@@ -108,8 +108,10 @@ tc_snapshot() {
 }
 tc_snapshot "$OUT/tc-before.log"
 
-# Drop-site trace: skb:kfree_skb carries the kernel drop_reason enum.
-bpftrace -e 'tracepoint:skb:kfree_skb { printf("KFREE dev=%s reason=%d\n", comm, args->reason); }' \
+# Drop-site trace: skb:kfree_skb carries the kernel drop_reason enum. Include
+# the skb delivery fields so a stack drop can be distinguished from a TC
+# redirect that never reaches the host receive path.
+bpftrace -e 'tracepoint:skb:kfree_skb { $s = (struct sk_buff *)args->skbaddr; printf("KFREE comm=%s dev=%s reason=%d sum=%d pkt=%d iif=%d proto=0x%x\n", comm, str($s->dev->name), args->reason, $s->ip_summed, $s->pkt_type, $s->skb_iif, $s->protocol); }' \
     > "$OUT/kfree.log" 2>&1 &
 BT1=$!
 

@@ -4215,6 +4215,18 @@ impl ContainerRuntime {
     /// witness records the filesystem write independently of lifecycle start,
     /// exec, or deletion operations.
     pub fn put_archive(&self, id: &str, target: &str, archive: &[u8]) -> Result<(), RuntimeError> {
+        self.put_archive_options(id, target, archive, false)
+    }
+
+    /// Upload a tar archive into a container, optionally enforcing Docker's
+    /// `noOverwriteDirNonDir` contract before extraction.
+    pub fn put_archive_options(
+        &self,
+        id: &str,
+        target: &str,
+        archive: &[u8],
+        no_overwrite_dir_non_dir: bool,
+    ) -> Result<(), RuntimeError> {
         if archive.is_empty() {
             return Err(RuntimeError::InvalidCommand(
                 "container archive must not be empty".to_string(),
@@ -4275,6 +4287,9 @@ impl ContainerRuntime {
                 let mut temp = tempfile::NamedTempFile::new_in(&runtime.runtime_dir)?;
                 temp.write_all(archive)?;
                 temp.as_file_mut().sync_all()?;
+                if no_overwrite_dir_non_dir {
+                    crate::rootfs::check_archive_dir_non_dir_conflicts(&selected, temp.path())?;
+                }
                 apply_layer_tar(&selected, temp.path())?;
                 Ok(())
             },

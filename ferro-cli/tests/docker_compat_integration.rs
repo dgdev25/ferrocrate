@@ -1266,6 +1266,199 @@ fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
     assert_eq!(status, 204, "framed-logs cleanup response={response}");
 }
 
+/// Docker's `noOverwriteDirNonDir=1` upload contract: an archive entry that
+/// is a directory must not replace an existing non-directory (and vice
+/// versa), and the rejection must happen before any bytes are written.
+#[test]
+fn docker_compat_put_archive_enforces_no_overwrite_dir_non_dir() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/archive-conflict:latest");
+    let create_body = r#"{"Image":"compat/archive-conflict:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=archive-conflict HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&create);
+    assert_eq!(status, 201, "archive-conflict create response={body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+    let (status, body) = harness.request("POST", "/v1.45/containers/archive-conflict/start");
+    assert_eq!(status, 204, "archive-conflict start response={body}");
+    let rootfs = harness
+        ._runtime_dir
+        .path()
+        .join("containers")
+        .join(&id)
+        .join("rootfs");
+    assert!(rootfs.is_dir(), "rootfs missing: {}", rootfs.display());
+
+    // Seed a plain file, then attempt a directory entry over it.
+    let mut file_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut file_tar);
+        let payload = b"seed";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("conflict").expect("file path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append file");
+        builder.finish().expect("finish file tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-conflict/archive?path=%2F",
+        "application/x-tar",
+        &file_tar,
+    );
+    assert_eq!(status, 200, "seed put archive response={body}");
+
+    let mut dir_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut dir_tar);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_path("conflict").expect("dir path");
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).expect("append dir");
+        builder.finish().expect("finish dir tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-conflict/archive?path=%2F&noOverwriteDirNonDir=1",
+        "application/x-tar",
+        &dir_tar,
+    );
+    assert_eq!(status, 400, "dir-over-file must fail closed: {body}");
+    assert!(
+        body.contains("cannot overwrite non-directory"),
+        "body={body}"
+    );
+    assert!(
+        rootfs.join("conflict").is_file(),
+        "rejected upload must not modify the existing entry"
+    );
+
+    // Seed an existing directory under a fresh name, then attempt a file
+    // entry over it in the opposite direction.
+    let mut dir_fresh_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut dir_fresh_tar);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_path("dir-target").expect("dir path");
+        header.set_cksum();
+        builder.append(&header, std::io::empty()).expect("append dir");
+        builder.finish().expect("finish dir tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-conflict/archive?path=%2F",
+        "application/x-tar",
+        &dir_fresh_tar,
+    );
+    assert_eq!(status, 200, "seed dir upload response={body}");
+    assert!(rootfs.join("dir-target").is_dir(), "seed dir applies");
+
+    let mut file_over_dir_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut file_over_dir_tar);
+        let payload = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("dir-target").expect("file path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append file");
+        builder.finish().expect("finish file tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-conflict/archive?path=%2F&noOverwriteDirNonDir=1",
+        "application/x-tar",
+        &file_over_dir_tar,
+    );
+    assert_eq!(status, 400, "file-over-dir must fail closed: {body}");
+    assert!(body.contains("cannot overwrite directory"), "body={body}");
+
+    // A flagged upload without type conflicts applies normally.
+    let mut fresh_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut fresh_tar);
+        let payload = b"fresh";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("fresh-file").expect("fresh path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append fresh");
+        builder.finish().expect("finish fresh tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-conflict/archive?path=%2F&noOverwriteDirNonDir=1",
+        "application/x-tar",
+        &fresh_tar,
+    );
+    assert_eq!(status, 200, "flagged compatible upload response={body}");
+    assert!(
+        rootfs.join("fresh-file").is_file(),
+        "flagged compatible upload applies"
+    );
+
+    // A malformed flag value is rejected before the container is resolved.
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/missing/archive?path=%2F&noOverwriteDirNonDir=maybe",
+        "application/x-tar",
+        &file_tar,
+    );
+    assert_eq!(status, 400, "malformed flag response={body}");
+
+    let (status, body) = harness.request("DELETE", "/v1.45/containers/archive-conflict");
+    assert_eq!(status, 204, "archive-conflict cleanup response={body}");
+}
+
+/// Recognized Docker routes without a local implementation report an explicit
+/// 501 boundary instead of a generic unknown-route 404.
+#[test]
+fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
+    let harness = DaemonHarness::spawn();
+
+    let auth_request = "POST /auth HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"username\":\"u\",\"password\":\"p\"}";
+    let (status, body) = harness.request_raw(auth_request);
+    assert_eq!(status, 501, "auth response={body}");
+    assert!(
+        body.contains("auth is unsupported") && body.contains("registry credential backend"),
+        "body={body}"
+    );
+
+    let (status, body) = harness.request("GET", "/v1.45/containers/missing/attach/ws");
+    assert_eq!(status, 501, "attach/ws response={body}");
+    assert!(
+        body.contains("websocket attach is unsupported")
+            && body.contains("TCP hijack attach"),
+        "body={body}"
+    );
+
+    // The synthetic top listing cannot honor a client ps argument set.
+    let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=-ef");
+    assert_eq!(status, 400, "top ps_args response={body}");
+    assert!(
+        body.contains("ps_args is unsupported") && body.contains("synthetic"),
+        "body={body}"
+    );
+    // An empty ps_args stays a no-op and preserves the missing-container 404.
+    let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=");
+    assert_eq!(status, 404, "empty ps_args response={body}");
+}
+
 /// Decode a complete Docker multiplexed raw stream into (stream id, payload)
 /// frames; any truncated or invalid header is an error.
 fn decode_raw_frames(raw: &[u8]) -> Result<Vec<(u8, &[u8])>, String> {

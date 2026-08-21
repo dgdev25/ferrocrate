@@ -12222,6 +12222,16 @@ fn handle_docker_compat_connection(
                 }
             }
             ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
+            ("POST", "/auth") => {
+                // Registry credential verification needs an external
+                // registry; there is no local backend, so report the
+                // boundary explicitly rather than accepting or silently
+                // ignoring submitted credentials.
+                docker_error_response(
+                    501,
+                    "auth is unsupported: no registry credential backend is configured",
+                )
+            }
             ("GET", "/version") => {
                 let body = serde_json::json!({
                     "Version": env!("CARGO_PKG_VERSION"),
@@ -12545,9 +12555,18 @@ fn handle_docker_compat_connection(
                 let archive_path = query
                     .get("path")
                     .ok_or_else(|| "docker: archive path is required".to_string())?;
+                let no_overwrite_dir_non_dir = parse_docker_bool_query(
+                    query.get("noOverwriteDirNonDir"),
+                    "noOverwriteDirNonDir",
+                )?;
                 let id = resolve_container_id(&runtime, requested_id)?;
                 runtime
-                    .put_archive(&id, archive_path, &request.body)
+                    .put_archive_options(
+                        &id,
+                        archive_path,
+                        &request.body,
+                        no_overwrite_dir_non_dir,
+                    )
                     .map_err(|error| format!("docker: put archive: {error}"))?;
                 http_response(200, &[], "text/plain")
             }
@@ -12657,6 +12676,17 @@ fn handle_docker_compat_connection(
                     http_response(200, &body, "application/vnd.docker.raw-stream")
                 }
             }
+            ("GET", path)
+                if path.starts_with("/containers/") && path.ends_with("/attach/ws") =>
+            {
+                // The websocket attach variant is a recognized Docker route
+                // with no local implementation; report the boundary
+                // explicitly instead of a generic unknown-route 404.
+                docker_error_response(
+                    501,
+                    "websocket attach is unsupported: use the TCP hijack attach endpoint",
+                )
+            }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
                 let requested_id = path
                     .trim_start_matches("/containers/")
@@ -12758,6 +12788,17 @@ fn handle_docker_compat_connection(
                 let requested_id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/top");
+                // The local process listing is synthetic (PID/CMD/STATE from
+                // the container record); a client-supplied ps argument set
+                // cannot be honored, so fail closed instead of ignoring it.
+                if let Some(ps_args) = query.get("ps_args") {
+                    if !ps_args.is_empty() {
+                        return Err(
+                            "docker: top ps_args is unsupported: the local process listing is synthetic"
+                                .to_string(),
+                        );
+                    }
+                }
                 let pending = state
                     .pending
                     .lock()
@@ -14384,6 +14425,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("bad request")
         || lowered.contains("event query parameter")
         || lowered.contains("logs query parameter")
+        || lowered.contains("cannot overwrite")
         || lowered.contains("must be a boolean")
         || lowered.contains("non-negative integer")
         || lowered.contains("exceeds terminal bounds")
@@ -15953,6 +15995,7 @@ fn http_response_with_headers(
         404 => "404 Not Found",
         409 => "409 Conflict",
         503 => "503 Service Unavailable",
+        501 => "501 Not Implemented",
         500 => "500 Internal Server Error",
         _ => "200 OK",
     };

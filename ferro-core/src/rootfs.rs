@@ -21,6 +21,8 @@ pub enum RootfsError {
     UnsafePath(String),
     #[error("invalid hard link target in tar entry: {0}")]
     InvalidHardLink(String),
+    #[error("{0}")]
+    DirNonDirConflict(String),
 }
 
 /// Construct a root filesystem by applying OCI layers in order.
@@ -47,6 +49,49 @@ pub fn construct_rootfs_with_dedup(
 }
 
 /// Apply a single tar layer to an existing rootfs directory.
+/// Enforce the Docker `noOverwriteDirNonDir=1` upload contract before any
+/// extraction happens: a directory entry must not replace an existing
+/// non-directory, and a non-directory entry must not replace an existing
+/// directory. The scan mirrors `apply_layer_tar` path sanitization so a
+/// malicious archive fails closed here exactly as it would during extraction.
+pub fn check_archive_dir_non_dir_conflicts(
+    rootfs_dir: &Path,
+    layer_tar_path: &Path,
+) -> Result<(), RootfsError> {
+    let reader = open_decompressed_layer_reader(layer_tar_path)?;
+    let mut archive = Archive::new(reader);
+    for entry_result in archive.entries()? {
+        let entry = entry_result?;
+        let normalized = sanitize_archive_path(&entry.path()?)?;
+        if normalized.as_os_str().is_empty() {
+            continue;
+        }
+        let is_directory = entry.header().entry_type() == tar::EntryType::Directory;
+        let destination = rootfs_dir.join(&normalized);
+        // symlink_metadata does not follow the final component, so a symlink
+        // occupying the destination counts as a non-directory for directory
+        // entries and never resolves outside the rootfs.
+        let Ok(metadata) = fs::symlink_metadata(&destination) else {
+            continue;
+        };
+        if is_directory && !metadata.is_dir() {
+            return Err(RootfsError::DirNonDirConflict(format!(
+                "cannot overwrite non-directory {} with directory {}",
+                destination.display(),
+                normalized.display()
+            )));
+        }
+        if !is_directory && metadata.is_dir() {
+            return Err(RootfsError::DirNonDirConflict(format!(
+                "cannot overwrite directory {} with non-directory {}",
+                destination.display(),
+                normalized.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), RootfsError> {
     let reader = open_decompressed_layer_reader(layer_tar_path)?;
     let mut archive = Archive::new(reader);
@@ -328,6 +373,79 @@ mod tests {
             fs::read_to_string(rootfs.join("var/log/app.log")).expect("existing file"),
             "logline"
         );
+    }
+
+    #[test]
+    fn dir_non_dir_conflict_check_enforces_both_directions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).expect("create rootfs");
+
+        // An existing file at `conflict`; a directory upload over it is
+        // rejected by the noOverwriteDirNonDir contract.
+        fs::write(rootfs.join("conflict"), b"file").expect("seed file");
+        let layer = temp.path().join("dir-over-file.tar");
+        {
+            let file = fs::File::create(&layer).expect("create tar");
+            let mut builder = Builder::new(file);
+            let mut header = Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_path("conflict").expect("dir path");
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).expect("append dir");
+            builder.finish().expect("finish tar");
+        }
+        let error = super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
+            .expect_err("dir over file must conflict");
+        assert!(
+            error.to_string().contains("cannot overwrite non-directory"),
+            "{error}"
+        );
+
+        // An existing directory at `dir-target`; a file upload over it is
+        // rejected in the opposite direction.
+        fs::create_dir_all(rootfs.join("dir-target")).expect("seed directory");
+        let layer = temp.path().join("file-over-dir.tar");
+        create_tar(&layer, &[("dir-target", b"payload".as_slice())]);
+        let error = super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
+            .expect_err("file over dir must conflict");
+        assert!(
+            error.to_string().contains("cannot overwrite directory"),
+            "{error}"
+        );
+
+        // Matching types and fresh destinations do not conflict.
+        let layer = temp.path().join("compatible.tar");
+        create_tar(&layer, &[("fresh-file", b"ok".as_slice())]);
+        super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
+            .expect("compatible archive passes");
+
+        // A traversal entry fails closed during the scan, mirroring the
+        // extraction-time rejection.
+        let layer = temp.path().join("escape.tar");
+        {
+            let file = fs::File::create(&layer).expect("create tar");
+            let mut builder = Builder::new(file);
+            let mut header = Header::new_gnu();
+            header.set_size(3);
+            header.set_mode(0o644);
+            header.set_path("escape").expect("escape path");
+            // `set_path` refuses `..` components, so write the malicious name
+            // directly into the raw header field the way a hostile archive
+            // would.
+            let name = b"../escape\0";
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            builder
+                .append(&header, Cursor::new(b"bad".as_slice()))
+                .expect("append escape entry");
+            builder.finish().expect("finish tar");
+        }
+        let error = super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
+            .expect_err("traversal must fail closed");
+        assert!(error.to_string().contains("unsafe layer path"), "{error}");
     }
 
     #[test]

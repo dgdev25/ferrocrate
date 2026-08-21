@@ -12,6 +12,12 @@ cargo test -p ferro-cli --test api_compat_matrix --offline -- --nocapture
 
 echo "[release] validating CRI socket and lifecycle contract"
 cargo test -p ferro-cri --test socket_integration --offline -- --test-threads=1
+if [[ "$(id -u)" == 0 ]]; then
+  echo "[release] validating rootful CRI crash recovery"
+  bash scripts/test-cri-rootful-recovery.sh
+else
+  echo "[release] rootful CRI crash recovery skipped (requires root)"
+fi
 
 echo "[release] validating security enforcement tests"
 cargo test -p ferro-core --test security_tests --offline -- --nocapture

@@ -7,7 +7,7 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)}"
 out="${FERROCRATE_NETWORK_RATE_OUTPUT:-$repo_root/docs/evidence/performance/$(date -u +%F)-docker-network-rate-comparison.md}"
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
-image="${FERROCRATE_COMPARISON_IMAGE:-ferrocrate-bench:docker}"
+image="${FERROCRATE_COMPARISON_IMAGE:-alpine:3.20}"
 rounds="${FERROCRATE_COMPARISON_ROUNDS:-3}"
 requests="${FERROCRATE_NETWORK_RATE_REQUESTS:-8}"
 fixture_timeout="${FERROCRATE_COMPARISON_TIMEOUT_SECONDS:-30}"

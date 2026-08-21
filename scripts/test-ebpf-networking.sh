@@ -87,6 +87,9 @@ export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
 # datapath and the privileged probe gives a false negative.
 export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
+# Set FERROCRATE_EBPF_DISABLE_PROBE_VETH_OFFLOADS=1 for an A/B diagnostic.
+# Only veths created after probe entry are changed; production defaults remain
+# untouched and cleanup removes those owned interfaces.
 pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true)"
 netns_before="$(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ { print $1 }' | sort || true)"
 veth_before="$(ip -o link show master "$FERROCRATE_BRIDGE_NAME" 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort || true)"
@@ -193,6 +196,15 @@ trap cleanup EXIT
 
 sample_redirect_diagnostics() {
   while :; do
+    if [[ "${FERROCRATE_EBPF_DISABLE_PROBE_VETH_OFFLOADS:-0}" == 1 ]] &&
+       command -v ethtool >/dev/null 2>&1; then
+      while IFS= read -r interface; do
+        [[ -n "$interface" ]] || continue
+        if ! grep -Fqx "$interface" <<<"$veth_before"; then
+          ethtool -K "$interface" rx off tx off tso off gso off gro off >/dev/null 2>&1 || true
+        fi
+      done < <(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
+    fi
     printf '\n--- %s ---\n' "$(date --iso-8601=seconds)"
     for interface in $(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1); do
       printf 'tc ingress %s:\n' "$interface"

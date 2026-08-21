@@ -4,6 +4,20 @@ set -euo pipefail
 fail() { printf 'eBPF networking qualification failed: %s\n' "$*" >&2; exit 1; }
 [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
 [[ "${EUID}" -eq 0 ]] || fail "run with sudo"
+command -v timeout >/dev/null 2>&1 || fail "timeout is required for bounded qualification"
+
+step_timeout="${FERROCRATE_EBPF_STEP_TIMEOUT:-45}"
+[[ "$step_timeout" =~ ^[1-9][0-9]*$ ]] || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be a positive integer"
+(( step_timeout <= 600 )) || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be <= 600 seconds"
+run_bounded() {
+  timeout --foreground "${step_timeout}s" "$@" || {
+    local status=$?
+    if (( status == 124 )); then
+      fail "timed out after ${step_timeout}s: $*"
+    fi
+    return "$status"
+  }
+}
 
 # sudo's secure_path commonly hides the operator's Rustup shim. Resolve the
 # invoking user's Cargo explicitly so the privileged fixture does not fail
@@ -175,8 +189,8 @@ esac
 iptables-save >"$before_iptables" 2>/dev/null || true
 nft list ruleset >"$before_nft" 2>/dev/null || true
 
-"${FERROCRATE_CARGO_BIN}" test -p ferro-net --test kernel_compat -- --ignored
-"${FERROCRATE_CARGO_BIN}" test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
+run_bounded "${FERROCRATE_CARGO_BIN}" test -p ferro-net --test kernel_compat -- --ignored
+run_bounded "${FERROCRATE_CARGO_BIN}" test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
 sample_redirect_diagnostics >"$redirect_diagnostics" 2>&1 &
 redirect_sampler_pid=$!
 if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1; then
@@ -190,7 +204,7 @@ if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1
   tcpdump -Q out -i lo -nn -vvv -l -s 0 'tcp and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0) and host 127.0.0.1' >"$loopback_egress_capture" 2>&1 &
   loopback_egress_capture_pid=$!
 fi
-if ! "${FERROCRATE_CARGO_BIN}" test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
+if ! run_bounded "${FERROCRATE_CARGO_BIN}" test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
   dump_redirect_diagnostics
   exit 1
 fi

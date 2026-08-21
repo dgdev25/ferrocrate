@@ -83,7 +83,7 @@ matrix="ferro-cli/tests/api_compat_matrix.rs"
 declared="$(grep -c '^[[:space:]]*ApiCase {' "$matrix")"
 implemented="$(grep -c 'coverage: Coverage::Implemented' "$matrix")"
 unsupported="$(grep -c 'coverage: Coverage::Unsupported' "$matrix")"
-current_evidence="$(find docs/evidence/verification -maxdepth 1 -type f -name '2026-08-19-docker-api-matrix-tty-boundary-current-head.md' -print -quit)"
+current_evidence="$(find docs/evidence/verification -maxdepth 1 -type f -name '2026-08-21-docker-tty-container-lifecycle-current-head.md' -print -quit)"
 [[ -n "$current_evidence" ]] || {
   echo "missing current Docker API matrix evidence" >&2
   exit 1
@@ -96,7 +96,7 @@ grep -Fq "authoritative at $declared declared cases:" "$plan" || {
   echo "indie release plan Docker API matrix count is stale (expected $declared)" >&2
   exit 1
 }
-grep -Fq "$declared declared, $implemented implemented, $unsupported unsupported" "$roadmap" || {
+grep -Eq "$declared declared cases(:|,) $implemented implemented, (0|zero) partial, and $unsupported explicit(ly)? unsupported" "$roadmap" || {
   echo "roadmap Docker API matrix count is stale (expected $declared/$implemented/$unsupported)" >&2
   exit 1
 }

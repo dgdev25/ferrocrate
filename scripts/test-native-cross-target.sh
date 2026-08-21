@@ -14,6 +14,18 @@ if ! rustup target list --toolchain "$toolchain" --installed | grep -Fxq "$targe
   exit 77
 fi
 
+# Apple targets need an Apple SDK-aware compiler.  A Linux host may have the
+# Rust standard library installed while still lacking the SDK and linker; do
+# not spend several minutes compiling native dependencies only to fail on
+# cc-rs' first `-arch` flag.  A macOS runner (xcrun) or an explicitly provisioned
+# cross compiler is required for a real probe.
+if [[ "$target" == *-apple-darwin ]]; then
+  if ! command -v xcrun >/dev/null 2>&1 && ! command -v o64-clang >/dev/null 2>&1; then
+    echo "SKIP: $target requires an Apple SDK-aware compiler (xcrun or o64-clang); host toolchain is unavailable" >&2
+    exit 77
+  fi
+fi
+
 target_dir="$(mktemp -d /tmp/ferrocrate-cross-target.XXXXXX)"
 trap 'rm -rf "$target_dir"' EXIT
 

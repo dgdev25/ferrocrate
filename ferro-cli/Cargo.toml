@@ -9,10 +9,6 @@ test-console = []
 [dependencies]
 clap = { workspace = true }
 clap_complete = "4.5"
-ferro-core = { path = "../ferro-core" }
-ferro-compose = { path = "../ferro-compose" }
-ferro-net = { path = "../ferro-net" }
-ferro-mind = { path = "../ferro-mind", default-features = false }
 serde_json = { workspace = true }
 serde = { workspace = true }
 owo-colors = "4.0"
@@ -26,9 +22,12 @@ tar = "0.4"
 base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ferro-core = { path = "../ferro-core" }
+ferro-compose = { path = "../ferro-compose" }
+ferro-net = { path = "../ferro-net" }
+ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 caps = { workspace = true }
 nix = { workspace = true }
-ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }

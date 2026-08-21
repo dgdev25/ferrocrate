@@ -15778,6 +15778,17 @@ fn stream_docker_attach(
             emitted_stdout = stdout.len();
             emitted_stderr = stderr.len();
         }
+        // A hijacked Docker attach stream is tied to the container lifecycle.
+        // Once the runtime has recorded a terminal state, all newly-appended
+        // output has been emitted above and the connection must close rather
+        // than polling forever until the client-side timeout fires.
+        let current = runtime.inspect(id).map_err(|error| error.to_string())?;
+        if !matches!(
+            current.status.as_str(),
+            "created" | "running" | "restarting" | "paused"
+        ) {
+            return Ok(());
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
 }

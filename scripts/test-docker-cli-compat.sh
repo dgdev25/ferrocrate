@@ -171,6 +171,26 @@ docker -H "$host" logs --follow "$follow_name" >"$runtime_dir/logs-follow.stdout
 grep -q 'ferrocrate-logs-follow' "$runtime_dir/logs-follow.stdout"
 docker -H "$host" rm "$follow_name" >/dev/null
 
+# A finite attach must close when the workload exits; a client timeout is not
+# an acceptable substitute for lifecycle completion.
+finite_attach_name="docker-cli-attach-finite-$$"
+docker -H "$host" create --network none --name "$finite_attach_name" "$image" \
+  /bin/busybox sh -c 'echo ferrocrate-attach-finite' >/dev/null
+docker -H "$host" start "$finite_attach_name" >/dev/null
+finite_attach_id="$(docker -H "$host" inspect --format '{{.Id}}' "$finite_attach_name")"
+finite_attach_status=0
+timeout -k 2 8 curl --no-buffer --silent --show-error \
+  --unix-socket "$socket" -X POST \
+  -H 'Connection: Upgrade' -H 'Upgrade: tcp' -H 'Content-Length: 0' \
+  "http://localhost/v1.45/containers/$finite_attach_id/attach?logs=1&stream=1&stdin=0&stdout=1&stderr=1" \
+  >"$runtime_dir/attach-finite.stdout" || finite_attach_status=$?
+[[ "$finite_attach_status" == "0" ]] || {
+  echo "finite Docker attach did not close cleanly: status=$finite_attach_status" >&2
+  exit 1
+}
+grep -a -q 'ferrocrate-attach-finite' "$runtime_dir/attach-finite.stdout"
+docker -H "$host" rm "$finite_attach_name" >/dev/null
+
 # Exercise the real Docker CLI hijack/attach path against a long-lived
 # workload. The API-level handshake tests do not prove that the external
 # client can consume the post-start raw stream and return cleanly. Use the

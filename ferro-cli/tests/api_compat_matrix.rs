@@ -85,6 +85,13 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
+        path: "/build/prune?max_entries=64",
+        coverage: Coverage::Implemented,
+        expected_status: 200,
+        body: "",
+    },
+    ApiCase {
+        method: "POST",
         path: "/containers/create",
         // Valid creation is exercised by the named-container row below; this
         // row verifies the route's fail-closed missing-image validation.
@@ -793,6 +800,12 @@ fn docker_api_compatibility_matrix() {
                     .is_some_and(serde_json::Value::is_array),
                 "system df must project BuildCache: {body}"
             );
+        }
+        if case.path.starts_with("/build/prune") {
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).expect("build prune response is JSON");
+            assert!(payload.get("Removed").is_some());
+            assert_eq!(payload["MaxEntries"], 64);
         }
         if case.path.ends_with("/json?size=1") {
             let payload: serde_json::Value =

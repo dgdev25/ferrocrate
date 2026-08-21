@@ -1113,6 +1113,30 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
         .write_all(b"ferrocrate-tty-restart\n")
         .expect("write restarted TTY stdin");
     restarted_stream.flush().expect("flush restarted TTY stdin");
+    let (status, response) = harness.request(
+        "POST",
+        "/v1.45/containers/tty-container/kill?signal=SIGTERM",
+    );
+    assert_eq!(status, 204, "TTY kill response={response}");
+    let mut attach_closed = false;
+    let close_deadline = Instant::now() + Duration::from_secs(5);
+    let mut close_buffer = [0_u8; 4096];
+    while Instant::now() < close_deadline {
+        match restarted_stream.read(&mut close_buffer) {
+            Ok(0) => {
+                attach_closed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("read closed TTY attach: {error}"),
+        }
+    }
+    assert!(attach_closed, "TTY attach stream did not close after kill");
     let mut stopped = false;
     for _ in 0..80 {
         let (status, response) = harness.request("GET", "/v1.45/containers/tty-container/json");

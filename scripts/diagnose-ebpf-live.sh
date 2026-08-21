@@ -65,6 +65,15 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT=/tmp/ebpf-diag-$STAMP
 mkdir -p "$OUT"
 
+# Remember the pin directories that predate this diagnostic. If the bounded
+# fixture is terminated while its runtime is between attach and cleanup, the
+# kernel can retain a classifier link and the next run would fail with a
+# misleading "live classifiers" error. Cleanup below removes only bridge pin
+# directories created by this invocation; pre-existing Ferrocrate workloads
+# are never touched.
+pin_root="${FERROCRATE_EBPF_PIN_ROOT:-/sys/fs/bpf/ferrocrate}"
+baseline_pin_dirs="$(find "$pin_root" -mindepth 1 -maxdepth 1 -type d -name 'bridge-*' -printf '%f\n' 2>/dev/null || true)"
+
 # The live fixture requires its SNAT allocator range to be reserved from the
 # host ephemeral-port allocator. Restore the exact prior value on every exit.
 snat_range="${FERROCRATE_EBPF_SNAT_PORT_RANGE:-50000-50031}"
@@ -101,6 +110,7 @@ run_bounded() {
     return "$status"
 }
 cleanup() {
+    cleanup_created_classifiers
     restore_reserved_ports
     stop_capture_processes
     if [[ "$target_dir_owned" == 1 ]]; then
@@ -111,6 +121,44 @@ cleanup() {
     fi
 }
 trap cleanup EXIT INT TERM
+
+cleanup_created_classifiers() {
+    [[ -d "$pin_root" ]] || return 0
+    command -v tc >/dev/null 2>&1 || return 0
+    command -v bpftool >/dev/null 2>&1 || return 0
+    local bridge_dir bridge_name program_path program_id dev direction pref handle
+    for bridge_dir in "$pin_root"/bridge-*; do
+        [[ -d "$bridge_dir" ]] || continue
+        bridge_name="${bridge_dir##*/}"
+        if grep -Fqx "$bridge_name" <<<"$baseline_pin_dirs"; then
+            continue
+        fi
+        for direction in ingress egress; do
+            program_path="$bridge_dir/programs/ferro_$direction"
+            [[ -e "$program_path" ]] || continue
+            program_id="$(bpftool prog show pinned "$program_path" 2>/dev/null | sed -n 's/^\([0-9][0-9]*\):.*/\1/p')"
+            [[ "$program_id" =~ ^[0-9]+$ ]] || continue
+            while read -r dev pref handle; do
+                [[ -n "$dev" && -n "$pref" && -n "$handle" ]] || continue
+                tc filter del dev "$dev" "$direction" protocol all pref "$pref" handle "$handle" bpf >/dev/null 2>&1 || true
+            done < <(
+                for dev in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1); do
+                    tc filter show dev "$dev" "$direction" 2>/dev/null |
+                        awk -v id="$program_id" -v dev="$dev" '
+                            $0 ~ (" id " id " ") {
+                                pref=""; handle=""
+                                for (i = 1; i <= NF; i++) {
+                                    if ($i == "pref") pref=$(i + 1)
+                                    if ($i == "handle") handle=$(i + 1)
+                                }
+                                if (pref != "" && handle != "") print dev, pref, handle
+                            }'
+                done
+            )
+        done
+        find "$bridge_dir" -depth -delete 2>/dev/null || true
+    done
+}
 sysctl -q -w "net.ipv4.ip_local_reserved_ports=$snat_range"
 
 echo "== sysctl snapshot ==" > "$OUT/sysctl.log"

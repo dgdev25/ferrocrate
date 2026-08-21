@@ -19,6 +19,11 @@ manifest="$output_dir/manifest.tsv"
 # verifier decides whether that absence is acceptable for a release row.
 baseline_allow_skip="${FERROCRATE_PERF_ALLOW_SKIP:-1}"
 baseline_enforce="${FERROCRATE_PERF_ENFORCE:-0}"
+baseline_timeout="${FERROCRATE_PERF_BASELINE_TIMEOUT_SECONDS:-120}"
+if ! [[ "$baseline_timeout" =~ ^[1-9][0-9]*$ && "$baseline_timeout" -le 900 ]]; then
+  echo "FERROCRATE_PERF_BASELINE_TIMEOUT_SECONDS must be 1..900" >&2
+  exit 2
+fi
 
 run_benchmark() {
   local name="$1" script="$2"
@@ -26,7 +31,8 @@ run_benchmark() {
   local rc=0
   FERROCRATE_PERF_ALLOW_SKIP="$baseline_allow_skip" \
     FERROCRATE_PERF_ENFORCE="$baseline_enforce" \
-    bash "$repo_root/$script" >"$output_dir/$name.txt" 2>&1 || rc=$?
+    timeout --foreground --signal=TERM --kill-after=10s "$baseline_timeout" \
+      bash "$repo_root/$script" >"$output_dir/$name.txt" 2>&1 || rc=$?
   case "$rc" in
     0)
     printf '%s\tpass\n' "$name" >>"$manifest"
@@ -55,4 +61,4 @@ run_benchmark docker-api scripts/perf/docker-api-compat.sh
 run_benchmark oci-compat scripts/perf/oci-compat.sh
 run_benchmark oci-conformance scripts/oci-conformance.sh
 run_benchmark rootless scripts/verify-rootless.sh
-echo "performance baseline written to $output_dir (manifest: $manifest)"
+echo "performance baseline written to $output_dir (manifest: $manifest; per-benchmark timeout: ${baseline_timeout}s)"

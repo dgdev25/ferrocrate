@@ -6,6 +6,11 @@ set -euo pipefail
 
 cd /data/dev/ferrocrate/.worktrees/fcnet103-grok
 
+command -v setsid >/dev/null 2>&1 || {
+    echo "live eBPF diagnostics require setsid for process-group cleanup" >&2
+    exit 77
+}
+
 # sudo resets the invoking user's Cargo/Rustup PATH. Keep the diagnostic
 # runnable from a privileged shell without requiring operators to mutate PATH.
 cargo_bin="${FERROCRATE_CARGO:-/home/USER/.cargo/bin/cargo}"
@@ -46,12 +51,12 @@ min_free_kb="${FERROCRATE_EBPF_MIN_FREE_KB:-4194304}"
 target_parent="$(dirname -- "$target_dir")"
 available_kb="$(df -Pk "$target_parent" | awk 'NR == 2 { print $4 }')"
 if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
-    if [[ "$target_dir_owned" == 1 ]]; then rm -rf -- "$target_dir" 2>/dev/null || true; fi
+    if [[ "$target_dir_owned" == 1 ]]; then find "$target_dir" -depth -delete 2>/dev/null || true; fi
     echo "unable to determine free space for eBPF diagnostic target: $target_parent" >&2
     exit 77
 fi
 if (( available_kb < min_free_kb )); then
-    if [[ "$target_dir_owned" == 1 ]]; then rm -rf -- "$target_dir" 2>/dev/null || true; fi
+    if [[ "$target_dir_owned" == 1 ]]; then find "$target_dir" -depth -delete 2>/dev/null || true; fi
     echo "eBPF diagnostic skipped: ${available_kb} KiB free on $target_parent; ${min_free_kb} KiB required" >&2
     exit 77
 fi
@@ -72,6 +77,29 @@ stop_capture_processes() {
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     done
 }
+run_bounded() {
+    local seconds="$1" log_path="$2"
+    shift 2
+    setsid "$@" >"$log_path" 2>&1 &
+    local command_pid=$!
+    local deadline=$((SECONDS + seconds))
+    while kill -0 "$command_pid" 2>/dev/null; do
+        if (( SECONDS >= deadline )); then
+            echo "fixture timed out after ${seconds}s; terminating process group" >&2
+            kill -TERM -- "-$command_pid" 2>/dev/null || true
+            sleep 1
+            kill -KILL -- "-$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            cat "$log_path" >&2 || true
+            return 124
+        fi
+        sleep 0.1
+    done
+    local status=0
+    wait "$command_pid" || status=$?
+    cat "$log_path"
+    return "$status"
+}
 cleanup() {
     restore_reserved_ports
     stop_capture_processes
@@ -79,7 +107,7 @@ cleanup() {
         # A timed cargo process can still be unwinding incremental writes when
         # EXIT runs. Cleanup is best-effort and must not mask the fixture's
         # actual exit status or leave the release gate hanging.
-        rm -rf -- "$target_dir" 2>/dev/null || true
+        find "$target_dir" -depth -delete 2>/dev/null || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -144,16 +172,17 @@ BT2=$!
 # Let the tracepoints attach before traffic starts.
 sleep 2
 
-set +e
-FERROCRATE_E2E_NETWORK_BACKEND=ebpf FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 \
+if run_bounded "$fixture_timeout_seconds" "$OUT/fixture.log" \
+    env FERROCRATE_E2E_NETWORK_BACKEND=ebpf \
+    FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 \
     FERROCRATE_EBPF_SNAT_PORT_RANGE="$snat_range" \
     CARGO_TARGET_DIR="$target_dir" \
-    timeout --foreground --kill-after=10s "${fixture_timeout_seconds}s" \
     "$cargo_bin" test --test e2e_container_lifecycle \
-    -- --ignored ebpf_network_published_port_egress_without_netfilter_changes --nocapture \
-    2>&1 | tee "$OUT/fixture.log"
-RC=${PIPESTATUS[0]}
-set -e
+    -- --ignored ebpf_network_published_port_egress_without_netfilter_changes --nocapture; then
+    RC=0
+else
+    RC=$?
+fi
 echo "fixture exit: $RC" >> "$OUT/fixture.log"
 
 # Capture classifier counters while the per-fixture links and filters still

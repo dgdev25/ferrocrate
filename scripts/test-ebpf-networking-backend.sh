@@ -22,5 +22,10 @@ grep -Fq 'link-netnsid' "$script"
 grep -Fq 'lo_ingress_before=' "$script"
 grep -Fq 'lo_egress_before=' "$script"
 grep -Fq 'tc filter del dev lo' "$script"
+diagnostic="$repo_root/scripts/diagnose-ebpf-live.sh"
+bash -n "$diagnostic"
+grep -Fq 'setsid "$@"' "$diagnostic"
+grep -Fq 'kill -TERM -- "-$command_pid"' "$diagnostic"
+grep -Fq 'find "$target_dir" -depth -delete' "$diagnostic"
 
 printf '%s\n' 'ebpf-networking-backend=pass'

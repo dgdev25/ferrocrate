@@ -99,6 +99,7 @@ before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
 after_nft="$(mktemp)"
 redirect_diagnostics="$(mktemp)"
+offload_diagnostics="$(mktemp)"
 redirect_sampler_pid=""
 packet_capture="$(mktemp)"
 loopback_ingress_capture="$(mktemp)"
@@ -130,7 +131,8 @@ cleanup() {
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
   rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" \
-    "$redirect_diagnostics" "$packet_capture" "$loopback_ingress_capture" "$loopback_egress_capture"
+    "$redirect_diagnostics" "$offload_diagnostics" "$packet_capture" \
+    "$loopback_ingress_capture" "$loopback_egress_capture"
   while IFS= read -r pin_name; do
     [[ -n "$pin_name" ]] || continue
     if ! grep -Fqx "$pin_name" <<<"$pin_root_before"; then
@@ -233,6 +235,8 @@ dump_redirect_diagnostics() {
     done < <(find /sys/fs/bpf/ferrocrate -mindepth 3 -maxdepth 3 -path '*/maps/FERRO_COUNTERS' 2>/dev/null)
   fi
   printf '%s\n' '--- packet/checksum diagnostics ---' >&2
+  printf '%s\n' '--- interface offload diagnostics ---' >&2
+  cat "$offload_diagnostics" >&2 || true
   printf 'TcpInCsumErrors before=%s after=%s\n' "$checksum_errors_before" \
     "$(nstat -as 2>/dev/null | awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }')" >&2
   if [[ -s "$packet_capture" ]]; then
@@ -249,6 +253,7 @@ dump_redirect_diagnostics() {
   if [[ -n "$diagnostics_output_dir" ]]; then
     mkdir -p "$diagnostics_output_dir"
     cp "$redirect_diagnostics" "$diagnostics_output_dir/redirect-samples.log"
+    cp "$offload_diagnostics" "$diagnostics_output_dir/offload-features.log"
     cp "$packet_capture" "$diagnostics_output_dir/any-capture.log"
     cp "$loopback_ingress_capture" "$diagnostics_output_dir/loopback-ingress.log"
     cp "$loopback_egress_capture" "$diagnostics_output_dir/loopback-egress.log"
@@ -257,6 +262,21 @@ dump_redirect_diagnostics() {
       >"$diagnostics_output_dir/checksum-errors.txt"
     printf 'saved eBPF diagnostics to %s\n' "$diagnostics_output_dir" >&2
   fi
+}
+
+snapshot_offloads() {
+  local label="$1" device
+  shift
+  printf '## %s\n' "$label" >>"$offload_diagnostics"
+  for device in "$@"; do
+    [[ -n "$device" ]] || continue
+    printf '[%s]\n' "$device" >>"$offload_diagnostics"
+    if command -v ethtool >/dev/null 2>&1 && ip link show dev "$device" >/dev/null 2>&1; then
+      ethtool -k "$device" >>"$offload_diagnostics" 2>&1 || true
+    else
+      printf 'ethtool-unavailable-or-device-missing\n' >>"$offload_diagnostics"
+    fi
+  done
 }
 
 # The eBPF loader refuses to allocate a SNAT port unless the complete range is
@@ -278,6 +298,7 @@ esac
 
 iptables-save >"$before_iptables" 2>/dev/null || true
 nft list ruleset >"$before_nft" 2>/dev/null || true
+snapshot_offloads "before" "$FERRO_EBPF_TEST_INTERFACE" lo
 
 run_bounded "${FERROCRATE_CARGO_BIN}" test -p ferro-net --test kernel_compat -- --ignored
 run_bounded "${FERROCRATE_CARGO_BIN}" test -p ferro-net --test ebpf_integration privileged_aya_load_detach_smoke_deferred_to_task_7 -- --ignored
@@ -295,9 +316,20 @@ if [[ "${FERRO_EBPF_CAPTURE:-0}" == "1" ]] && command -v tcpdump >/dev/null 2>&1
   loopback_egress_capture_pid=$!
 fi
 if ! run_bounded "${FERROCRATE_CARGO_BIN}" test --test e2e_container_lifecycle -- --ignored ebpf_network_published_port_egress_without_netfilter_changes; then
+  probe_devices=(lo "$FERROCRATE_BRIDGE_NAME")
+  while IFS= read -r device; do
+    [[ -n "$device" ]] && probe_devices+=("$device")
+  done < <(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
+  snapshot_offloads "after-failed-e2e" "${probe_devices[@]}"
   dump_redirect_diagnostics
   exit 1
 fi
+
+probe_devices=(lo "$FERROCRATE_BRIDGE_NAME")
+while IFS= read -r device; do
+  [[ -n "$device" ]] && probe_devices+=("$device")
+done < <(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
+snapshot_offloads "after-e2e" "${probe_devices[@]}"
 
 iptables-save >"$after_iptables" 2>/dev/null || true
 nft list ruleset >"$after_nft" 2>/dev/null || true

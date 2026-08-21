@@ -1940,12 +1940,102 @@ struct StageSpec {
     volumes: Vec<String>,
 }
 
+/// Apply Dockerfile parser directives and join line continuations.
+///
+/// Docker reads `# key=value` directives only from the comment block before
+/// the first instruction. `escape` selects the continuation character; any
+/// other `key=value` comment stays a comment, matching Docker's
+/// warn-and-continue behavior. The `syntax` directive selects a BuildKit
+/// frontend; this builder has no frontend switching, so accepting it silently
+/// would build with different semantics than the file requests.
+fn preprocess_dockerfile(contents: &str) -> Result<String, DockerfileBuildError> {
+    let mut escape = '\\';
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_directive_block = true;
+    for raw_line in contents.lines() {
+        if in_directive_block {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                lines.push(raw_line.to_string());
+                continue;
+            }
+            if let Some(comment) = trimmed.strip_prefix('#') {
+                if let Some((key, value)) = comment.trim().split_once('=') {
+                    match key.trim() {
+                        "escape" => escape = parse_escape_directive(value.trim())?,
+                        "syntax" => {
+                            return Err(DockerfileBuildError::Unsupported(format!(
+                                "Dockerfile syntax directive is not supported: {value}"
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                lines.push(raw_line.to_string());
+                continue;
+            }
+            in_directive_block = false;
+        }
+        lines.push(raw_line.to_string());
+    }
+    join_continuation_lines(&lines, escape)
+}
+
+fn parse_escape_directive(raw: &str) -> Result<char, DockerfileBuildError> {
+    let mut chars = raw.chars();
+    let escape = chars.next().ok_or_else(|| {
+        DockerfileBuildError::Invalid(
+            "invalid escape directive: must be ` or \\".to_string(),
+        )
+    })?;
+    if chars.next().is_some() || !matches!(escape, '`' | '\\') {
+        return Err(DockerfileBuildError::Invalid(
+            "invalid escape directive: must be ` or \\".to_string(),
+        ));
+    }
+    Ok(escape)
+}
+
+/// Join lines ending with an odd run of the escape character, matching
+/// Docker's rule that a doubled escape is a literal character and a single
+/// trailing escape continues onto the next line.
+fn join_continuation_lines(
+    lines: &[String],
+    escape: char,
+) -> Result<String, DockerfileBuildError> {
+    let mut joined: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in lines {
+        let standalone = pending.is_none()
+            && (line.trim().is_empty() || line.trim_start().starts_with('#'));
+        if standalone {
+            joined.push(line.to_string());
+            continue;
+        }
+        let trailing = line.chars().rev().take_while(|&c| c == escape).count();
+        let mut current = pending.take().unwrap_or_default();
+        if trailing % 2 == 1 {
+            current.push_str(&line[..line.len() - escape.len_utf8()]);
+            pending = Some(current);
+        } else {
+            current.push_str(line);
+            joined.push(current);
+        }
+    }
+    if let Some(dangling) = pending {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "Dockerfile instruction ends with an escape: {dangling}"
+        )));
+    }
+    Ok(joined.join("\n"))
+}
+
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
     let mut global_args: HashMap<String, String> = HashMap::new();
 
-    for raw_line in contents.lines() {
+    for raw_line in preprocess_dockerfile(contents)?.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -6020,6 +6110,68 @@ mod tests {
         let trailing = parse_stages("FROM alpine unexpected tokens\n")
             .expect_err("ignored FROM tokens must fail deterministically");
         assert!(trailing.to_string().contains("optional AS stage name"));
+    }
+
+    #[test]
+    fn line_continuation_joins_wrapped_instructions() {
+        let stages = parse_stages("FROM scratch\nRUN echo one && \\\n    echo two\n")
+            .expect("continued RUN should join into one instruction");
+        assert_eq!(stages[0].run.len(), 1);
+        assert_eq!(
+            stages[0].run[0].args.last().map(String::as_str),
+            Some("echo one && echo two")
+        );
+
+        let copied = parse_stages("FROM scratch\nCOPY app \\\n    /app\n")
+            .expect("continued COPY should join into one instruction");
+        assert_eq!(copied[0].copy_paths[0].srcs, vec!["app"]);
+        assert_eq!(copied[0].copy_paths[0].dest, "/app");
+
+        let trailing = parse_stages("FROM scratch\nRUN echo hi \\")
+            .expect_err("dangling continuation must fail deterministically");
+        assert!(trailing.to_string().contains("ends with an escape"));
+    }
+
+    #[test]
+    fn escape_directive_changes_the_continuation_character() {
+        let stages = parse_stages("# escape=`\nFROM scratch\nRUN echo one && `\n    echo two\n")
+            .expect("backtick escape directive should be honored");
+        assert_eq!(stages[0].run.len(), 1);
+        assert_eq!(
+            stages[0].run[0].args.last().map(String::as_str),
+            Some("echo one && echo two")
+        );
+
+        let backslash_literal =
+            parse_stages("# escape=`\nFROM scratch\nRUN echo one && \\\necho two\n")
+                .expect_err("backslash must not continue lines under escape directive");
+        assert!(backslash_literal.to_string().contains("ECHO"));
+    }
+
+    #[test]
+    fn syntax_directive_fails_closed_as_an_unsupported_frontend() {
+        let error = parse_stages("# syntax=docker/dockerfile:1\nFROM scratch\n")
+            .expect_err("syntax directive must fail closed");
+        assert!(error.to_string().contains("syntax"));
+        assert!(error.to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn invalid_escape_directive_is_rejected() {
+        let error = parse_stages("# escape=ab\nFROM scratch\n")
+            .expect_err("multi-character escape directive must fail");
+        assert!(error.to_string().contains("escape"));
+
+        let error = parse_stages("# escape=\nFROM scratch\n")
+            .expect_err("empty escape directive must fail");
+        assert!(error.to_string().contains("escape"));
+    }
+
+    #[test]
+    fn unknown_leading_comment_directives_stay_comments() {
+        let stages = parse_stages("# unknown-key=value\nFROM scratch\nLABEL a=b\n")
+            .expect("unknown directives remain comments like Docker");
+        assert_eq!(stages[0].labels.get("a").map(String::as_str), Some("b"));
     }
 
     #[test]

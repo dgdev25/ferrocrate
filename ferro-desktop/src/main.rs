@@ -1779,6 +1779,14 @@ fn stop_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
     }
 }
 
+/// Escape a value embedded in a QEMU option string. QEMU parses `,` as an
+/// option separator inside a single argv element, so a literal comma must be
+/// doubled to remain part of the value. Without this, an operator-configured
+/// path containing a comma could alter adjacent drive/chardev/netdev options.
+fn qemu_escape_option_value(value: &str) -> String {
+    value.replace(',', ",,")
+}
+
 fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Command, DesktopError> {
     let qemu_bin = match config.backend.as_str() {
         "qemu-hvf" => "qemu-system-aarch64",
@@ -1808,10 +1816,13 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
             cmd.arg("-drive")
                 .arg(format!(
                     "if=pflash,format=raw,readonly=on,file={}",
-                    code.display()
+                    qemu_escape_option_value(&code.display().to_string())
                 ))
                 .arg("-drive")
-                .arg(format!("if=pflash,format=raw,file={}", vars_path.display()));
+                .arg(format!(
+                    "if=pflash,format=raw,file={}",
+                    qemu_escape_option_value(&vars_path.display().to_string())
+                ));
         } else if config.backend != "qemu-x86_64" {
             cmd.arg("-bios").arg(code);
         }
@@ -1830,7 +1841,7 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         let bind_addr = if entry.bind_addr.trim().is_empty() {
             "127.0.0.1".to_string()
         } else {
-            entry.bind_addr.clone()
+            qemu_escape_option_value(entry.bind_addr.trim())
         };
         if used_bind_ports.contains(&(bind_addr.clone(), entry.listen_port)) {
             continue;
@@ -1851,14 +1862,18 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         .arg("-m")
         .arg(config.memory_mb.to_string())
         .arg("-drive")
-        .arg(format!("file={},if=virtio,format=qcow2", config.disk_path))
+        .arg(format!(
+            "file={},if=virtio,format=qcow2",
+            qemu_escape_option_value(&config.disk_path)
+        ))
         .arg("-netdev")
         .arg(netdev)
         .arg("-device")
         .arg("virtio-net-pci,netdev=net0");
     if let Some(cloud_init) = config.cloud_init_image_path.as_deref() {
         cmd.arg("-drive").arg(format!(
-            "file={cloud_init},if=virtio,media=cdrom,readonly=on,format=raw"
+            "file={},if=virtio,media=cdrom,readonly=on,format=raw",
+            qemu_escape_option_value(cloud_init)
         ));
     }
     match config.fs_backend.as_str() {
@@ -1869,14 +1884,17 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
                 )
             })?;
             cmd.arg("-chardev")
-                .arg(format!("socket,id=vfs0,path={socket_path}"))
+                .arg(format!(
+                    "socket,id=vfs0,path={}",
+                    qemu_escape_option_value(socket_path)
+                ))
                 .arg("-device")
                 .arg("vhost-user-fs-pci,chardev=vfs0,tag=ferrohost");
         }
         "9p" => {
             cmd.arg("-virtfs").arg(format!(
                 "local,path={},mount_tag=ferrohost,security_model=none",
-                config.host_share_path
+                qemu_escape_option_value(&config.host_share_path)
             ));
         }
         other => {
@@ -2474,6 +2492,111 @@ mod tests {
         };
         let err = build_vm_command(&cfg, &[]).expect_err("must reject unknown backend");
         assert!(err.to_string().contains("unsupported vm backend"));
+    }
+
+    #[test]
+    fn vm_command_builder_escapes_commas_in_option_values() {
+        let cfg = VmConfig {
+            backend: "qemu-x86_64".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_path: "/tmp/dir,with,commas/disk.qcow2".to_string(),
+            host_share_path: "/tmp/share,path".to_string(),
+            fs_backend: "9p".to_string(),
+            virtiofs_socket_path: Some("/tmp/sock,pet".to_string()),
+            hyperv_switch: None,
+            ssh_port: 2222,
+            api_port: 4288,
+            guest_user: None,
+            ssh_private_key_path: None,
+            cloud_init_image_path: Some("/tmp/seed,cloud.img".to_string()),
+        };
+        let forwards = vec![ForwardEntry {
+            bind_addr: "127.0.0.1,evil=1".to_string(),
+            listen_port: 8080,
+            target_host: "localhost".to_string(),
+            target_port: 80,
+            enabled: true,
+        }];
+        let cmd = build_vm_command(&cfg, &forwards).expect("build vm command");
+        let args = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let drive = args
+            .iter()
+            .find(|arg| arg.contains("if=virtio,format=qcow2"))
+            .expect("disk drive arg");
+        assert!(
+            drive.contains("file=/tmp/dir,,with,,commas/disk.qcow2"),
+            "disk path commas must be doubled: {drive}"
+        );
+
+        let cloud_init = args
+            .iter()
+            .find(|arg| arg.contains("media=cdrom"))
+            .expect("cloud-init drive arg");
+        assert!(
+            cloud_init.contains("file=/tmp/seed,,cloud.img"),
+            "cloud-init path commas must be doubled: {cloud_init}"
+        );
+
+        let netdev = args
+            .iter()
+            .find(|arg| arg.contains("user,id=net0"))
+            .expect("netdev arg");
+        assert!(
+            netdev.contains("127.0.0.1,,evil=1:8080-:80"),
+            "bind address commas must be doubled: {netdev}"
+        );
+        assert!(
+            !netdev.contains("127.0.0.1,evil"),
+            "unescaped comma must not survive in netdev: {netdev}"
+        );
+
+        let virtfs = args
+            .iter()
+            .find(|arg| arg.starts_with("local,path="))
+            .expect("virtfs arg");
+        assert!(
+            virtfs.contains("path=/tmp/share,,path"),
+            "host share path commas must be doubled: {virtfs}"
+        );
+    }
+
+    #[test]
+    fn vm_command_builder_escapes_virtiofs_socket_comma() {
+        let cfg = VmConfig {
+            backend: "qemu-x86_64".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_path: "/tmp/disk.qcow2".to_string(),
+            host_share_path: "/tmp/share".to_string(),
+            fs_backend: "virtiofs".to_string(),
+            virtiofs_socket_path: Some("/tmp/sock,pet".to_string()),
+            hyperv_switch: None,
+            ssh_port: 2222,
+            api_port: 4288,
+            guest_user: None,
+            ssh_private_key_path: None,
+            cloud_init_image_path: None,
+        };
+        let cmd = build_vm_command(&cfg, &[]).expect("build vm command");
+        let args = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let chardev = args
+            .iter()
+            .find(|arg| arg.starts_with("socket,id=vfs0"))
+            .expect("virtiofs chardev arg");
+        assert!(
+            chardev.contains("path=/tmp/sock,,pet"),
+            "virtiofs socket path commas must be doubled: {chardev}"
+        );
     }
 
     #[test]

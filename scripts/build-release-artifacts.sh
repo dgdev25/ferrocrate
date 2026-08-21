@@ -115,7 +115,11 @@ resolve_os() {
 
 resolve_arch() {
   if [[ -n "$TARGET_ARCH" ]]; then
-    echo "$TARGET_ARCH"
+    case "$TARGET_ARCH" in
+      x86_64|amd64) echo "x86_64" ;;
+      aarch64|arm64) echo "aarch64" ;;
+      *) echo "unsupported target architecture: $TARGET_ARCH" >&2; exit 1 ;;
+    esac
     return
   fi
   case "$(uname -m)" in
@@ -125,6 +129,19 @@ resolve_arch() {
       echo "unsupported host architecture: $(uname -m)" >&2
       exit 1
       ;;
+  esac
+}
+
+resolve_target_triple() {
+  local os="$1" arch="$2"
+  case "$os/$arch" in
+    linux/x86_64) echo "x86_64-unknown-linux-gnu" ;;
+    linux/aarch64) echo "aarch64-unknown-linux-gnu" ;;
+    macos/x86_64) echo "x86_64-apple-darwin" ;;
+    macos/aarch64) echo "aarch64-apple-darwin" ;;
+    windows/x86_64) echo "x86_64-pc-windows-gnu" ;;
+    windows/aarch64) echo "aarch64-pc-windows-gnullvm" ;;
+    *) echo "unsupported target combination: $os/$arch" >&2; exit 1 ;;
   esac
 }
 
@@ -158,9 +175,17 @@ main() {
     exit 1
   fi
 
-  local os arch archive_name checksum_name tmpdir package_dir
+  local os arch target_triple artifact_release_dir archive_name checksum_name tmpdir package_dir
   os="$(resolve_os)"
   arch="$(resolve_arch)"
+  target_triple="$(resolve_target_triple "$os" "$arch")"
+
+  if ! rustup target list --installed 2>/dev/null | grep -Fqx "$target_triple"; then
+    echo "Rust target is not installed: $target_triple" >&2
+    echo "install it with: rustup target add $target_triple" >&2
+    exit 1
+  fi
+  artifact_release_dir="$TARGET_DIR/$target_triple/release"
 
   mkdir -p "$OUTPUT_DIR"
   tmpdir="$(mktemp -d)"
@@ -171,15 +196,15 @@ main() {
     build_packages+=( -p ferro-desktop )
   fi
 
-  echo "building release binaries (channel=$CHANNEL os=$os arch=$arch)..."
-  CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release "${build_packages[@]}"
+  echo "building release binaries (channel=$CHANNEL os=$os arch=$arch target=$target_triple)..."
+  CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --target "$target_triple" "${build_packages[@]}"
 
   package_dir="$tmpdir/ferrocrate"
   mkdir -p "$package_dir"
 
   local cli_bin desktop_bin security_object
-  cli_bin="$TARGET_DIR/release/$(binary_name ferro-cli "$os")"
-  desktop_bin="$TARGET_DIR/release/$(binary_name ferro-desktop "$os")"
+  cli_bin="$artifact_release_dir/$(binary_name ferro-cli "$os")"
+  desktop_bin="$artifact_release_dir/$(binary_name ferro-desktop "$os")"
 
   if [[ ! -f "$cli_bin" ]]; then
     echo "missing built CLI binary: $cli_bin" >&2
@@ -194,7 +219,7 @@ main() {
   cp "$cli_bin" "$package_dir/$(binary_name ferrocrate "$os")"
 
   if [[ "$os" == "linux" ]]; then
-    security_object="$(find "$TARGET_DIR/release/build" -path '*/out/ferro-security-ebpf' -type f -print -quit)"
+    security_object="$(find "$artifact_release_dir/build" -path '*/out/ferro-security-ebpf' -type f -print -quit)"
     if [[ -z "$security_object" || ! -f "$security_object" ]]; then
       echo "missing built security eBPF object under $TARGET_DIR/release/build" >&2
       exit 1

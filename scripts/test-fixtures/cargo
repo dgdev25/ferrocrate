@@ -2,11 +2,24 @@
 set -euo pipefail
 
 target_dir="${CARGO_TARGET_DIR:-target}"
-mkdir -p "$target_dir/release"
-printf '#!/bin/sh\nexit 0\n' > "$target_dir/release/ferro-cli"
-chmod +x "$target_dir/release/ferro-cli"
+target_triple=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--target" ]]; then
+    target_triple="${2:-}"
+    shift 2
+  else
+    shift
+  fi
+done
+release_dir="$target_dir/release"
+if [[ -n "$target_triple" ]]; then
+  release_dir="$target_dir/$target_triple/release"
+fi
+mkdir -p "$release_dir"
+printf '#!/bin/sh\nexit 0\n' > "$release_dir/ferro-cli"
+chmod +x "$release_dir/ferro-cli"
 # The release packager embeds the security-monitor eBPF object produced by the
 # real ferro-net build script. Keep the hermetic Cargo fixture representative
 # of that contract without invoking a compiler or toolchain.
-mkdir -p "$target_dir/release/build/fixture/out"
-printf 'fixture-security-ebpf\n' > "$target_dir/release/build/fixture/out/ferro-security-ebpf"
+mkdir -p "$release_dir/build/fixture/out"
+printf 'fixture-security-ebpf\n' > "$release_dir/build/fixture/out/ferro-security-ebpf"

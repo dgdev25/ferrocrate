@@ -8,8 +8,25 @@ if [[ ! -f "$roadmap" ]]; then
   exit 2
 fi
 
-completed=$(rg -c '^\s*- \[x\] ' "$roadmap" || true)
-open=$(rg -c '^\s*- \[ \] ' "$roadmap" || true)
+count_matches() {
+  local pattern="$1" path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -c "$pattern" "$path" || true
+  else
+    # Keep the release gate usable under sudo/systemd PATHs that omit the
+    # optional ripgrep binary.  awk is part of the base toolchain and preserves
+    # the same anchored checklist semantics.
+    case "$pattern" in
+      '^\s*- \[x\] ') awk '/^[[:space:]]*- \[x\] / { count++ } END { print count + 0 }' "$path" ;;
+      '^\s*- \[ \] ') awk '/^[[:space:]]*- \[ \] / { count++ } END { print count + 0 }' "$path" ;;
+      '^### [0-9]+\.') awk '/^### [0-9]+\./ { count++ } END { print count + 0 }' "$path" ;;
+      *) echo "unsupported roadmap count pattern: $pattern" >&2; return 2 ;;
+    esac
+  fi
+}
+
+completed=$(count_matches '^\s*- \[x\] ' "$roadmap")
+open=$(count_matches '^\s*- \[ \] ' "$roadmap")
 total=$((completed + open))
 if (( total == 0 )); then
   echo "roadmap progress failed: no checklist rows found" >&2
@@ -23,7 +40,7 @@ if [[ "${FERROCRATE_ROADMAP_EXPECTED_EPICS:-15}" != "15" ]]; then
   echo "roadmap progress failed: expected epic count is fixed at 15" >&2
   exit 1
 fi
-epics=$(rg -c '^### [0-9]+\.' "$roadmap" || true)
+epics=$(count_matches '^### [0-9]+\.' "$roadmap")
 if (( epics != 15 )); then
   echo "roadmap progress failed: expected 15 epic headings, found $epics" >&2
   exit 1

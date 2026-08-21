@@ -62,6 +62,7 @@ bash -n scripts/rootless-install.sh scripts/test-rootless-install.sh \
   scripts/generate-release-index.sh scripts/test-generate-release-index.sh \
   scripts/perf/check-benchmark-register.sh scripts/perf/test-check-benchmark-register.sh \
   scripts/perf/test-update-benchmark-register.sh \
+  scripts/check-roadmap-progress.sh \
   scripts/verify-indie-release-plan.sh \
   scripts/test-docker-cli-compat.sh \
   scripts/e2e-cli.sh scripts/test-e2e-cli-backend.sh \
@@ -93,6 +94,7 @@ bash scripts/test-ebpf-networking-backend.sh
 bash scripts/perf/test-check-docker-comparison.sh
 bash scripts/perf/test-check-benchmark-register.sh
 bash scripts/perf/test-update-benchmark-register.sh
+bash scripts/check-roadmap-progress.sh
 bash scripts/test-generate-changelog.sh
 bash scripts/test-next-release-version.sh
 bash scripts/test-generate-release-index.sh

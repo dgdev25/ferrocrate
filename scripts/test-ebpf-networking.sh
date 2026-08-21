@@ -5,15 +5,39 @@ fail() { printf 'eBPF networking qualification failed: %s\n' "$*" >&2; exit 1; }
 [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
 [[ "${EUID}" -eq 0 ]] || fail "run with sudo"
 command -v timeout >/dev/null 2>&1 || fail "timeout is required for bounded qualification"
+command -v setsid >/dev/null 2>&1 || fail "setsid is required for process-group cleanup"
 
 step_timeout="${FERROCRATE_EBPF_STEP_TIMEOUT:-45}"
 [[ "$step_timeout" =~ ^[1-9][0-9]*$ ]] || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be a positive integer"
 (( step_timeout <= 600 )) || fail "FERROCRATE_EBPF_STEP_TIMEOUT must be <= 600 seconds"
 run_bounded() {
-  timeout --foreground "${step_timeout}s" "$@"
-  local status=$?
-  if (( status == 124 )); then
+  # Cargo can leave the ignored integration child alive after a plain timeout,
+  # retaining pinned classifiers while the parent has already returned. Run
+  # each step in its own process group and terminate the whole group on expiry.
+  local command_pid status timed_out=0 deadline=$((SECONDS + step_timeout))
+  setsid "$@" &
+  command_pid=$!
+  while kill -0 "$command_pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      timed_out=1
+      kill -TERM -- "-${command_pid}" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        kill -0 "$command_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      kill -KILL -- "-${command_pid}" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+  if wait "$command_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  if (( timed_out )); then
     printf 'eBPF qualification step timed out after %ss: %s\n' "$step_timeout" "$*" >&2
+    return 124
   fi
   return "$status"
 }
@@ -51,6 +75,11 @@ IFS=. read -r kernel_major kernel_minor _ <<<"$(uname -r)"
 : "${FERRO_EBPF_TEST_SNAT_END:?set a reserved SNAT range end}"
 
 export FERRO_EBPF_TEST_NETWORK_ID="ferro-qualify-$$"
+# Give each live probe a unique bridge/network identity. A timed-out cargo
+# child may leave a classifier briefly visible; reusing the fixed `ferro0`
+# identity would make the next probe fail closed against that prior run.
+export FERROCRATE_BRIDGE_NAME="fep-$((BASHPID % 100000))"
+export FERROCRATE_BRIDGE_CIDR="10.77.$((BASHPID % 200 + 20)).1/24"
 export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
 # This gate intentionally exercises the experimental published-port path;
 # production remains fail-closed until the live checksum/redirect qualification
@@ -60,9 +89,11 @@ export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
 pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true)"
 netns_before="$(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ { print $1 }' | sort || true)"
-veth_before="$(ip -o link show master ferro0 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort || true)"
+veth_before="$(ip -o link show master "$FERROCRATE_BRIDGE_NAME" 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort || true)"
 lo_ingress_before="$(tc filter show dev lo ingress 2>/dev/null || true)"
 lo_egress_before="$(tc filter show dev lo egress 2>/dev/null || true)"
+external_ingress_before="$(tc filter show dev "$FERRO_EBPF_TEST_INTERFACE" ingress 2>/dev/null || true)"
+external_egress_before="$(tc filter show dev "$FERRO_EBPF_TEST_INTERFACE" egress 2>/dev/null || true)"
 before_iptables="$(mktemp)"
 before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
@@ -119,6 +150,14 @@ cleanup() {
      grep -q 'ferro_egress' <<<"$(tc filter show dev lo egress 2>/dev/null || true)"; then
     tc filter del dev lo egress pref 49152 handle 1 bpf 2>/dev/null || true
   fi
+  if ! grep -q 'ferro_ingress' <<<"$external_ingress_before" &&
+     grep -q 'ferro_ingress' <<<"$(tc filter show dev "$FERRO_EBPF_TEST_INTERFACE" ingress 2>/dev/null || true)"; then
+    tc filter del dev "$FERRO_EBPF_TEST_INTERFACE" ingress pref 49152 handle 1 bpf 2>/dev/null || true
+  fi
+  if ! grep -q 'ferro_egress' <<<"$external_egress_before" &&
+     grep -q 'ferro_egress' <<<"$(tc filter show dev "$FERRO_EBPF_TEST_INTERFACE" egress 2>/dev/null || true)"; then
+    tc filter del dev "$FERRO_EBPF_TEST_INTERFACE" egress pref 49152 handle 1 bpf 2>/dev/null || true
+  fi
   # A failed e2e process can leave a PID-free namespace after its normal
   # runtime cleanup has already lost ownership metadata.  The qualification
   # harness owns only namespaces that did not exist at entry; remove those
@@ -143,7 +182,7 @@ cleanup() {
         ip link delete "$veth_name" 2>/dev/null || true
       fi
     fi
-  done < <(ip -o link show master ferro0 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort)
+  done < <(ip -o link show master "$FERROCRATE_BRIDGE_NAME" 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort)
   if [[ -n "${FERROCRATE_BRIDGE_NAME:-}" ]]; then
     ip link delete "$FERROCRATE_BRIDGE_NAME" 2>/dev/null || true
   fi

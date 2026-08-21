@@ -561,6 +561,20 @@ CMD ["cat", "/hello.txt"]
                 }
             }
         });
+        // The temporary runtime directory owns an independent image store.
+        // Pull explicitly so `run` cannot block in an implicit registry pull
+        // before the eBPF classifier is attached, and report registry failures
+        // at the fixture boundary.
+        let pull_output = ferro_cli()
+            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .args(["pull", "docker.io/library/nginx:alpine"])
+            .output()
+            .expect("pull nginx image");
+        assert!(
+            pull_output.status.success(),
+            "eBPF nginx image pull should succeed: {}",
+            String::from_utf8_lossy(&pull_output.stderr)
+        );
         let (port_reservation, host_port) =
             reserve_dynamic_host_port().expect("reserve unoccupied localhost port");
         let port_mapping = format!("{host_port}:80");
@@ -570,35 +584,44 @@ CMD ["cat", "/hello.txt"]
         );
         let before = netfilter_snapshot();
         drop(port_reservation);
+        let mut run_args = vec![
+            "run".to_string(),
+            "--name".to_string(),
+            "ferro-e2e-ebpf-web".to_string(),
+            "--network".to_string(),
+            "bridge".to_string(),
+            "--network-backend".to_string(),
+            "ebpf".to_string(),
+        ];
+        if let Ok(bridge_name) = std::env::var("FERROCRATE_BRIDGE_NAME") {
+            run_args.extend(["--bridge-name".to_string(), bridge_name]);
+        }
+        if let Ok(bridge_cidr) = std::env::var("FERROCRATE_BRIDGE_CIDR") {
+            run_args.extend(["--bridge-cidr".to_string(), bridge_cidr]);
+        }
+        run_args.extend([
+            "--cap-add".to_string(),
+            "NET_BIND_SERVICE".to_string(),
+            "--cap-add".to_string(),
+            "CHOWN".to_string(),
+            "--cap-add".to_string(),
+            "DAC_OVERRIDE".to_string(),
+            "--cap-add".to_string(),
+            "FOWNER".to_string(),
+            "--cap-add".to_string(),
+            "SETGID".to_string(),
+            "--cap-add".to_string(),
+            "SETUID".to_string(),
+            "-p".to_string(),
+            port_mapping,
+            "docker.io/library/nginx:alpine".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            nginx_command,
+        ]);
         let run_output = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .args([
-                "run".to_string(),
-                "--name".to_string(),
-                "ferro-e2e-ebpf-web".to_string(),
-                "--network".to_string(),
-                "bridge".to_string(),
-                "--network-backend".to_string(),
-                "ebpf".to_string(),
-                "--cap-add".to_string(),
-                "NET_BIND_SERVICE".to_string(),
-                "--cap-add".to_string(),
-                "CHOWN".to_string(),
-                "--cap-add".to_string(),
-                "DAC_OVERRIDE".to_string(),
-                "--cap-add".to_string(),
-                "FOWNER".to_string(),
-                "--cap-add".to_string(),
-                "SETGID".to_string(),
-                "--cap-add".to_string(),
-                "SETUID".to_string(),
-                "-p".to_string(),
-                port_mapping,
-                "docker.io/library/nginx:alpine".to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                nginx_command,
-            ])
+            .args(&run_args)
             .output()
             .expect("run nginx with eBPF");
         assert!(

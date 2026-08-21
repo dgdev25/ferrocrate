@@ -33,7 +33,16 @@ impl HostCapabilities {
             });
         Self {
             linux: cfg!(target_os = "linux"),
-            root: nix::unistd::geteuid().as_raw() == 0,
+            root: {
+                #[cfg(unix)]
+                {
+                    nix::unistd::geteuid().as_raw() == 0
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            },
             cap_net_admin: cap_eff.is_some_and(|value| value & (1 << 12) != 0),
             ip: command_available("ip"),
             nft: command_available("nft"),

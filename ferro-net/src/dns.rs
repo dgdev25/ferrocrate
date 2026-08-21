@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -48,11 +49,11 @@ pub fn write_resolv_conf(path: &Path, config: &DnsConfig) -> Result<(), DnsError
     ));
     let contents = render_resolv_conf(config);
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&temp)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o644);
+        let mut file = options.open(&temp)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         fs::rename(&temp, path)?;

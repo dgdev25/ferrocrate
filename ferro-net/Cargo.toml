@@ -7,7 +7,6 @@ edition = "2021"
 workspace = true
 
 [dependencies]
-aya = { workspace = true }
 nix = { workspace = true, features = ["fs"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -15,7 +14,10 @@ ipnet = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-[build-dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
 aya-build = { workspace = true }
 
 [dev-dependencies]

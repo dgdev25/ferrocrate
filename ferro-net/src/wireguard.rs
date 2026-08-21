@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -249,11 +250,11 @@ impl WireGuardManager {
             std::process::id(),
             extension
         ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&path)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         Ok(path)
@@ -330,15 +331,25 @@ fn validate_config(
 }
 
 fn validate_private_key_path(path: &Path) -> Result<(), WireGuardError> {
-    let metadata = fs::metadata(path)
-        .map_err(|_| WireGuardError::UnsafeKeyPath(path.display().to_string()))?;
-    if !metadata.is_file()
-        || metadata.mode() & 0o077 != 0
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+    #[cfg(not(unix))]
     {
-        return Err(WireGuardError::UnsafeKeyPath(path.display().to_string()));
+        let _ = path;
+        return Err(WireGuardError::UnsafeKeyPath(
+            "WireGuard key validation requires a Unix host".to_string(),
+        ));
     }
-    validate_key(fs::read_to_string(path)?.trim())
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path)
+            .map_err(|_| WireGuardError::UnsafeKeyPath(path.display().to_string()))?;
+        if !metadata.is_file()
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        {
+            return Err(WireGuardError::UnsafeKeyPath(path.display().to_string()));
+        }
+        validate_key(fs::read_to_string(path)?.trim())
+    }
 }
 
 fn validate_key(key: &str) -> Result<(), WireGuardError> {

@@ -1,9 +1,15 @@
 pub mod backend;
 pub mod bridge;
 pub mod dns;
+#[cfg(target_os = "linux")]
+pub mod ebpf;
+#[cfg(not(target_os = "linux"))]
+#[path = "ebpf_non_linux.rs"]
 pub mod ebpf;
 pub mod ebpf_abi;
+#[cfg(target_os = "linux")]
 mod ebpf_loader;
+#[cfg(target_os = "linux")]
 pub mod ebpf_maps;
 pub mod executor;
 pub mod iptables;

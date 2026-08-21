@@ -12,6 +12,7 @@ pub enum NetnsError {
     #[error("failed to open netns path {0}")]
     Open(PathBuf, #[source] std::io::Error),
     #[error("failed to enter network namespace: {0}")]
+    #[cfg(target_os = "linux")]
     Setns(#[from] nix::Error),
     #[error("validation error: {0}")]
     Validation(#[from] ValidationError),

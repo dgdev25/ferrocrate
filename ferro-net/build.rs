@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
 use std::{env, ffi::OsString, fs, path::PathBuf, process::Command};
 
+#[cfg(target_os = "linux")]
 use aya_build::{build_ebpf, Package, Toolchain};
 
 const BPF_TOOLCHAIN: &str = "nightly-2026-02-11";
@@ -36,7 +38,14 @@ const BPF_ENVIRONMENT: &[&str] = &[
     "RUSTUP_TOOLCHAIN",
 ];
 
+#[cfg(target_os = "linux")]
 fn main() {
+    // `build.rs` itself runs for the host, so a host-side cfg(target_os) is
+    // not the package target. Avoid compiling the Linux eBPF payload when the
+    // crate is being cross-checked for Windows or macOS.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
     emit_rebuild_contract();
     reject_skipped_build();
     require_bpf_toolchain();
@@ -102,6 +111,14 @@ fn main() {
     );
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    // The eBPF object is a Linux-only implementation detail. Non-Linux builds
+    // use the explicit unsupported backend in ebpf_non_linux.rs and must not
+    // require a Linux BPF toolchain or attempt to run a build script for it.
+}
+
+#[cfg(target_os = "linux")]
 fn emit_rebuild_contract() {
     for input in BPF_INPUTS {
         println!("cargo:rerun-if-changed={input}");
@@ -114,6 +131,7 @@ fn emit_rebuild_contract() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn require_bpf_linker() {
     let output = Command::new("bpf-linker").arg("--version").output();
     let expected = format!("bpf-linker {BPF_LINKER_VERSION}");
@@ -127,6 +145,7 @@ fn require_bpf_linker() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn reject_skipped_build() {
     let skip = env::var("AYA_BUILD_SKIP").unwrap_or_default();
     assert!(
@@ -135,6 +154,7 @@ fn reject_skipped_build() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn require_bpf_toolchain() {
     let rustup = rustup_command();
     let rustup_version = Command::new(&rustup).arg("--version").output();
@@ -169,6 +189,7 @@ fn require_bpf_toolchain() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn rustup_command() -> PathBuf {
     if Command::new("rustup")
         .arg("--version")

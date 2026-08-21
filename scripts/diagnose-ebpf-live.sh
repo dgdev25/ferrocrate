@@ -151,6 +151,33 @@ cat /proc/net/snmp > "$OUT/snmp-after.txt"
 cat /proc/net/netstat > "$OUT/netstat-after.txt"
 nstat -az > "$OUT/nstat-after.txt" 2>&1 || true
 
+# Emit a compact summary alongside the raw captures.  The raw pcap/trace files
+# are intentionally ephemeral, but this summary is safe to attach to a bug
+# report and makes repeated kernel runs directly comparable.  In particular,
+# distinguish a checksum counter change from a loopback drop and record the
+# devices observed at the receive boundary.
+{
+    printf 'fixture_exit=%s\n' "$RC"
+    printf 'kernel=%s\n' "$(uname -r)"
+    printf 'snat_range=%s\n' "$snat_range"
+    printf 'tcp_in_csum_errors_before='
+    awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }' \
+        "$OUT/nstat-before.txt"
+    printf 'tcp_in_csum_errors_after='
+    awk '$1 == "TcpInCsumErrors" { print $2; found=1 } END { if (!found) print 0 }' \
+        "$OUT/nstat-after.txt"
+    printf 'rx_devices='
+    awk -F'dev=' '/^RX dev=/{ split($2, fields, " "); counts[fields[1]]++ }
+        END { first=1; for (device in counts) { if (!first) printf ","; printf "%s:%d", device, counts[device]; first=0 } }' \
+        "$OUT/netif_rx.log" | sort
+    printf 'kfree_reasons='
+    awk -F'reason=' '/^KFREE /{ split($2, fields, " "); counts[fields[1]]++ }
+        END { first=1; for (reason in counts) { if (!first) printf ","; printf "%s:%d", reason, counts[reason]; first=0 } }' \
+        "$OUT/kfree.log" | sort
+    printf 'syn_packets='
+    tcpdump -nn -r "$OUT/any.pcap" 'tcp[tcpflags] & (tcp-syn|tcp-ack) != 0' 2>/dev/null | wc -l
+} > "$OUT/summary.txt"
+
 echo "artifacts in $OUT"
 ls -la "$OUT"
 exit "$RC"

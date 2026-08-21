@@ -21,6 +21,19 @@ PATH="$tmp/empty-bin" \
 /usr/bin/grep -q '^rootless.provision.package_manager=dnf$' "$tmp/fedora-output"
 /usr/bin/grep -q '^rootless.provision.packages=shadow-utils slirp4netns bubblewrap$' "$tmp/fedora-output"
 
+printf 'ID=rocky\nID_LIKE="rhel fedora"\n' >"$tmp/rocky-release"
+PATH="$tmp/empty-bin" \
+  /bin/bash "$script" --os-release "$tmp/rocky-release" >"$tmp/rocky-output"
+/usr/bin/grep -q '^rootless.provision.package_manager=dnf$' "$tmp/rocky-output"
+/usr/bin/grep -q '^rootless.provision.packages=shadow-utils slirp4netns bubblewrap$' "$tmp/rocky-output"
+
+printf 'ID=arch\n' >"$tmp/arch-release"
+PATH="$tmp/empty-bin" \
+  /bin/bash "$script" --os-release "$tmp/arch-release" --no-update >"$tmp/arch-output"
+/usr/bin/grep -q '^rootless.provision.package_manager=pacman$' "$tmp/arch-output"
+/usr/bin/grep -q '^rootless.provision.packages=shadow slirp4netns bubblewrap$' "$tmp/arch-output"
+/usr/bin/grep -q '^rootless.provision.command=pacman --needed --noconfirm -S shadow slirp4netns bubblewrap ' "$tmp/arch-output"
+
 if PATH="$tmp/empty-bin" /bin/bash "$script" --os-release "$tmp/os-release" --package-manager unsupported >"$tmp/invalid" 2>&1; then
   echo "unsupported package manager unexpectedly succeeded" >&2
   exit 1

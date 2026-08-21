@@ -12,16 +12,18 @@ parallel="${FERROCRATE_LIFECYCLE_PARALLEL:-1}"
 keep_tmp="${FERROCRATE_LIFECYCLE_KEEP_TMP:-0}"
 memory_max="${FERROCRATE_LIFECYCLE_MEMORY_MAX:-}"
 hold_seconds="${FERROCRATE_LIFECYCLE_HOLD_SECONDS:-0}"
+operation_timeout="${FERROCRATE_LIFECYCLE_OPERATION_TIMEOUT_SECONDS:-45}"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "perf.container_lifecycle_skipped=1"
   echo "perf.container_lifecycle_skip_reason=root_required"
   exit 77
 fi
-if ! [[ "$count" =~ ^[1-9][0-9]*$ && "$parallel" =~ ^[1-9][0-9]*$ && "$hold_seconds" =~ ^[0-9]+$ ]]; then
-  echo "invalid lifecycle count, parallelism, or hold duration" >&2
+if ! [[ "$count" =~ ^[1-9][0-9]*$ && "$parallel" =~ ^[1-9][0-9]*$ && "$hold_seconds" =~ ^[0-9]+$ && "$operation_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid lifecycle count, parallelism, hold duration, or operation timeout" >&2
   exit 2
 fi
+(( operation_timeout <= 900 )) || { echo "operation timeout must be <= 900 seconds" >&2; exit 2; }
 if [[ -n "$memory_max" ]] && ! [[ "$memory_max" =~ ^[1-9][0-9]*$ ]]; then
   echo "invalid lifecycle memory limit" >&2
   exit 2
@@ -52,7 +54,8 @@ if (( hold_seconds > 0 )); then
   workload=(sh -c "sleep $hold_seconds")
 fi
 pull_ok=1
-if ! "${env_prefix[@]}" "$binary" pull "$image" >/dev/null 2>&1; then
+if ! timeout --foreground --signal=TERM --kill-after=5s "${operation_timeout}s" \
+  "${env_prefix[@]}" "$binary" pull "$image" >/dev/null 2>&1; then
   pull_ok=0
 fi
 
@@ -60,7 +63,8 @@ fi
 # expose the namespace identity required for OCI cleanup (common in nested CI
 # or unprivileged development VMs).
 probe_log="$tmp_root/probe.log"
-if ! "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" >"$probe_log" 2>&1; then
+if ! timeout --foreground --signal=TERM --kill-after=5s "${operation_timeout}s" \
+  "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" >"$probe_log" 2>&1; then
   if grep -q "no kernel identity\|namespace identity" "$probe_log"; then
     echo "perf.container_lifecycle_skipped=1"
     echo "perf.container_lifecycle_skip_reason=namespace_identity_unavailable"
@@ -91,7 +95,8 @@ reap_one() {
 }
 
 while (( started < count )); do
-  "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" \
+  timeout --foreground --signal=TERM --kill-after=5s "${operation_timeout}s" \
+    "${env_prefix[@]}" "$binary" run "${run_args[@]}" "$image" "${workload[@]}" \
     >"$tmp_root/run-${started}.log" 2>&1 &
   jobs+=("$!")
   running=$((running + 1))
@@ -111,6 +116,7 @@ if [[ -n "$memory_max" ]]; then
   echo "perf.container_lifecycle_memory_max=$memory_max"
 fi
 echo "perf.container_lifecycle_hold_seconds=$hold_seconds"
+echo "perf.container_lifecycle_operation_timeout_seconds=$operation_timeout"
 echo "perf.container_lifecycle_passed=$passed"
 echo "perf.container_lifecycle_failed=$failed"
 echo "perf.container_lifecycle_elapsed_ms=$elapsed_ms"

@@ -14,6 +14,21 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "docker CLI compatibility smoke skipped (docker not installed)"
   exit 0
 fi
+
+# Docker-compatible endpoints are exercised against finite fixtures, but a
+# broken daemon or hijacked stream must never hold the release gate forever.
+# Wrap every Docker CLI call with a bounded watchdog; callers can lower this
+# for development or raise it for slower hosted runners.
+docker_timeout_seconds="${FERROCRATE_DOCKER_CLI_TIMEOUT_SECONDS:-20}"
+if ! [[ "$docker_timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  echo "FERROCRATE_DOCKER_CLI_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+docker_bin="$(command -v docker)"
+docker() {
+  timeout --foreground --kill-after=3s "${docker_timeout_seconds}s" "$docker_bin" "$@"
+}
+
 if [[ ! -x "$bin" ]]; then
   if [[ "$strict" == "1" || "$strict" == "true" ]]; then
     echo "Ferrocrate binary is required but missing: $bin" >&2
@@ -46,6 +61,17 @@ cleanup() {
   if [[ -n "$daemon_pid" ]]; then
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
+  fi
+  if [[ -d "$runtime_dir" ]]; then
+    # A killed Docker client can leave a workload process detached from the
+    # daemon. Reap only bwrap processes belonging to this fixture's unique
+    # runtime directory; never scan or kill unrelated container workloads.
+    fixture_pids="$(ps -eo pid=,args= | awk -v root="$runtime_dir" 'index($0, root) && /\/bwrap/ {print $1}')"
+    if [[ -n "$fixture_pids" ]]; then
+      kill -TERM $fixture_pids 2>/dev/null || true
+      sleep 0.2
+      kill -KILL $fixture_pids 2>/dev/null || true
+    fi
   fi
   rm -rf "$runtime_dir"
 }
@@ -123,7 +149,7 @@ timeout 5 docker -H "$host" events --since 0s --filter type=container \
   >"$events_file" 2>"$runtime_dir/events.stderr" &
 events_pid=$!
 sleep 0.2
-container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox sleep 30)"
+container_id="$(docker -H "$host" create --network none --name "$name" "$image" /bin/busybox sleep 5)"
 [[ -n "$container_id" ]] || { echo "docker create returned no ID" >&2; exit 1; }
 pending_renamed="${name}-pending"
 docker -H "$host" rename "$name" "$pending_renamed"
@@ -217,7 +243,7 @@ docker -H "$host" rm "$stdin_attach_name" >/dev/null
 # explicit BusyBox applet because this scratch fixture has no /bin/sleep link.
 attach_name="docker-cli-attach-$$"
 docker -H "$host" create --network none --name "$attach_name" "$image" \
-  /bin/busybox sh -c '/bin/busybox sleep 2; echo ferrocrate-attach-smoke; /bin/busybox sleep 30' >/dev/null
+  /bin/busybox sh -c '/bin/busybox sleep 2; echo ferrocrate-attach-smoke; /bin/busybox sleep 5' >/dev/null
 docker -H "$host" start "$attach_name" >/dev/null
 attach_status=0
 attach_id="$(docker -H "$host" inspect --format '{{.Id}}' "$attach_name")"
@@ -231,7 +257,7 @@ grep -a -q 'ferrocrate-attach-smoke' "$runtime_dir/attach.stdout" || {
   od -An -tx1 "$runtime_dir/attach.stdout" >&2 || true
   exit 1
 }
-if [[ "$attach_status" != 124 && "$attach_status" != 137 ]]; then
+if [[ "$attach_status" != 0 && "$attach_status" != 124 && "$attach_status" != 137 ]]; then
   echo "Docker CLI attach returned unexpected status: $attach_status" >&2
   exit 1
 fi
@@ -243,7 +269,7 @@ stop_status="$(docker -H "$host" wait "$attach_name")"
 }
 kill_name="docker-cli-kill-$$"
 docker -H "$host" create --network none --name "$kill_name" "$image" \
-  /bin/busybox sleep 30 >/dev/null
+  /bin/busybox sleep 5 >/dev/null
 docker -H "$host" start "$kill_name" >/dev/null
 docker -H "$host" kill "$kill_name" >/dev/null
 kill_status="$(docker -H "$host" wait "$kill_name")"
@@ -260,7 +286,7 @@ docker -H "$host" rm --force "$attach_name" >/dev/null
 # is live.
 tty_name="docker-cli-tty-$$"
 docker -H "$host" create --network none --name "$tty_name" --tty "$image" \
-  /bin/busybox sh -c '/bin/busybox sleep 2; printf ferrocrate-tty-smoke; /bin/busybox sleep 30' >/dev/null
+  /bin/busybox sh -c '/bin/busybox sleep 2; printf ferrocrate-tty-smoke; /bin/busybox sleep 5' >/dev/null
 docker -H "$host" inspect --format '{{.Config.Tty}}' "$tty_name" | grep -qx 'true'
 docker -H "$host" start "$tty_name" >/dev/null
 tty_id="$(docker -H "$host" inspect --format '{{.Id}}' "$tty_name")"

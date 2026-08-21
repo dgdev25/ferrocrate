@@ -77,9 +77,13 @@ if command -v docker >/dev/null 2>&1; then
   FERROCRATE_DOCKER_CLI_REQUIRED=1 \
     FERROCRATE_DOCKER_CLI_REBUILD_STALE=1 \
     FERROCRATE_BIN="$release_target/release/ferro-cli" \
-    bash scripts/test-docker-cli-compat.sh
+    timeout --foreground --kill-after=10s \
+      "${FERROCRATE_DOCKER_CLI_GATE_TIMEOUT_SECONDS:-240}s" \
+      bash scripts/test-docker-cli-compat.sh
 else
-  bash scripts/test-docker-cli-compat.sh
+  timeout --foreground --kill-after=10s \
+    "${FERROCRATE_DOCKER_CLI_GATE_TIMEOUT_SECONDS:-240}s" \
+    bash scripts/test-docker-cli-compat.sh
 fi
 bash scripts/test-rootless-install.sh
 bash scripts/test-rootless-provision.sh

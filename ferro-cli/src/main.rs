@@ -1866,7 +1866,7 @@ fn handle_doctor(
                     |_| "nested bubblewrap user+network namespace probe passed".to_string(),
                 ),
                 hint: nested_bubblewrap.as_ref().err().map(|_| {
-                    "rootless bridge networking requires a host that permits nested user+network namespaces; use slirp-disabled mode or a supported host"
+                    "rootless bridge networking requires a host that permits nested user+network namespaces; use network_mode=none, disable FERROCRATE_ROOTLESS_NETNS, or run rootful"
                         .to_string()
                 }),
                 remediated: false,

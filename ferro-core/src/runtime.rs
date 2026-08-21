@@ -2731,7 +2731,11 @@ impl ContainerRuntime {
         }
         validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
         if rootless && network_mode == "bridge" && rootless_netns_enabled() {
-            nested_bubblewrap_diagnostic().map_err(RuntimeError::InvalidCommand)?;
+            nested_bubblewrap_diagnostic().map_err(|error| {
+                RuntimeError::InvalidCommand(format!(
+                    "rootless bridge networking is unavailable on this host: {error}; use network_mode=none, disable FERROCRATE_ROOTLESS_NETNS, or run rootful"
+                ))
+            })?;
         }
         verify_image_signature(signature_image)
             .map_err(|err| RuntimeError::InvalidState(err.to_string()))?;

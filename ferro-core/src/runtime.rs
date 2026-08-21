@@ -45,11 +45,11 @@ use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, Proces
 use crate::pty::PtyPair;
 use crate::registry::parse_image_reference;
 #[cfg(target_os = "linux")]
-use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
+use crate::rootfs::apply_layer_tar;
 #[cfg(target_os = "linux")]
 use crate::rootfs_diff;
 #[cfg(target_os = "linux")]
-use crate::rootless::{bubblewrap_execution_diagnostic, nested_bubblewrap_diagnostic};
+use crate::rootless::{bubblewrap_execution_diagnostic_cached, nested_bubblewrap_diagnostic};
 #[cfg(target_os = "linux")]
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
@@ -2724,11 +2724,12 @@ impl ContainerRuntime {
         }
         validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
         if rootless {
-            bubblewrap_execution_diagnostic().map_err(|error| {
-                RuntimeError::InvalidCommand(format!(
+            bubblewrap_execution_diagnostic_cached(&self.runtime_dir.join("bwrap-exec-probe"))
+                .map_err(|error| {
+                    RuntimeError::InvalidCommand(format!(
                     "rootless rootfs execution is unavailable on this host: {error}; enable user namespaces, use a delegated rootless runtime, or run rootful"
                 ))
-            })?;
+                })?;
         }
         if rootless && network_mode == "bridge" && rootless_netns_enabled() {
             nested_bubblewrap_diagnostic().map_err(|error| {
@@ -2836,12 +2837,15 @@ impl ContainerRuntime {
             rollback.plan_resource("cgroup", format!("ferrocrate/{container_id}:1"))?;
         }
         if !layer_paths.is_empty() {
-            let cas_root = self
-                .runtime_dir
-                .join("images")
-                .join("file-cas")
-                .join("shake256");
-            construct_rootfs_with_dedup(&rootfs_dir, &layer_paths, &cas_root)?;
+            let images_dir = self.runtime_dir.join("images");
+            let cas_root = images_dir.join("file-cas").join("shake256");
+            let layer_cache_root = images_dir.join("layer-cache");
+            crate::layer_cache::construct_rootfs_cached(
+                &rootfs_dir,
+                &layer_paths,
+                &cas_root,
+                &layer_cache_root,
+            )?;
         } else {
             fs::create_dir_all(&rootfs_dir)?;
         }

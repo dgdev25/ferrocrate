@@ -164,6 +164,53 @@ pub fn bubblewrap_execution_diagnostic() -> Result<(), String> {
     })
 }
 
+/// Identity of the bwrap executable a probe result was recorded for. Any
+/// change to the binary invalidates the cached probe.
+pub(crate) fn bwrap_probe_identity(bwrap: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    match fs::metadata(bwrap) {
+        Ok(metadata) => format!(
+            "{}.{}.{}.{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mtime(),
+            metadata.size()
+        ),
+        Err(_) => String::new(),
+    }
+}
+
+pub(crate) fn read_bwrap_probe_cache(cache_path: &Path) -> Option<String> {
+    fs::read_to_string(cache_path).ok()
+}
+
+pub(crate) fn write_bwrap_probe_cache(cache_path: &Path, identity: &str) {
+    if let Err(error) = crate::fs_atomic::write_atomic(cache_path, identity.as_bytes()) {
+        log::debug!("failed to cache bwrap probe result: {error}");
+    }
+}
+
+/// Cached [`bubblewrap_execution_diagnostic`]. The probe spawns a full bwrap
+/// child with a user namespace (~tens of ms); the result is memoized per
+/// runtime directory keyed by the bwrap binary identity. A cached success
+/// only skips the pre-flight diagnostic: if the host later denies the
+/// mapping, the launch itself still fails closed.
+pub fn bubblewrap_execution_diagnostic_cached(cache_path: &Path) -> Result<(), String> {
+    let bwrap = bubblewrap_path().ok_or_else(|| {
+        "bubblewrap (bwrap) executable is unavailable; rootless rootfs execution requires it"
+            .to_string()
+    })?;
+    let identity = bwrap_probe_identity(&bwrap);
+    if !identity.is_empty() && read_bwrap_probe_cache(cache_path).as_deref() == Some(&identity) {
+        return Ok(());
+    }
+    let result = bubblewrap_execution_diagnostic();
+    if result.is_ok() && !identity.is_empty() {
+        write_bwrap_probe_cache(cache_path, &identity);
+    }
+    result
+}
+
 /// Probe the combined user/network namespace plus bubblewrap path used by
 /// rootless bridge workloads. This catches hosts where a standalone mount
 /// namespace is allowed but nested user namespaces are denied.
@@ -655,6 +702,34 @@ mod tests {
     use std::fs;
     use std::path::Path;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
+
+    #[test]
+    fn bwrap_probe_cache_round_trip_and_invalidation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join("bwrap");
+        fs::write(&binary, b"#!/bin/sh\ntrue\n").expect("write fake bwrap");
+        let cache = temp.path().join("probe-cache");
+
+        let identity = super::bwrap_probe_identity(&binary);
+        assert!(!identity.is_empty());
+        assert!(super::read_bwrap_probe_cache(&cache).is_none());
+
+        super::write_bwrap_probe_cache(&cache, &identity);
+        assert_eq!(
+            super::read_bwrap_probe_cache(&cache).as_deref(),
+            Some(identity.as_str())
+        );
+
+        // Replace the binary: size (and likely mtime) change, so the cached
+        // identity must no longer match.
+        fs::write(&binary, b"#!/bin/sh\nexit 1\n").expect("rewrite fake bwrap");
+        assert_ne!(super::bwrap_probe_identity(&binary), identity);
+    }
+
+    #[test]
+    fn bwrap_probe_identity_missing_binary_is_empty() {
+        assert!(super::bwrap_probe_identity(Path::new("/nonexistent/bwrap")).is_empty());
+    }
 
     #[test]
     fn parses_subuid_line() {

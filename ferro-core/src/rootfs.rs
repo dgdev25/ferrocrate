@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use tar::Archive;
 use thiserror::Error;
 
-const OCI_WHITEOUT_PREFIX: &str = ".wh.";
-const OCI_OPAQUE_WHITEOUT: &str = ".wh..wh..opq";
+pub(crate) const OCI_WHITEOUT_PREFIX: &str = ".wh.";
+pub(crate) const OCI_OPAQUE_WHITEOUT: &str = ".wh..wh..opq";
 
 #[derive(Debug, Error)]
 pub enum RootfsError {
@@ -223,7 +223,7 @@ fn apply_hard_link_entry<R: io::Read>(
     Ok(())
 }
 
-fn sanitize_archive_path(path: &Path) -> Result<PathBuf, RootfsError> {
+pub(crate) fn sanitize_archive_path(path: &Path) -> Result<PathBuf, RootfsError> {
     let mut cleaned = PathBuf::new();
     for component in path.components() {
         match component {
@@ -266,7 +266,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RootfsError> {
     Ok(())
 }
 
-fn ensure_no_symlink_components(rootfs_dir: &Path, rel_path: &Path) -> Result<(), RootfsError> {
+pub(crate) fn ensure_no_symlink_components(rootfs_dir: &Path, rel_path: &Path) -> Result<(), RootfsError> {
     let mut current = rootfs_dir.to_path_buf();
     let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
     for component in parent.components() {

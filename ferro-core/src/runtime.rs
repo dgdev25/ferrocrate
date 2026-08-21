@@ -49,7 +49,7 @@ use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 #[cfg(target_os = "linux")]
 use crate::rootfs_diff;
 #[cfg(target_os = "linux")]
-use crate::rootless::nested_bubblewrap_diagnostic;
+use crate::rootless::{bubblewrap_execution_diagnostic, nested_bubblewrap_diagnostic};
 #[cfg(target_os = "linux")]
 use crate::seccomp::{
     apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
@@ -2730,6 +2730,13 @@ impl ContainerRuntime {
             ));
         }
         validate_rootless_mount_capability(rootless, mounts, tmpfs_mounts, readonly_rootfs)?;
+        if rootless {
+            bubblewrap_execution_diagnostic().map_err(|error| {
+                RuntimeError::InvalidCommand(format!(
+                    "rootless rootfs execution is unavailable on this host: {error}; enable user namespaces, use a delegated rootless runtime, or run rootful"
+                ))
+            })?;
+        }
         if rootless && network_mode == "bridge" && rootless_netns_enabled() {
             nested_bubblewrap_diagnostic().map_err(|error| {
                 RuntimeError::InvalidCommand(format!(

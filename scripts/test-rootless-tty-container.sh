@@ -87,6 +87,11 @@ start_status="${start_response##*$'\n'}"
 if [[ "$start_status" != 2* ]]; then
   printf '%s\n' "${start_response%$'\n'*}" >&2
   sed -n '1,80p' "$daemon_log" >&2 || true
+  if grep -Eqi 'bubblewrap|bwrap|user namespace|uid map|permission denied' <<<"$start_response" || \
+      grep -Eqi 'bubblewrap|bwrap|user namespace|uid map|permission denied' "$daemon_log"; then
+    echo "rootless TTY fixture blocked by host user-namespace/bubblewrap prerequisite" >&2
+    exit 77
+  fi
   exit 1
 fi
 inspect="$(curl --silent --show-error --fail --max-time 5 --unix-socket "$socket" \

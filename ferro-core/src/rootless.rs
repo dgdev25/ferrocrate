@@ -132,6 +132,38 @@ pub fn bubblewrap_diagnostic() -> Result<(), String> {
         })
 }
 
+/// Probe the bubblewrap execution path used for every rootless rootfs.
+///
+/// Merely finding `bwrap` is insufficient: some hosts expose the executable
+/// but deny the user-namespace mapping it needs.  Run a minimal, bounded
+/// read-only rootfs probe so callers can fail before creating partial state.
+pub fn bubblewrap_execution_diagnostic() -> Result<(), String> {
+    let bwrap = bubblewrap_path().ok_or_else(|| {
+        "bubblewrap (bwrap) executable is unavailable; rootless rootfs execution requires it"
+            .to_string()
+    })?;
+    let output = Command::new(&bwrap)
+        .args(["--ro-bind", "/", "/", "true"])
+        .output()
+        .map_err(|error| format!("could not launch rootless rootfs probe: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(240)
+        .collect::<String>();
+    Err(if detail.is_empty() {
+        format!("rootless rootfs probe exited with {}", output.status)
+    } else {
+        format!(
+            "rootless rootfs probe exited with {}: {detail}",
+            output.status
+        )
+    })
+}
+
 /// Probe the combined user/network namespace plus bubblewrap path used by
 /// rootless bridge workloads. This catches hosts where a standalone mount
 /// namespace is allowed but nested user namespaces are denied.

@@ -11693,13 +11693,20 @@ fn run_daemon(
                 let volume_store = volume_store.clone();
                 let state = state.clone();
                 std::thread::spawn(move || {
-                    let _ = handle_docker_compat_connection(
+                    if let Err(error) = handle_docker_compat_connection(
                         stream,
                         runtime_dir,
                         store,
                         volume_store,
                         state,
-                    );
+                    ) {
+                        // Hijacked/streaming requests have already sent their
+                        // upgrade headers before the lifecycle loop runs. A
+                        // later error therefore closes the socket, so retain
+                        // the exact bounded cause in the daemon log instead
+                        // of silently turning it into a client-side reset.
+                        tracing::error!("docker compatibility connection failed: {error}");
+                    }
                 });
             }
             Err(_) => break,

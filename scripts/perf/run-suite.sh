@@ -125,9 +125,16 @@ for name in "${SELECTED[@]}"; do
   if FERROCRATE_PERF_ENFORCE=0 FERROCRATE_PERF_ALLOW_SKIP=1 \
       timeout --signal=TERM --kill-after=5s "$TIMEOUT_SECONDS" \
       bash "$script" >"$log_file" 2>&1; then
-    status="passed"
+    # A fixture may exit zero after recording an explicit host limitation.
+    # Preserve that distinction in the report instead of counting a skip as
+    # a successful measurement.
+    if grep -Eq '^perf\.[A-Za-z0-9_.-]+_skipped=1$' "$log_file"; then
+      status="skipped"
+    else
+      status="passed"
+    fi
   else
-    status="skipped/failed"
+    status="failed"
     failures=$((failures + 1))
   fi
   finished="$(date +%s%N)"

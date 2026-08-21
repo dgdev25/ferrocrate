@@ -184,6 +184,91 @@ mod tests {
     }
 
     #[test]
+    fn recorded_decision_includes_model_confidence_inputs_and_action() {
+        use crate::ai::restart::{AdaptiveRestartPolicy, RestartSignal};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ai-decisions.jsonl");
+        let logger = AuditLogger::new(&path);
+
+        // Compose the production path: a restart policy decides from explicit
+        // inputs, its confidence estimate is recorded, and the durable trace
+        // names the model, the inputs, and the resulting action.
+        let mut policy = AdaptiveRestartPolicy::new("container-42");
+        let signal = RestartSignal {
+            exit_code: 137,
+            recent_failures: 1,
+            uptime_secs: 3600,
+        };
+        let decision = policy.decide(&signal);
+        let confidence = policy.estimate_success_probability(&signal);
+        let trace = DecisionTrace::new(
+            "restart-container-42",
+            policy.decision_trace(&signal, &decision),
+        )
+        .with_model("restart-policy", "1")
+        .with_decision(format!("{decision:?}"))
+        .with_evidence("confidence", format!("{confidence:.4}"))
+        .with_evidence("container_id", "container-42")
+        .with_evidence("exit_code", signal.exit_code.to_string())
+        .with_evidence("recent_failures", signal.recent_failures.to_string())
+        .with_evidence("uptime_secs", signal.uptime_secs.to_string());
+        logger
+            .log("ai_restart_decision", &trace)
+            .expect("log decision");
+
+        let entry: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&path).expect("read").trim())
+                .expect("json");
+        // Model selection is recorded.
+        assert_eq!(entry["model"], "restart-policy");
+        assert_eq!(entry["model_version"], "1");
+        // Confidence is recorded as a bounded, parseable number.
+        let recorded_confidence = entry["confidence"].as_f64().expect("confidence");
+        assert!((0.0..=1.0).contains(&recorded_confidence));
+        assert!((recorded_confidence as f32 - confidence).abs() < 0.001);
+        // Every decision input is recorded.
+        assert_eq!(entry["evidence"]["exit_code"], "137");
+        assert_eq!(entry["evidence"]["recent_failures"], "1");
+        assert_eq!(entry["evidence"]["uptime_secs"], "3600");
+        assert_eq!(entry["evidence"]["container_id"], "container-42");
+        // The resulting action is recorded.
+        assert!(
+            entry["decision"]
+                .as_str()
+                .expect("decision")
+                .contains("Restart")
+        );
+    }
+
+    #[test]
+    fn audit_log_appends_across_simulated_restarts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ai-audit.jsonl");
+        for session in 0..3 {
+            // A new logger per "process" must append, not truncate, so the
+            // decision history stays durable across restarts.
+            let logger = AuditLogger::new(&path);
+            logger
+                .log(
+                    format!("session_{session}"),
+                    &DecisionTrace::new(format!("trace-{session}"), "summary"),
+                )
+                .expect("log");
+        }
+        let entries = std::fs::read_to_string(&path)
+            .expect("read")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3);
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(entry["action"], format!("session_{index}"));
+        }
+    }
+
+    #[test]
     fn concurrent_container_decisions_remain_line_delimited_and_durable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ai-audit.jsonl");

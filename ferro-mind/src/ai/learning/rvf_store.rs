@@ -261,6 +261,53 @@ mod tests {
     }
 
     #[test]
+    fn open_fails_closed_on_corrupt_file_without_silent_reset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("corrupt.rvf");
+        let garbage = b"not an rvf store: trailing junk bytes".to_vec();
+        std::fs::write(&path, &garbage).expect("write garbage");
+
+        let error = RvfStore::open_or_create(&path, 3).err().expect("corrupt store must fail");
+        assert!(
+            matches!(error, super::RvfStoreError::Runtime(_)),
+            "unexpected error: {error:?}"
+        );
+        // Fail closed also means the corrupt artifact is left untouched.
+        assert_eq!(std::fs::read(&path).expect("unchanged file"), garbage);
+    }
+
+    #[test]
+    fn reopen_with_mismatched_dimensions_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("dims.rvf");
+        {
+            let store = RvfStore::open_or_create(&path, 3).expect("create");
+            store.insert(Some("v"), &[1.0, 0.0, 0.0]).expect("insert");
+        }
+
+        let error = RvfStore::open_or_create(&path, 4).err().expect("dimension mismatch");
+        assert!(
+            matches!(error, super::RvfStoreError::InvalidDimensions(3)),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn insert_rejects_wrong_dimension_vector() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = RvfStore::open_or_create(tmp.path().join("dim-check.rvf"), 3).expect("create");
+        let error = store
+            .insert(Some("bad"), &[1.0, 0.0])
+            .err()
+            .expect("wrong dimension must fail");
+        assert!(
+            matches!(error, super::RvfStoreError::InvalidDimensions(2)),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
     fn scalar_compression_persists_and_remains_queryable_after_restart() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("compressed.rvf");

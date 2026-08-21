@@ -56,9 +56,16 @@ impl TelemetryEvent {
 
     /// Extract a feature vector for vector similarity storage.
     ///
-    /// All values are normalized to [0.0, 1.0]. The fourth element is a
+    /// All values are normalized and clamped to [0.0, 1.0] so out-of-range
+    /// inputs (multi-core CPU, hosts with more than 4 GiB, uptimes longer
+    /// than a day) cannot produce invalid features. The fourth element is a
     /// class label: 0.0 = healthy, 0.8 = crash, 1.0 = OOM.
     pub fn to_feature_vector(&self) -> Vec<f32> {
+        let normalize_cpu = |cpu: f32| (cpu / 100.0).clamp(0.0, 1.0);
+        let normalize_memory = |bytes: u64| {
+            (bytes as f32 / (4.0 * 1024.0 * 1024.0 * 1024.0)).clamp(0.0, 1.0) // 4 GiB
+        };
+        let normalize_uptime = |secs: u64| (secs as f32 / 86400.0).clamp(0.0, 1.0); // 1 day
         match self {
             TelemetryEvent::ContainerStopped {
                 cpu_mean_percent,
@@ -66,10 +73,10 @@ impl TelemetryEvent {
                 uptime_secs,
                 ..
             } => vec![
-                *cpu_mean_percent / 100.0,
-                (*memory_peak_bytes as f32) / (4.0 * 1024.0 * 1024.0 * 1024.0), // normalize to 4 GiB
-                (*uptime_secs as f32) / 86400.0, // normalize to 1 day
-                0.0,                             // label: healthy
+                normalize_cpu(*cpu_mean_percent),
+                normalize_memory(*memory_peak_bytes),
+                normalize_uptime(*uptime_secs),
+                0.0, // label: healthy
             ],
             TelemetryEvent::OomKilled {
                 memory_at_kill_bytes,
@@ -84,8 +91,8 @@ impl TelemetryEvent {
                 };
                 vec![
                     1.0, // high cpu implied by OOM
-                    mem_ratio,
-                    (*uptime_secs as f32) / 86400.0,
+                    mem_ratio.clamp(0.0, 1.0),
+                    normalize_uptime(*uptime_secs),
                     1.0, // label: oom
                 ]
             }
@@ -97,7 +104,7 @@ impl TelemetryEvent {
             } => vec![
                 (*exit_code as f32 / 255.0).clamp(0.0, 1.0),
                 (*restart_count as f32 / 10.0).clamp(0.0, 1.0),
-                (*uptime_secs as f32) / 86400.0,
+                normalize_uptime(*uptime_secs),
                 0.8, // label: crash
             ],
             TelemetryEvent::ContainerHealthy {
@@ -106,9 +113,9 @@ impl TelemetryEvent {
                 uptime_secs,
                 ..
             } => vec![
-                *cpu_percent / 100.0,
-                (*memory_bytes as f32) / (4.0 * 1024.0 * 1024.0 * 1024.0),
-                (*uptime_secs as f32) / 86400.0,
+                normalize_cpu(*cpu_percent),
+                normalize_memory(*memory_bytes),
+                normalize_uptime(*uptime_secs),
                 0.0, // label: healthy
             ],
         }
@@ -201,14 +208,38 @@ impl TelemetryCollector {
 
         let path = self.data_dir.join(format!("telemetry-{timestamp}.jsonl"));
 
-        let content: String = self
+        let mut content: String = self
             .buffer
             .iter()
             .map(|e| e.to_jsonl())
             .collect::<Vec<_>>()
             .join("\n");
+        content.push('\n');
 
-        if let Err(e) = std::fs::write(&path, content) {
+        // Append instead of truncate: two flushes within the same wall-clock
+        // second map to the same file name and must not discard each other.
+        let result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(&path)?;
+            if file.metadata()?.len() > 0 {
+                // Older files may lack a trailing newline.
+                let mut tail = [0u8; 1];
+                use std::io::Seek;
+                let length = file.metadata()?.len();
+                file.seek(std::io::SeekFrom::Start(length - 1))?;
+                std::io::Read::read_exact(&mut file, &mut tail)?;
+                file.seek(std::io::SeekFrom::End(0))?;
+                if tail[0] != b'\n' {
+                    file.write_all(b"\n")?;
+                }
+            }
+            file.write_all(content.as_bytes())
+        })();
+        if let Err(e) = result {
             warn!(
                 path = ?path,
                 error = %e,
@@ -281,6 +312,99 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert!(!entries.is_empty(), "expected telemetry file to be written");
+    }
+
+    #[test]
+    fn test_feature_vector_clamps_out_of_range_inputs() {
+        let event = TelemetryEvent::ContainerStopped {
+            container_id: "edge".to_string(),
+            image: "big:latest".to_string(),
+            cpu_mean_percent: 250.0,
+            memory_peak_bytes: 8 * 1024 * 1024 * 1024,
+            uptime_secs: 30 * 24 * 3600,
+        };
+        let vec = event.to_feature_vector();
+        assert_eq!(vec.len(), 4);
+        assert!(
+            vec.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "features must stay in [0,1], got {vec:?}"
+        );
+
+        let healthy = TelemetryEvent::ContainerHealthy {
+            container_id: "edge".to_string(),
+            image: "big:latest".to_string(),
+            cpu_percent: 120.0,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+            uptime_secs: 10 * 24 * 3600,
+        };
+        let vec = healthy.to_feature_vector();
+        assert!(
+            vec.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "features must stay in [0,1], got {vec:?}"
+        );
+
+        let oom = TelemetryEvent::OomKilled {
+            container_id: "edge".to_string(),
+            image: "big:latest".to_string(),
+            memory_at_kill_bytes: 6 * 1024 * 1024 * 1024,
+            memory_limit_bytes: 4 * 1024 * 1024 * 1024,
+            uptime_secs: 5 * 24 * 3600,
+        };
+        let vec = oom.to_feature_vector();
+        assert!(
+            vec.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "features must stay in [0,1], got {vec:?}"
+        );
+
+        let crashed = TelemetryEvent::ContainerCrashed {
+            container_id: "edge".to_string(),
+            image: "big:latest".to_string(),
+            exit_code: 137,
+            restart_count: 2,
+            uptime_secs: 90 * 24 * 3600,
+        };
+        let vec = crashed.to_feature_vector();
+        assert!(
+            vec.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "features must stay in [0,1], got {vec:?}"
+        );
+    }
+
+    #[test]
+    fn flushes_within_the_same_second_preserve_both_batches() {
+        let tmp = TempDir::new().unwrap();
+        let mut collector = TelemetryCollector::new(tmp.path().to_path_buf());
+        collector.buffer.push(TelemetryEvent::ContainerStopped {
+            container_id: "batch-1".to_string(),
+            image: "a:latest".to_string(),
+            cpu_mean_percent: 5.0,
+            memory_peak_bytes: 1_000,
+            uptime_secs: 10,
+        });
+        collector.flush_to_jsonl();
+        collector.buffer.push(TelemetryEvent::ContainerStopped {
+            container_id: "batch-2".to_string(),
+            image: "a:latest".to_string(),
+            cpu_mean_percent: 5.0,
+            memory_peak_bytes: 1_000,
+            uptime_secs: 10,
+        });
+        // Both flushes land in the same timestamped file name within one
+        // second; the second flush must not discard the first batch.
+        collector.flush_to_jsonl();
+
+        let contents: String = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .ok()
+                    .map(|body| body.trim().to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(contents.contains("batch-1"), "first batch lost: {contents:?}");
+        assert!(contents.contains("batch-2"), "second batch lost: {contents:?}");
     }
 
     #[test]

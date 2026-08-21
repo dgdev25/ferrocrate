@@ -323,6 +323,32 @@ mod tests {
 
     #[cfg(feature = "rvf-persistence")]
     #[test]
+    fn persistent_memory_fails_closed_on_dimension_mismatch_and_corrupt_store() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("mismatch.rvf");
+        {
+            let mut memory = VectorMemory::persistent(&path, 3).expect("create");
+            memory.insert(VectorEntry {
+                id: Some(VectorId::from("vec1")),
+                vector: vec![1.0, 0.0, 0.0],
+                metadata: None,
+            });
+        }
+
+        let error = VectorMemory::persistent(&path, 4).err().expect("dimension mismatch");
+        assert!(
+            error.contains("dimensions") || error.contains("dimension"),
+            "actionable error expected, got: {error}"
+        );
+
+        let corrupt = tmp.path().join("corrupt.rvf");
+        std::fs::write(&corrupt, b"garbage bytes").expect("write garbage");
+        let error = VectorMemory::persistent(&corrupt, 3).err().expect("corrupt store");
+        assert!(!error.is_empty(), "corrupt store must fail closed");
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
     fn backend_selector_respects_legacy_env() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("backend.rvf");

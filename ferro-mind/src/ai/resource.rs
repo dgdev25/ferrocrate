@@ -913,6 +913,114 @@ mod tests {
     }
 
     #[test]
+    fn predictor_snapshot_round_trip_preserves_oom_prediction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oom-state.json");
+        let base = Instant::now();
+        let mut predictor = ResourcePredictor::new(10).with_memory_limit(100_000);
+        for i in 0..5 {
+            predictor.push(ResourceSample {
+                cpu_percent: 10.0,
+                memory_bytes: 10_000 + i as u64 * 10_000,
+                pids_count: 1,
+                timestamp: base + Duration::from_millis(i * 250),
+            });
+        }
+        let original = predictor
+            .predict_oom(Duration::from_secs(300))
+            .expect("original prediction");
+        predictor
+            .save_snapshot(&path, "container-a")
+            .expect("save snapshot");
+
+        // Simulate a process restart: the window is restored from disk only.
+        let restored = ResourcePredictor::from_snapshot(&path, "container-a")
+            .expect("restore snapshot");
+        let replayed = restored
+            .predict_oom(Duration::from_secs(300))
+            .expect("restored prediction");
+        assert_eq!(replayed.memory_limit, original.memory_limit);
+        assert_eq!(replayed.current_memory, original.current_memory);
+        // Relative sample ages are preserved, so the growth-rate estimate
+        // must not drift across the restart.
+        assert_eq!(replayed.time_to_oom, original.time_to_oom);
+    }
+
+    #[test]
+    fn predictor_snapshot_load_fails_closed_on_corrupt_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"{ broken json").expect("write corrupt snapshot");
+        let error = ResourcePredictor::from_snapshot(&corrupt, "container-a")
+            .err()
+            .expect("corrupt snapshot must fail");
+        assert!(error.contains("invalid resource snapshot"), "got: {error}");
+
+        // Valid JSON with an out-of-range CPU value must be rejected.
+        let bad_value = dir.path().join("bad-value.json");
+        let mut predictor = ResourcePredictor::new(10);
+        for i in 0..3 {
+            predictor.push(ResourceSample {
+                cpu_percent: 10.0,
+                memory_bytes: 1_000 + i * 100,
+                pids_count: 1,
+                timestamp: Instant::now(),
+            });
+        }
+        predictor
+            .save_snapshot(&bad_value, "container-a")
+            .expect("save snapshot");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bad_value).expect("read"))
+                .expect("snapshot json");
+        value["samples"][0]["cpu_percent"] = serde_json::json!(250.0);
+        std::fs::write(&bad_value, value.to_string()).expect("write patched snapshot");
+        let error = ResourcePredictor::from_snapshot(&bad_value, "container-a")
+            .err()
+            .expect("out-of-range CPU must fail");
+        assert!(error.contains("CPU"), "got: {error}");
+    }
+
+    #[cfg(feature = "rvf-persistence")]
+    #[test]
+    fn predictor_persistent_similarity_memory_reopens_across_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let mut predictor = ResourcePredictor::persistent(10, dir.path()).expect("create");
+            let base = Instant::now();
+            for i in 0..3 {
+                predictor.push(ResourceSample {
+                    cpu_percent: 10.0,
+                    memory_bytes: 1_000 + i * 100,
+                    pids_count: 1,
+                    timestamp: base + Duration::from_secs(i as u64),
+                });
+            }
+            assert!(predictor.predict().is_some());
+        }
+
+        // A fresh process reopens the same on-disk similarity memory instead
+        // of failing on the existing artifact.
+        let mut reopened = ResourcePredictor::persistent(10, dir.path()).expect("reopen");
+        assert!(
+            reopened.predict().is_none(),
+            "window is not restored by persistent(); only the store reopens"
+        );
+        // The reopened predictor accepts new samples and produces a
+        // prediction, proving the persisted store is usable after restart.
+        let base = Instant::now();
+        for i in 0..3 {
+            reopened.push(ResourceSample {
+                cpu_percent: 12.0,
+                memory_bytes: 2_000 + i * 100,
+                pids_count: 1,
+                timestamp: base + Duration::from_secs(i as u64),
+            });
+        }
+        assert!(reopened.predict().is_some());
+    }
+
+    #[test]
     fn predictor_trains_neural_model_for_stable_sequences() {
         let base = Instant::now();
         let mut p = ResourcePredictor::new(64);

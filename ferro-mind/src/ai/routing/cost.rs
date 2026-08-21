@@ -893,6 +893,109 @@ mod tests {
     }
 
     #[test]
+    fn routing_selection_is_deterministic_and_order_independent() {
+        let providers = sample_providers();
+        let policy = RoutingPolicy {
+            min_quality: 0.6,
+            max_cost_per_1k_tokens: Some(0.5),
+            max_latency_ms: Some(50),
+            estimated_tokens: 1800,
+            quality_weight: 0.45,
+            cost_weight: 0.4,
+            latency_weight: 0.15,
+            local_bonus: 0.08,
+        };
+        let expected = choose_provider(&providers, &policy).expect("provider");
+        for _ in 0..50 {
+            assert_eq!(
+                choose_provider(&providers, &policy).expect("provider").name,
+                expected.name
+            );
+        }
+
+        // Candidate order must not change the winner for a strict-score
+        // leader: the same inputs route to the same model regardless of how
+        // the registry was populated.
+        for permutation in [
+            vec![1usize, 0, 2],
+            vec![2, 1, 0],
+            vec![2, 0, 1],
+            vec![1, 2, 0],
+        ] {
+            let reordered: Vec<Provider> = permutation
+                .into_iter()
+                .map(|index| providers[index].clone())
+                .collect();
+            assert_eq!(
+                choose_provider(&reordered, &policy).expect("provider").name,
+                expected.name
+            );
+        }
+    }
+
+    #[test]
+    fn routing_filters_providers_with_non_finite_statistics() {
+        let providers = vec![
+            Provider {
+                name: "nan-quality".to_string(),
+                cost_per_1k_tokens: 0.0,
+                quality: f32::NAN,
+                avg_latency_ms: 4,
+                local: true,
+            },
+            Provider {
+                name: "nan-cost".to_string(),
+                cost_per_1k_tokens: f32::NAN,
+                quality: 0.9,
+                avg_latency_ms: 4,
+                local: true,
+            },
+        ];
+        // Every candidate is non-finite, so the policy must fail closed
+        // instead of routing to an unscorable backend.
+        assert!(choose_provider(&providers, &RoutingPolicy::default()).is_none());
+
+        // A finite candidate stays selectable next to non-finite ones.
+        let mut mixed = providers;
+        mixed.push(Provider {
+            name: "finite".to_string(),
+            cost_per_1k_tokens: 0.0,
+            quality: 0.8,
+            avg_latency_ms: 4,
+            local: true,
+        });
+        let selected = choose_provider(&mixed, &RoutingPolicy::default()).expect("provider");
+        assert_eq!(selected.name, "finite");
+    }
+
+    #[test]
+    fn adapter_routing_fails_closed_without_eligible_provider() {
+        // Empty adapter list must surface NoProvider, not a silent fallback.
+        let error = execute_routed_prompt_with_adapters(
+            &[],
+            &RoutingPolicy::default(),
+            "prompt",
+            std::time::Duration::from_secs(1),
+        )
+        .err().expect("empty adapters must fail");
+        assert!(matches!(error, ExecutionError::NoProvider));
+
+        // An eligible-but-unsatisfiable policy also fails closed with the
+        // same actionable error.
+        let error = execute_routed_prompt_with_adapters(
+            &[],
+            &RoutingPolicy {
+                min_quality: 1.0,
+                ..RoutingPolicy::default()
+            },
+            "prompt",
+            std::time::Duration::from_secs(1),
+        )
+        .err().expect("unsatisfiable policy must fail");
+        assert!(matches!(error, ExecutionError::NoProvider));
+    }
+
+    #[test]
     fn returns_none_when_constraints_filter_everything() {
         let providers = sample_providers();
         let policy = RoutingPolicy {

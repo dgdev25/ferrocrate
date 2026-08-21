@@ -803,6 +803,77 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_load_fails_closed_on_corrupt_or_out_of_range_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"{ not json").expect("write corrupt snapshot");
+        let error = AdaptiveRestartPolicy::from_snapshot(&corrupt, "container-a")
+            .err()
+            .expect("corrupt snapshot must fail");
+        assert!(error.contains("invalid restart policy snapshot"), "got: {error}");
+
+        // Valid JSON with an unsupported schema must be rejected.
+        let wrong_schema = dir.path().join("wrong-schema.json");
+        let policy = AdaptiveRestartPolicy::new("container-a");
+        policy.save_snapshot(&wrong_schema).expect("save");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&wrong_schema).expect("read"))
+                .expect("snapshot json");
+        value["schema_version"] = serde_json::json!(2);
+        std::fs::write(&wrong_schema, value.to_string()).expect("write patched snapshot");
+        let error = AdaptiveRestartPolicy::from_snapshot(&wrong_schema, "container-a")
+            .err()
+            .expect("unsupported schema must fail");
+        assert!(error.contains("schema"), "got: {error}");
+
+        // Out-of-range learned weights must be rejected before they can
+        // influence a restart decision.
+        let out_of_range = dir.path().join("out-of-range.json");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&wrong_schema).expect("read"))
+                .expect("snapshot json");
+        value["schema_version"] = serde_json::json!(1);
+        value["decision_weights"] = serde_json::json!([999.0, -0.5, -0.2, 0.4, 0.25]);
+        std::fs::write(&out_of_range, value.to_string()).expect("write out-of-range snapshot");
+        let error = AdaptiveRestartPolicy::from_snapshot(&out_of_range, "container-a")
+            .err()
+            .expect("out-of-range weights must fail");
+        assert!(error.contains("out-of-range"), "got: {error}");
+    }
+
+    #[test]
+    fn model_artifact_load_fails_closed_on_corrupt_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let corrupt = dir.path().join("bad-model.json");
+        std::fs::write(&corrupt, b"definitely not json").expect("write corrupt artifact");
+        let error = AdaptiveRestartPolicy::from_model_artifact(&corrupt, "container-a")
+            .err()
+            .expect("corrupt artifact must fail");
+        assert!(error.contains("invalid restart model artifact"), "got: {error}");
+
+        let out_of_bounds = dir.path().join("out-of-bounds.json");
+        std::fs::write(
+            &out_of_bounds,
+            serde_json::json!({
+                "model_type": "restart-policy",
+                "artifact": {
+                    "success_rate": 1.5,
+                    "baseline_accuracy": 0.9,
+                    "avg_uptime_success": 120.0,
+                    "avg_uptime_failure": 5.0
+                }
+            })
+            .to_string(),
+        )
+        .expect("write out-of-bounds artifact");
+        let error = AdaptiveRestartPolicy::from_model_artifact(&out_of_bounds, "container-a")
+            .err()
+            .expect("out-of-bounds statistics must fail");
+        assert!(error.contains("0..=1"), "got: {error}");
+    }
+
+    #[test]
     fn adaptive_policy_first_failure_restarts_immediately() {
         let mut policy = AdaptiveRestartPolicy::new("test");
         let signal = RestartSignal {

@@ -70,6 +70,23 @@ ipv6_gateway="fd42:203::1"
 endpoint_ipv6="fd42:203::2/64"
 bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$net_name" | sha256sum | awk '{print substr($1,1,12)}')"
 bridge_name="fc-${bridge_suffix}"
+netns_before="$(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ {print $1}' || true)"
+
+remove_owned_ferro_netns() {
+  local ns
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    if grep -Fqx -- "$ns" <<<"$netns_before"; then
+      continue
+    fi
+    # Never remove a namespace that still owns a workload. A PID-free handle
+    # is an orphaned test artifact and can be safely reclaimed after the
+    # executor has completed its own cleanup.
+    if [[ -z "$(ip netns pids "$ns" 2>/dev/null || true)" ]]; then
+      ip netns delete "$ns" 2>/dev/null || true
+    fi
+  done < <(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ {print $1}' || true)
+}
 
 cleanup() {
   if ip netns list 2>/dev/null | awk '{print $1}' | grep -Fxq -- "$ep_ns"; then
@@ -90,6 +107,7 @@ cleanup() {
   if [[ -d "$runtime_dir" ]]; then
     find "$runtime_dir" -depth -delete 2>/dev/null || true
   fi
+  remove_owned_ferro_netns
 }
 trap cleanup EXIT
 

@@ -35,6 +35,27 @@ PY
 bash "$repo_root/scripts/verify-release-channel-artifacts.sh" \
   --channel public --version v0.0.1 --artifact-dir "$tmp_dir"
 
+# The release gate must validate the checksum bytes, not merely the presence
+# of an archive and a provenance manifest.
+cp "$tmp_dir/$archive" "$tmp_dir/$archive.good"
+printf 'tampered\n' >> "$tmp_dir/$archive"
+if bash "$repo_root/scripts/verify-release-channel-artifacts.sh" \
+  --channel public --version v0.0.1 --artifact-dir "$tmp_dir" >/dev/null 2>&1; then
+  echo "tampered archive unexpectedly passed checksum verification" >&2
+  exit 1
+fi
+mv "$tmp_dir/$archive.good" "$tmp_dir/$archive"
+
+# Reject path traversal and extra checksum entries before any archive access.
+printf '%s  ../outside.tar.gz\n%s  %s\n' \
+  "$digest" "$digest" "$archive" > "$tmp_dir/ferrocrate-v0.0.1-checksums.txt"
+if bash "$repo_root/scripts/verify-release-channel-artifacts.sh" \
+  --channel public --version v0.0.1 --artifact-dir "$tmp_dir" >/dev/null 2>&1; then
+  echo "unsafe checksum manifest unexpectedly passed" >&2
+  exit 1
+fi
+printf '%s  %s\n' "$digest" "$archive" > "$tmp_dir/ferrocrate-v0.0.1-checksums.txt"
+
 # Exercise the signed-channel verifier with an isolated ephemeral key.  This
 # proves the release gate, while keeping real publication keys out of tests and
 # the repository.  Hosts without GPG still retain the checksum/provenance gate.

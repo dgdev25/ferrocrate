@@ -105,12 +105,33 @@ main() {
     exit 1
   }
 
-  local archive
-  archive="$(awk 'NF >= 2 {print $2; exit}' "$checksum_file")"
+  local checksum_entries
+  checksum_entries="$(awk 'NF && $1 !~ /^#/ {count += 1} END {print count + 0}' "$checksum_file")"
+  [[ "$checksum_entries" == "1" ]] || {
+    echo "checksum file must contain exactly one artifact entry: $checksum_file" >&2
+    exit 1
+  }
+
+  local checksum_digest archive
+  checksum_digest="$(awk 'NF && $1 !~ /^#/ {print $1; exit}' "$checksum_file")"
+  archive="$(awk 'NF && $1 !~ /^#/ {name=$2; sub(/^\*/, "", name); print name; exit}' "$checksum_file")"
+  [[ "$checksum_digest" =~ ^[[:xdigit:]]{64}$ ]] || {
+    echo "checksum file has an invalid SHA-256 digest: $checksum_file" >&2
+    exit 1
+  }
   [[ -n "$archive" ]] || {
     echo "checksum file has no artifact entry: $checksum_file" >&2
     exit 1
   }
+  [[ "$archive" != */* && "$archive" != -* && "$archive" != .* ]] || {
+    echo "checksum file contains an unsafe artifact path: $archive" >&2
+    exit 1
+  }
+  if [[ "$archive" != "ferrocrate-${VERSION}-"*.tar.gz &&
+    "$archive" != "ferrocrate-${VERSION}-"*.zip ]]; then
+    echo "checksum artifact has an unexpected release name: $archive" >&2
+    exit 1
+  fi
 
   local archive_path="${ARTIFACT_DIR}/${archive}"
   [[ -f "$archive_path" ]] || {
@@ -173,7 +194,7 @@ if digest.hexdigest() != data["sha256"]:
 PY
 
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$ARTIFACT_DIR" && sha256sum --ignore-missing -c "$(basename "$checksum_file")")
+    (cd "$ARTIFACT_DIR" && sha256sum --strict -c "$(basename "$checksum_file")")
   elif command -v shasum >/dev/null 2>&1; then
     (cd "$ARTIFACT_DIR" && shasum -a 256 -c "$(basename "$checksum_file")")
   else

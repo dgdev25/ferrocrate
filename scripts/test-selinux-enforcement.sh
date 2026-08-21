@@ -6,13 +6,18 @@ fail() {
   exit 1
 }
 
-[[ "$(uname -s)" == "Linux" ]] || fail "Linux is required"
-[[ "${EUID}" -eq 0 ]] || fail "run as root"
-command -v getenforce >/dev/null 2>&1 || fail "getenforce is required"
-command -v runcon >/dev/null 2>&1 || fail "runcon is required"
+skip() {
+  printf 'SKIP: SELinux enforcement fixture unavailable: %s\n' "$*" >&2
+  exit 77
+}
+
+[[ "$(uname -s)" == "Linux" ]] || skip "Linux is required"
+[[ "${EUID}" -eq 0 ]] || skip "run as root"
+command -v getenforce >/dev/null 2>&1 || skip "getenforce is required"
+command -v runcon >/dev/null 2>&1 || skip "runcon is required"
 
 state="$(getenforce 2>/dev/null || true)"
-[[ "$state" == "Enforcing" ]] || fail "SELinux must be Enforcing (reported: ${state:-unknown})"
+[[ "$state" == "Enforcing" ]] || skip "SELinux must be Enforcing (reported: ${state:-unknown})"
 
 selinux_type="${FERROCRATE_SELINUX_TYPE:-container_t}"
 runcon -t "$selinux_type" -- true \

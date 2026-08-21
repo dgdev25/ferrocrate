@@ -327,4 +327,28 @@ table ip nat {
         };
         assert!(build_nft_add_rule_cmd(&rule).is_err());
     }
+
+    #[test]
+    fn rule_application_and_deletion_fail_closed_without_root_privilege() {
+        if nix::unistd::geteuid().as_raw() == 0 {
+            // Running with privilege would reach the real firewall; skip.
+            return;
+        }
+        let rule = NftRule {
+            family: "ip".to_string(),
+            table: "filter".to_string(),
+            chain: "input".to_string(),
+            expr: vec!["tcp".to_string(), "dport".to_string(), "80".to_string()],
+        };
+        assert!(matches!(
+            super::apply_nft_rule(&rule),
+            Err(crate::executor::ExecError::CapabilityRequired { capability })
+                if capability == "root"
+        ));
+        assert!(matches!(
+            super::delete_nft_rule(&rule),
+            Err(crate::executor::ExecError::CapabilityRequired { capability })
+                if capability == "root"
+        ));
+    }
 }

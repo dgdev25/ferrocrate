@@ -441,4 +441,86 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(txn.len(), 1);
     }
+
+    #[test]
+    fn allow_missing_classifies_absent_resource_stderr_without_shell_interpretation() {
+        // Cleanup commands treat "resource already absent" stderr as success.
+        let missing = exec_cmd_allow_missing(&[
+            "sh".into(),
+            "-c".into(),
+            "echo 'ip: Cannot find device \"veth-gone\"' >&2; exit 1".into(),
+        ]);
+        assert!(missing.is_ok());
+        let table = exec_cmd_allow_missing(&[
+            "sh".into(),
+            "-c".into(),
+            "echo 'Error: No such file or directory' >&2; exit 1".into(),
+        ]);
+        assert!(table.is_ok());
+        // Any other failure stays a failure.
+        let hard = exec_cmd_allow_missing(&[
+            "sh".into(),
+            "-c".into(),
+            "echo 'permission denied' >&2; exit 1".into(),
+        ]);
+        assert!(matches!(&hard, Err(ExecError::CommandFailed { stderr, .. }) if stderr.contains("permission denied")));
+        // Spawn failures are never silently swallowed.
+        assert!(matches!(
+            exec_cmd_allow_missing(&["nonexistent_command_12345".to_string()]),
+            Err(ExecError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn transaction_rollback_undoes_executed_commands_in_reverse_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let log = directory.path().join("rollback-order");
+        let mut txn = Transaction::new();
+        assert!(txn
+            .add(
+                vec![
+                    "touch".into(),
+                    first.to_str().expect("utf-8 path").into()
+                ],
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "rm {} && echo first >> {}",
+                        first.to_str().expect("utf-8 path"),
+                        log.to_str().expect("utf-8 path")
+                    )
+                ],
+            )
+            .is_ok());
+        assert!(txn
+            .add(
+                vec![
+                    "touch".into(),
+                    second.to_str().expect("utf-8 path").into()
+                ],
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "rm {} && echo second >> {}",
+                        second.to_str().expect("utf-8 path"),
+                        log.to_str().expect("utf-8 path")
+                    )
+                ],
+            )
+            .is_ok());
+        // Third command fails; both earlier commands must be rolled back,
+        // newest first.
+        assert!(txn.add(vec!["false".into()], vec![]).is_err());
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "second\nfirst\n",
+            "rollback must run in reverse execution order"
+        );
+    }
 }

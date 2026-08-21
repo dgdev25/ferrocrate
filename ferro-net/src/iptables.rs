@@ -196,4 +196,27 @@ mod tests {
             vec!["iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp"]
         );
     }
+
+    #[test]
+    fn rule_application_and_deletion_fail_closed_without_root_privilege() {
+        if nix::unistd::geteuid().as_raw() == 0 {
+            // Running with privilege would reach the real firewall; skip.
+            return;
+        }
+        let rule = IptablesRule {
+            table: "filter".into(),
+            chain: "INPUT".into(),
+            args: vec!["-p".into(), "tcp".into()],
+        };
+        assert!(matches!(
+            super::apply_iptables_rule(&rule),
+            Err(crate::executor::ExecError::CapabilityRequired { capability })
+                if capability == "root"
+        ));
+        assert!(matches!(
+            super::delete_iptables_rule(&rule),
+            Err(crate::executor::ExecError::CapabilityRequired { capability })
+                if capability == "root"
+        ));
+    }
 }

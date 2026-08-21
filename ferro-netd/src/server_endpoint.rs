@@ -12,9 +12,29 @@ impl NetdServer {
         operation_id: [u8; 16],
         nonce: [u8; 16],
         receipt: EffectReceipt,
+        overlay_id: String,
         endpoint_id: String,
     ) -> NetdResponse {
         let identity = format!("endpoint:{endpoint_id}");
+        // The grant authorizes detaching the endpoint from one specific
+        // overlay. Refuse when the endpoint is owned by a different overlay,
+        // before any kernel effect or intent is recorded.
+        if self
+            .endpoints
+            .get(&endpoint_id)
+            .is_some_and(|owner| owner != &overlay_id)
+        {
+            let _ = self.record_grant_failure(
+                &request_id,
+                nonce,
+                identity,
+                "endpoint is attached to a different overlay",
+            );
+            return reject(
+                RejectionCode::PolicyViolation,
+                "endpoint is not attached to the authorized overlay",
+            );
+        }
         if self
             .begin_overlay_intent(operation_id, "detach", receipt.clone(), vec![], vec![])
             .is_err()

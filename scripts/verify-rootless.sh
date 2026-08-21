@@ -187,7 +187,7 @@ if [[ -d "$cgroup_root" && -w "$cgroup_root" && -w "$cgroup_root/cgroup.procs" ]
 else
   echo "rootless.cgroup_delegation=missing"
   echo "rootless.cgroup_delegation_reason=caller hierarchy is not writable: $cgroup_root"
-  echo "warning: rootless cgroup limits require a delegated user systemd scope (systemd-run --user --scope -p Delegate=yes) or a caller-owned FERROCRATE_CGROUP_ROOT" >&2
+  echo "warning: rootless cgroup limits require a delegated user systemd scope (scripts/run-rootless-delegated.sh COMMAND ...) or a caller-owned FERROCRATE_CGROUP_ROOT" >&2
   missing=1
 fi
 

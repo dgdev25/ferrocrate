@@ -202,6 +202,103 @@ pub fn nested_bubblewrap_diagnostic() -> Result<(), String> {
     })
 }
 
+/// Report the subordinate-ID prerequisite for rootless ID mappings. Return
+/// the exact per-file remediation for whichever range is missing so operators
+/// can distinguish a missing `/etc/subuid` entry from a missing `/etc/subgid`
+/// entry instead of debugging a silent single-ID mapping fallback.
+pub fn subid_diagnostic() -> Result<(), String> {
+    let uid = Uid::current();
+    let gid = Gid::current();
+    let username = User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|user| user.name)
+        .unwrap_or_default();
+    let has_subuid = first_subid_range(Path::new("/etc/subuid"), &username, uid.as_raw())
+        .map(|range| range.is_some())
+        .unwrap_or(false);
+    let has_subgid = first_subid_range(Path::new("/etc/subgid"), &username, gid.as_raw())
+        .map(|range| range.is_some())
+        .unwrap_or(false);
+    subid_prerequisite_message(&username, has_subuid, has_subgid).map_or(Ok(()), Err)
+}
+
+/// Select the prerequisite message for the missing subordinate-ID ranges.
+/// `None` means both ranges are present and rootless mappings are complete.
+pub(crate) fn subid_prerequisite_message(
+    username: &str,
+    has_subuid: bool,
+    has_subgid: bool,
+) -> Option<String> {
+    if has_subuid && has_subgid {
+        return None;
+    }
+    let mut missing = Vec::new();
+    if !has_subuid {
+        missing.push(format!(
+            "no subordinate UID range for user {username} in /etc/subuid; run: sudo usermod --add-subuids 100000-165535 {username}"
+        ));
+    }
+    if !has_subgid {
+        missing.push(format!(
+            "no subordinate GID range for user {username} in /etc/subgid; run: sudo usermod --add-subgids 100000-165535 {username}"
+        ));
+    }
+    Some(format!(
+        "{}; without subordinate ranges rootless containers fall back to a single-ID mapping, which cannot chown files or run multi-user workloads",
+        missing.join("; ")
+    ))
+}
+
+/// Report whether cgroup v2 controllers are delegated to the caller. Rootful
+/// callers do not need delegation and always pass.
+pub fn cgroup_delegation_diagnostic() -> Result<(), String> {
+    if Uid::effective().is_root() {
+        return Ok(());
+    }
+    if let Some(custom) = std::env::var_os("FERROCRATE_CGROUP_ROOT") {
+        return cgroup_delegation_probe(&PathBuf::from(custom));
+    }
+    let Some(relative) = self_cgroup_relative_path() else {
+        return Err(
+            "could not read this process's cgroup from /proc/self/cgroup; rootless cgroup delegation cannot be verified"
+                .to_string(),
+        );
+    };
+    cgroup_delegation_probe(&Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
+}
+
+fn self_cgroup_relative_path() -> Option<String> {
+    let content = fs::read_to_string("/proc/self/cgroup").ok()?;
+    let line = content.lines().next()?;
+    let path = line.strip_prefix("0::")?;
+    Some(path.trim().to_string())
+}
+
+/// Probe one cgroup subtree for the delegated write access that rootless
+/// controller configuration requires. Opening `cgroup.subtree_control` for
+/// write never mutates the hierarchy by itself.
+pub(crate) fn cgroup_delegation_probe(cgroup_root: &Path) -> Result<(), String> {
+    if !cgroup_root.join("cgroup.controllers").exists() {
+        return Err(format!(
+            "cgroup v2 hierarchy is unavailable at {}; rootless resource limits require cgroup v2 with delegated controllers",
+            cgroup_root.display()
+        ));
+    }
+    let subtree_control = cgroup_root.join("cgroup.subtree_control");
+    match fs::OpenOptions::new().write(true).open(&subtree_control) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(cgroup_not_delegated_message(&subtree_control)),
+    }
+}
+
+pub(crate) fn cgroup_not_delegated_message(probed: &Path) -> String {
+    format!(
+        "cgroup controllers are not delegated to this user (probed {}); run `sudo loginctl enable-linger $USER` and `sudo systemctl set-property user-$(id -u).slice Delegate=yes`, or set FERROCRATE_CGROUP_ROOT to a caller-owned delegated hierarchy",
+        probed.display()
+    )
+}
+
 fn bubblewrap_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -546,6 +643,7 @@ mod tests {
         trusted_executable_path, RootlessConfig, RootlessMapping,
     };
     use std::fs;
+    use std::path::Path;
     const DEFAULT_SUBID_SIZE: u32 = 65_536;
 
     #[test]
@@ -624,6 +722,81 @@ mod tests {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
         }
+    }
+
+    #[test]
+    fn subid_message_selection_matches_each_missing_prerequisite() {
+        assert!(super::subid_prerequisite_message("tester", true, true).is_none());
+
+        let missing_subuid =
+            super::subid_prerequisite_message("tester", false, true).expect("subuid message");
+        assert!(missing_subuid.contains("/etc/subuid"));
+        assert!(missing_subuid.contains("--add-subuids 100000-165535 tester"));
+        assert!(!missing_subuid.contains("--add-subgids"));
+
+        let missing_subgid =
+            super::subid_prerequisite_message("tester", true, false).expect("subgid message");
+        assert!(missing_subgid.contains("/etc/subgid"));
+        assert!(missing_subgid.contains("--add-subgids 100000-165535 tester"));
+        assert!(!missing_subgid.contains("--add-subuids"));
+
+        let missing_both =
+            super::subid_prerequisite_message("tester", false, false).expect("both message");
+        assert!(missing_both.contains("--add-subuids"));
+        assert!(missing_both.contains("--add-subgids"));
+        assert!(missing_both.contains("single-ID mapping"));
+    }
+
+    #[test]
+    fn cgroup_probe_reports_missing_v2_hierarchy_with_probed_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = super::cgroup_delegation_probe(temp.path()).expect_err("no v2 hierarchy");
+        let message = error.to_string();
+        assert!(message.contains("cgroup v2 hierarchy is unavailable"));
+        assert!(message.contains(temp.path().display().to_string().as_str()));
+    }
+
+    #[test]
+    fn cgroup_probe_accepts_delegated_subtree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("cgroup.controllers"), "cpu memory pids")
+            .expect("seed controllers");
+        fs::write(temp.path().join("cgroup.subtree_control"), "").expect("seed subtree control");
+        super::cgroup_delegation_probe(temp.path()).expect("delegated subtree passes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cgroup_probe_reports_undelegated_subtree_with_exact_commands() {
+        if nix::unistd::Uid::effective().is_root() {
+            // Root bypasses file permissions, so an undelegated fixture
+            // cannot be simulated reliably.
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("cgroup.controllers"), "cpu memory pids")
+            .expect("seed controllers");
+        let subtree = temp.path().join("cgroup.subtree_control");
+        fs::write(&subtree, "").expect("seed subtree control");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&subtree, fs::Permissions::from_mode(0o444))
+            .expect("read-only subtree control");
+        let error =
+            super::cgroup_delegation_probe(temp.path()).expect_err("undelegated subtree");
+        let message = error.to_string();
+        assert!(message.contains("not delegated"));
+        assert!(message.contains("loginctl enable-linger"));
+        assert!(message.contains("systemctl set-property user-$(id -u).slice Delegate=yes"));
+        assert!(message.contains("FERROCRATE_CGROUP_ROOT"));
+        assert!(message.contains(subtree.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn cgroup_not_delegated_message_names_the_probed_file() {
+        let message = super::cgroup_not_delegated_message(Path::new(
+            "/sys/fs/cgroup/user.slice/cgroup.subtree_control",
+        ));
+        assert!(message.contains("probed /sys/fs/cgroup/user.slice/cgroup.subtree_control"));
     }
 
     #[test]

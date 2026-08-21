@@ -576,6 +576,16 @@ fn first_subid_range(
         }
     };
 
+    first_subid_range_in(&raw, username, numeric_id)
+}
+
+/// Resolve the caller's first subordinate range from file contents so
+/// installer flows can plan against fixture content without reading `/etc`.
+pub(crate) fn first_subid_range_in(
+    raw: &str,
+    username: &str,
+    numeric_id: u32,
+) -> Result<Option<IdRange>, RootlessError> {
     let numeric_id = numeric_id.to_string();
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
         let parsed = parse_subid_line(line)?;

@@ -31,9 +31,30 @@ if [[ -z "$target_dir" ]]; then
     target_dir_owned=1
 fi
 
-for tool in tcpdump bpftrace nstat ip; do
+for tool in tcpdump bpftrace nstat ip df; do
     command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 2; }
 done
+
+# A fresh Cargo target for this diagnostic can consume several gigabytes. Do
+# not start a compile when the target filesystem is already near exhaustion;
+# repeated privileged probes must never be allowed to fill the host tmpfs.
+min_free_kb="${FERROCRATE_EBPF_MIN_FREE_KB:-4194304}"
+[[ "$min_free_kb" =~ ^[1-9][0-9]*$ ]] || {
+    echo "FERROCRATE_EBPF_MIN_FREE_KB must be a positive integer" >&2
+    exit 2
+}
+target_parent="$(dirname -- "$target_dir")"
+available_kb="$(df -Pk "$target_parent" | awk 'NR == 2 { print $4 }')"
+if [[ ! "$available_kb" =~ ^[0-9]+$ ]]; then
+    if [[ "$target_dir_owned" == 1 ]]; then rm -rf -- "$target_dir" 2>/dev/null || true; fi
+    echo "unable to determine free space for eBPF diagnostic target: $target_parent" >&2
+    exit 77
+fi
+if (( available_kb < min_free_kb )); then
+    if [[ "$target_dir_owned" == 1 ]]; then rm -rf -- "$target_dir" 2>/dev/null || true; fi
+    echo "eBPF diagnostic skipped: ${available_kb} KiB free on $target_parent; ${min_free_kb} KiB required" >&2
+    exit 77
+fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUT=/tmp/ebpf-diag-$STAMP

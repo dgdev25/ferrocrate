@@ -10,6 +10,8 @@ pub mod anomaly;
 pub mod audit;
 /// Telemetry collection for AI training data
 pub mod collector;
+/// Durable per-container token/memory metering
+pub mod metering;
 /// Configuration management
 pub mod config;
 /// Decision explanation and transparency

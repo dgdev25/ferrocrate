@@ -1156,6 +1156,67 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
 }
 
 #[test]
+fn docker_compat_healthcheck_reaches_healthy_and_reports_streak() {
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("SKIP: healthcheck lifecycle requires CAP_SYS_ADMIN for nsenter");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/health:latest");
+
+    let create_body = serde_json::json!({
+        "Image": "compat/health:latest",
+        "Cmd": ["/bin/busybox", "sleep", "5"],
+        "Healthcheck": {
+            "Test": ["CMD-SHELL", "/bin/busybox true"],
+            "Interval": 100_000_000,
+            "Timeout": 1_000_000_000,
+            "Retries": 2,
+            "StartPeriod": 0
+        },
+        "HostConfig": {"NetworkMode": "none"}
+    })
+    .to_string();
+    let request = format!(
+        "POST /v1.45/containers/create?name=health-container HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&request);
+    assert_eq!(status, 201, "health create response={body}");
+
+    let (status, body) = harness.request("POST", "/v1.45/containers/health-container/start");
+    assert_eq!(status, 204, "health start response={body}");
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut inspect = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        let (status, response) = harness.request("GET", "/v1.45/containers/health-container/json");
+        assert_eq!(status, 200, "health inspect response={response}");
+        inspect = serde_json::from_str(&response).expect("health inspect JSON");
+        if inspect["State"]["Health"]["Status"] == "healthy" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        inspect["State"]["Health"]["Status"], "healthy",
+        "inspect={inspect}"
+    );
+    assert_eq!(
+        inspect["State"]["Health"]["FailingStreak"], 0,
+        "inspect={inspect}"
+    );
+    assert!(
+        inspect["Config"]["Healthcheck"].is_object(),
+        "inspect={inspect}"
+    );
+
+    let (status, body) = harness.request("DELETE", "/v1.45/containers/health-container?force=true");
+    assert_eq!(status, 204, "health cleanup response={body}");
+}
+
+#[test]
 fn docker_compat_events_uses_chunked_stream_for_docker_cli_accept_header() {
     let harness = DaemonHarness::spawn();
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect event stream");

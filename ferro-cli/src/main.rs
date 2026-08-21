@@ -2862,6 +2862,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     health_timeout,
                     health_retries,
                     health_start_period,
+                    None,
                     &restart_policy,
                     rm,
                     bridge_cidr.as_deref(),
@@ -4095,6 +4096,7 @@ fn handle_run(
     health_timeout: Option<u64>,
     health_retries: Option<u32>,
     health_start_period: Option<u64>,
+    health_override: Option<ferro_core::container_store::HealthConfig>,
     restart_policy: &str,
     rm: bool,
     bridge_cidr: Option<&str>,
@@ -4181,13 +4183,16 @@ fn handle_run(
     let annotations = parse_key_values("annotation", annotations)?;
     let caps = parse_capabilities(cap_add)?;
     let port_mappings = parse_publish(publish)?;
-    let health = build_health_config(
-        health_cmd,
-        health_interval,
-        health_timeout,
-        health_retries,
-        health_start_period,
-    )?;
+    let health = match health_override {
+        Some(health) => Some(health),
+        None => build_health_config(
+            health_cmd,
+            health_interval,
+            health_timeout,
+            health_retries,
+            health_start_period,
+        )?,
+    };
     let restart_policy = parse_restart_policy(restart_policy)?;
     let effective_cmd = if let Some(entry) = entrypoint {
         let mut out = parse_entrypoint(entry)?;
@@ -10422,6 +10427,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            None,
             restart,
             false,
             None,
@@ -10896,7 +10902,7 @@ fn docker_resolve_id(
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DockerHealthSpec {
-    cmd: String,
+    cmd: Vec<String>,
     interval_secs: u64,
     timeout_secs: u64,
     retries: u32,
@@ -12867,6 +12873,15 @@ fn handle_docker_compat_connection(
                 };
                 state.persist_pending()?;
                 let health = spec.health.as_ref();
+                let health_override = health.map(|value| {
+                    ferro_core::container_store::HealthConfig {
+                        cmd: value.cmd.clone(),
+                        interval_secs: value.interval_secs,
+                        timeout_secs: value.timeout_secs,
+                        retries: value.retries,
+                        start_period_secs: value.start_period_secs,
+                    }
+                });
                 let network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
                     .unwrap_or_else(|_| "ebpf".to_string());
                 validate_network_backend(&network_backend)?;
@@ -12897,11 +12912,12 @@ fn handle_docker_compat_connection(
                     spec.user.as_deref(),
                     spec.name.as_deref(),
                     &spec.publish,
-                    health.map(|value| value.cmd.as_str()),
-                    health.map(|value| value.interval_secs),
-                    health.map(|value| value.timeout_secs),
-                    health.map(|value| value.retries),
-                    health.map(|value| value.start_period_secs),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    health_override,
                     &spec.restart_policy,
                     spec.auto_remove,
                     None,
@@ -14905,21 +14921,22 @@ fn parse_docker_healthcheck(
         return Ok(None);
     }
     let cmd = match kind {
-        "CMD-SHELL" => healthcheck
-            .test
-            .get(1)
-            .filter(|command| !command.trim().is_empty())
-            .cloned()
-            .ok_or_else(|| "docker: CMD-SHELL healthcheck requires a command".to_string())?,
+        "CMD-SHELL" => vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            healthcheck
+                .test
+                .get(1)
+                .filter(|command| !command.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| "docker: CMD-SHELL healthcheck requires a command".to_string())?,
+        ],
         "CMD" => {
             let args = healthcheck.test.get(1..).unwrap_or_default();
             if args.is_empty() || args.iter().any(|arg| arg.trim().is_empty()) {
                 return Err("docker: CMD healthcheck requires non-empty arguments".to_string());
             }
-            args.iter()
-                .map(|arg| shell_quote_health_arg(arg))
-                .collect::<Vec<_>>()
-                .join(" ")
+            args.to_vec()
         }
         other => return Err(format!("docker: unsupported Healthcheck.Test mode {other}")),
     };
@@ -14946,11 +14963,6 @@ fn duration_nanos_to_secs(value: u64, field: &str) -> Result<u64, String> {
         return Err(format!("docker: Healthcheck.{field} is too small"));
     }
     Ok(seconds)
-}
-
-#[cfg(target_os = "linux")]
-fn shell_quote_health_arg(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(target_os = "linux")]
@@ -15236,8 +15248,18 @@ fn docker_pending_inspect_payload(
 
 #[cfg(target_os = "linux")]
 fn docker_pending_healthcheck(health: &DockerHealthSpec) -> serde_json::Value {
+    let test = if health.cmd.len() == 3
+        && health.cmd.first().is_some_and(|value| value == "/bin/sh")
+        && health.cmd.get(1).is_some_and(|value| value == "-c")
+    {
+        serde_json::json!(["CMD-SHELL", health.cmd[2]])
+    } else {
+        let mut test = vec![serde_json::Value::String("CMD".to_string())];
+        test.extend(health.cmd.iter().cloned().map(serde_json::Value::String));
+        serde_json::Value::Array(test)
+    };
     serde_json::json!({
-        "Test": ["CMD-SHELL", health.cmd],
+        "Test": test,
         "Interval": health.interval_secs.saturating_mul(1_000_000_000),
         "Timeout": health.timeout_secs.saturating_mul(1_000_000_000),
         "Retries": health.retries,
@@ -18622,6 +18644,7 @@ volumes:
             None,
             None,
             None,
+            None,
             "no",
             false,
             None,
@@ -19209,7 +19232,7 @@ volumes:
         )
         .expect("CMD-SHELL healthcheck");
         let health = spec.health.expect("health config");
-        assert_eq!(health.cmd, "test -f /ready");
+        assert_eq!(health.cmd, vec!["/bin/sh", "-c", "test -f /ready"]);
         assert_eq!(health.interval_secs, 2);
         assert_eq!(health.timeout_secs, 1);
         assert_eq!(health.retries, 2);
@@ -19219,7 +19242,10 @@ volumes:
             None,
         )
         .expect("CMD healthcheck");
-        assert_eq!(cmd.health.expect("CMD config").cmd, "'/bin/check' 'ready'");
+        assert_eq!(
+            cmd.health.expect("CMD config").cmd,
+            vec!["/bin/check", "ready"]
+        );
 
         let none = parse_docker_create_spec(
             br#"{"Image":"busybox","Healthcheck":{"Test":["NONE"]}}"#,
@@ -19275,7 +19301,7 @@ volumes:
             tty: false,
             auto_remove: false,
             health: Some(DockerHealthSpec {
-                cmd: "test -f /ready".to_string(),
+                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), "test -f /ready".to_string()],
                 interval_secs: 2,
                 timeout_secs: 1,
                 retries: 3,

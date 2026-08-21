@@ -13,5 +13,12 @@ grep -Fq 'run_bounded' "$script"
 grep -Fq 'timeout --foreground' "$script"
 grep -Fq '|| true)' "$script"
 grep -Fq 'FERROCRATE_EBPF_DIAGNOSTICS_DIR' "$script"
+grep -Fq 'netns_before=' "$script"
+grep -Fq 'ip netns del' "$script"
+grep -Fq 'veth_before=' "$script"
+grep -Fq 'link-netnsid' "$script"
+grep -Fq 'lo_ingress_before=' "$script"
+grep -Fq 'lo_egress_before=' "$script"
+grep -Fq 'tc filter del dev lo' "$script"
 
 printf '%s\n' 'ebpf-networking-backend=pass'

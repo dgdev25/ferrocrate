@@ -59,6 +59,10 @@ export FERROCRATE_E2E_NETWORK_BACKEND=ebpf
 export FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1
 export FERROCRATE_EBPF_SNAT_PORT_RANGE="${FERRO_EBPF_TEST_SNAT_START}-${FERRO_EBPF_TEST_SNAT_END}"
 pin_root_before="$(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || true)"
+netns_before="$(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ { print $1 }' | sort || true)"
+veth_before="$(ip -o link show master ferro0 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort || true)"
+lo_ingress_before="$(tc filter show dev lo ingress 2>/dev/null || true)"
+lo_egress_before="$(tc filter show dev lo egress 2>/dev/null || true)"
 before_iptables="$(mktemp)"
 before_nft="$(mktemp)"
 after_iptables="$(mktemp)"
@@ -94,9 +98,6 @@ cleanup() {
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
-  if [[ -n "${FERROCRATE_BRIDGE_NAME:-}" ]]; then
-    ip link delete "$FERROCRATE_BRIDGE_NAME" 2>/dev/null || true
-  fi
   rm -f "$before_iptables" "$before_nft" "$after_iptables" "$after_nft" \
     "$redirect_diagnostics" "$packet_capture" "$loopback_ingress_capture" "$loopback_egress_capture"
   while IFS= read -r pin_name; do
@@ -107,6 +108,45 @@ cleanup() {
       find "$pin_path" -depth -type d -empty -delete 2>/dev/null || true
     fi
   done < <(find /sys/fs/bpf/ferrocrate -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+  # A failed attach can leave the two loopback classifiers live even after
+  # their pin directory is gone. Remove only the exact qualification filters
+  # when no ferro classifier existed on that hook at entry.
+  if ! grep -q 'ferro_ingress' <<<"$lo_ingress_before" &&
+     grep -q 'ferro_ingress' <<<"$(tc filter show dev lo ingress 2>/dev/null || true)"; then
+    tc filter del dev lo ingress pref 49152 handle 1 bpf 2>/dev/null || true
+  fi
+  if ! grep -q 'ferro_egress' <<<"$lo_egress_before" &&
+     grep -q 'ferro_egress' <<<"$(tc filter show dev lo egress 2>/dev/null || true)"; then
+    tc filter del dev lo egress pref 49152 handle 1 bpf 2>/dev/null || true
+  fi
+  # A failed e2e process can leave a PID-free namespace after its normal
+  # runtime cleanup has already lost ownership metadata.  The qualification
+  # harness owns only namespaces that did not exist at entry; remove those
+  # exact ferro-* names so a later bounded probe cannot inherit partial tc
+  # state.  Never touch pre-existing namespaces.
+  while IFS= read -r netns_name; do
+    [[ -n "$netns_name" ]] || continue
+    if ! grep -Fqx "$netns_name" <<<"$netns_before"; then
+      if [[ -z "$(ip netns pids "$netns_name" 2>/dev/null || true)" ]]; then
+        ip netns del "$netns_name" 2>/dev/null || true
+      fi
+    fi
+  done < <(ip netns list 2>/dev/null | awk '$1 ~ /^ferro-/ { print $1 }' | sort)
+  # Deleting an orphaned netns can leave its host-side veth with an invalid
+  # peer reference. Remove only veths that were absent at probe entry and no
+  # longer name a live ferro-* peer; pre-existing interfaces are untouched.
+  while IFS= read -r veth_name; do
+    [[ -n "$veth_name" ]] || continue
+    if ! grep -Fqx "$veth_name" <<<"$veth_before"; then
+      link_state="$(ip -o link show dev "$veth_name" 2>/dev/null || true)"
+      if grep -q 'link-netnsid' <<<"$link_state" && ! grep -q 'link-netns ferro-' <<<"$link_state"; then
+        ip link delete "$veth_name" 2>/dev/null || true
+      fi
+    fi
+  done < <(ip -o link show master ferro0 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | sort)
+  if [[ -n "${FERROCRATE_BRIDGE_NAME:-}" ]]; then
+    ip link delete "$FERROCRATE_BRIDGE_NAME" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 

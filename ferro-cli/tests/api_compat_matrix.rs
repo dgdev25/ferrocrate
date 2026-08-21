@@ -164,6 +164,40 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
+        // Docker rejects a logs request that selects no stream; validation
+        // precedes container resolution.
+        path: "/containers/missing/logs?stdout=0&stderr=0",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        // Per-line timestamps are not recorded, so timestamps=1 fails closed
+        // instead of returning untimestamped lines.
+        path: "/containers/missing/logs?timestamps=1",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        path: "/containers/missing/logs?since=not-a-number",
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
+        // The Docker client always sends since/until; zero is the no-op bound
+        // and must stay accepted, while a nonzero bound fails closed.
+        path: "/containers/missing/logs?since=0",
+        coverage: Coverage::Implemented,
+        expected_status: 404,
+        body: "",
+    },
+    ApiCase {
+        method: "GET",
         path: "/containers/matrix-container/changes",
         coverage: Coverage::Implemented,
         expected_status: 200,

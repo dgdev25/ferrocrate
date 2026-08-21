@@ -5372,6 +5372,9 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 if format == "json" {
                     Err("remote logs: --follow cannot be combined with --format json".to_string())
                 } else {
+                    // The daemon multiplexes non-TTY follow streams as Docker
+                    // stream frames and sends TTY follow streams raw.
+                    let mut demuxer = DockerLogFrameDemuxer::new();
                     remote_docker_stream_request(
                         &endpoint,
                         "GET",
@@ -5381,7 +5384,13 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                         ),
                         None,
                         |chunk| {
-                            print!("{}", String::from_utf8_lossy(chunk));
+                            let (stdout, stderr) = demuxer.feed(chunk);
+                            if !stdout.is_empty() {
+                                print!("{}", String::from_utf8_lossy(&stdout));
+                            }
+                            if !stderr.is_empty() {
+                                eprint!("{}", String::from_utf8_lossy(&stderr));
+                            }
                             std::io::stdout().flush().map_err(|error| error.to_string())
                         },
                     )
@@ -5395,10 +5404,18 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     ),
                 )
                 .and_then(|body| {
+                    // Non-TTY containers return multiplexed Docker stream
+                    // frames; TTY containers return the raw byte stream.
+                    // Decode when the body parses as frames and fall back to
+                    // the raw bytes otherwise.
+                    let (stdout, stderr) = decode_docker_raw_stream(&body)
+                        .unwrap_or_else(|_| (body.clone(), Vec::new()));
                     if format == "json" {
+                        let mut logs = stdout.clone();
+                        logs.extend_from_slice(&stderr);
                         let output = serde_json::json!({
                             "container": container,
-                            "logs": String::from_utf8_lossy(&body),
+                            "logs": String::from_utf8_lossy(&logs),
                         });
                         println!(
                             "{}",
@@ -5407,7 +5424,12 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                         );
                         Ok(())
                     } else {
-                        print!("{}", String::from_utf8_lossy(&body));
+                        if !stdout.is_empty() {
+                            print!("{}", String::from_utf8_lossy(&stdout));
+                        }
+                        if !stderr.is_empty() {
+                            eprint!("{}", String::from_utf8_lossy(&stderr));
+                        }
                         Ok(())
                     }
                 })
@@ -5767,6 +5789,59 @@ fn remote_commit_path(container: &str, repository: &str) -> Result<String, Strin
 }
 
 #[cfg(target_os = "linux")]
+/// Incremental demuxer for a followed Docker log stream. Carries partial
+/// frames across chunks; falls back to raw passthrough when the first bytes
+/// are not a valid frame header (TTY containers stream raw bytes).
+struct DockerLogFrameDemuxer {
+    carry: Vec<u8>,
+    raw_passthrough: bool,
+}
+
+impl DockerLogFrameDemuxer {
+    fn new() -> Self {
+        Self {
+            carry: Vec::new(),
+            raw_passthrough: false,
+        }
+    }
+
+    /// Feed one streamed chunk and return the decoded (stdout, stderr) output
+    /// for it. Raw passthrough output is returned as stdout.
+    fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        if self.raw_passthrough {
+            return (chunk.to_vec(), Vec::new());
+        }
+        self.carry.extend_from_slice(chunk);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        loop {
+            if self.carry.len() < 8 {
+                break;
+            }
+            let stream = self.carry[0];
+            if stream != 1 && stream != 2 {
+                self.raw_passthrough = true;
+                let pending = std::mem::take(&mut self.carry);
+                return (pending, Vec::new());
+            }
+            let size =
+                u32::from_be_bytes([self.carry[4], self.carry[5], self.carry[6], self.carry[7]])
+                    as usize;
+            if self.carry.len() < 8 + size {
+                break;
+            }
+            let payload = self.carry[8..8 + size].to_vec();
+            self.carry.drain(..8 + size);
+            if stream == 1 {
+                stdout.extend_from_slice(&payload);
+            } else {
+                stderr.extend_from_slice(&payload);
+            }
+        }
+        (stdout, stderr)
+    }
+}
+
 fn decode_docker_raw_stream(raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     let mut offset = 0usize;
     let mut stdout = Vec::new();
@@ -11403,6 +11478,15 @@ fn parse_event_time_bound(value: &str, name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("event query parameter `{name}` is out of range: {value}"))
 }
 
+/// Parse a `/containers/{id}/logs` `since`/`until` bound in Unix seconds.
+/// Reuses the event time-bound grammar so both endpoints accept the same
+/// timestamp shapes; only the error label differs.
+#[cfg(target_os = "linux")]
+fn parse_docker_log_time_bound(value: &str, name: &str) -> Result<u64, String> {
+    parse_event_time_bound(value, name)
+        .map_err(|error| error.replace("event query parameter", "docker: logs query parameter"))
+}
+
 #[cfg(target_os = "linux")]
 fn event_time_nanos(event: &DockerEvent) -> u64 {
     if event.time_nano == 0 {
@@ -11926,7 +12010,7 @@ fn handle_docker_compat_connection(
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let mut event_request: Option<DockerEventRequest> = None;
     let mut event_follow_query: Option<HashMap<String, String>> = None;
-    let mut log_follow: Option<(String, Option<String>)> = None;
+    let mut log_follow: Option<(String, Option<String>, bool, bool, bool)> = None;
     let mut stats_follow: Option<String> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_output: Option<Vec<u8>> = None;
@@ -12345,6 +12429,48 @@ fn handle_docker_compat_connection(
                     .map(|value| parse_docker_bool_query(Some(value), "follow"))
                     .transpose()?
                     .unwrap_or(false);
+                // Docker clients send stdout/stderr stream selectors with
+                // every logs request. Absent flags default to both streams so
+                // hand-rolled clients that omit them keep the combined view;
+                // an explicit `0` on both is rejected exactly like Docker's
+                // "you must choose at least one stream".
+                let stdout_requested = query
+                    .get("stdout")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdout"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let stderr_requested = query
+                    .get("stderr")
+                    .map(|value| parse_docker_bool_query(Some(value), "stderr"))
+                    .transpose()?
+                    .unwrap_or(true);
+                if !stdout_requested && !stderr_requested {
+                    return Err(
+                        "docker: logs requires at least one of stdout=1 or stderr=1".to_string()
+                    );
+                }
+                let timestamps =
+                    parse_docker_bool_query(query.get("timestamps"), "timestamps")?;
+                if timestamps {
+                    // The runtime records plain byte streams without per-line
+                    // timestamps, so the parameter cannot be honored honestly.
+                    // Fail closed instead of returning untimestamped lines.
+                    return Err("docker: logs timestamps=1 is unsupported: per-line timestamps are not recorded".to_string());
+                }
+                for name in ["since", "until"] {
+                    if let Some(value) = query.get(name) {
+                        // The Docker client always sends since/until (zero
+                        // means "no bound"). Accept the no-op zero and reject
+                        // nonzero bounds, which cannot be honored without
+                        // per-line timestamps.
+                        let bound = parse_docker_log_time_bound(value, name)?;
+                        if bound > 0 {
+                            return Err(format!(
+                                "docker: logs {name} filtering is unsupported: per-line timestamps are not recorded"
+                            ));
+                        }
+                    }
+                }
                 // Validate tail syntax before resolving the resource so
                 // malformed requests retain Docker's 400-class response even
                 // when the container is absent.
@@ -12359,19 +12485,44 @@ fn handle_docker_compat_connection(
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
                 }
+                let tty = runtime
+                    .inspect(&id)
+                    .map(|record| record.tty)
+                    .unwrap_or(false);
                 if follow {
                     // Validate the container and tail before committing to a
                     // long-lived chunked response.
-                    let raw = runtime.logs(&id).map_err(|err| err.to_string())?;
-                    let _ = docker_tail_logs(&raw, tail.as_deref())?;
-                    log_follow = Some((id.to_string(), tail));
-                    docker_chunked_headers(200, "text/plain")
+                    let (stdout, stderr) = runtime.logs_split(&id).map_err(|err| err.to_string())?;
+                    let _ = docker_tail_logs(&format!("{stdout}{stderr}"), tail.as_deref())?;
+                    log_follow = Some((
+                        id.to_string(),
+                        tail,
+                        tty,
+                        stdout_requested,
+                        stderr_requested,
+                    ));
+                    docker_chunked_headers(200, "application/vnd.docker.raw-stream")
                 } else {
-                    let logs = docker_tail_logs(
-                        &runtime.logs(&id).map_err(|err| err.to_string())?,
-                        tail.as_deref(),
-                    )?;
-                    http_response(200, logs.as_bytes(), "text/plain")
+                    let (stdout, stderr) =
+                        runtime.logs_split(&id).map_err(|err| err.to_string())?;
+                    let stdout = if stdout_requested {
+                        docker_tail_logs(&stdout, tail.as_deref())?
+                    } else {
+                        String::new()
+                    };
+                    let stderr = if stderr_requested {
+                        docker_tail_logs(&stderr, tail.as_deref())?
+                    } else {
+                        String::new()
+                    };
+                    // Docker returns multiplexed stream frames for non-TTY
+                    // containers and the raw byte stream for TTY containers.
+                    let body = if tty {
+                        format!("{stdout}{stderr}").into_bytes()
+                    } else {
+                        docker_raw_stream(&stdout, &stderr)
+                    };
+                    http_response(200, &body, "application/vnd.docker.raw-stream")
                 }
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
@@ -13970,10 +14121,18 @@ fn handle_docker_compat_connection(
         stream_docker_events(&mut stream, &state, &query)?;
         return Ok(());
     }
-    if let Some((id, tail)) = log_follow {
+    if let Some((id, tail, tty, stdout_requested, stderr_requested)) = log_follow {
         let follow_runtime =
             ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
-        stream_docker_logs(&mut stream, &follow_runtime, &id, tail.as_deref())?;
+        stream_docker_logs(
+            &mut stream,
+            &follow_runtime,
+            &id,
+            tail.as_deref(),
+            tty,
+            stdout_requested,
+            stderr_requested,
+        )?;
         return Ok(());
     }
     if let Some(id) = stats_follow {
@@ -14080,6 +14239,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("too large")
         || lowered.contains("bad request")
         || lowered.contains("event query parameter")
+        || lowered.contains("logs query parameter")
         || lowered.contains("must be a boolean")
         || lowered.contains("non-negative integer")
         || lowered.contains("exceeds terminal bounds")
@@ -15739,35 +15899,73 @@ fn stream_docker_logs(
     runtime: &ContainerRuntime,
     id: &str,
     tail: Option<&str>,
+    tty: bool,
+    stdout_requested: bool,
+    stderr_requested: bool,
 ) -> Result<(), String> {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("docker: log stream write timeout setup failed: {error}"))?;
-    let mut emitted = 0usize;
+    let mut emitted_stdout = 0usize;
+    let mut emitted_stderr = 0usize;
+    let mut initialized = false;
     loop {
-        let raw = runtime.logs(id).map_err(|error| error.to_string())?;
-        if emitted == 0 {
-            let initial = docker_tail_logs(&raw, tail)?;
-            if !initial.is_empty() {
-                write_chunk(stream, &docker_raw_stream(&initial, ""))?;
-            }
-            emitted = raw.len();
-        } else if raw.len() >= emitted {
-            if raw.len() > emitted {
-                write_chunk(stream, &docker_raw_stream(&raw[emitted..], ""))?;
-                emitted = raw.len();
-            }
-        } else {
+        let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
+        if stdout.len() < emitted_stdout || stderr.len() < emitted_stderr {
             // The log files were rotated or truncated; resume from the new
             // beginning rather than indexing stale bytes.
-            emitted = 0;
+            emitted_stdout = 0;
+            emitted_stderr = 0;
+            initialized = false;
         }
+        if !initialized {
+            let window_stdout = if stdout_requested {
+                docker_tail_logs(&stdout, tail)?
+            } else {
+                String::new()
+            };
+            let window_stderr = if stderr_requested {
+                docker_tail_logs(&stderr, tail)?
+            } else {
+                String::new()
+            };
+            let frame = if tty {
+                format!("{window_stdout}{window_stderr}").into_bytes()
+            } else {
+                docker_raw_stream(&window_stdout, &window_stderr)
+            };
+            if !frame.is_empty() {
+                write_chunk(stream, &frame)?;
+            }
+            initialized = true;
+        } else {
+            let stdout_delta = if stdout_requested {
+                &stdout[emitted_stdout..]
+            } else {
+                ""
+            };
+            let stderr_delta = if stderr_requested {
+                &stderr[emitted_stderr..]
+            } else {
+                ""
+            };
+            let frame = if tty {
+                format!("{stdout_delta}{stderr_delta}").into_bytes()
+            } else {
+                docker_raw_stream(stdout_delta, stderr_delta)
+            };
+            if !frame.is_empty() {
+                write_chunk(stream, &frame)?;
+            }
+        }
+        emitted_stdout = stdout.len();
+        emitted_stderr = stderr.len();
         let terminal = runtime
             .inspect(id)
             .map(|record| !matches!(record.status.as_str(), "running" | "paused"))
             .unwrap_or(true);
         stream.flush().map_err(|error| error.to_string())?;
-        if terminal && raw.len() <= emitted {
+        if terminal {
             stream
                 .write_all(b"0\r\n\r\n")
                 .map_err(|error| error.to_string())?;
@@ -16135,12 +16333,14 @@ mod tests {
         append_export_rootfs, bind_run_network, build_error_is_retryable, build_health_config,
         build_limits, context_endpoint_available, context_endpoint_is_local,
         decode_docker_raw_stream, desktop_forward_enabled, dispatch,
+        DockerLogFrameDemuxer,
         rootless_socket_candidates, select_rootless_socket,
         dispatch_remote_context, docker_attach_output, docker_build_cache_entries,
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
+        parse_docker_log_time_bound,
         docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
@@ -21147,6 +21347,53 @@ volumes:
         assert_eq!(stdout, b"out\n");
         assert_eq!(stderr, b"err\n");
         assert!(decode_docker_raw_stream(&raw[..7]).is_err());
+    }
+
+    #[test]
+    fn log_frame_demuxer_carries_partial_frames_across_chunks() {
+        let mut demuxer = DockerLogFrameDemuxer::new();
+        let raw = docker_raw_stream("out\n", "err\n");
+        // Split the framed stream at every byte boundary; the demuxer must
+        // reassemble both frames regardless of chunk placement.
+        for split in 0..=raw.len() {
+            let mut demuxer = DockerLogFrameDemuxer::new();
+            let (stdout, stderr) = demuxer.feed(&raw[..split]);
+            let (stdout_tail, stderr_tail) = demuxer.feed(&raw[split..]);
+            let mut stdout = stdout;
+            stdout.extend_from_slice(&stdout_tail);
+            let mut stderr = stderr;
+            stderr.extend_from_slice(&stderr_tail);
+            assert_eq!(stdout, b"out\n", "split={split}");
+            assert_eq!(stderr, b"err\n", "split={split}");
+        }
+        // Empty chunks produce no output.
+        let (stdout, stderr) = demuxer.feed(&[]);
+        assert!(stdout.is_empty() && stderr.is_empty());
+    }
+
+    #[test]
+    fn log_frame_demuxer_falls_back_to_raw_passthrough_for_tty_streams() {
+        let mut demuxer = DockerLogFrameDemuxer::new();
+        // TTY streams carry raw text that does not begin with a frame header.
+        let (stdout, stderr) = demuxer.feed(b"tty-container:line\n");
+        assert_eq!(stdout, b"tty-container:line\n");
+        assert!(stderr.is_empty());
+        // Once raw mode is detected, later chunks pass through unchanged even
+        // if they happen to contain frame-like bytes.
+        let (stdout, _) = demuxer.feed(&docker_raw_stream("out\n", ""));
+        assert_eq!(stdout, docker_raw_stream("out\n", ""));
+    }
+
+    #[test]
+    fn docker_log_time_bounds_accept_zero_and_reject_malformed_values() {
+        assert_eq!(parse_docker_log_time_bound("0", "since").unwrap(), 0);
+        assert_eq!(
+            parse_docker_log_time_bound("1.5", "until").unwrap(),
+            1_500_000_000
+        );
+        assert!(parse_docker_log_time_bound("not-a-number", "since").is_err());
+        let error = parse_docker_log_time_bound("x", "since").unwrap_err();
+        assert!(error.contains("docker: logs query parameter"), "{error}");
     }
 
     #[cfg(unix)]

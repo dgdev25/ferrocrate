@@ -143,21 +143,25 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[cfg(target_os = "linux")]
+    /// Inspect or verify the authorization policy surface.
     Policy {
         #[command(subcommand)]
         command: PolicyCommands,
     },
     #[cfg(target_os = "linux")]
+    /// Inspect and verify durable witness journals.
     Witness {
         #[command(subcommand)]
         command: WitnessCommands,
     },
     #[cfg(target_os = "linux")]
+    /// Activate or reconcile emergency stop state.
     Emergency {
         #[command(subcommand)]
         command: EmergencyCommands,
     },
     #[cfg(target_os = "linux")]
+    /// Create and start a container from an image reference.
     Run {
         image: String,
         #[arg(long)]
@@ -230,6 +234,7 @@ pub enum Commands {
         cmd: Vec<String>,
     },
     #[cfg(target_os = "linux")]
+    /// Build an OCI image from a Dockerfile.
     Build {
         #[arg(long)]
         dockerfile: Option<String>,
@@ -277,6 +282,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: RvfCommands,
     },
+    /// List stored images.
     Images {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
@@ -288,11 +294,13 @@ pub enum Commands {
         #[arg(long, default_value = "json", value_parser = validate_output_format)]
         format: String,
     },
+    /// Show image configuration and layer metadata.
     ImageInspect {
         image: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Add a reference tag to a stored image.
     Tag {
         source: String,
         target: String,
@@ -303,31 +311,37 @@ pub enum Commands {
         container: String,
         repository: String,
     },
+    /// Show image layer history.
     History {
         image: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Remove a stored image by reference.
     Rmi {
         image: String,
     },
+    /// Remove dangling or time-filtered images.
     ImagePrune {
         /// Docker image-prune selector (`dangling=true|false` or `until=UNIX_SECONDS`).
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
     #[cfg(target_os = "linux")]
+    /// Manage named volumes.
     Volume {
         #[command(subcommand)]
         command: VolumeCommands,
     },
     #[cfg(target_os = "linux")]
+    /// Manage networks.
     Network {
         #[command(subcommand)]
         command: NetworkCommands,
     },
     #[cfg(target_os = "linux")]
     #[command(alias = "ps")]
+    /// List containers.
     Containers {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
@@ -361,6 +375,7 @@ pub enum Commands {
         follow: bool,
     },
     #[cfg(target_os = "linux")]
+    /// Read container logs.
     Logs {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -369,6 +384,7 @@ pub enum Commands {
         follow: bool,
     },
     #[cfg(target_os = "linux")]
+    /// Report container resource statistics.
     Stats {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
@@ -377,12 +393,14 @@ pub enum Commands {
         follow: bool,
     },
     #[cfg(target_os = "linux")]
+    /// List processes running inside a container.
     Top {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Block until a container stops and print its exit code.
     Wait {
         container: String,
         #[arg(long, default_value = "not-running")]
@@ -393,51 +411,61 @@ pub enum Commands {
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Show container metadata.
     Inspect {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Freeze a running container.
     Pause {
         container: String,
     },
     #[cfg(target_os = "linux")]
+    /// Resume a paused container.
     Unpause {
         container: String,
     },
     #[cfg(target_os = "linux")]
+    /// Stop a running container.
     Stop {
         container: String,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
+    /// Send a signal to a container.
     Kill {
         container: String,
         #[arg(long, default_value = "SIGKILL")]
         signal: String,
     },
     #[cfg(target_os = "linux")]
+    /// Remove a stopped container.
     Rm {
         container: String,
     },
     #[cfg(target_os = "linux")]
+    /// Rename a container.
     Rename {
         container: String,
         name: String,
     },
     #[cfg(target_os = "linux")]
+    /// Start a stopped container.
     Start {
         container: String,
     },
     #[cfg(target_os = "linux")]
+    /// Restart a container.
     Restart {
         container: String,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
+    /// Run a command inside a running container.
     Exec {
         container: String,
         /// Allocate a rootful kernel PTY for the command.
@@ -446,21 +474,25 @@ pub enum Commands {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    /// Pull an image from a registry.
     Pull {
         image: String,
         #[arg(long)]
         lazy: bool,
     },
+    /// Push an image to a registry.
     Push {
         image: String,
     },
     #[cfg(target_os = "linux")]
+    /// Scan a stored image with a security scanner.
     Scan {
         image: String,
         #[arg(long, default_value = "auto")]
         scanner: String,
     },
     #[cfg(target_os = "linux")]
+    /// Run multi-service Compose projects.
     Compose {
         #[arg(short, long)]
         file: Option<String>,
@@ -468,6 +500,7 @@ pub enum Commands {
         command: ComposeCommands,
     },
     #[cfg(target_os = "linux")]
+    /// Run the persistent daemon and Docker-compatible socket.
     Daemon {
         #[arg(long, default_value = "/var/run/ferrocrate.sock")]
         socket: String,
@@ -476,15 +509,19 @@ pub enum Commands {
         #[arg(long)]
         metrics_addr: Option<String>,
     },
+    /// Print shell completion scripts.
     Completion {
         shell: String,
     },
     #[cfg(target_os = "linux")]
+    /// Start the interactive terminal dashboard.
     Tui,
+    /// Manage local AI assist behavior.
     Ai {
         #[command(subcommand)]
         command: AiCommands,
     },
+    /// Train a local AI model from recorded data.
     AiTrain {
         #[arg(long = "model-type")]
         model_type: String,
@@ -497,6 +534,7 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Export local AI model state.
     AiExport {
         #[arg(long = "model-type")]
         model_type: String,
@@ -507,6 +545,7 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Import local AI model state.
     AiImport {
         #[arg(long = "model-type")]
         model_type: String,
@@ -517,6 +556,7 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Report local AI model statistics.
     AiStats {
         path: Option<String>,
         #[arg(long = "model-type")]
@@ -527,6 +567,7 @@ pub enum Commands {
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Branch local AI memory state.
     AiBranch {
         source: String,
         target: String,
@@ -534,6 +575,7 @@ pub enum Commands {
         force: bool,
     },
     #[cfg(target_os = "linux")]
+    /// Show local AI memory lineage.
     AiLineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -543,14 +585,17 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Read or write CLI configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Manage named connection contexts.
     Context {
         #[command(subcommand)]
         command: ContextCommands,
     },
+    /// Diagnose host prerequisites and runtime state.
     Doctor {
         #[arg(long, default_value_t = false)]
         fix: bool,
@@ -563,10 +608,12 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Inspect commercial entitlement state.
     Entitlement {
         #[command(subcommand)]
         command: EntitlementCommands,
     },
+    /// Audit local AI decisions and actions.
     AiAudit {
         #[arg(long)]
         action: String,
@@ -575,6 +622,7 @@ pub enum Commands {
         #[arg(long = "evidence")]
         evidence: Vec<String>,
     },
+    /// Migrate Docker configuration or Compose projects.
     Migrate {
         #[command(subcommand)]
         target: MigrateCommands,
@@ -621,9 +669,11 @@ pub enum RvfCommands {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommands {
+    /// Verify the active policy allows a described action.
     Check {
         path: PathBuf,
     },
+    /// Reload authorization policy from disk.
     Reload {
         path: PathBuf,
         #[arg(long)]
@@ -634,6 +684,7 @@ pub enum PolicyCommands {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub enum WitnessCommands {
+    /// Print witness journal entries and receipts.
     Show {
         #[arg(long)]
         journal: PathBuf,
@@ -646,6 +697,7 @@ pub enum WitnessCommands {
         #[arg(long)]
         stage: Option<String>,
     },
+    /// Verify witness journal integrity and signatures.
     Verify {
         #[arg(long)]
         journal: PathBuf,
@@ -658,6 +710,7 @@ pub enum WitnessCommands {
         #[arg(long, default_value_t = 300)]
         max_age_seconds: u64,
     },
+    /// Create a signed checkpoint of a witness journal.
     Checkpoint {
         #[arg(long)]
         journal: PathBuf,
@@ -674,6 +727,7 @@ pub enum WitnessCommands {
         #[arg(long)]
         recover_pending: bool,
     },
+    /// Rotate a witness journal signing key with predecessor continuity.
     RotateKey {
         #[arg(long)]
         journal: PathBuf,
@@ -723,6 +777,7 @@ pub enum WitnessCommands {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub enum EmergencyCommands {
+    /// Activate the emergency stop and freeze mutations.
     Activate {
         #[arg(long, default_value = "console", hide = true)]
         origin: String,
@@ -749,6 +804,7 @@ pub enum EmergencyCommands {
         #[arg(long)]
         deadline_uptime_ns: Option<u64>,
     },
+    /// Execute the recorded emergency plan.
     Execute {
         #[arg(long)]
         action: String,
@@ -759,12 +815,14 @@ pub enum EmergencyCommands {
         #[arg(long)]
         sink: Option<PathBuf>,
     },
+    /// Reconcile observed state against the emergency plan.
     Reconcile {
         #[arg(long, default_value = "filesystem")]
         sink_backend: String,
         #[arg(long)]
         sink: Option<PathBuf>,
     },
+    /// Serve the privileged emergency sink socket.
     SinkServe {
         #[arg(long)]
         socket: PathBuf,
@@ -783,6 +841,7 @@ pub enum EmergencyCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum MigrateCommands {
+    /// Export Docker CLI credentials into a Ferrocrate-compatible auth store.
     DockerAuth {
         #[arg(long)]
         output: Option<String>,
@@ -798,6 +857,7 @@ pub enum MigrateCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum ComposeCommands {
+    /// Create and start a Compose project.
     Up {
         #[arg(long)]
         profile: Vec<String>,
@@ -806,19 +866,24 @@ pub enum ComposeCommands {
         #[arg(short = 'd', long, default_value_t = true)]
         detach: bool,
     },
+    /// Watch a Compose project and reconcile drift.
     Watch {
         #[arg(long)]
         profile: Vec<String>,
         #[arg(long, default_value = "2")]
         interval: u64,
     },
+    /// Stop and remove a Compose project.
     Down,
+    /// List containers of a Compose project.
     Ps,
+    /// Read logs of Compose services.
     Logs,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum VolumeCommands {
+    /// Create a named volume.
     Create {
         name: String,
         #[arg(long, default_value = "local")]
@@ -826,27 +891,33 @@ pub enum VolumeCommands {
         #[arg(long = "opt")]
         opts: Vec<String>,
     },
+    /// Archive a named volume to a tarball.
     Backup {
         name: String,
         path: String,
     },
+    /// Restore a named volume from a tarball.
     Restore {
         name: String,
         path: String,
     },
+    /// List volumes.
     Ls {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Remove unused volumes.
     Prune {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Show volume metadata.
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Remove a named volume.
     Rm {
         name: String,
     },
@@ -854,6 +925,7 @@ pub enum VolumeCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum NetworkCommands {
+    /// Create a network.
     Create {
         name: String,
         #[arg(long)]
@@ -865,19 +937,23 @@ pub enum NetworkCommands {
         #[arg(long = "ipv6-gateway")]
         ipv6_gateway: Option<String>,
     },
+    /// List networks.
     Ls {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Remove unused networks.
     Prune {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Show network metadata.
     Inspect {
         name: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Remove a network.
     Rm {
         name: String,
     },
@@ -885,6 +961,7 @@ pub enum NetworkCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum AiCommands {
+    /// Run a bounded AI orchestration task.
     Orchestrate {
         #[arg(long)]
         task: String,
@@ -895,6 +972,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Train local AI models from recorded data.
     Train {
         #[arg(long = "model-type")]
         model_type: String,
@@ -907,6 +985,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Export local AI model state.
     Export {
         #[arg(long = "model-type")]
         model_type: String,
@@ -917,6 +996,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Import local AI model state.
     Import {
         #[arg(long = "model-type")]
         model_type: String,
@@ -944,6 +1024,7 @@ pub enum AiCommands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Report local AI model statistics.
     Stats {
         /// Path to a .rvf model file (optional)
         path: Option<String>,
@@ -962,6 +1043,7 @@ pub enum AiCommands {
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Branch local AI memory state.
     Branch {
         source: String,
         target: String,
@@ -969,6 +1051,7 @@ pub enum AiCommands {
         force: bool,
     },
     #[cfg(target_os = "linux")]
+    /// Show local AI memory lineage.
     Lineage {
         path: String,
         #[arg(long = "parent-file")]
@@ -979,6 +1062,7 @@ pub enum AiCommands {
         format: String,
     },
     #[cfg(target_os = "linux")]
+    /// Migrate local AI model state between stores.
     Migrate {
         #[arg(long)]
         source: Option<String>,
@@ -987,6 +1071,7 @@ pub enum AiCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Manage community AI marketplace items.
     Community {
         #[command(subcommand)]
         command: AiCommunityCommands,
@@ -1029,24 +1114,31 @@ pub enum AiCommunityCommands {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum ConfigCommands {
+    /// Set a CLI configuration value.
     Set { key: String, value: String },
+    /// Read a CLI configuration value.
     Get { key: String },
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum ContextCommands {
+    /// Create a named connection context.
     Create {
         name: String,
         #[arg(long)]
         endpoint: String,
     },
+    /// Show context metadata.
     Inspect {
         name: Option<String>,
     },
+    /// List contexts.
     List,
+    /// Select the active context.
     Use {
         name: String,
     },
+    /// Remove a context.
     Rm {
         name: String,
     },
@@ -1054,6 +1146,7 @@ pub enum ContextCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum EntitlementCommands {
+    /// Show the active entitlement and feature grants.
     Status {
         #[arg(long, default_value_t = false)]
         json: bool,

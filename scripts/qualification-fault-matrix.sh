@@ -11,6 +11,8 @@ set -euo pipefail
 # Environment:
 #   FERROCRATE_QUAL_TARGET_DIR  isolated target dir (default /tmp owned path)
 #   FERROCRATE_QUAL_KEEP_TARGET keep the target dir on exit (default 0)
+#   FERROCRATE_QUAL_ROOT        1 = run only the root-gated rows (must be
+#                               executed as root; default 0 = unprivileged rows)
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 target_root="${FERROCRATE_QUAL_TARGET_DIR:-$(mktemp -d /tmp/ferrocrate-qual.XXXXXX)}"
@@ -62,13 +64,30 @@ run_case() {
   # in the isolated target dir until the trap removes it.
 }
 
-run_case qual_hundred_container_lifecycle_with_rss_sampling 900
-run_case qual_resource_exhaustion_memory_oom_isolated 420
-run_case qual_resource_exhaustion_cpu_quota_fail_closed 420
-run_case qual_resource_exhaustion_pids_limit_fail_closed 180
-run_case qual_daemon_crash_mid_lifecycle_reconciliation 420
-run_case qual_interrupted_network_emulated_recovery 300
-run_case qual_disk_pressure_rlimit_fsize_fail_closed_and_recovery 420
+root_mode="${FERROCRATE_QUAL_ROOT:-0}"
+if [[ "$root_mode" == "1" ]]; then
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "root mode blocked: FERROCRATE_QUAL_ROOT=1 requires root (mount/tmpfs and cgroup writes)" >&2
+    exit 77
+  fi
+  for required in mount umount; do
+    if ! command -v "$required" >/dev/null 2>&1; then
+      echo "root mode blocked: required command is unavailable: $required" >&2
+      exit 77
+    fi
+  done
+  run_case qual_root_enospc_tmpfs_fail_closed_and_recovery 420
+  run_case qual_root_cgroup_oom_group_teardown 420
+  run_case qual_root_cpu_throttle_measured 420
+else
+  run_case qual_hundred_container_lifecycle_with_rss_sampling 900
+  run_case qual_resource_exhaustion_memory_oom_isolated 420
+  run_case qual_resource_exhaustion_cpu_quota_fail_closed 420
+  run_case qual_resource_exhaustion_pids_limit_fail_closed 180
+  run_case qual_daemon_crash_mid_lifecycle_reconciliation 420
+  run_case qual_interrupted_network_emulated_recovery 300
+  run_case qual_disk_pressure_rlimit_fsize_fail_closed_and_recovery 420
+fi
 
 echo
 echo "qualification matrix manifest:"

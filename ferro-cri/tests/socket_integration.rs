@@ -132,7 +132,7 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
     }
 
     let registry = Server::run();
-    let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[]}"#;
+    let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13},"layers":[]}"#;
     registry.expect(
         Expectation::matching(request::method_path(
             "GET",
@@ -141,7 +141,7 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
         .times(2)
         .respond_with(status_code(200).body(manifest)),
     );
-    let manifest_digest = "sha256:1b75874027e3aa933373ebaaa9720a85e38f14be533478e9c3cc9163ff021544";
+    let manifest_digest = "sha256:6ee1fcf5d0cc4a59012ec52e3e5a99b2bec3336099150b110fa8e992d208b93c";
     registry.expect(
         Expectation::matching(request::method_path(
             "GET",
@@ -370,7 +370,7 @@ async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
         }
 
         let registry = Server::run();
-        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":1},"layers":[]}"#;
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:46b68ac1696c3870d537f376868d9402400de28587e345264a77b65da09669be","size":13},"layers":[]}"#;
         registry.expect(
             Expectation::matching(request::method_path(
                 "GET",
@@ -380,7 +380,7 @@ async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
             .respond_with(status_code(200).body(manifest)),
         );
         let manifest_digest =
-            "sha256:1b75874027e3aa933373ebaaa9720a85e38f14be533478e9c3cc9163ff021544";
+            "sha256:6ee1fcf5d0cc4a59012ec52e3e5a99b2bec3336099150b110fa8e992d208b93c";
         registry.expect(
             Expectation::matching(request::method_path(
                 "GET",

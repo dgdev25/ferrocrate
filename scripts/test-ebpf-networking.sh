@@ -115,6 +115,17 @@ diagnostics_output_dir="${FERROCRATE_EBPF_DIAGNOSTICS_DIR:-}"
 reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
 reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
 reserved_ports_changed=0
+# The eBPF published-port reverse path injects 127/8-sourced replies onto host
+# loopback; the kernel's input route lookup drops them as martian unless
+# loopback route_localnet is enabled. Qualification enables it for the run and
+# restores the exact prior value in the EXIT trap.
+route_localnet_path="/proc/sys/net/ipv4/conf/lo/route_localnet"
+route_localnet_before="$(cat "$route_localnet_path" 2>/dev/null || true)"
+route_localnet_changed=0
+if [[ "$route_localnet_before" != "1" ]]; then
+  printf '1\n' >"$route_localnet_path"     || fail "could not enable net.ipv4.conf.lo.route_localnet for eBPF published-port qualification"
+  route_localnet_changed=1
+fi
 cleanup() {
   if [[ -n "$redirect_sampler_pid" ]]; then
     kill "$redirect_sampler_pid" 2>/dev/null || true
@@ -130,6 +141,9 @@ cleanup() {
       wait "$capture_pid" 2>/dev/null || true
     fi
   done
+  if [[ "$route_localnet_changed" -eq 1 ]]; then
+    printf '%s\n' "$route_localnet_before" >"$route_localnet_path" 2>/dev/null || true
+  fi
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi

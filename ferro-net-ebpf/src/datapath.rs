@@ -554,7 +554,13 @@ pub fn decide_ingress<S: DatapathState>(
                 decision.action = Action::Redirect;
                 decision.ifindex = Some(external.loopback_ifindex);
                 decision.redirect_ingress = true;
-                decision.destination_mac = None;
+                // Loopback's device address is all-zero. eth_type_trans on lo
+                // classifies any frame with a non-zero destination MAC as
+                // PACKET_OTHERHOST, and the kernel silently drops it after the
+                // tap — observable in captures but never delivered to TCP.
+                // Zero the destination MAC so the redirected frame is received
+                // as PACKET_HOST on loopback.
+                decision.destination_mac = Some([0; 6]);
                 Ok(decision)
             } else if external.ifindex != 0 && external.next_hop_mac != [0; 6] {
                 decision.action = Action::Redirect;
@@ -666,7 +672,10 @@ pub fn decide_egress<S: DatapathState>(
             }
             decision.action = Action::Redirect;
             decision.ifindex = Some(external.loopback_ifindex);
-            decision.destination_mac = None;
+            // Same loopback receive-path requirement as the ingress redirect:
+            // a non-zero destination MAC is classified PACKET_OTHERHOST by
+            // eth_type_trans on lo and silently dropped before IP input.
+            decision.destination_mac = Some([0; 6]);
             return Ok(decision);
         }
     }

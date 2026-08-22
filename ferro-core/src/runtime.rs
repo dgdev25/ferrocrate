@@ -3662,7 +3662,18 @@ impl ContainerRuntime {
         if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
             return Ok(());
         }
-        stop_pid(record.pid, timeout)?;
+        // Docker signals the workload's PID 1. Rootless containers record the
+        // bubblewrap launcher PID; the workload is its deepest descendant in
+        // the host PID namespace. Signaling the launcher instead would kill
+        // the boundary while a TERM-trapping workload never sees the signal.
+        let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
+        stop_pid(workload_pid, timeout)?;
+        if workload_pid != record.pid {
+            let launcher = nix::unistd::Pid::from_raw(record.pid as i32);
+            if crate::process_lifecycle::probe_pid(record.pid).is_ok() {
+                let _ = nix::sys::signal::kill(launcher, nix::sys::signal::Signal::SIGKILL);
+            }
+        }
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status(proof, intent, id, "running", "stopped")?;
@@ -3710,7 +3721,17 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         if let Some(signal) = signal {
-            signal_pid(record.pid, signal)?;
+            // Deliver to the workload's PID 1 (deepest descendant for the
+            // rootless bubblewrap boundary), matching Docker's kill target.
+            let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
+            signal_pid(workload_pid, signal)?;
+            if workload_pid != record.pid
+                && signal == nix::sys::signal::Signal::SIGKILL
+                && crate::process_lifecycle::probe_pid(record.pid).is_ok()
+            {
+                let _ =
+                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(record.pid as i32), signal);
+            }
         } else {
             // Docker's signal 0 is an existence probe. It must not publish a
             // killed state or trigger cleanup side effects.

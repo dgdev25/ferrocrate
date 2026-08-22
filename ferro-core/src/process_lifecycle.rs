@@ -286,3 +286,38 @@ mod tests {
         probe_pid(proc.pid()).expect("live process probe");
     }
 }
+
+/// Parse the parent PID from a `/proc/<pid>/stat` line. The comm field may
+/// contain spaces and parentheses, so fields are read after the last `)`.
+fn ppid_from_stat(stat: &str) -> Option<u32> {
+    let after = stat.rsplit(')').next()?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next()?;
+    fields.next().and_then(|ppid| ppid.parse::<u32>().ok())
+}
+
+/// The workload's PID 1 for signal delivery. Rootless containers record the
+/// bubblewrap launcher PID; the container's PID 1 is the launcher's direct
+/// child in the host PID namespace (deeper descendants are the workload's
+/// own children and must not be the signal target). Rootful containers exec
+/// the workload directly, so the recorded PID is already PID 1 and has no
+/// launcher child.
+pub fn container_pid1_for_signal(root: u32) -> u32 {
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{name}/stat")) else {
+                continue;
+            };
+            if ppid_from_stat(&stat) == Some(root) {
+                if let Ok(pid) = name.parse::<u32>() {
+                    return pid;
+                }
+            }
+        }
+    }
+    root
+}

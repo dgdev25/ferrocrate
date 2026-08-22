@@ -527,6 +527,86 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
     );
 }
 
+/// Requires a delegated user cgroup (cpu/memory controllers enabled below
+/// the caller): run the corpus under
+/// `scripts/run-rootless-delegated.sh` or an equivalent systemd user scope.
+/// Outside such a scope the run fails closed with the controller-availability
+/// diagnostic, which is the documented rootless boundary.
+/// Requires a delegated user cgroup (controllers enabled), like every
+/// rootless resource-limit fixture: run under
+/// `scripts/run-rootless-delegated.sh` or
+/// `systemd-run --user --scope -p Delegate=yes`.
+#[test]
+fn rootless_compose_applies_deploy_resource_limits() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+    // Rootless cgroup controllers must be enabled in the caller's delegated
+    // subtree; outside a delegated scope the run fails closed with a
+    // controller-unavailable error (documented boundary, not a fixture pass).
+    let delegated = std::fs::read_to_string(
+        "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/cgroup.subtree_control",
+    )
+    .unwrap_or_default();
+    if !delegated.contains("memory") || !delegated.contains("cpu") {
+        eprintln!("SKIP: requires a delegated user cgroup with cpu+memory controllers");
+        return;
+    }
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    fs::write(
+        project.join("compose.yml"),
+        compose_fixture(
+            "services:\n  limited:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 30\"]\n    network_mode: none\n    deploy:\n      resources:\n        limits:\n          memory: 64M\n          cpus: \"0.50\"\n",
+        ),
+    )
+    .expect("compose file");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+
+    let up = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "up", "--detach"])
+        .output()
+        .expect("compose up");
+    assert!(
+        up.status.success(),
+        "compose up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+
+    let inspect = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .args(["inspect", "--format", "json", "limited"])
+        .output()
+        .expect("inspect limited");
+    let payload = String::from_utf8_lossy(&inspect.stdout).to_string();
+    let memory_seen = payload.contains("67108864") || payload.contains("64M");
+    assert!(
+        memory_seen,
+        "memory limit (64M) missing from inspect payload: {payload}"
+    );
+
+    let down = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "down"])
+        .output()
+        .expect("compose down");
+    assert!(down.status.success(), "compose down failed");
+}
+
 #[test]
 fn rootless_named_volume_receives_image_content_on_first_use() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {

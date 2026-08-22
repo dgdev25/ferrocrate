@@ -10935,6 +10935,31 @@ fn resolve_compose_network_mode(
     Ok(format!("container:{netns}"))
 }
 
+/// `deploy.resources.limits.memory` in bytes, parsed from Compose size
+/// strings (`512M`, `1g`, `64k`).
+#[cfg(target_os = "linux")]
+fn compose_memory_limit(service: &ComposeService) -> Option<u64> {
+    service
+        .deploy
+        .as_ref()
+        .and_then(|deploy| deploy.resources.as_ref())
+        .and_then(|resources| resources.limits.as_ref())
+        .and_then(|limits| limits.memory.as_deref())
+        .and_then(ferro_compose::parse_byte_size)
+}
+
+/// `deploy.resources.limits.cpus` as a quota/period pair.
+#[cfg(target_os = "linux")]
+fn compose_cpu_quota(service: &ComposeService) -> Option<(u64, u64)> {
+    service
+        .deploy
+        .as_ref()
+        .and_then(|deploy| deploy.resources.as_ref())
+        .and_then(|resources| resources.limits.as_ref())
+        .and_then(|limits| limits.cpus.as_deref())
+        .and_then(ferro_compose::parse_cpu_limit)
+}
+
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn run_compose_service(
@@ -11028,9 +11053,9 @@ fn run_compose_service(
             None,
             None,
             None,
-            None,
-            None,
-            None,
+            compose_memory_limit(service),
+            compose_cpu_quota(service).map(|(quota, _period)| quota),
+            compose_cpu_quota(service).map(|(_quota, period)| period),
             None,
             None,
             None,
@@ -11088,6 +11113,16 @@ fn compose_service_execution_digest(
     } else {
         cmd
     };
+    let (cpu_quota, cpu_period) = match compose_cpu_quota(service) {
+        Some((quota, period)) => (Some(quota), Some(period)),
+        None => (None, None),
+    };
+    let compose_limits = build_limits(
+        compose_memory_limit(service),
+        cpu_quota,
+        cpu_period,
+        None,
+    )?;
     let digest = runtime
         .normalized_run_execution_digest(
             store,
@@ -11099,7 +11134,7 @@ fn compose_service_execution_digest(
             None,
             &restart,
             &[],
-            None,
+            compose_limits.as_ref(),
             &mounts,
             &[],
             service.read_only,

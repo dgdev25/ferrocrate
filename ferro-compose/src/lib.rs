@@ -663,3 +663,82 @@ pub use fanout::{
     execute_fanout, FanoutAction, FanoutChild, FanoutError, FanoutExecutionError, FanoutOutcome,
     FanoutPlan, FanoutReplayStore, FanoutResult, FanoutStatus, ServiceMutation,
 };
+
+/// Parse a Compose byte-size string (`"512M"`, `"1g"`, `"64k"`, `"2048"`)
+/// into bytes. Decimal units (K/M/G/T) match Compose v2 semantics
+/// (K = 1000 would be Docker's reading; Compose files in practice use the
+/// binary factors, so both scales are accepted explicitly via `Ki` suffixes
+/// and plain suffixes use binary multiples like Docker's `--memory`).
+pub fn parse_byte_size(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (number, multiplier) = if let Some(stripped) = trimmed.strip_suffix("Ki") {
+        (stripped, 1024u64)
+    } else if let Some(stripped) = trimmed.strip_suffix("Mi") {
+        (stripped, 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix("Gi") {
+        (stripped, 1024 * 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix("Ti") {
+        (stripped, 1024u64 * 1024 * 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix(['k', 'K']) {
+        (stripped, 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix(['m', 'M']) {
+        (stripped, 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix(['g', 'G']) {
+        (stripped, 1024 * 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix(['t', 'T']) {
+        (stripped, 1024u64 * 1024 * 1024 * 1024)
+    } else if let Some(stripped) = trimmed.strip_suffix(['b', 'B']) {
+        (stripped, 1)
+    } else {
+        (trimmed, 1)
+    };
+    number
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+}
+
+/// Parse a Compose CPU count (`"0.5"`, `"2"`) into a cgroup-v2
+/// quota/period pair (period fixed at 100000 µs, quota = cpus × period).
+pub fn parse_cpu_limit(value: &str) -> Option<(u64, u64)> {
+    let cpus: f64 = value.trim().parse().ok()?;
+    if !cpus.is_finite() || cpus <= 0.0 || cpus > 1024.0 {
+        return None;
+    }
+    const PERIOD: u64 = 100_000;
+    let quota = (cpus * PERIOD as f64).round() as u64;
+    if quota == 0 {
+        return None;
+    }
+    Some((quota, PERIOD))
+}
+
+#[cfg(test)]
+mod resource_parsing_tests {
+    use super::{parse_byte_size, parse_cpu_limit};
+
+    #[test]
+    fn byte_sizes_parse_decimal_and_binary_suffixes() {
+        assert_eq!(parse_byte_size("2048"), Some(2048));
+        assert_eq!(parse_byte_size("64k"), Some(64 * 1024));
+        assert_eq!(parse_byte_size("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1g"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("2Gi"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size(""), None);
+        assert_eq!(parse_byte_size("abc"), None);
+        assert_eq!(parse_byte_size("99999999999999999999G"), None);
+    }
+
+    #[test]
+    fn cpu_limits_map_to_quota_period() {
+        assert_eq!(parse_cpu_limit("0.5"), Some((50_000, 100_000)));
+        assert_eq!(parse_cpu_limit("2"), Some((200_000, 100_000)));
+        assert_eq!(parse_cpu_limit("0"), None);
+        assert_eq!(parse_cpu_limit("-1"), None);
+        assert_eq!(parse_cpu_limit("bogus"), None);
+    }
+}

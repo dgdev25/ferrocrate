@@ -6742,12 +6742,23 @@ fn supervise_child(
                     .or_else(|| status.signal().map(|signal| 128 + signal))
             })
             .unwrap_or(-1);
-        let current_status =
-            match update_exit_after_mutation(&store, &container_id, child.id(), exit_code) {
-                Ok(Some(status)) => status,
-                Ok(None) => break,
-                Err(_) => "exited".to_string(),
-            };
+        let current_status = match update_exit_after_mutation(
+            &store,
+            &container_id,
+            child.id(),
+            exit_code,
+        ) {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                warn!(
+                    container = %container_id,
+                    pid = child.id(),
+                    "restart supervisor stopping: container record no longer matches the observed process"
+                );
+                break;
+            }
+            Err(_) => "exited".to_string(),
+        };
 
         let uptime_secs = container_start_time.elapsed().as_secs();
         if ai_enabled {
@@ -6800,6 +6811,10 @@ fn supervise_child(
             None
         };
         let Some(delay_secs) = adaptive_restart_delay(adaptive_decision) else {
+            warn!(
+                container = %container_id,
+                "restart supervisor stopping: policy or adaptive decision chose no restart"
+            );
             break;
         };
         thread::sleep(Duration::from_secs(delay_secs.max(1)));
@@ -6819,7 +6834,12 @@ fn supervise_child(
             readonly_rootfs,
         ) {
             Ok(cmd) => cmd,
-            Err(_) => {
+            Err(error) => {
+                warn!(
+                    container = %container_id,
+                    error = %error,
+                    "restart supervisor stopping: respawn command build failed"
+                );
                 if ai_enabled {
                     log_ai_restart_lifecycle(
                         &container_id,
@@ -6837,7 +6857,12 @@ fn supervise_child(
         let (pid, new_child, new_pidfd) =
             match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty) {
                 Ok(tuple) => tuple,
-                Err(_) => {
+                Err(error) => {
+                    warn!(
+                        container = %container_id,
+                        error = %error,
+                        "restart supervisor stopping: respawn spawn failed"
+                    );
                     if ai_enabled {
                         log_ai_restart_lifecycle(
                             &container_id,

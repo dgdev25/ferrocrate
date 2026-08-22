@@ -526,3 +526,173 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
         String::from_utf8_lossy(&down.stderr)
     );
 }
+
+#[test]
+fn rootless_compose_profiles_scale_restart_and_teardown() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    fs::write(
+        project.join("compose.yml"),
+        compose_fixture(
+            "services:\n  base:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 60\"]\n    network_mode: none\n  extra:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 60\"]\n    profiles: [\"feat\"]\n    network_mode: none\n  worker:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 60\"]\n    deploy:\n      replicas: 2\n    network_mode: none\n  resilient:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 60\"]\n    restart: \"always\"\n    network_mode: none\n  crasher:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"sleep 4; exit 3\"]\n    restart: \"always\"\n    network_mode: none\n",
+        ),
+    )
+    .expect("compose file");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+
+    let compose = |args: &[&str]| {
+        let mut command = Command::new(binary);
+        command
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .env("FERROCRATE_ROOTLESS_NETNS", "1")
+            .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+            .args(["compose", "--file", "compose.yml"])
+            .args(args);
+        let output = command.output().expect("compose command");
+        assert!(
+            output.status.success(),
+            "compose {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    // Container-level status via the CLI `ps` (compose ps lists declared
+    // services, not runtime state).
+    let cli_ps = || -> String {
+        let output = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .args(["ps", "--all"])
+            .output()
+            .expect("container ps");
+        assert!(
+            output.status.success(),
+            "container ps failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    // Without the profile: base, worker-1, worker-2, resilient start; the
+    // profile-gated service must not.
+    compose(&["up", "--detach"]);
+    let ps = cli_ps();
+    assert!(ps.contains("base"), "base service missing: {ps}");
+    assert!(ps.contains("worker-1"), "scale instance 1 missing: {ps}");
+    assert!(ps.contains("worker-2"), "scale instance 2 missing: {ps}");
+    assert!(ps.contains("resilient"), "resilient service missing: {ps}");
+    assert!(
+        !ps.contains("extra"),
+        "profile service must not start: {ps}"
+    );
+
+    compose(&["down"]);
+
+    // Restart policy: a crashing service must be relaunched by the restart
+    // supervisor while the attached `compose up` process owns the project.
+    // (One-shot detached up cannot supervise: the watcher thread dies with
+    // the CLI process, so the attached path is the supported restart mode.)
+    let mut attach_up = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args([
+            "compose",
+            "--file",
+            "compose.yml",
+            "up",
+            "--profile",
+            "feat",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("attached compose up");
+
+    // The crasher exits nonzero after 4s; the supervisor must relaunch it
+    // (restart: always). Observe a `running` status again within a bounded
+    // window after the first exit.
+    let mut crasher_restarted = false;
+    let mut saw_exited = false;
+    for _ in 0..300 {
+        let ps = cli_ps();
+        let line = ps
+            .lines()
+            .find(|line| line.contains("crasher"))
+            .unwrap_or_default();
+        if line.contains("exited") || line.contains("created") {
+            saw_exited = true;
+        }
+        if saw_exited && line.contains("running") {
+            crasher_restarted = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = attach_up.kill();
+    let _ = attach_up.wait();
+    assert!(
+        crasher_restarted,
+        "restart=always crasher was not relaunched after its first exit"
+    );
+
+    // Teardown from a separate process while nothing supervises the project.
+    let down_output = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "down"])
+        .output()
+        .expect("compose down");
+    assert!(
+        down_output.status.success(),
+        "compose down failed: {}",
+        String::from_utf8_lossy(&down_output.stderr)
+    );
+
+    compose(&["down"]);
+
+    // With the profile: the gated service starts alongside the others.
+    compose(&["up", "--detach", "--profile", "feat"]);
+    let ps_profile = cli_ps();
+    assert!(
+        ps_profile.contains("extra"),
+        "profile service missing: {ps_profile}"
+    );
+    compose(&["down"]);
+
+    // Teardown: no project container remains in a live state after down.
+    let ps_after = cli_ps();
+    for name in [
+        "base",
+        "worker-1",
+        "worker-2",
+        "resilient",
+        "extra",
+        "crasher",
+    ] {
+        let still_live = ps_after.lines().any(|line| {
+            line.contains(name) && (line.contains("running") || line.contains("paused"))
+        });
+        assert!(!still_live, "container {name} survived down: {ps_after}");
+    }
+}

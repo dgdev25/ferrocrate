@@ -863,9 +863,11 @@ pub enum ComposeCommands {
     Up {
         #[arg(long)]
         profile: Vec<String>,
-        /// Keep services running after the command returns (Docker-compatible;
-        /// Ferrocrate Compose is detached by design today).
-        #[arg(short = 'd', long, default_value_t = true)]
+        /// Return immediately and leave services running. Default is
+        /// Docker-compatible attached mode: the command stays alive while
+        /// project containers run, which is also the supported mode for
+        /// `restart:` supervision in CLI Compose.
+        #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
     },
     /// Watch a Compose project and reconcile drift.
@@ -10013,6 +10015,46 @@ fn remove_owned_compose_networks(
 }
 
 #[cfg(target_os = "linux")]
+/// Whether a Compose service's restart policy relaunches it after exit, for
+/// the attached-up liveness loop.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum ComposeRestartEligibility {
+    Always,
+    OnFailure,
+    No,
+}
+
+/// Map every service instance name (including replica suffixes) to its
+/// restart eligibility.
+#[cfg(target_os = "linux")]
+fn compose_restart_eligible_instances(
+    services: &HashMap<String, ferro_compose::Service>,
+) -> HashMap<String, ComposeRestartEligibility> {
+    let mut out = HashMap::new();
+    for (name, service) in services {
+        let eligibility = match service.restart.as_deref() {
+            Some("always") | Some("unless-stopped") => ComposeRestartEligibility::Always,
+            Some("on-failure") => ComposeRestartEligibility::OnFailure,
+            _ => ComposeRestartEligibility::No,
+        };
+        let replicas = service
+            .deploy
+            .as_ref()
+            .and_then(|deploy| deploy.replicas)
+            .unwrap_or(1);
+        for index in 1..=replicas {
+            let instance = if replicas == 1 {
+                name.clone()
+            } else {
+                format!("{name}-{index}")
+            };
+            out.insert(instance, eligibility);
+        }
+    }
+    out
+}
+
 fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
@@ -10032,7 +10074,7 @@ fn handle_compose(
     let default_network =
         compose_default_network_name_with_declared(&project_dir, project.compose.name.as_deref())?;
     match command {
-        ComposeCommands::Up { profile, detach: _ } => {
+        ComposeCommands::Up { profile, detach } => {
             // Compose is a detached CLI operation: services must outlive the
             // short-lived `compose up` launcher just like Docker daemon
             // workloads. Without this lease override, the parent-death
@@ -10119,6 +10161,10 @@ fn handle_compose(
             )?;
             let mut failures = Vec::new();
             let mut rootless_network_leaders = HashMap::<String, u32>::new();
+            let prepared_names: Vec<String> = prepared
+                .iter()
+                .map(|prepared| prepared.instance.clone())
+                .collect();
             for prepared in prepared {
                 let service = project
                     .compose
@@ -10301,6 +10347,57 @@ fn handle_compose(
             }
             if !failures.is_empty() {
                 return Err(format!("compose partial result: {}", failures.join("; ")));
+            }
+            if !detach {
+                // Attached up keeps this process alive while project
+                // containers run, mirroring Docker's attached semantics. The
+                // in-process restart supervisor (restart: always/on-failure)
+                // only functions while its launching process lives, so an
+                // attached up is the supported restart mode for CLI Compose.
+                // A container between restarts shows a momentary `exited`
+                // status; restart-eligible services stay attached through it.
+                let restart_eligible =
+                    compose_restart_eligible_instances(&project.compose.services);
+                // A container record becomes queryable only after its launch
+                // mutation finalizes; do not treat not-yet-visible instances
+                // as finished.
+                let mut observed: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                loop {
+                    let records = runtime.list().map_err(|err| err.to_string())?;
+                    let any_active = records.iter().any(|record| {
+                        let Some(name) = record.name.as_deref() else {
+                            return false;
+                        };
+                        if !prepared_names.iter().any(|prepared| prepared == name) {
+                            return false;
+                        }
+                        observed.insert(name.to_string());
+                        let eligibility = restart_eligible.get(name);
+                        match record.status.as_str() {
+                            // `exited` between restarts: stay attached while
+                            // the policy will relaunch this instance.
+                            "exited" => match eligibility {
+                                Some(ComposeRestartEligibility::Always) => true,
+                                Some(ComposeRestartEligibility::OnFailure) => {
+                                    record.last_exit_code.is_some_and(|code| code != 0)
+                                }
+                                _ => false,
+                            },
+                            "stopped" | "killed" => false,
+                            // Any pre-terminal state (created/pending/running/
+                            // paused/…) keeps the attached up alive.
+                            _ => true,
+                        }
+                    });
+                    let pending_visibility = prepared_names
+                        .iter()
+                        .any(|name| !observed.contains(name));
+                    if !any_active && !pending_visibility {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
         }
         ComposeCommands::Watch { profile, interval } => {

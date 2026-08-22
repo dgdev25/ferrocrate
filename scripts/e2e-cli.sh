@@ -197,7 +197,7 @@ ${compose_network_mode}
 ${compose_network_mode}
 COMPOSE_EOF
 
-run "${BIN}" compose -f "${COMPOSE_FILE}" up
+run "${BIN}" compose -f "${COMPOSE_FILE}" up --detach
 run "${BIN}" compose -f "${COMPOSE_FILE}" down
 
 # 5) Docker socket compatibility (basic)

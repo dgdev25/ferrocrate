@@ -528,6 +528,143 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
 }
 
 #[test]
+fn rootless_named_volume_receives_image_content_on_first_use() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    let seed_dir = project.join("seed");
+    fs::create_dir_all(&seed_dir).expect("seed dir");
+    fs::write(seed_dir.join("seed.txt"), b"copy-up-payload\n").expect("seed file");
+    fs::write(
+        project.join("Dockerfile"),
+        format!("FROM {}\nCOPY seed/ /srv/data/\n", rootless_test_image()),
+    )
+    .expect("dockerfile");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+
+    let cli = |args: &[&str]| {
+        let output = Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .env("FERROCRATE_ROOTLESS_NETNS", "1")
+            .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+            .args(args)
+            .output()
+            .expect("cli command");
+        assert!(
+            output.status.success(),
+            "cli {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    cli(&[
+        "build",
+        "--dockerfile",
+        "Dockerfile",
+        "--tag",
+        "local/copyup:latest",
+    ]);
+    cli(&["volume", "create", "copyup-vol"]);
+
+    // First use: the empty volume receives the image's /srv/data content.
+    let cid = cli(&[
+        "run",
+        "--network",
+        "none",
+        "--name",
+        "copyup-first",
+        "-v",
+        "copyup-vol:/srv/data",
+        "local/copyup:latest",
+        "cat",
+        "/srv/data/seed.txt",
+    ])
+    .lines()
+    .find_map(|line| {
+        line.split_once("container_id=").map(|(_, rest)| {
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    })
+    .expect("container id");
+    let mut saw_payload = false;
+    for _ in 0..100 {
+        let logs = cli(&["logs", &cid]);
+        if logs.contains("copy-up-payload") {
+            saw_payload = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        saw_payload,
+        "first use must surface image content through the volume"
+    );
+    let seeded = fs::read_to_string(runtime.join("volumes/copyup-vol/seed.txt"))
+        .expect("volume received the image file");
+    assert_eq!(seeded, "copy-up-payload\n");
+    cli(&["stop", &cid]);
+    cli(&["rm", &cid]);
+
+    // Second use: existing volume data is never overwritten.
+    fs::write(runtime.join("volumes/copyup-vol/keep.txt"), b"kept\n").expect("keep file");
+    let cid = cli(&[
+        "run",
+        "--network",
+        "none",
+        "--name",
+        "copyup-second",
+        "-v",
+        "copyup-vol:/srv/data",
+        "local/copyup:latest",
+        "cat",
+        "/srv/data/keep.txt",
+    ])
+    .lines()
+    .find_map(|line| {
+        line.split_once("container_id=").map(|(_, rest)| {
+            rest.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+    })
+    .expect("second container id");
+    let mut saw_keep = false;
+    for _ in 0..100 {
+        let logs = cli(&["logs", &cid]);
+        if logs.contains("kept") {
+            saw_keep = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(saw_keep, "existing volume data must stay visible");
+    // The original image file is still there too (not truncated).
+    assert!(runtime.join("volumes/copyup-vol/seed.txt").exists());
+    cli(&["stop", &cid]);
+    cli(&["rm", &cid]);
+    cli(&["volume", "rm", "copyup-vol"]);
+}
+
+#[test]
 fn rootless_compose_profiles_scale_restart_and_teardown() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
         return;

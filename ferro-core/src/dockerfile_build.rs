@@ -5401,13 +5401,32 @@ fn copy_from_context(
                         .unwrap_or_else(|| "src".to_string()),
                 )
             };
-            let dest = if spec.parents {
+            // Docker semantics: a source directory with a trailing slash
+            // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
+            // /out/), while a bare directory name is copied under its name.
+            let copy_contents = src.ends_with('/') && source.is_dir();
+            let dest = if copy_contents {
+                dest_root.clone()
+            } else if spec.parents {
                 dest_root.join(src.trim_start_matches('/'))
             } else if multiple {
                 dest_root.join(source_name)
             } else {
                 dest_root.clone()
             };
+            if copy_contents {
+                for entry in fs::read_dir(&source)? {
+                    let entry = entry?;
+                    copy_path_recursive_mode_with_excludes(
+                        &entry.path(),
+                        &dest_root.join(entry.file_name()),
+                        spec.chmod,
+                        &spec.excludes,
+                        Path::new(""),
+                    )?;
+                }
+                continue;
+            }
             let archive_dest = if spec.extract_archives {
                 &dest_root
             } else {

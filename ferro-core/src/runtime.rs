@@ -2870,6 +2870,14 @@ impl ContainerRuntime {
 
         let mut bind_plans = Vec::with_capacity(mounts.len());
         for mount in mounts {
+            // Docker-compatible first-use copy-up: an empty named volume over
+            // image content receives that content before mounting.
+            crate::mounts::volume_copy_up_if_empty(
+                &self.runtime_dir.join("volumes"),
+                mount,
+                &rootfs_dir,
+            )
+            .map_err(RuntimeError::InvalidState)?;
             let source_is_dir = fs::metadata(&mount.source)?.is_dir();
             let _target =
                 open_mount_target_beneath_for_source(&rootfs_dir, &mount.target, source_is_dir)?;

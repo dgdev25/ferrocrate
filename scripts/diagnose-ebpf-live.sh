@@ -4,7 +4,8 @@
 # (raw privileged diagnostics are never committed).
 set -euo pipefail
 
-cd /data/dev/ferrocrate/.worktrees/fcnet103-grok
+script_dir="$(cd "$(dirname -- "$0")" && pwd)"
+cd "$script_dir/.."
 
 command -v setsid >/dev/null 2>&1 || {
     echo "live eBPF diagnostics require setsid for process-group cleanup" >&2

@@ -22138,6 +22138,16 @@ volumes:
     }
 
     #[test]
+    fn filesystem_available_bytes_reports_a_real_filesystem() {
+        let available = super::filesystem_available_bytes(std::path::Path::new("/"));
+        assert!(available.is_some(), "statvfs on / must succeed");
+        assert!(
+            available.unwrap() > 0,
+            "root filesystem reports zero free bytes"
+        );
+    }
+
+    #[test]
     fn docker_log_time_bounds_accept_zero_and_reject_malformed_values() {
         assert_eq!(parse_docker_log_time_bound("0", "since").unwrap(), 0);
         assert_eq!(

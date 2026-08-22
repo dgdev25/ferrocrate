@@ -87,7 +87,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -6491,25 +6491,61 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
         Ok(file) => file,
         Err(_) => return,
     };
-    let mut reader = io::BufReader::new(pipe);
+    let mut reader = pipe;
     let mut offset: u64 = log.stream_position().unwrap_or(0);
-    let mut line: Vec<u8> = Vec::new();
+    // Bound the pending "line" so a workload emitting newline-free output
+    // cannot grow the copier's memory without limit: past the cap the pending
+    // bytes are journaled as a synthetic line boundary.
+    const MAX_LINE_BYTES: usize = 1024 * 1024;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buffer = [0_u8; 8192];
+
+    fn flush(log: &mut fs::File, journal: &mut fs::File, offset: &mut u64, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        if log.write_all(bytes).is_err() {
+            return false;
+        }
+        let _ = writeln!(journal, "{offset} {nanos}");
+        *offset += bytes.len() as u64;
+        true
+    }
+
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
+        match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
-            Ok(count) => {
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0);
-                if log.write_all(&line[..count]).is_err() {
-                    break;
+            Ok(read_bytes) => {
+                let mut start = 0_usize;
+                while start < read_bytes {
+                    let newline = buffer[start..read_bytes]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map(|index| start + index);
+                    let end = match newline {
+                        Some(index) => index + 1,
+                        None => read_bytes,
+                    };
+                    pending.extend_from_slice(&buffer[start..end]);
+                    if newline.is_some() || pending.len() >= MAX_LINE_BYTES {
+                        if !flush(log, &mut journal, &mut offset, &pending) {
+                            let _ = journal.sync_all();
+                            return;
+                        }
+                        pending.clear();
+                    }
+                    start = end;
                 }
-                let _ = writeln!(journal, "{offset} {nanos}");
-                offset += count as u64;
             }
         }
+    }
+    if !flush(log, &mut journal, &mut offset, &pending) {
+        let _ = journal.sync_all();
+        return;
     }
     let _ = journal.sync_all();
 }
@@ -6528,7 +6564,11 @@ fn timestamped_lines_from(log_path: &Path) -> Vec<(Option<u128>, Vec<u8>)> {
         let mut parts = entry.split(' ');
         if let (Some(offset), Some(nanos)) = (parts.next(), parts.next()) {
             if let (Ok(offset), Ok(nanos)) = (offset.parse::<u64>(), nanos.parse::<u128>()) {
-                recorded.insert(offset, nanos);
+                // A malformed or stale record past end-of-file cannot
+                // fabricate timestamps for bytes that do not exist.
+                if (offset as usize) < raw.len() {
+                    recorded.insert(offset, nanos);
+                }
             }
         }
     }
@@ -12285,8 +12325,9 @@ fn run_resource_monitor(
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_restart_delay, associated_network_name, immutable_image_manifest_reference,
-        immutable_image_reference, validate_archive_target, BindMount, ContainerRuntime,
+        adaptive_restart_delay, associated_network_name, copy_line_journaled,
+        immutable_image_manifest_reference, immutable_image_reference, log_journal_path,
+        timestamped_lines_from, validate_archive_target, BindMount, ContainerRuntime,
         KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
         NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
@@ -12843,6 +12884,57 @@ mod tests {
 
         let listed = runtime.list().expect("list");
         assert!(listed.iter().any(|c| c.id == record.id));
+    }
+
+    #[test]
+    fn journaled_copier_bounds_memory_and_resolves_timestamps() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("stdout.log");
+        let journal_path = log_journal_path(&log_path);
+        {
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .expect("log");
+            // 2.5 MiB with a single trailing newline: the copier must journal
+            // synthetic boundaries every MiB instead of buffering it all.
+            let mut giant = vec![b'x'; 3 * 1024 * 1024];
+            giant.push(b'\n');
+            let mut pipe = giant.as_slice();
+            copy_line_journaled(&mut pipe, &mut log, &journal_path);
+        }
+        let raw = std::fs::read(&log_path).expect("raw log");
+        assert_eq!(raw.len(), 3 * 1024 * 1024 + 1);
+        // The writer journals synthetic boundaries every MiB (memory bound);
+        // the reader still sees one line because there is one newline, and its
+        // start offset carries a recorded timestamp.
+        let journal = std::fs::read_to_string(log_journal_path(&log_path)).expect("journal");
+        assert_eq!(
+            journal.lines().count(),
+            4,
+            "3x1MiB synthetic chunks + final newline"
+        );
+        let lines = timestamped_lines_from(&log_path);
+        assert_eq!(lines.len(), 1, "one newline means one reader line");
+        assert_eq!(lines[0].0, Some(lines[0].0.unwrap_or(0)));
+        assert_eq!(lines[0].1.len(), 3 * 1024 * 1024 + 1);
+    }
+
+    #[test]
+    fn timestamped_lines_ignore_journal_records_past_end_of_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("stdout.log");
+        std::fs::write(&log_path, b"one\ntwo\n").expect("log");
+        std::fs::write(log_journal_path(&log_path), b"0 100\n9999 200\n4 300\n").expect("journal");
+        let lines = timestamped_lines_from(&log_path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, Some(100), "valid offset kept: {lines:?}");
+        assert_eq!(
+            lines[1].0,
+            Some(300),
+            "offset 4 kept, 9999 ignored: {lines:?}"
+        );
     }
 
     #[test]

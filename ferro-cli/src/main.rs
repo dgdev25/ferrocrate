@@ -1670,6 +1670,144 @@ fn doctor_guest_ssh_diagnose(
     Err(format!("ssh failed: {stderr}"))
 }
 
+/// Read-only local-state integrity check: orphaned directories (on disk
+/// without a store record), ghost records (in the store without data), and
+/// runtime-filesystem headroom. Returns `None` only when the runtime state
+/// cannot be opened at all; that failure is reported as a failing check.
+#[cfg(target_os = "linux")]
+fn doctor_state_store_check() -> Option<DoctorCheck> {
+    let runtime = runtime_dir();
+    let mut problems: Vec<String> = Vec::new();
+
+    let volume_store =
+        match ferro_core::volume_store::LocalVolumeStore::open(runtime.join("volumes")) {
+            Ok(store) => store,
+            Err(error) => {
+                return Some(DoctorCheck {
+                    id: "state_store".to_string(),
+                    ok: false,
+                    message: format!(
+                        "volume store at {} cannot be opened: {error}",
+                        runtime.join("volumes").display()
+                    ),
+                    hint: Some(
+                        "check runtime-dir ownership and disk health; state is never mutated by doctor"
+                            .to_string(),
+                    ),
+                    remediated: false,
+                    action: None,
+                });
+            }
+        };
+    let records = volume_store.list().unwrap_or_default();
+    let recorded_names: Vec<String> = records.iter().map(|record| record.name.clone()).collect();
+    let ghost_volumes = records
+        .iter()
+        .filter(|record| !Path::new(&record.path).exists())
+        .count();
+    if ghost_volumes > 0 {
+        problems.push(format!("{ghost_volumes} volume record(s) without data directories"));
+    }
+    if let Ok(entries) = std::fs::read_dir(runtime.join("volumes")) {
+        let orphan_volumes = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                !recorded_names.contains(&name)
+            })
+            .count();
+        if orphan_volumes > 0 {
+            problems.push(format!(
+                "{orphan_volumes} volume data directory(ies) without store records"
+            ));
+        }
+    }
+
+    let container_records = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime.join("containers"),
+    )
+    .and_then(|store| store.list());
+    match container_records {
+        Ok(records) => {
+            let ids: Vec<String> = records.into_iter().map(|record| record.id).collect();
+            if let Ok(entries) = std::fs::read_dir(runtime.join("containers")) {
+                let orphan_containers = entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.path().is_dir())
+                    .filter(|entry| {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        !ids.contains(&name)
+                    })
+                    .count();
+                if orphan_containers > 0 {
+                    problems.push(format!(
+                        "{orphan_containers} container directory(ies) without store records"
+                    ));
+                }
+            }
+        }
+        Err(error) => problems.push(format!("container store cannot be opened: {error}")),
+    }
+
+    // Disk headroom on the runtime filesystem. Below the floor, image pulls,
+    // volume writes, and journal appends start failing without guidance.
+    let mut headroom_note = String::new();
+    if let Some(available_bytes) = filesystem_available_bytes(&runtime) {
+        const HEADROOM_FLOOR: u64 = 512 * 1024 * 1024;
+        if available_bytes < HEADROOM_FLOOR {
+            problems.push(format!(
+                "runtime filesystem has only {} MiB free",
+                available_bytes / (1024 * 1024)
+            ));
+            headroom_note = format!(
+                "; free space is below the {} MiB floor",
+                HEADROOM_FLOOR / (1024 * 1024)
+            );
+        }
+    }
+
+    let ok = problems.is_empty();
+    Some(DoctorCheck {
+        id: "state_store".to_string(),
+        ok,
+        message: if ok {
+            format!(
+                "local state consistent: {} volume(s), no orphaned directories{}",
+                recorded_names.len(),
+                if headroom_note.is_empty() {
+                    String::new()
+                } else {
+                    headroom_note.clone()
+                }
+            )
+        } else {
+            problems.join("; ")
+        },
+        hint: (!ok).then(|| {
+            "orphaned directories are not deleted automatically: inspect them, then remove with `volume rm` after recreating a record or delete the directory manually; free space with `image-prune`, `container-prune`, and `volume prune`".to_string()
+        }),
+        remediated: false,
+        action: None,
+    })
+}
+
+/// Available bytes on the filesystem containing `path`, via `statvfs`.
+#[cfg(target_os = "linux")]
+fn filesystem_available_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: nix::libc::statvfs = unsafe { std::mem::zeroed() };
+    let status = unsafe { nix::libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if status != 0 {
+        return None;
+    }
+    if stat.f_bavail == 0 && stat.f_blocks == 0 {
+        return None;
+    }
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2041,6 +2179,13 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
+
+            // Bounded local-state integrity: orphaned volume/container
+            // directories without store records, ghost records without data,
+            // and runtime-filesystem headroom. Read-only; never mutates state.
+            if let Some(state_check) = doctor_state_store_check() {
+                checks.push(state_check);
+            }
         }
     }
 
@@ -11720,6 +11865,8 @@ fn parse_docker_log_time_bound(value: &str, name: &str) -> Result<u64, String> {
 /// days-from-civil algorithm (Hinnant); no datetime crate is pulled in.
 #[cfg(target_os = "linux")]
 fn rfc3339_nanos(nanos: u128) -> String {
+    // Clamp before the i64 cast so an out-of-range value cannot wrap.
+    let nanos = nanos.min(i64::MAX as u128);
     let seconds = (nanos / 1_000_000_000) as i64;
     let subsec = (nanos % 1_000_000_000) as u64;
     let days = seconds.div_euclid(86_400);

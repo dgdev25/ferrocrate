@@ -198,6 +198,68 @@ else
   missing=1
 fi
 
+# Kernel version report: cgroup-v2 delegation, SO_PEERPIDFD (5.8+), and the
+# userns sysctls used above assume a modern kernel. Below the floor the report
+# is informational (individual probes above already fail closed), never an
+# independent gate.
+kernel_version="$(uname -r 2>/dev/null || echo unknown)"
+kernel_major_minor="$(printf '%s' "$kernel_version" | awk -F. '{print $1"."$2}')"
+kernel_floor_pass=1
+if [[ "$kernel_major_minor" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+  kmajor="${BASH_REMATCH[1]}"
+  kminor="${BASH_REMATCH[2]}"
+  if (( kmajor < 5 )) || { (( kmajor == 5 )) && (( kminor < 11 )); }; then
+    kernel_floor_pass=0
+  fi
+  echo "rootless.kernel=pass version=${kernel_version}"
+  (( kernel_floor_pass )) || echo "rootless.kernel_note=below 5.11; cgroup-v2 delegation and SO_PEERPIDFD probes above are authoritative"
+else
+  echo "rootless.kernel=unknown version=${kernel_version}"
+fi
+
+# AppArmor state: an enabled module with the unprivileged-userns restriction
+# denies bridge-mode rootless workloads unless a profile admits bubblewrap.
+# Report the module, the sysctl, and (when restricted) whether an apparmor
+# parser is available to install a host profile.
+apparmor_enabled="no"
+if [[ -r /sys/module/apparmor/parameters/enabled ]]; then
+  apparmor_enabled="$(cat /sys/module/apparmor/parameters/enabled | tr -d '[:space:]')"
+  [[ "$apparmor_enabled" == "Y" ]] && apparmor_enabled="yes" || apparmor_enabled="no"
+fi
+if [[ "$apparmor_enabled" == "yes" ]]; then
+  echo "rootless.apparmor=enabled"
+else
+  echo "rootless.apparmor=disabled-or-unavailable"
+fi
+if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+  userns_restricted="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+  echo "rootless.apparmor_restrict_unprivileged_userns=${userns_restricted}"
+  if [[ "$userns_restricted" == "1" ]]; then
+    if command -v apparmor_parser >/dev/null 2>&1; then
+      echo "rootless.apparmor_note=unprivileged userns restricted; apparmor_parser available to install a bubblewrap profile"
+    else
+      echo "rootless.apparmor_note=unprivileged userns restricted and apparmor_parser unavailable; bridge-mode rootless will fail closed on this host"
+    fi
+  fi
+fi
+
+# Rootless socket state: report every probed candidate with its disposition so
+# a stale or missing socket is visible before a client command hangs.
+socket_reported=0
+for socket_candidate in \
+  "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate/ferro.sock" \
+  "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ferrocrate/docker.sock" \
+  "$HOME/.ferrocrate/run/ferro.sock"; do
+  if [[ -S "$socket_candidate" ]]; then
+    echo "rootless.socket=found path=${socket_candidate}"
+    socket_reported=1
+  fi
+done
+if (( ! socket_reported )); then
+  echo "rootless.socket=none"
+  echo "rootless.socket_note=no rootless daemon socket found; start one or export FERROCRATE_RUNTIME_DIR"
+fi
+
 if [[ "$strict" == 1 && "$missing" != 0 ]]; then
   echo "rootless prerequisites are incomplete (strict mode)" >&2
   echo "rootless remediation: enable unprivileged user+mount namespaces, configure /etc/subuid and /etc/subgid, install newuidmap/newgidmap, slirp4netns, and bubblewrap, and provide a writable XDG_RUNTIME_DIR" >&2

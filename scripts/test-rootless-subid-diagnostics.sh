@@ -116,3 +116,10 @@ bash "$repo_root/scripts/verify-rootless.sh" >"$reason_output" 2>&1
 grep -q '^rootless.userns_mount=missing$' "$reason_output"
 grep -q '^rootless.userns_mount_reason=unshare: unshare failed: Operation not permitted$' "$reason_output"
 echo "rootless namespace failure reason regression passed"
+
+# The workstation doctor must report kernel, AppArmor, and socket state
+# before any mutation, independent of pass/fail prerequisites.
+grep -Eq '^rootless.kernel=(pass|unknown) version=' "$output"
+grep -Eq '^rootless.apparmor=(enabled|disabled-or-unavailable)$' "$output"
+grep -Eq '^rootless.socket=(found path=|none$)' "$output"
+echo "rootless kernel/apparmor/socket diagnostics regression passed"

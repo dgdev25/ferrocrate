@@ -163,6 +163,7 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Create and start a container from an image reference.
     Run {
+        /// Image reference (`registry/repo:tag`, `repo:tag`, digest, or local tag).
         image: String,
         #[arg(long)]
         name: Option<String>,
@@ -511,6 +512,7 @@ pub enum Commands {
     },
     /// Print shell completion scripts.
     Completion {
+        /// Target shell (`bash`, `zsh`, or `fish`).
         shell: String,
     },
     #[cfg(target_os = "linux")]
@@ -9330,6 +9332,7 @@ fn execute_image_pull(
         return Ok(());
     }
     let runtime_dir = runtime_dir();
+    println!("pull: fetching image={}", plan.canonical_reference());
     ferro_core::image_fetch::pull_image_with_store_authorized(&runtime_dir, &plan, store, permit)
         .map_err(|error| error.to_string())?;
     println!("pull: image={}", plan.canonical_reference());

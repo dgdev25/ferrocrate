@@ -7,6 +7,10 @@ networking, and optional AI-assisted restart/resource signals.
 
 ## Current support scope
 
+The authoritative feature matrix is
+[`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md); every support claim there
+links dated evidence. The summary below does not replace it.
+
 The strongest qualified baseline is rootful Ubuntu 26.04 on x86_64 with the
 tested kernel/tooling recorded in `docs/evidence/host-matrix/`. Rootful bridge,
 IPv4/IPv6 lifecycle, DNS, firewall backends, MTU, WireGuard, teardown, recovery,
@@ -16,10 +20,14 @@ evidence.
 Rootless image pull/run, slirp networking, cgroup discovery, volume-store
 operations, and the opt-in Compose/CRI fixtures are qualified on the current
 Ubuntu host. Rootless bridge provisioning on hosts that deny nested mount
-namespaces, broader resource-limit enforcement, other distributions, and live
-eBPF published-port checksum delivery remain qualification gates.
-Published-port eBPF is fail-closed by default; use iptables or nftables for the
-supported path.
+namespaces, broader resource-limit enforcement, and other distributions remain
+qualification gates.
+
+Live eBPF published ports now pass the privileged host-to-container handshake
+end to end, but remain experimental and opt-in
+(`FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1` plus two documented host sysctls);
+iptables and nftables stay the supported path
+([evidence](docs/evidence/verification/2026-08-22-ebpf-published-port-reverse-path-resolved.md)).
 
 ## Quick start
 

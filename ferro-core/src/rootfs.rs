@@ -48,7 +48,6 @@ pub fn construct_rootfs_with_dedup(
     Ok(())
 }
 
-/// Apply a single tar layer to an existing rootfs directory.
 /// Enforce the Docker `noOverwriteDirNonDir=1` upload contract before any
 /// extraction happens: a directory entry must not replace an existing
 /// non-directory, and a non-directory entry must not replace an existing
@@ -92,6 +91,47 @@ pub fn check_archive_dir_non_dir_conflicts(
     Ok(())
 }
 
+/// Apply a container archive upload with Docker's default replace
+/// semantics: without `noOverwriteDirNonDir`, a directory entry replaces an
+/// existing non-directory and a non-directory entry replaces an existing
+/// directory, instead of failing with EEXIST. Removal is limited to the
+/// conflicting entry itself, only after the same path sanitization used by
+/// extraction, and never through a symlinked parent. Image-layer extraction
+/// (`apply_layer_tar`) keeps its stricter semantics unchanged.
+pub fn apply_container_archive_with_replace(
+    rootfs_dir: &Path,
+    layer_tar_path: &Path,
+) -> Result<(), RootfsError> {
+    let reader = open_decompressed_layer_reader(layer_tar_path)?;
+    let mut archive = Archive::new(reader);
+    for entry_result in archive.entries()? {
+        let entry = entry_result?;
+        let normalized = sanitize_archive_path(&entry.path()?)?;
+        if normalized.as_os_str().is_empty() {
+            continue;
+        }
+        let is_directory = entry.header().entry_type() == tar::EntryType::Directory;
+        let destination = rootfs_dir.join(&normalized);
+        let Ok(metadata) = fs::symlink_metadata(&destination) else {
+            continue;
+        };
+        if is_directory == metadata.is_dir() {
+            continue;
+        }
+        // A type change replaces the existing entry. Refuse to remove
+        // through a symlinked parent: the removal target must stay inside
+        // the rootfs just like the extraction that follows it.
+        ensure_no_symlink_components(rootfs_dir, &normalized)?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(&destination)?;
+        } else {
+            fs::remove_file(&destination)?;
+        }
+    }
+    apply_layer_tar(rootfs_dir, layer_tar_path)
+}
+
+/// Apply a single tar layer to an existing rootfs directory.
 pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), RootfsError> {
     let reader = open_decompressed_layer_reader(layer_tar_path)?;
     let mut archive = Archive::new(reader);
@@ -311,7 +351,10 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RootfsError> {
     Ok(())
 }
 
-pub(crate) fn ensure_no_symlink_components(rootfs_dir: &Path, rel_path: &Path) -> Result<(), RootfsError> {
+pub(crate) fn ensure_no_symlink_components(
+    rootfs_dir: &Path,
+    rel_path: &Path,
+) -> Result<(), RootfsError> {
     let mut current = rootfs_dir.to_path_buf();
     let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
     for component in parent.components() {
@@ -394,7 +437,9 @@ mod tests {
             header.set_entry_type(tar::EntryType::Directory);
             header.set_path("conflict").expect("dir path");
             header.set_cksum();
-            builder.append(&header, std::io::empty()).expect("append dir");
+            builder
+                .append(&header, std::io::empty())
+                .expect("append dir");
             builder.finish().expect("finish tar");
         }
         let error = super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
@@ -446,6 +491,70 @@ mod tests {
         let error = super::check_archive_dir_non_dir_conflicts(&rootfs, &layer)
             .expect_err("traversal must fail closed");
         assert!(error.to_string().contains("unsafe layer path"), "{error}");
+    }
+
+    #[test]
+    fn container_archive_replace_semantics_apply_both_directions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).expect("create rootfs");
+
+        let dir_tar = |name: &str, entry: &str| {
+            let path = temp.path().join(name);
+            let file = fs::File::create(&path).expect("create tar");
+            let mut builder = Builder::new(file);
+            let mut header = Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_path(entry).expect("dir path");
+            header.set_cksum();
+            builder
+                .append(&header, std::io::empty())
+                .expect("append dir");
+            builder.finish().expect("finish tar");
+            path
+        };
+        let file_tar = |name: &str, entry: &str| {
+            let path = temp.path().join(name);
+            create_tar(&path, &[(entry, b"payload".as_slice())]);
+            path
+        };
+
+        fs::write(rootfs.join("entry"), b"file").expect("seed file");
+        super::apply_container_archive_with_replace(&rootfs, &dir_tar("d1.tar", "entry"))
+            .expect("dir over file replaces");
+        assert!(
+            rootfs.join("entry").is_dir(),
+            "entry must become a directory"
+        );
+
+        super::apply_container_archive_with_replace(&rootfs, &file_tar("f1.tar", "entry"))
+            .expect("file over dir replaces");
+        assert!(rootfs.join("entry").is_file(), "entry must become a file");
+        assert_eq!(
+            fs::read(rootfs.join("entry")).expect("replaced file"),
+            b"payload"
+        );
+
+        fs::create_dir_all(rootfs.join("nested")).expect("seed nested dir");
+        fs::write(rootfs.join("nested/child"), b"child").expect("seed child");
+        super::apply_container_archive_with_replace(&rootfs, &file_tar("f2.tar", "nested"))
+            .expect("file over nested dir replaces");
+        assert!(rootfs.join("nested").is_file(), "nested must become a file");
+        assert!(!rootfs.join("nested/child").exists(), "child removed");
+
+        fs::create_dir_all(rootfs.join("real")).expect("seed real dir");
+        std::os::unix::fs::symlink("real", rootfs.join("link")).expect("seed symlink parent");
+        fs::write(rootfs.join("real/target"), b"keep").expect("seed target");
+        let layer = dir_tar("via-link.tar", "link/target");
+        let error = super::apply_container_archive_with_replace(&rootfs, &layer)
+            .expect_err("removal through a symlinked parent must fail closed");
+        assert!(error.to_string().contains("unsafe layer path"), "{error}");
+        assert_eq!(
+            fs::read(rootfs.join("real/target")).expect("target survives"),
+            b"keep"
+        );
     }
 
     #[test]

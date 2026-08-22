@@ -872,7 +872,9 @@ impl CreationRollback {
                         if self.namespace_identity.is_none() {
                             log::warn!("[rollback] network namespace identity is unavailable; refusing name-only deletion");
                         } else {
-                            log::warn!("[rollback] network namespace identity changed; refusing deletion");
+                            log::warn!(
+                                "[rollback] network namespace identity changed; refusing deletion"
+                            );
                         }
                         None
                     }
@@ -4289,8 +4291,14 @@ impl ContainerRuntime {
                 temp.as_file_mut().sync_all()?;
                 if no_overwrite_dir_non_dir {
                     crate::rootfs::check_archive_dir_non_dir_conflicts(&selected, temp.path())?;
+                    apply_layer_tar(&selected, temp.path())?;
+                } else {
+                    // Without the flag, Docker's default replace semantics
+                    // apply: a type-changing entry removes the conflicting
+                    // existing entry before extraction. Image-layer
+                    // extraction keeps its stricter behavior.
+                    crate::rootfs::apply_container_archive_with_replace(&selected, temp.path())?;
                 }
-                apply_layer_tar(&selected, temp.path())?;
                 Ok(())
             },
         )
@@ -15776,7 +15784,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .unwrap();
         if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {
-            let store = crate::sqlite_container_store::SqliteContainerStore::open(store_path).unwrap();
+            let store =
+                crate::sqlite_container_store::SqliteContainerStore::open(store_path).unwrap();
             let mut record =
                 ContainerRecord::authorization_candidate("launch-helper".into(), "image".into());
             record.pending_mutation = Some(MutationReservation {

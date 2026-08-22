@@ -1176,8 +1176,10 @@ fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
 
     let (status, response) = harness.request("POST", "/v1.45/containers/framed-logs/start");
     assert_eq!(status, 204, "framed-logs start response={response}");
-    let (status, response) =
-        harness.request("POST", "/v1.45/containers/framed-logs/wait?condition=not-running");
+    let (status, response) = harness.request(
+        "POST",
+        "/v1.45/containers/framed-logs/wait?condition=not-running",
+    );
     assert_eq!(status, 200, "framed-logs wait response={response}");
 
     // Poll until both log streams are durable; bounded like the TTY fixture.
@@ -1243,24 +1245,30 @@ fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
         "stderr payload missing: {decoded:?}"
     );
 
-    let (status, response) =
-        harness.request("GET", "/v1.45/containers/framed-logs/logs?stdout=0&stderr=0");
+    let (status, response) = harness.request(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=0&stderr=0",
+    );
     assert_eq!(status, 400, "both streams disabled must fail: {response}");
     let (status, response) =
         harness.request("GET", "/v1.45/containers/framed-logs/logs?timestamps=1");
     assert_eq!(status, 400, "timestamps must fail closed: {response}");
     assert!(response.contains("timestamps"), "body={response}");
-    let (status, response) =
-        harness.request("GET", "/v1.45/containers/framed-logs/logs?since=5");
+    let (status, response) = harness.request("GET", "/v1.45/containers/framed-logs/logs?since=5");
     assert_eq!(status, 400, "nonzero since must fail closed: {response}");
-    let (status, response) =
-        harness.request("GET", "/v1.45/containers/framed-logs/logs?since=not-a-number");
+    let (status, response) = harness.request(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?since=not-a-number",
+    );
     assert_eq!(status, 400, "malformed since must fail closed: {response}");
     let (status, response) = harness.request(
         "GET",
         "/v1.45/containers/framed-logs/logs?stdout=1&since=0&until=0&timestamps=0",
     );
-    assert_eq!(status, 200, "client-default no-op bounds must pass: {response}");
+    assert_eq!(
+        status, 200,
+        "client-default no-op bounds must pass: {response}"
+    );
 
     let (status, response) = harness.request("DELETE", "/v1.45/containers/framed-logs");
     assert_eq!(status, 204, "framed-logs cleanup response={response}");
@@ -1326,7 +1334,9 @@ fn docker_compat_put_archive_enforces_no_overwrite_dir_non_dir() {
         header.set_entry_type(tar::EntryType::Directory);
         header.set_path("conflict").expect("dir path");
         header.set_cksum();
-        builder.append(&header, std::io::empty()).expect("append dir");
+        builder
+            .append(&header, std::io::empty())
+            .expect("append dir");
         builder.finish().expect("finish dir tar");
     }
     let (status, body) = harness.request_bytes(
@@ -1356,7 +1366,9 @@ fn docker_compat_put_archive_enforces_no_overwrite_dir_non_dir() {
         header.set_entry_type(tar::EntryType::Directory);
         header.set_path("dir-target").expect("dir path");
         header.set_cksum();
-        builder.append(&header, std::io::empty()).expect("append dir");
+        builder
+            .append(&header, std::io::empty())
+            .expect("append dir");
         builder.finish().expect("finish dir tar");
     }
     let (status, body) = harness.request_bytes(
@@ -1425,6 +1437,112 @@ fn docker_compat_put_archive_enforces_no_overwrite_dir_non_dir() {
     assert_eq!(status, 204, "archive-conflict cleanup response={body}");
 }
 
+/// Without `noOverwriteDirNonDir`, Docker replaces a file with a directory
+/// (and vice versa) instead of returning EEXIST.
+#[test]
+fn docker_compat_put_archive_replaces_type_changing_entries() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/archive-replace:latest");
+    let create_body = r#"{"Image":"compat/archive-replace:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=archive-replace HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, body) = harness.request_raw(&create);
+    assert_eq!(status, 201, "archive-replace create response={body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("container id")
+        .to_string();
+    let (status, body) = harness.request("POST", "/v1.45/containers/archive-replace/start");
+    assert_eq!(status, 204, "archive-replace start response={body}");
+    let rootfs = harness
+        ._runtime_dir
+        .path()
+        .join("containers")
+        .join(&id)
+        .join("rootfs");
+
+    let mut file_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut file_tar);
+        let payload = b"seed";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("conflict").expect("file path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append file");
+        builder.finish().expect("finish file tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-replace/archive?path=%2F",
+        "application/x-tar",
+        &file_tar,
+    );
+    assert_eq!(status, 200, "seed put archive response={body}");
+    assert!(rootfs.join("conflict").is_file(), "seed file applies");
+
+    let mut dir_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut dir_tar);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_path("conflict").expect("dir path");
+        header.set_cksum();
+        builder
+            .append(&header, std::io::empty())
+            .expect("append dir");
+        builder.finish().expect("finish dir tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-replace/archive?path=%2F",
+        "application/x-tar",
+        &dir_tar,
+    );
+    assert_eq!(status, 200, "dir-over-file replace response={body}");
+    assert!(
+        rootfs.join("conflict").is_dir(),
+        "unflagged upload must replace the file with a directory"
+    );
+
+    let mut file_over_dir_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut file_over_dir_tar);
+        let payload = b"payload";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("conflict").expect("file path");
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &payload[..]).expect("append file");
+        builder.finish().expect("finish file tar");
+    }
+    let (status, body) = harness.request_bytes(
+        "PUT",
+        "/v1.45/containers/archive-replace/archive?path=%2F",
+        "application/x-tar",
+        &file_over_dir_tar,
+    );
+    assert_eq!(status, 200, "file-over-dir replace response={body}");
+    assert!(
+        rootfs.join("conflict").is_file(),
+        "unflagged upload must replace the directory with a file"
+    );
+    assert_eq!(
+        std::fs::read(rootfs.join("conflict")).expect("replaced file"),
+        b"payload"
+    );
+
+    let (status, body) = harness.request("DELETE", "/v1.45/containers/archive-replace");
+    assert_eq!(status, 204, "archive-replace cleanup response={body}");
+}
+
 /// Recognized Docker routes without a local implementation report an explicit
 /// 501 boundary instead of a generic unknown-route 404.
 #[test]
@@ -1442,8 +1560,7 @@ fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/attach/ws");
     assert_eq!(status, 501, "attach/ws response={body}");
     assert!(
-        body.contains("websocket attach is unsupported")
-            && body.contains("TCP hijack attach"),
+        body.contains("websocket attach is unsupported") && body.contains("TCP hijack attach"),
         "body={body}"
     );
 

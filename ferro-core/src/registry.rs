@@ -5,8 +5,8 @@ use reqwest::header::{
 };
 use reqwest::Certificate;
 use reqwest::Method;
-use std::fs::File;
-use std::io::{copy, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{copy, Read, Seek, Write};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -247,6 +247,11 @@ impl RegistryClient {
     }
 
     /// Pull a blob (layer/config) by digest and write to a file.
+    ///
+    /// A connection that dies mid-body must not restart the whole layer:
+    /// the download retries with a byte-range from the bytes already on
+    /// disk. Digest verification at the fetch boundary rejects any
+    /// mismatched resume.
     pub fn pull_blob_to_file(
         &self,
         image: &str,
@@ -256,25 +261,67 @@ impl RegistryClient {
     ) -> Result<(), RegistryError> {
         let image_ref = parse_image_reference(image)?;
         let url = blob_url(&image_ref, digest);
-        let mut response =
-            self.send_request_with_auth(Method::GET, &url, Vec::new(), None, auth)?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            return Err(RegistryError::HttpStatus {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(RegistryError::Io)?;
         }
         // Security: Use UUID-based temp file name to prevent symlink attacks
         let tmp_path = dest.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+        const MAX_RESUME_ATTEMPTS: usize = 3;
         let mut file = File::create(&tmp_path).map_err(RegistryError::Io)?;
-        copy(&mut response, &mut file).map_err(RegistryError::Io)?;
-        file.sync_all().map_err(RegistryError::Io)?;
+        let mut resume_attempts = 0;
+        loop {
+            let downloaded = file.metadata().map_err(RegistryError::Io)?.len();
+            let mut headers = Vec::new();
+            if downloaded > 0 {
+                let header =
+                    reqwest::header::HeaderValue::from_str(&format!("bytes={downloaded}-"))
+                        .map_err(|error| {
+                            RegistryError::Io(std::io::Error::other(format!(
+                                "invalid range header: {error}"
+                            )))
+                        })?;
+                headers.push((reqwest::header::RANGE, header));
+            }
+            let mut response =
+                self.send_request_with_auth(Method::GET, &url, headers, None, auth)?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().unwrap_or_default();
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(RegistryError::HttpStatus {
+                    status: status.as_u16(),
+                    body,
+                });
+            }
+            if status.as_u16() == 206 {
+                // Partial content resumes the bytes already written.
+                let mut append_file = OpenOptions::new()
+                    .append(true)
+                    .open(&tmp_path)
+                    .map_err(RegistryError::Io)?;
+                copy(&mut response, &mut append_file).map_err(RegistryError::Io)?;
+                append_file.sync_all().map_err(RegistryError::Io)?;
+                break;
+            }
+            // A full 200 response means the server ignored the range (or this
+            // is the first attempt): replace any partial bytes.
+            file.set_len(0).map_err(RegistryError::Io)?;
+            file.seek(std::io::SeekFrom::Start(0))
+                .map_err(RegistryError::Io)?;
+            match copy(&mut response, &mut file) {
+                Ok(_) => {
+                    file.sync_all().map_err(RegistryError::Io)?;
+                    break;
+                }
+                Err(error) => {
+                    resume_attempts += 1;
+                    if resume_attempts >= MAX_RESUME_ATTEMPTS {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        return Err(RegistryError::Io(error));
+                    }
+                }
+            }
+        }
         std::fs::rename(&tmp_path, dest).map_err(RegistryError::Io)?;
         Ok(())
     }
@@ -1100,6 +1147,108 @@ mod tests {
             .pull_manifest(&image, None)
             .expect("manifest should be pulled");
         assert_eq!(manifest.schema_version, 2);
+    }
+
+    /// A registry that drops the connection mid-body must not force a full
+    /// layer restart: the client retries with a byte-range and appends. The
+    /// fixture server is a raw TCP listener so the first response can be cut
+    /// after a partial body, which httptest cannot express.
+    #[test]
+    fn blob_pull_resumes_after_midstream_disconnect() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, rx) = mpsc::channel::<()>();
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let server_payload = payload.clone();
+        const CRLF: &str = "\r\n";
+        let handle = std::thread::spawn(move || {
+            // Request 1: serve half the body, then close abruptly.
+            let (mut stream, _) = listener.accept().expect("accept 1");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&server_payload[..server_payload.len() / 2]);
+            drop(stream);
+            tx.send(()).expect("notify first half served");
+
+            // Request 2+: serve the requested range suffix completely.
+            let (mut stream, _) = listener.accept().expect("accept 2");
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request 2");
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&format!("range: bytes={}-", server_payload.len() / 2)),
+                "resume request must carry the byte range: {request}"
+            );
+            let suffix = &server_payload[server_payload.len() / 2..];
+            let head = format!(
+                "HTTP/1.1 206 Partial Content{}Content-Length: {}{}Content-Range: bytes {}-{}/{}{}Connection: close{}{}",
+                CRLF,
+                suffix.len(),
+                CRLF,
+                server_payload.len() / 2,
+                server_payload.len() - 1,
+                server_payload.len(),
+                CRLF,
+                CRLF,
+                CRLF,
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(suffix);
+            drop(stream);
+        });
+
+        let client = RegistryClient::new().expect("client");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dest = temp.path().join("layer.tar");
+        let image = format!("{addr}/resume/app:latest");
+        let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        client
+            .pull_blob_to_file(&image, digest, None, &dest)
+            .expect("resumable pull");
+        rx.recv().expect("server finished first half");
+        handle.join().expect("server thread");
+        let written = std::fs::read(&dest).expect("blob file");
+        assert_eq!(written, payload, "resumed blob must be byte-complete");
+    }
+
+    /// Registries redirect blob/manifest requests to CDNs; the client must
+    /// follow cross-host redirects for unauthenticated fetches.
+    #[test]
+    fn manifest_pull_follows_redirect() {
+        let origin = Server::run();
+        let cdn = Server::run();
+        let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},"layers":[]}"#;
+
+        origin.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/v2/redirect/app/manifests/latest",
+            ))
+            .respond_with(
+                status_code(307)
+                    .append_header("Location", format!("http://{}/cdn/manifest", cdn.addr())),
+            ),
+        );
+        cdn.expect(
+            Expectation::matching(request::method_path("GET", "/cdn/manifest"))
+                .respond_with(status_code(200).body(manifest)),
+        );
+
+        let client = RegistryClient::new().expect("client");
+        let image = format!("{}/redirect/app:latest", origin.addr());
+        let pulled = client.pull_manifest(&image, None).expect("redirected pull");
+        assert_eq!(pulled.schema_version, 2);
     }
 
     #[test]

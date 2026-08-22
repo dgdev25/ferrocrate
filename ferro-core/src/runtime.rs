@@ -10777,12 +10777,68 @@ fn validate_ebpf_published_port_boundary(
     if backend != NetworkBackend::Ebpf || port_mappings.is_empty() {
         return Ok(());
     }
-    if std::env::var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS").as_deref() == Ok("1") {
+    if std::env::var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS").as_deref() != Ok("1") {
+        return Err(RuntimeError::Network(
+            "eBPF published-port forwarding is disabled pending live checksum qualification; use --network-backend iptables or nftables, or set FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 for an explicit experimental override".to_string(),
+        ));
+    }
+    let route_localnet =
+        route_localnet_enabled_from(Path::new("/proc/sys/net/ipv4/conf/lo/route_localnet"))?;
+    validate_ebpf_published_port_route_localnet(route_localnet)?;
+    let accept_local =
+        accept_local_enabled_from(Path::new("/proc/sys/net/ipv4/conf/lo/accept_local"))?;
+    validate_ebpf_published_port_accept_local(accept_local)
+}
+
+/// The eBPF published-port reverse path rewrites the reply source to 127/8
+/// before redirecting it onto host loopback. The kernel's input route lookup
+/// treats a 127/8 source arriving on `lo` from outside the local output path
+/// as a martian unless `net.ipv4.conf.lo.route_localnet=1`, so the reply is
+/// silently discarded before TCP. Fail closed with the exact remediation
+/// instead of starting a container whose published port can never answer.
+fn validate_ebpf_published_port_route_localnet(enabled: bool) -> Result<(), RuntimeError> {
+    if enabled {
         return Ok(());
     }
     Err(RuntimeError::Network(
-        "eBPF published-port forwarding is disabled pending live checksum qualification; use --network-backend iptables or nftables, or set FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1 for an explicit experimental override".to_string(),
+        "eBPF published-port reverse delivery requires net.ipv4.conf.lo.route_localnet=1 on the host: a 127/8 reply source redirected onto loopback is otherwise rejected by the kernel's input route lookup. Enable it explicitly with: sysctl -w net.ipv4.conf.lo.route_localnet=1 (host-global; experimental)".to_string(),
     ))
+}
+
+/// `route_localnet=1` lets the 127/8-sourced reply pass the loopback martian
+/// check, but the kernel then validates the source address itself:
+/// `fib_validate_source` rejects a packet whose source is a local address
+/// arriving on the input path unless `accept_local=1`, freeing the skb in
+/// `ip_rcv_finish_core` with drop reason `IP_LOCAL_SOURCE`. Fail closed with
+/// the exact remediation instead of starting a container whose published port
+/// can never answer.
+fn validate_ebpf_published_port_accept_local(enabled: bool) -> Result<(), RuntimeError> {
+    if enabled {
+        return Ok(());
+    }
+    Err(RuntimeError::Network(
+        "eBPF published-port reverse delivery requires net.ipv4.conf.lo.accept_local=1 on the host: a 127/8 reply source arriving on loopback via the input path is otherwise rejected by fib_validate_source (drop reason IP_LOCAL_SOURCE). Enable it explicitly with: sysctl -w net.ipv4.conf.lo.accept_local=1 (host-global; experimental)".to_string(),
+    ))
+}
+
+fn accept_local_enabled_from(path: &Path) -> Result<bool, RuntimeError> {
+    let value = std::fs::read_to_string(path).map_err(|error| {
+        RuntimeError::Network(format!(
+            "cannot read the loopback accept_local setting at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(value.trim() == "1")
+}
+
+fn route_localnet_enabled_from(path: &Path) -> Result<bool, RuntimeError> {
+    let value = std::fs::read_to_string(path).map_err(|error| {
+        RuntimeError::Network(format!(
+            "cannot read the loopback route_localnet setting at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(value.trim() == "1")
 }
 
 fn allocate_container_ipv6(container_id: &str, gateway: &Ipv6Addr, prefix: u8) -> String {
@@ -14524,9 +14580,65 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         super::validate_ebpf_published_port_boundary(NetworkBackend::Iptables, &mapping)
             .expect("iptables remains the explicit supported fallback");
         unsafe { std::env::set_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS", "1") };
-        super::validate_ebpf_published_port_boundary(NetworkBackend::Ebpf, &mapping)
-            .expect("experimental override should be explicit");
+        let host_route_localnet = super::route_localnet_enabled_from(Path::new(
+            "/proc/sys/net/ipv4/conf/lo/route_localnet",
+        ))
+        .unwrap_or(false);
+        let host_accept_local =
+            super::accept_local_enabled_from(Path::new("/proc/sys/net/ipv4/conf/lo/accept_local"))
+                .unwrap_or(false);
+        let overridden =
+            super::validate_ebpf_published_port_boundary(NetworkBackend::Ebpf, &mapping);
+        match (host_route_localnet && host_accept_local, overridden) {
+            (true, Ok(())) => {}
+            (false, Err(error)) => assert!(
+                error.to_string().contains("route_localnet")
+                    || error.to_string().contains("accept_local"),
+                "expected a loopback sysctl prerequisite error, got: {error}"
+            ),
+            (true, Err(error)) => {
+                panic!("override should pass with route_localnet=1 and accept_local=1: {error}")
+            }
+            (false, Ok(())) => {
+                panic!("a disabled loopback prerequisite must fail closed with the override")
+            }
+        }
         unsafe { std::env::remove_var("FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS") };
+    }
+
+    #[test]
+    fn ebpf_published_port_route_localnet_prerequisite_fails_closed_with_remediation() {
+        let error = super::validate_ebpf_published_port_route_localnet(false)
+            .expect_err("route_localnet=0 must fail closed");
+        assert!(error.to_string().contains("route_localnet=1"));
+        assert!(error.to_string().contains("sysctl -w"));
+        super::validate_ebpf_published_port_route_localnet(true)
+            .expect("route_localnet=1 satisfies the prerequisite");
+    }
+
+    #[test]
+    fn ebpf_published_port_accept_local_prerequisite_fails_closed_with_remediation() {
+        let error = super::validate_ebpf_published_port_accept_local(false)
+            .expect_err("accept_local=0 must fail closed");
+        assert!(error.to_string().contains("accept_local=1"));
+        assert!(error.to_string().contains("sysctl -w"));
+        super::validate_ebpf_published_port_accept_local(true)
+            .expect("accept_local=1 satisfies the prerequisite");
+    }
+
+    #[test]
+    fn route_localnet_reader_parses_proc_sys_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enabled = dir.path().join("enabled");
+        std::fs::write(&enabled, "1\n").expect("write enabled");
+        assert!(super::route_localnet_enabled_from(&enabled).unwrap());
+        let disabled = dir.path().join("disabled");
+        std::fs::write(&disabled, "0\n").expect("write disabled");
+        assert!(!super::route_localnet_enabled_from(&disabled).unwrap());
+        let missing = dir.path().join("missing");
+        let error = super::route_localnet_enabled_from(&missing)
+            .expect_err("missing sysctl file must surface an actionable error");
+        assert!(error.to_string().contains("route_localnet"));
     }
 
     #[test]

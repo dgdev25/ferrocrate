@@ -115,6 +115,28 @@ diagnostics_output_dir="${FERROCRATE_EBPF_DIAGNOSTICS_DIR:-}"
 reserved_ports_path="/proc/sys/net/ipv4/ip_local_reserved_ports"
 reserved_ports_before="$(cat "$reserved_ports_path" 2>/dev/null || true)"
 reserved_ports_changed=0
+# The eBPF published-port reverse path injects 127/8-sourced replies onto host
+# loopback; the kernel's input route lookup drops them as martian unless
+# loopback route_localnet is enabled. Qualification enables it for the run and
+# restores the exact prior value in the EXIT trap.
+route_localnet_path="/proc/sys/net/ipv4/conf/lo/route_localnet"
+route_localnet_before="$(cat "$route_localnet_path" 2>/dev/null || true)"
+route_localnet_changed=0
+if [[ "$route_localnet_before" != "1" ]]; then
+  printf '1\n' >"$route_localnet_path"     || fail "could not enable net.ipv4.conf.lo.route_localnet for eBPF published-port qualification"
+  route_localnet_changed=1
+fi
+# route_localnet only clears the loopback martian check; fib_validate_source
+# still rejects a 127/8 source arriving on the input path (drop reason
+# IP_LOCAL_SOURCE) unless loopback accept_local is enabled. Same ownership
+# rules: enable for the run, restore the exact prior value in the EXIT trap.
+accept_local_path="/proc/sys/net/ipv4/conf/lo/accept_local"
+accept_local_before="$(cat "$accept_local_path" 2>/dev/null || true)"
+accept_local_changed=0
+if [[ "$accept_local_before" != "1" ]]; then
+  printf '1\n' >"$accept_local_path"     || fail "could not enable net.ipv4.conf.lo.accept_local for eBPF published-port qualification"
+  accept_local_changed=1
+fi
 cleanup() {
   if [[ -n "$redirect_sampler_pid" ]]; then
     kill "$redirect_sampler_pid" 2>/dev/null || true
@@ -130,6 +152,12 @@ cleanup() {
       wait "$capture_pid" 2>/dev/null || true
     fi
   done
+  if [[ "$route_localnet_changed" -eq 1 ]]; then
+    printf '%s\n' "$route_localnet_before" >"$route_localnet_path" 2>/dev/null || true
+  fi
+  if [[ "$accept_local_changed" -eq 1 ]]; then
+    printf '%s\n' "$accept_local_before" >"$accept_local_path" 2>/dev/null || true
+  fi
   if [[ "$reserved_ports_changed" -eq 1 ]]; then
     printf '%s\n' "$reserved_ports_before" >"$reserved_ports_path" || true
   fi
@@ -308,8 +336,18 @@ case ",$reserved_ports_before," in
     ;;
 esac
 
-iptables-save >"$before_iptables" 2>/dev/null || true
-nft list ruleset >"$before_nft" 2>/dev/null || true
+# Snapshot rule CONTENT only: iptables-save timestamps its comment header,
+# builtin-chain policy counters tick with unrelated host traffic, and nft
+# per-rule counters do the same. Raw byte comparison of live-host snapshots
+# would fail on every run that carries any background traffic.
+snapshot_iptables_rules() {
+  iptables-save 2>/dev/null | sed -e '/^#/d' -e 's/\[[0-9]\{1,\}:[0-9]\{1,\}\]//g'
+}
+snapshot_nft_rules() {
+  nft list ruleset 2>/dev/null | sed -e 's/counter packets [0-9]\{1,\} bytes [0-9]\{1,\}/counter/g'
+}
+snapshot_iptables_rules >"$before_iptables" || true
+snapshot_nft_rules >"$before_nft" || true
 snapshot_offloads "before" "$FERRO_EBPF_TEST_INTERFACE" lo
 
 run_bounded "${FERROCRATE_CARGO_BIN}" test -p ferro-net --test kernel_compat -- --ignored
@@ -343,8 +381,8 @@ while IFS= read -r device; do
 done < <(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
 snapshot_offloads "after-e2e" "${probe_devices[@]}"
 
-iptables-save >"$after_iptables" 2>/dev/null || true
-nft list ruleset >"$after_nft" 2>/dev/null || true
+snapshot_iptables_rules >"$after_iptables" || true
+snapshot_nft_rules >"$after_nft" || true
 cmp -s "$before_iptables" "$after_iptables" || fail "iptables state changed in eBPF mode"
 cmp -s "$before_nft" "$after_nft" || fail "nftables state changed in eBPF mode"
 while IFS= read -r pin_name; do

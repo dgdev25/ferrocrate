@@ -868,7 +868,7 @@ fn localhost_published_port_response_returns_through_loopback() {
         Some(1),
         "localhost response must use loopback"
     );
-    assert_eq!(egress.destination_mac, None);
+    assert_eq!(egress.destination_mac, Some([0; 6]));
     assert_eq!(egress.destination.address, localhost);
 }
 
@@ -923,7 +923,10 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     assert_eq!(redirected.action, Action::Redirect);
     assert_eq!(redirected.ifindex, Some(1));
     assert!(redirected.redirect_ingress);
-    assert_eq!(redirected.destination_mac, None);
+    // Loopback delivery requires an all-zero destination MAC: eth_type_trans
+    // on lo classifies non-zero destination frames PACKET_OTHERHOST and the
+    // kernel drops them after the capture tap.
+    assert_eq!(redirected.destination_mac, Some([0; 6]));
 
     // The redirected packet re-enters loopback ingress with its translated
     // tuple. It must pass without a second DNAT/redirect loop.
@@ -932,6 +935,69 @@ fn localhost_published_port_response_on_veth_ingress_redirects_to_loopback() {
     assert_eq!(passed.action, Action::Pass);
     assert!(!passed.redirect_ingress);
     assert_eq!(passed.translation, Translation::None);
+}
+
+#[test]
+fn loopback_redirect_rewrites_the_veth_destination_mac_to_zero() {
+    // Regression for the live published-port failure: the endpoint's
+    // SYN-ACK arrived on the host veth carrying the veth destination MAC.
+    // Redirected to loopback unchanged, eth_type_trans on lo classified it
+    // PACKET_OTHERHOST and the kernel dropped it after the capture tap —
+    // visible in tcpdump, never delivered to TCP. The applied decision must
+    // zero the destination MAC for loopbound delivery.
+    let localhost = [127, 0, 0, 1];
+    let endpoint_address = [10, 44, 1, 2];
+    let request = tcp_packet(localhost, 51_000, localhost, 8080);
+    let mut state = FixtureState {
+        external: Some(ExternalNetwork {
+            address: [203, 0, 113, 8],
+            bridge_gateway: [10, 44, 1, 1],
+            ifindex: 9,
+            loopback_ifindex: 1,
+            next_hop_mac: [2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            snat_port_start: 55_000,
+            snat_port_end: 55_031,
+            snat_range_reserved: true,
+        }),
+        ..FixtureState::default()
+    };
+    state.ports.push((
+        (request.protocol, 8080),
+        PortTarget {
+            address: endpoint_address,
+            port: 80,
+        },
+    ));
+    state.endpoints.push((
+        endpoint_address,
+        Endpoint {
+            ifindex: 17,
+            mac: [2, 0, 0, 0, 0, 17],
+            flags: 0,
+        },
+    ));
+
+    let ingress = decide_ingress(&request, &state).unwrap();
+    let reverse = ingress.reverse_conntrack.expect("reverse DNAT record");
+    state.insert_existing(reverse.key, reverse.target);
+
+    let response = tcp_packet(endpoint_address, 80, [10, 44, 1, 1], 51_000);
+    let decision = decide_ingress(&response, &state).unwrap();
+    assert_eq!(decision.ifindex, Some(1));
+    assert!(decision.redirect_ingress);
+    // A frame as it arrives on the host veth: veth destination and endpoint
+    // source MACs, both non-zero.
+    let mut frame = frame_for(&response, b"veth-reply", false);
+    frame[0..6].copy_from_slice(&[2, 0, 0, 0, 0, 9]);
+    frame[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 17]);
+
+    apply_decision(&mut frame, &response, &decision).unwrap();
+
+    assert_eq!(
+        &frame[0..6],
+        &[0; 6],
+        "loopback redirect must carry an all-zero destination MAC"
+    );
 }
 
 #[test]

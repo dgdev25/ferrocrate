@@ -373,6 +373,45 @@ pub fn signal_pid_verified_parent(
     Ok(true)
 }
 
+/// Every process currently parented (directly or transitively) under `root`,
+/// owned by the calling UID, deepest first. Rootless containers live in the
+/// host PID namespace, so their full tree — not just PID 1 — is the unit
+/// that teardown must collect to avoid orphaned grandchildren.
+pub fn owned_descendants_deepest_first(root: u32) -> Vec<u32> {
+    let caller = own_uid();
+    let mut by_parent: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{name}/stat")) else {
+                continue;
+            };
+            let (Some(ppid), Ok(pid)) = (ppid_from_stat(&stat), name.parse::<u32>()) else {
+                continue;
+            };
+            if uid_of_pid(pid) == Some(caller) {
+                by_parent.entry(ppid).or_default().push(pid);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if let Some(children) = by_parent.get(&current) {
+            for child in children {
+                out.push(*child);
+                stack.push(*child);
+            }
+        }
+    }
+    // Reverse the pre-order accumulation so children die before parents.
+    out.reverse();
+    out
+}
+
 /// Docker-style graceful stop of the workload's PID 1, verified against the
 /// launcher parent before each signal so a recycled PID is never signaled.
 pub fn stop_pid_verified(
@@ -388,11 +427,19 @@ pub fn stop_pid_verified(
     }
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !pid_exists(Pid::from_raw(child as i32)) {
+        if !pid_exists(Pid::from_raw(child as i32)) && !pid_exists(Pid::from_raw(parent as i32)) {
+            // With host-PID-namespace execution, a recycled PID can satisfy
+            // the parent check while the real workload still runs; only a
+            // dead launcher proves the container actually finished.
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
     }
-    let _ = signal_pid_verified_parent(child, parent, Signal::SIGKILL);
+    // Escalation collects the container's whole process tree: without a
+    // private PID namespace, killing only PID 1 orphans its grandchildren.
+    for pid in owned_descendants_deepest_first(parent) {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+    let _ = kill(Pid::from_raw(parent as i32), Signal::SIGKILL);
     Ok(())
 }

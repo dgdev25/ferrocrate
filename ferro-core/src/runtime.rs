@@ -3729,25 +3729,27 @@ impl ContainerRuntime {
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         if let Some(signal) = signal {
-            // Deliver to the workload's PID 1 (deepest descendant for the
-            // rootless bubblewrap boundary), matching Docker's kill target.
-            let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
-            if !crate::process_lifecycle::signal_pid_verified_parent(
-                workload_pid,
-                record.pid,
-                signal,
-            )? {
-                // The workload vanished between resolution and delivery
-                // (normal for an exiting container); signal the launcher as
-                // the fallback target.
-                signal_pid(record.pid, signal)?;
-            }
-            if workload_pid != record.pid
-                && signal == nix::sys::signal::Signal::SIGKILL
-                && crate::process_lifecycle::probe_pid(record.pid).is_ok()
-            {
+            // Host-PID-namespace execution makes the container's whole
+            // process tree the signal target for SIGKILL (nothing may be
+            // orphaned); named signals go to the verified workload PID 1.
+            if signal == nix::sys::signal::Signal::SIGKILL {
+                for pid in crate::process_lifecycle::owned_descendants_deepest_first(record.pid) {
+                    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal);
+                }
                 let _ =
                     nix::sys::signal::kill(nix::unistd::Pid::from_raw(record.pid as i32), signal);
+            } else {
+                let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
+                if !crate::process_lifecycle::signal_pid_verified_parent(
+                    workload_pid,
+                    record.pid,
+                    signal,
+                )? {
+                    // The workload vanished between resolution and delivery
+                    // (normal for an exiting container); signal the launcher
+                    // as the fallback target.
+                    signal_pid(record.pid, signal)?;
+                }
             }
         } else {
             // Docker's signal 0 is an existence probe. It must not publish a

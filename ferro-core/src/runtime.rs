@@ -87,7 +87,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -3474,6 +3474,43 @@ impl ContainerRuntime {
         Ok((stdout, stderr))
     }
 
+    /// Return stdout and stderr lines with per-line capture timestamps.
+    ///
+    /// Returns `Err` when the container predates per-line journaling (no
+    /// sidecar journal exists), and `Ok((None, None))`-style partial data is
+    /// not hidden: any line lacking a timestamp record makes that stream
+    /// `None`, so callers fail closed instead of guessing.
+    #[inline]
+    pub fn logs_timestamped_split(
+        &self,
+        id: &str,
+    ) -> Result<(Option<Vec<TimestampedLine>>, Option<Vec<TimestampedLine>>), RuntimeError> {
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let split = |path: &str| -> Option<Vec<TimestampedLine>> {
+            let log_path = PathBuf::from(path);
+            if !log_path.exists() || !log_journal_path(&log_path).exists() {
+                return None;
+            }
+            let lines = timestamped_lines_from(&log_path);
+            if lines.iter().any(|(nanos, _)| nanos.is_none()) {
+                return None;
+            }
+            Some(
+                lines
+                    .into_iter()
+                    .map(|(nanos, bytes)| TimestampedLine {
+                        nanos: nanos.unwrap_or(0),
+                        bytes,
+                    })
+                    .collect(),
+            )
+        };
+        Ok((split(&record.stdout_path), split(&record.stderr_path)))
+    }
+
     /// Return the authorization-scoped FIFO used for a running container's
     /// Docker-compatible stdin channel. Callers must still validate the
     /// container record before opening it for writes.
@@ -6386,6 +6423,30 @@ fn spawn_child_with_logs(
             }
         });
         child
+    } else if std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some() {
+        // Long-lived callers (the Docker-compatible daemon) opt into pipe
+        // capture so every output line gets a sidecar timestamp journal
+        // (`<stream>.log.ts`: `<offset> <nanos>` per line). The raw log file
+        // keeps its plain format; Docker's `logs?timestamps|since|until`
+        // semantics derive from the journal. Short-lived CLI callers must not
+        // use pipes: their copier threads would die with the process and drop
+        // the detached container's output.
+        let mut child = command
+            .stdin(Stdio::from(stdin_file))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut pipe) = child.stdout.take() {
+            let mut log = stdout_file;
+            let journal = log_journal_path(&stdout_path);
+            thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
+        }
+        if let Some(mut pipe) = child.stderr.take() {
+            let mut log = stderr_file;
+            let journal = log_journal_path(&stderr_path);
+            thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
+        }
+        child
     } else {
         command
             .stdin(Stdio::from(stdin_file))
@@ -6401,6 +6462,86 @@ fn spawn_child_with_logs(
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
     Ok((child_id, child, pidfd))
+}
+
+/// One captured log line with the Unix-epoch nanoseconds recorded when the
+/// line was accepted from the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimestampedLine {
+    pub nanos: u128,
+    pub bytes: Vec<u8>,
+}
+
+fn log_journal_path(log_path: &Path) -> PathBuf {
+    let mut name = log_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".ts");
+    log_path.with_file_name(name)
+}
+
+/// Copy a container output pipe into the plain log file line by line, recording
+/// `<start-offset> <unix-nanos>` per line in the sidecar journal. The journal
+/// entry is written after the data so a crash can only lag, never lead, the
+/// raw file.
+fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_path: &Path) {
+    let mut journal = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal_path)
+    {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let mut reader = io::BufReader::new(pipe);
+    let mut offset: u64 = log.stream_position().unwrap_or(0);
+    let mut line: Vec<u8> = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                if log.write_all(&line[..count]).is_err() {
+                    break;
+                }
+                let _ = writeln!(journal, "{offset} {nanos}");
+                offset += count as u64;
+            }
+        }
+    }
+    let _ = journal.sync_all();
+}
+
+/// Split a raw log file into lines, resolving each line's recorded timestamp
+/// from the sidecar journal. Lines without a journal record (containers that
+/// predate journaling, or a torn tail after a crash) yield `None`.
+fn timestamped_lines_from(log_path: &Path) -> Vec<(Option<u128>, Vec<u8>)> {
+    let raw = match fs::read(log_path) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let journal = fs::read_to_string(log_journal_path(log_path)).unwrap_or_default();
+    let mut recorded: std::collections::HashMap<u64, u128> = std::collections::HashMap::new();
+    for entry in journal.lines() {
+        let mut parts = entry.split(' ');
+        if let (Some(offset), Some(nanos)) = (parts.next(), parts.next()) {
+            if let (Ok(offset), Ok(nanos)) = (offset.parse::<u64>(), nanos.parse::<u128>()) {
+                recorded.insert(offset, nanos);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut offset = 0_u64;
+    for line in raw.split_inclusive(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        out.push((recorded.get(&offset).copied(), line.to_vec()));
+        offset += line.len() as u64;
+    }
+    out
 }
 
 fn stdin_fifo_path(stdout_path: &Path) -> PathBuf {

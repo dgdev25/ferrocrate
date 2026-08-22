@@ -173,11 +173,12 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
-        // Per-line timestamps are not recorded, so timestamps=1 fails closed
-        // instead of returning untimestamped lines.
+        // timestamps=1 is now honored for journaled non-TTY containers; for a
+        // missing container, resolution runs after query validation, so the
+        // response is Docker's 404 not-found.
         path: "/containers/missing/logs?timestamps=1",
         coverage: Coverage::Implemented,
-        expected_status: 400,
+        expected_status: 404,
         body: "",
     },
     ApiCase {
@@ -190,7 +191,7 @@ const API_MATRIX: &[ApiCase] = &[
     ApiCase {
         method: "GET",
         // The Docker client always sends since/until; zero is the no-op bound
-        // and must stay accepted, while a nonzero bound fails closed.
+        // and must stay accepted (nonzero bounds select per-line filtering).
         path: "/containers/missing/logs?since=0",
         coverage: Coverage::Implemented,
         expected_status: 404,

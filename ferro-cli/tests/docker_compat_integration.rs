@@ -1159,8 +1159,9 @@ fn docker_compat_rootful_tty_container_create_start_and_logs() {
 /// Docker returns `/containers/{id}/logs` for a non-TTY container as a
 /// multiplexed raw stream: each frame carries a stream id (1=stdout,
 /// 2=stderr) and a big-endian length. The stdout/stderr query selectors
-/// must filter which frames are emitted, and unsupported time bounds must
-/// fail closed instead of silently returning unfiltered output.
+/// must filter which frames are emitted, `timestamps=1` prefixes each line
+/// with its RFC3339Nano capture time, and `since`/`until` select lines by
+/// that capture time; `follow` plus time filtering stays fail-closed.
 #[test]
 fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
     let harness = DaemonHarness::spawn();
@@ -1245,17 +1246,64 @@ fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
         "stderr payload missing: {decoded:?}"
     );
 
-    let (status, response) = harness.request(
+    let (status, _response) = harness.request(
         "GET",
         "/v1.45/containers/framed-logs/logs?stdout=0&stderr=0",
     );
-    assert_eq!(status, 400, "both streams disabled must fail: {response}");
-    let (status, response) =
-        harness.request("GET", "/v1.45/containers/framed-logs/logs?timestamps=1");
-    assert_eq!(status, 400, "timestamps must fail closed: {response}");
-    assert!(response.contains("timestamps"), "body={response}");
-    let (status, response) = harness.request("GET", "/v1.45/containers/framed-logs/logs?since=5");
-    assert_eq!(status, 400, "nonzero since must fail closed: {response}");
+    assert_eq!(status, 400, "both streams disabled must fail");
+    // timestamps=1 prefixes every line with Docker's RFC3339Nano capture time.
+    let response = harness.request_bytes_raw(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=1&stderr=1&timestamps=1",
+        "text/plain",
+        b"",
+    );
+    let decoded =
+        decode_raw_frames(http_body(&response)).expect("timestamped logs must stay framed");
+    assert!(
+        decoded.iter().any(|(stream, payload)| *stream == 1
+            && payload.starts_with(b"20")
+            && payload.contains(&b' ')
+            && payload.ends_with(b"out-line")),
+        "timestamped stdout frame missing RFC3339 prefix: {decoded:?}"
+    );
+    assert!(
+        decoded.iter().any(|(stream, payload)| *stream == 2
+            && payload.starts_with(b"20")
+            && payload.ends_with(b"err-line")),
+        "timestamped stderr frame missing RFC3339 prefix: {decoded:?}"
+    );
+    // since/until select lines by capture time: a past since keeps everything,
+    // a past until drops everything.
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(60);
+    let response = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/containers/framed-logs/logs?stdout=1&stderr=1&since={past}"),
+        "text/plain",
+        b"",
+    );
+    let decoded =
+        decode_raw_frames(http_body(&response)).expect("since-filtered logs must stay framed");
+    assert!(
+        decoded.iter().any(|(_, payload)| payload == b"out-line"),
+        "past since must keep lines: {decoded:?}"
+    );
+    let response = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/containers/framed-logs/logs?stdout=1&stderr=1&until={past}"),
+        "text/plain",
+        b"",
+    );
+    let decoded =
+        decode_raw_frames(http_body(&response)).expect("until-filtered logs must stay framed");
+    assert!(
+        decoded.is_empty(),
+        "past until must drop all lines: {decoded:?}"
+    );
     let (status, response) = harness.request(
         "GET",
         "/v1.45/containers/framed-logs/logs?since=not-a-number",
@@ -1263,12 +1311,22 @@ fn docker_compat_non_tty_logs_are_framed_and_stream_selectable() {
     assert_eq!(status, 400, "malformed since must fail closed: {response}");
     let (status, response) = harness.request(
         "GET",
-        "/v1.45/containers/framed-logs/logs?stdout=1&since=0&until=0&timestamps=0",
+        "/v1.45/containers/framed-logs/logs?stdout=1&stderr=1&since=0&until=0&timestamps=0",
     );
     assert_eq!(
         status, 200,
         "client-default no-op bounds must pass: {response}"
     );
+    // Combining time filtering with follow remains an explicit boundary.
+    let (status, response) = harness.request(
+        "GET",
+        "/v1.45/containers/framed-logs/logs?stdout=1&stderr=1&follow=1&timestamps=1",
+    );
+    assert_eq!(
+        status, 400,
+        "timestamps with follow must fail closed: {response}"
+    );
+    assert!(response.contains("follow"), "body={response}");
 
     let (status, response) = harness.request("DELETE", "/v1.45/containers/framed-logs");
     assert_eq!(status, 204, "framed-logs cleanup response={response}");

@@ -11715,6 +11715,36 @@ fn parse_docker_log_time_bound(value: &str, name: &str) -> Result<u64, String> {
         .map_err(|error| error.replace("event query parameter", "docker: logs query parameter"))
 }
 
+/// Format Unix-epoch nanoseconds as Docker's log timestamp prefix
+/// (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`). Civil-date conversion uses the
+/// days-from-civil algorithm (Hinnant); no datetime crate is pulled in.
+#[cfg(target_os = "linux")]
+fn rfc3339_nanos(nanos: u128) -> String {
+    let seconds = (nanos / 1_000_000_000) as i64;
+    let subsec = (nanos % 1_000_000_000) as u64;
+    let days = seconds.div_euclid(86_400);
+    let secs_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{subsec:09}Z")
+}
+
+#[cfg(target_os = "linux")]
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
 #[cfg(target_os = "linux")]
 fn event_time_nanos(event: &DockerEvent) -> u64 {
     if event.time_nano == 0 {
@@ -12090,6 +12120,11 @@ fn run_daemon(
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
     unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
+    // The daemon is long-lived, so its log-capture copier threads survive the
+    // containers they serve; only journaling capture makes Docker's
+    // logs timestamps/since/until semantics available. Short-lived CLI
+    // processes keep direct-to-file capture (their threads would die first).
+    unsafe { std::env::set_var("FERROCRATE_LOG_JOURNAL", "1") };
     let socket_path = Path::new(socket);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -12698,26 +12733,22 @@ fn handle_docker_compat_connection(
                 }
                 let timestamps =
                     parse_docker_bool_query(query.get("timestamps"), "timestamps")?;
-                if timestamps {
-                    // The runtime records plain byte streams without per-line
-                    // timestamps, so the parameter cannot be honored honestly.
-                    // Fail closed instead of returning untimestamped lines.
-                    return Err("docker: logs timestamps=1 is unsupported: per-line timestamps are not recorded".to_string());
-                }
+                let mut since_nanos = 0_u64;
+                let mut until_nanos = 0_u64;
                 for name in ["since", "until"] {
                     if let Some(value) = query.get(name) {
                         // The Docker client always sends since/until (zero
-                        // means "no bound"). Accept the no-op zero and reject
-                        // nonzero bounds, which cannot be honored without
-                        // per-line timestamps.
+                        // means "no bound"). Zero stays a no-op; nonzero
+                        // bounds select per-line time filtering.
                         let bound = parse_docker_log_time_bound(value, name)?;
-                        if bound > 0 {
-                            return Err(format!(
-                                "docker: logs {name} filtering is unsupported: per-line timestamps are not recorded"
-                            ));
+                        if name == "since" {
+                            since_nanos = bound;
+                        } else {
+                            until_nanos = bound;
                         }
                     }
                 }
+                let time_filtered = timestamps || since_nanos > 0 || until_nanos > 0;
                 // Validate tail syntax before resolving the resource so
                 // malformed requests retain Docker's 400-class response even
                 // when the container is absent.
@@ -12737,6 +12768,11 @@ fn handle_docker_compat_connection(
                     .map(|record| record.tty)
                     .unwrap_or(false);
                 if follow {
+                    if time_filtered {
+                        // Snapshot filtering is honored below; the long-lived
+                        // follow stream still lacks per-line journal replay.
+                        return Err("docker: logs timestamps/since/until are unsupported together with follow=1: per-line journal replay is not wired into the follow stream".to_string());
+                    }
                     // Validate the container and tail before committing to a
                     // long-lived chunked response.
                     let (stdout, stderr) = runtime.logs_split(&id).map_err(|err| err.to_string())?;
@@ -12749,6 +12785,47 @@ fn handle_docker_compat_connection(
                         stderr_requested,
                     ));
                     docker_chunked_headers(200, "application/vnd.docker.raw-stream")
+                } else if time_filtered {
+                    if tty {
+                        return Err("docker: logs timestamps/since/until are unsupported for TTY containers: the PTY capture has no per-line timestamp journal".to_string());
+                    }
+                    let (stdout_ts, stderr_ts) = runtime
+                        .logs_timestamped_split(&id)
+                        .map_err(|err| err.to_string())?;
+                    let mut body = Vec::new();
+                    for (stream_id, requested, lines) in [
+                        (1_u8, stdout_requested, &stdout_ts),
+                        (2_u8, stderr_requested, &stderr_ts),
+                    ] {
+                        if !requested {
+                            continue;
+                        }
+                        let lines = lines.as_ref().ok_or_else(|| {
+                            "docker: logs timestamps/since/until unavailable: this container's log capture has no complete per-line timestamp journal (containers created before journaling, or a torn journal tail, fail closed)".to_string()
+                        })?;
+                        for line in lines {
+                            let nanos = u64::try_from(line.nanos).unwrap_or(u64::MAX);
+                            if since_nanos > 0 && nanos < since_nanos {
+                                continue;
+                            }
+                            if until_nanos > 0 && nanos > until_nanos {
+                                continue;
+                            }
+                            let payload: Vec<u8> = if timestamps {
+                                let mut prefixed =
+                                    format!("{} ", rfc3339_nanos(line.nanos)).into_bytes();
+                                prefixed.extend_from_slice(&line.bytes);
+                                prefixed
+                            } else {
+                                line.bytes.clone()
+                            };
+                            body.push(stream_id);
+                            body.extend_from_slice(&[0, 0, 0]);
+                            body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                            body.extend_from_slice(&payload);
+                        }
+                    }
+                    http_response(200, &body, "application/vnd.docker.raw-stream")
                 } else {
                     let (stdout, stderr) =
                         runtime.logs_split(&id).map_err(|err| err.to_string())?;
@@ -16623,7 +16700,7 @@ mod tests {
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
-        parse_docker_log_time_bound,
+        parse_docker_log_time_bound, rfc3339_nanos,
         docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
@@ -21923,6 +22000,25 @@ volumes:
         assert!(parse_docker_log_time_bound("not-a-number", "since").is_err());
         let error = parse_docker_log_time_bound("x", "since").unwrap_err();
         assert!(error.contains("docker: logs query parameter"), "{error}");
+    }
+
+    #[test]
+    fn rfc3339_nanos_formats_docker_log_timestamp_prefixes() {
+        // 2026-08-22T00:00:00Z is 1787356800 Unix seconds.
+        assert_eq!(
+            rfc3339_nanos(1_787_356_800_000_000_000),
+            "2026-08-22T00:00:00.000000000Z"
+        );
+        assert_eq!(
+            rfc3339_nanos(1_787_356_800_123_456_789),
+            "2026-08-22T00:00:00.123456789Z"
+        );
+        // Unix epoch and a leap-year date (2024-02-29).
+        assert_eq!(rfc3339_nanos(0), "1970-01-01T00:00:00.000000000Z");
+        assert_eq!(
+            rfc3339_nanos(1_709_164_800_000_000_000),
+            "2024-02-29T00:00:00.000000000Z"
+        );
     }
 
     #[cfg(unix)]

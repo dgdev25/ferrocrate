@@ -7,8 +7,9 @@ set -euo pipefail
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/e2e-cli.sh"
 
 grep -Fq 'network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"' "$script"
-grep -Fq '"${BIN}" run --network-backend "${network_backend}"' "$script"
-grep -Fq '"${BIN}" run --network-backend "${network_backend}" local/test:dev' "$script"
+grep -Fq 'run_network_args=(--network-backend "${network_backend}")' "$script"
+grep -Fq '"${BIN}" run "${run_network_args[@]}" local/test:dev' "$script"
+grep -Fq 'FERROCRATE_E2E_NETWORK_MODE:-}" == "none"' "$script"
 grep -Fq 'docker_compat_ready=0' "$script"
 grep -Fq 'daemon_ready_attempts="${FERROCRATE_E2E_DAEMON_READY_ATTEMPTS:-200}"' "$script"
 grep -Fq 'docker_compat_unavailable=1' "$script"

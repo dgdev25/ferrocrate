@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # matters for guest/CI runs that place build artifacts on a caller-owned disk
 # rather than the repository filesystem.
 TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
-BIN="${TARGET_DIR}/debug/ferro-cli"
+BIN="${FERROCRATE_BIN:-${TARGET_DIR}/debug/ferro-cli}"
 
 if [[ ! -x "${BIN}" ]]; then
   echo "Building ferro-cli..."
@@ -33,6 +33,15 @@ export FERROCRATE_RUNTIME_DIR="${TMP_DIR}/runtime"
 # leave shared bpffs classifiers behind between repeated runs.
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 export FERROCRATE_NETWORK_BACKEND="${network_backend}"
+# Hosts that deny nested user/network namespaces (for example Ubuntu's
+# apparmor_restrict_unprivileged_userns policy) cannot run unprivileged bridge
+# workloads. The smoke caller sets FERROCRATE_E2E_NETWORK_MODE=none to keep the
+# lifecycle corpus on the supported fail-closed path instead of failing at the
+# first run.
+run_network_args=(--network-backend "${network_backend}")
+if [[ "${FERROCRATE_E2E_NETWORK_MODE:-}" == "none" ]]; then
+  run_network_args=(--network none)
+fi
 mkdir -p "${FERROCRATE_RUNTIME_DIR}"
 COMPOSE_FILE="${TMP_DIR}/compose.yml"
 DOCKERFILE="${TMP_DIR}/Dockerfile"
@@ -61,6 +70,16 @@ if ! [[ "${daemon_ready_attempts}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# 0) Binary sanity
+VERSION_OUTPUT="$("${BIN}" --version 2>&1)" || {
+  echo "ferro-cli --version failed: ${VERSION_OUTPUT}" >&2
+  exit 1
+}
+if [[ "${VERSION_OUTPUT}" != ferrocrate* ]]; then
+  echo "unexpected --version output: ${VERSION_OUTPUT}" >&2
+  exit 1
+fi
+
 # 1) Pull + run + logs + exec + stop + rm
 IMAGE_CANDIDATES=(
   "${FERROCRATE_E2E_IMAGE:-registry-1.docker.io/library/alpine:latest}"
@@ -84,7 +103,7 @@ if [[ -z "${PULL_IMAGE}" ]]; then
   exit 1
 fi
 
-CID=$("${BIN}" run --network-backend "${network_backend}" "${PULL_IMAGE}" sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+CID=$("${BIN}" run "${run_network_args[@]}" "${PULL_IMAGE}" sh -c "echo hello; sleep 1" | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${CID}" ]]; then
   echo "Failed to capture container id" >&2
   exit 1
@@ -109,13 +128,53 @@ DOCKER_EOF
 
 echo "hi" > "${HELLO_FILE}"
 run "${BIN}" build --dockerfile "${DOCKERFILE}" --tag local/test:dev
-OUT=$("${BIN}" run --network-backend "${network_backend}" local/test:dev /bin/cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+OUT=$("${BIN}" run "${run_network_args[@]}" local/test:dev /bin/cat /hello.txt | awk -F'container_id=' '{print $2}' | awk '{print $1}')
 if [[ -z "${OUT}" ]]; then
   echo "Failed to run built image" >&2
   exit 1
 fi
+run "${BIN}" stop "${OUT}"
+run "${BIN}" rm "${OUT}"
 
-# 3) Compose up/down
+# 3) Named volume: create, write from one container, read from another, remove
+VOLUME_NAME="e2e-smoke-vol"
+run "${BIN}" volume create "${VOLUME_NAME}"
+if ! "${BIN}" run --rm "${run_network_args[@]}" \
+  -v "${VOLUME_NAME}:/data" "${PULL_IMAGE}" \
+  sh -c "echo volume-ok > /data/probe.txt"; then
+  echo "Failed to run volume-write container" >&2
+  exit 1
+fi
+READ_CID=$("${BIN}" run "${run_network_args[@]}" \
+  -v "${VOLUME_NAME}:/data:ro" "${PULL_IMAGE}" \
+  cat /data/probe.txt 2>/dev/null | awk -F'container_id=' '{print $2}' | awk '{print $1}')
+if [[ -z "${READ_CID}" ]]; then
+  echo "Failed to run volume-read container" >&2
+  exit 1
+fi
+# Container stdout is delivered through the log store, not the run command's
+# stdout; poll it briefly so an exited-but-unreconciled record cannot race.
+READ_BACK=""
+for _ in $(seq 1 20); do
+  READ_BACK="$("${BIN}" logs "${READ_CID}" 2>/dev/null || true)"
+  if [[ "${READ_BACK}" == *volume-ok* ]]; then
+    break
+  fi
+  sleep 0.5
+done
+if [[ "${READ_BACK}" != *volume-ok* ]]; then
+  echo "Volume persistence check failed; read back: ${READ_BACK}" >&2
+  exit 1
+fi
+run "${BIN}" stop "${READ_CID}"
+run "${BIN}" rm "${READ_CID}"
+run "${BIN}" volume rm "${VOLUME_NAME}"
+if "${BIN}" volume ls 2>/dev/null | grep -q "${VOLUME_NAME}"; then
+  echo "volume rm did not remove ${VOLUME_NAME}" >&2
+  exit 1
+fi
+
+# 4) Compose up/down
 compose_network_mode=""
 if [[ "${FERROCRATE_ROOTLESS_NETNS:-}" == "1" ]]; then
   # Rootless Compose cannot provision a durable host bridge yet. Keep this
@@ -141,7 +200,7 @@ COMPOSE_EOF
 run "${BIN}" compose -f "${COMPOSE_FILE}" up
 run "${BIN}" compose -f "${COMPOSE_FILE}" down
 
-# 4) Docker socket compatibility (basic)
+# 5) Docker socket compatibility (basic)
 "${BIN}" daemon --docker-compat --socket "${SOCKET}" >"${DOCKER_COMPAT_LOG}" 2>&1 &
 DOCKER_COMPAT_PID=$!
 docker_compat_ready=0
@@ -179,9 +238,20 @@ run docker_curl http://localhost/_ping
 run docker_curl http://localhost/version
 run docker_curl http://localhost/containers/json
 
-# 5) Rootless bridge (optional)
-if [[ "${FERROCRATE_ROOTLESS_NETNS:-}" == "1" ]]; then
+# 6) Rootless bridge (optional; requires a host that permits nested user and
+# network namespaces). Skipped when the smoke caller already selected the
+# network_mode=none fallback for exactly that denial.
+if [[ "${FERROCRATE_ROOTLESS_NETNS:-}" == "1" &&
+      "${FERROCRATE_E2E_NETWORK_MODE:-}" != "none" ]]; then
   run "${BIN}" run alpine:latest sh -c "ip a; sleep 1"
+fi
+
+# 7) No-leftovers check: every workload above must have terminated and left no
+# container records behind in the smoke runtime directory.
+PS_OUTPUT="$("${BIN}" ps 2>&1 || true)"
+if [[ "${PS_OUTPUT}" != *"containers: no entries"* ]]; then
+  echo "leftover containers after smoke: ${PS_OUTPUT}" >&2
+  exit 1
 fi
 
 echo "E2E CLI checks passed."

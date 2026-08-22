@@ -7,6 +7,7 @@ pub mod desired_state;
 pub mod enrollment;
 pub mod limits;
 pub mod metrics;
+pub mod node;
 pub mod pki;
 pub mod recovery;
 pub mod revocation;

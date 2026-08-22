@@ -10,8 +10,6 @@ pub mod anomaly;
 pub mod audit;
 /// Telemetry collection for AI training data
 pub mod collector;
-/// Durable per-container token/memory metering
-pub mod metering;
 /// Configuration management
 pub mod config;
 /// Decision explanation and transparency
@@ -20,6 +18,8 @@ pub mod explain;
 pub mod gpu;
 /// Machine learning and pattern recognition
 pub mod learning;
+/// Durable per-container token/memory metering
+pub mod metering;
 /// Online learning scheduler for incremental model updates
 pub mod online_learner;
 pub mod provenance;

@@ -3124,9 +3124,7 @@ pub mod quantize {
                 || self.min_neighbor_parity < 0.0
                 || self.min_neighbor_parity > 1.0
             {
-                return Err(
-                    "minimum neighbor parity must be finite and within [0, 1]".to_string(),
-                );
+                return Err("minimum neighbor parity must be finite and within [0, 1]".to_string());
             }
             Ok(())
         }
@@ -3445,11 +3443,7 @@ pub mod quantize {
         /// neighbor prediction and fail a parity-1.0 policy.
         #[test]
         fn policy_rejects_neighbor_parity_regression() {
-            let vectors = vec![
-                vec![0.0, 1.0],
-                vec![0.001, 1.0],
-                vec![100.0, 1.0],
-            ];
+            let vectors = vec![vec![0.0, 1.0], vec![0.001, 1.0], vec![100.0, 1.0]];
             let summary = train_quantizer(&vectors, Method::Scalar8bit).expect("train");
             assert!(
                 summary.top1_neighbor_parity < 1.0,

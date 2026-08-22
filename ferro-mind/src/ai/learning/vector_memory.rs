@@ -335,7 +335,9 @@ mod tests {
             });
         }
 
-        let error = VectorMemory::persistent(&path, 4).err().expect("dimension mismatch");
+        let error = VectorMemory::persistent(&path, 4)
+            .err()
+            .expect("dimension mismatch");
         assert!(
             error.contains("dimensions") || error.contains("dimension"),
             "actionable error expected, got: {error}"
@@ -343,7 +345,9 @@ mod tests {
 
         let corrupt = tmp.path().join("corrupt.rvf");
         std::fs::write(&corrupt, b"garbage bytes").expect("write garbage");
-        let error = VectorMemory::persistent(&corrupt, 3).err().expect("corrupt store");
+        let error = VectorMemory::persistent(&corrupt, 3)
+            .err()
+            .expect("corrupt store");
         assert!(!error.is_empty(), "corrupt store must fail closed");
     }
 

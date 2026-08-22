@@ -120,7 +120,10 @@ mod tests {
         ];
 
         for name in valid_names {
-            assert!(validate_image_reference(name).is_ok(), "Should accept: {name}");
+            assert!(
+                validate_image_reference(name).is_ok(),
+                "Should accept: {name}"
+            );
         }
     }
 }

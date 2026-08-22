@@ -330,7 +330,11 @@ fn dockerfile_build_platform_is_host_bound() {
         String::from_utf8_lossy(&host_output.stderr)
     );
 
-    let foreign_arch = if host_arch == "amd64" { "arm64" } else { "amd64" };
+    let foreign_arch = if host_arch == "amd64" {
+        "arm64"
+    } else {
+        "amd64"
+    };
     let foreign_output = run_build(
         runtime_dir.path(),
         context_dir.path(),

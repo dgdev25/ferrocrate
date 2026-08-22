@@ -403,8 +403,14 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(contents.contains("batch-1"), "first batch lost: {contents:?}");
-        assert!(contents.contains("batch-2"), "second batch lost: {contents:?}");
+        assert!(
+            contents.contains("batch-1"),
+            "first batch lost: {contents:?}"
+        );
+        assert!(
+            contents.contains("batch-2"),
+            "second batch lost: {contents:?}"
+        );
     }
 
     #[test]

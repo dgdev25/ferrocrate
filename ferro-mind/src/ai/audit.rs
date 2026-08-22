@@ -233,12 +233,10 @@ mod tests {
         assert_eq!(entry["evidence"]["uptime_secs"], "3600");
         assert_eq!(entry["evidence"]["container_id"], "container-42");
         // The resulting action is recorded.
-        assert!(
-            entry["decision"]
-                .as_str()
-                .expect("decision")
-                .contains("Restart")
-        );
+        assert!(entry["decision"]
+            .as_str()
+            .expect("decision")
+            .contains("Restart"));
     }
 
     #[test]

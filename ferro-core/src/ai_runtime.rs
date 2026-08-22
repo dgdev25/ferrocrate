@@ -93,10 +93,7 @@ fn allowed_syscalls(profile: &SeccompProfile) -> AllowedSyscalls {
 /// allow-by-default profiles compare through their deny lists: `strict` must
 /// deny every name `relaxed` denies.
 #[cfg(target_os = "linux")]
-pub fn profile_is_at_least_as_strict(
-    strict: &SeccompProfile,
-    relaxed: &SeccompProfile,
-) -> bool {
+pub fn profile_is_at_least_as_strict(strict: &SeccompProfile, relaxed: &SeccompProfile) -> bool {
     match (allowed_syscalls(strict), allowed_syscalls(relaxed)) {
         (AllowedSyscalls::All, AllowedSyscalls::All) => {
             denied_names(relaxed).is_subset(&denied_names(strict))
@@ -335,7 +332,10 @@ impl CognitiveBudgets {
     /// Creates budgets from the raw `AiRuntimeConfig` fields. A zero budget is
     /// unlimited (matching the config semantics).
     pub fn from_config(config: &AiRuntimeConfig) -> Self {
-        Self::new(config.token_budget, config.memory_budget_mb.saturating_mul(1024 * 1024))
+        Self::new(
+            config.token_budget,
+            config.memory_budget_mb.saturating_mul(1024 * 1024),
+        )
     }
 
     /// Creates budgets from raw values. `token_budget` is a token count and

@@ -47,7 +47,6 @@ impl SqliteJournalStore {
         })
     }
 
-
     pub(super) fn get(&self, tree: &str, key: &[u8]) -> Result<Option<Vec<u8>>, JournalError> {
         let connection = self.connection.lock().map_err(|_| JournalError::Corrupt)?;
         Ok(connection

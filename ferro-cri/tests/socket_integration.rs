@@ -1836,8 +1836,7 @@ async fn cri_pending_publication_crash_without_kernel_effects_is_reclaimed() {
         .await
         .expect("restarted CRI service ready");
     assert!(
-        read_cri_state(runtime.path(), "pending-sandbox-networks")
-            .is_empty(),
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
         "pending network without kernel effects must be reclaimed on restart"
     );
     assert!(
@@ -1923,8 +1922,7 @@ async fn cri_netns_effect_crash_is_reconciled_on_restart() {
         .await
         .expect("restarted CRI service ready");
     assert!(
-        read_cri_state(runtime.path(), "pending-sandbox-networks")
-            .is_empty(),
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
         "pending network must be reclaimed after namespace-only crash"
     );
     assert!(
@@ -2028,8 +2026,7 @@ async fn cri_remove_sandbox_store_crash_is_reconciled_on_restart() {
         .await
         .expect("restarted CRI service ready");
     assert!(
-        read_cri_state(runtime.path(), "pending-sandbox-networks")
-            .is_empty(),
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
         "pending teardown must complete on restart"
     );
     assert!(
@@ -2126,8 +2123,7 @@ async fn cri_remove_sandbox_netns_crash_clears_pending_idempotently() {
         .await
         .expect("restarted CRI service ready");
     assert!(
-        read_cri_state(runtime.path(), "pending-sandbox-networks")
-            .is_empty(),
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
         "fully torn-down pending record must be reclaimed without new effects"
     );
     assert!(!ferro_net::netns_path(&namespace).exists());
@@ -2243,7 +2239,9 @@ async fn cri_remove_container_runtime_crash_rebinds_cleared_binding() {
     );
     let containers_after = read_cri_state(runtime.path(), "containers");
     assert!(
-        containers_after[&container]["runtime_id"].as_str().is_none(),
+        containers_after[&container]["runtime_id"]
+            .as_str()
+            .is_none(),
         "recovered CRI record must not reference the removed runtime container"
     );
     let runtime_records = ferro_core::runtime::ContainerRuntime::new(runtime.path())
@@ -2347,8 +2345,7 @@ async fn cri_journal_pending_network_without_kernel_effects_is_reclaimed() {
         .expect("recovered CRI service ready");
 
     assert!(
-        read_cri_state(runtime.path(), "pending-sandbox-networks")
-            .is_empty(),
+        read_cri_state(runtime.path(), "pending-sandbox-networks").is_empty(),
         "journal-only pending network must be reclaimed without kernel effects"
     );
     assert!(
@@ -2554,11 +2551,10 @@ async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
     // remove_container reaches the runtime removal effect without privileged
     // OCI execution. Both CRI labels are required, otherwise startup
     // reconciliation would treat the binding as stale and clear it.
-    let store =
-        ferro_core::sqlite_container_store::SqliteContainerStore::open(
-            runtime.path().join("containers.db"),
-        )
-        .expect("open runtime container store");
+    let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime.path().join("containers.db"),
+    )
+    .expect("open runtime container store");
     store
         .put(&ferro_core::container_store::ContainerRecord {
             id: runtime_id.to_string(),
@@ -2674,13 +2670,15 @@ async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
 
     // The runtime effect landed (record deleted) while the CRI mapping was
     // retained with its now-stale binding.
-    let store =
-        ferro_core::sqlite_container_store::SqliteContainerStore::open(
-            runtime.path().join("containers.db"),
-        )
-        .expect("reopen runtime container store");
+    let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime.path().join("containers.db"),
+    )
+    .expect("reopen runtime container store");
     assert!(
-        store.get(runtime_id).expect("query removed record").is_none(),
+        store
+            .get(runtime_id)
+            .expect("query removed record")
+            .is_none(),
         "runtime removal effect must land before the crash point"
     );
     drop(store);

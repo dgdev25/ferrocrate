@@ -76,7 +76,6 @@ fn canary_survives(victim: &Path) -> bool {
     fs::read(victim.join("canary.txt")).is_ok_and(|bytes| bytes == b"must-survive")
 }
 
-
 // ---------------------------------------------------------------------------
 // symlink / path traversal in layer extraction
 // ---------------------------------------------------------------------------
@@ -85,12 +84,17 @@ fn canary_survives(victim: &Path) -> bool {
 fn rootfs_rejects_absolute_and_parent_traversal_entries() {
     let temp = tempfile::tempdir().expect("tempdir");
     let rootfs = temp.path().join("rootfs");
-    for case in ["/etc/absolute-evil", "../../escape", "a/../../escape", "/../escape"] {
+    for case in [
+        "/etc/absolute-evil",
+        "../../escape",
+        "a/../../escape",
+        "/../escape",
+    ] {
         let layer = temp.path().join("layer.tar");
         create_tar_with_files(&layer, &[(case, b"payload".as_slice())]);
 
-        let error = construct_rootfs(&rootfs, &[layer])
-            .expect_err("traversal entry must fail closed");
+        let error =
+            construct_rootfs(&rootfs, &[layer]).expect_err("traversal entry must fail closed");
         assert!(
             matches!(error, RootfsError::UnsafePath(_)),
             "case {case:?} must be rejected as unsafe, got {error:?}"
@@ -114,7 +118,11 @@ fn rootfs_rejects_files_written_through_symlinked_directory() {
         header.set_mode(0o644);
         header.set_cksum();
         builder
-            .append_data(&mut header, PathBuf::from("esc/pwned.txt"), Cursor::new(b"pwned!!"))
+            .append_data(
+                &mut header,
+                PathBuf::from("esc/pwned.txt"),
+                Cursor::new(b"pwned!!"),
+            )
             .expect("append through symlink");
         builder.finish().expect("finish tar");
     }
@@ -139,7 +147,11 @@ fn rootfs_opaque_whiteout_cannot_escape_through_symlinked_directory() {
     {
         let file = fs::File::create(&layer1).expect("create tar");
         let mut builder = Builder::new(file);
-        append_symlink_entry(&mut builder, "etc/esc", victim.to_str().expect("utf8 victim"));
+        append_symlink_entry(
+            &mut builder,
+            "etc/esc",
+            victim.to_str().expect("utf8 victim"),
+        );
         builder.finish().expect("finish tar");
     }
     let layer2 = temp.path().join("layer2.tar");
@@ -168,7 +180,11 @@ fn rootfs_regular_whiteout_cannot_delete_through_symlinked_directory() {
     {
         let file = fs::File::create(&layer1).expect("create tar");
         let mut builder = Builder::new(file);
-        append_symlink_entry(&mut builder, "etc/esc", victim.to_str().expect("utf8 victim"));
+        append_symlink_entry(
+            &mut builder,
+            "etc/esc",
+            victim.to_str().expect("utf8 victim"),
+        );
         builder.finish().expect("finish tar");
     }
     let layer2 = temp.path().join("layer2.tar");
@@ -370,7 +386,10 @@ fn policy_loader_rejects_hardlinked_policy_sources() {
     let dir = tempfile::tempdir().expect("tempdir");
     let original = dir.path().join("policy.toml");
     let alias = dir.path().join("policy-alias.toml");
-    write_protected_policy(&original, "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n");
+    write_protected_policy(
+        &original,
+        "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+    );
     fs::hard_link(&original, &alias).expect("hard link policy");
 
     let error = PolicyStore::load(&alias).expect_err("hard-linked policy must fail closed");
@@ -387,7 +406,10 @@ fn policy_loader_rejects_invalid_schema_and_zero_generation() {
         "schema_version = 2\ngeneration = 1\nmode = \"disabled\"\n",
     );
     let error = PolicyStore::load(&future).expect_err("unknown schema must fail closed");
-    assert!(matches!(error, PolicyError::UnsupportedSchema(2)), "got {error:?}");
+    assert!(
+        matches!(error, PolicyError::UnsupportedSchema(2)),
+        "got {error:?}"
+    );
 
     let zero = dir.path().join("zero.toml");
     write_protected_policy(
@@ -395,7 +417,10 @@ fn policy_loader_rejects_invalid_schema_and_zero_generation() {
         "schema_version = 1\ngeneration = 0\nmode = \"disabled\"\n",
     );
     let error = PolicyStore::load(&zero).expect_err("zero generation must fail closed");
-    assert!(matches!(error, PolicyError::InvalidGeneration), "got {error:?}");
+    assert!(
+        matches!(error, PolicyError::InvalidGeneration),
+        "got {error:?}"
+    );
 }
 
 #[test]

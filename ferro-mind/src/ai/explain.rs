@@ -98,13 +98,9 @@ pub fn check_action_coherence(
     let confidence: f64 = raw
         .trim()
         .parse()
-        .map_err(|_| CoherenceGateError::InvalidConfidence {
-            value: raw.clone(),
-        })?;
+        .map_err(|_| CoherenceGateError::InvalidConfidence { value: raw.clone() })?;
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
-        return Err(CoherenceGateError::InvalidConfidence {
-            value: raw.clone(),
-        });
+        return Err(CoherenceGateError::InvalidConfidence { value: raw.clone() });
     }
     if confidence < policy.min_confidence {
         return Err(CoherenceGateError::BelowThreshold {
@@ -142,8 +138,7 @@ mod tests {
     #[test]
     fn refuses_action_below_the_confidence_threshold() {
         let policy = CoherencePolicy::new(0.8);
-        let error =
-            check_action_coherence(&trace_with("0.79"), &policy).expect_err("must refuse");
+        let error = check_action_coherence(&trace_with("0.79"), &policy).expect_err("must refuse");
         assert_eq!(
             error,
             CoherenceGateError::BelowThreshold {

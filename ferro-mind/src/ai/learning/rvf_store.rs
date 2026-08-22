@@ -391,9 +391,8 @@ mod tests {
             .collect();
 
         let build = |path: std::path::PathBuf, compression: CompressionProfile| {
-            let store =
-                RvfStore::open_or_create_with_compression(&path, dimensions, compression)
-                    .expect("create store");
+            let store = RvfStore::open_or_create_with_compression(&path, dimensions, compression)
+                .expect("create store");
             for (index, vector) in workload.iter().enumerate() {
                 store
                     .insert(Some(&format!("v-{index}")), vector)
@@ -417,8 +416,8 @@ mod tests {
         );
 
         // Compatibility: both profiles must answer probes identically.
-        let plain_store = RvfStore::open_or_create(tmp.path().join("plain.rvf"), dimensions)
-            .expect("open plain");
+        let plain_store =
+            RvfStore::open_or_create(tmp.path().join("plain.rvf"), dimensions).expect("open plain");
         let scalar_store = RvfStore::open_or_create(tmp.path().join("scalar.rvf"), dimensions)
             .expect("open scalar");
         for probe in [0usize, 7, 100, 511] {

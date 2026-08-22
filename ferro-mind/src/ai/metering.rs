@@ -162,9 +162,10 @@ impl MeteringLedger {
         for (index, attempt) in attempts.iter().enumerate() {
             let (tokens_delta, detail) = match &attempt.outcome {
                 AttemptOutcome::Failed(reason) => (0, format!("failed: {reason}")),
-                AttemptOutcome::Succeeded { response_tokens } => {
-                    (*response_tokens, format!("succeeded: {response_tokens} response tokens"))
-                }
+                AttemptOutcome::Succeeded { response_tokens } => (
+                    *response_tokens,
+                    format!("succeeded: {response_tokens} response tokens"),
+                ),
             };
             let used_after = if index + 1 == attempts.len() {
                 tokens_used_after
@@ -317,8 +318,8 @@ mod tests {
     #[test]
     fn recorded_failover_sequence_is_durable_in_the_ledger_across_reopen() {
         use crate::ai::routing::cost::{
-            execute_routed_prompt_metered_failover_recorded, ProviderAdapter, ProviderEndpoint,
-            Provider, RoutingPolicy, TokenBudget,
+            execute_routed_prompt_metered_failover_recorded, Provider, ProviderAdapter,
+            ProviderEndpoint, RoutingPolicy, TokenBudget,
         };
         use std::os::unix::fs::PermissionsExt;
 

@@ -463,7 +463,9 @@ mod tests {
             "-c".into(),
             "echo 'permission denied' >&2; exit 1".into(),
         ]);
-        assert!(matches!(&hard, Err(ExecError::CommandFailed { stderr, .. }) if stderr.contains("permission denied")));
+        assert!(
+            matches!(&hard, Err(ExecError::CommandFailed { stderr, .. }) if stderr.contains("permission denied"))
+        );
         // Spawn failures are never silently swallowed.
         assert!(matches!(
             exec_cmd_allow_missing(&["nonexistent_command_12345".to_string()]),
@@ -480,10 +482,7 @@ mod tests {
         let mut txn = Transaction::new();
         assert!(txn
             .add(
-                vec![
-                    "touch".into(),
-                    first.to_str().expect("utf-8 path").into()
-                ],
+                vec!["touch".into(), first.to_str().expect("utf-8 path").into()],
                 vec![
                     "sh".into(),
                     "-c".into(),
@@ -497,10 +496,7 @@ mod tests {
             .is_ok());
         assert!(txn
             .add(
-                vec![
-                    "touch".into(),
-                    second.to_str().expect("utf-8 path").into()
-                ],
+                vec!["touch".into(), second.to_str().expect("utf-8 path").into()],
                 vec![
                     "sh".into(),
                     "-c".into(),

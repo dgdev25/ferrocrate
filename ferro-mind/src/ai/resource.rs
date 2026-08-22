@@ -934,8 +934,8 @@ mod tests {
             .expect("save snapshot");
 
         // Simulate a process restart: the window is restored from disk only.
-        let restored = ResourcePredictor::from_snapshot(&path, "container-a")
-            .expect("restore snapshot");
+        let restored =
+            ResourcePredictor::from_snapshot(&path, "container-a").expect("restore snapshot");
         let replayed = restored
             .predict_oom(Duration::from_secs(300))
             .expect("restored prediction");

@@ -1085,10 +1085,7 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 fn docker_events_frames_carry_docker_canonical_attribute_types() {
     let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
     let kernel_state = runtime_dir.path().join("network-kernel-state.json");
-    let harness = DaemonHarness::spawn_env(&[(
-        "FERROCRATE_NETWORK_KERNEL_STATE",
-        kernel_state,
-    )]);
+    let harness = DaemonHarness::spawn_env(&[("FERROCRATE_NETWORK_KERNEL_STATE", kernel_state)]);
     let (status, _) = harness.request(
         "POST",
         "/containers/create?name=attr-container",
@@ -1111,8 +1108,9 @@ fn docker_events_frames_carry_docker_canonical_attribute_types() {
     let frames: Vec<serde_json::Value> = body
         .lines()
         .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("event frame must be one JSON object: {error}: {line}"))
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("event frame must be one JSON object: {error}: {line}")
+            })
         })
         .collect();
     assert!(frames.len() >= 3, "expected three create events: {body}");
@@ -1126,7 +1124,9 @@ fn docker_events_frames_carry_docker_canonical_attribute_types() {
         assert!(frame["scope"].is_string(), "scope: {frame}");
         assert!(frame["time"].is_u64(), "time: {frame}");
         assert!(frame["timeNano"].is_u64(), "timeNano: {frame}");
-        assert!(frame["timeNano"].as_u64().unwrap() >= frame["time"].as_u64().unwrap() * 1_000_000_000);
+        assert!(
+            frame["timeNano"].as_u64().unwrap() >= frame["time"].as_u64().unwrap() * 1_000_000_000
+        );
         let actor = &frame["Actor"];
         assert!(actor.is_object(), "Actor: {frame}");
         assert!(actor["ID"].is_string(), "Actor.ID: {frame}");
@@ -1176,7 +1176,8 @@ fn docker_events_follow_stream_uses_chunked_jsonl_framing() {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
-    let request = "GET /events?follow=1 HTTP/1.1\r\nHost: docker\r\nAccept: application/x-ndjson\r\n\r\n";
+    let request =
+        "GET /events?follow=1 HTTP/1.1\r\nHost: docker\r\nAccept: application/x-ndjson\r\n\r\n";
     stream
         .write_all(request.as_bytes())
         .expect("write events request");

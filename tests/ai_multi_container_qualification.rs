@@ -112,7 +112,10 @@ fn metering_ledger_survives_three_restarts_at_50_container_scale() {
         }
     }
     let contents = std::fs::read_to_string(&path).expect("read ledger");
-    let lines: Vec<&str> = contents.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(lines.len(), SESSIONS as usize * CONTAINERS);
     let mut per_container = std::collections::BTreeMap::new();
     for line in &lines {
@@ -120,14 +123,20 @@ fn metering_ledger_survives_three_restarts_at_50_container_scale() {
             serde_json::from_str(line).unwrap_or_else(|error| panic!("invalid JSON line: {error}"));
         assert_eq!(entry["schema_version"], "v1");
         assert_eq!(entry["kind"], "usage");
-        let id = entry["container_id"].as_str().expect("container id").to_string();
+        let id = entry["container_id"]
+            .as_str()
+            .expect("container id")
+            .to_string();
         assert_eq!(entry["tokens_delta"], PER_SESSION_TOKENS);
         let count = per_container.entry(id).or_insert(0u64);
         *count += 1;
     }
     assert_eq!(per_container.len(), CONTAINERS);
     for (id, count) in per_container {
-        assert_eq!(count, SESSIONS, "container {id} lost entries across restarts");
+        assert_eq!(
+            count, SESSIONS,
+            "container {id} lost entries across restarts"
+        );
     }
     // The last session's totals survive the final reopen.
     let entries: Vec<serde_json::Value> = lines
@@ -234,8 +243,7 @@ fn failover_is_deterministic_across_50_containers_under_provider_failure() {
     let failing_body = "#!/bin/sh\nexit 9\n";
     let healthy_body = "#!/bin/sh\nread prompt\nprintf 'ok'\n";
     let make_adapters = |reversed: bool| -> Vec<ProviderAdapter> {
-        let preferred =
-            command_adapter(&temp, "preferred", 0.99, failing_body);
+        let preferred = command_adapter(&temp, "preferred", 0.99, failing_body);
         let fallback = command_adapter(&temp, "fallback", 0.80, healthy_body);
         if reversed {
             vec![fallback, preferred]
@@ -250,12 +258,7 @@ fn failover_is_deterministic_across_50_containers_under_provider_failure() {
         let adapters = make_adapters(false);
         let budget = TokenBudget::new(10_000);
         let (_, attempts) = execute_routed_prompt_metered_failover_recorded(
-            &adapters,
-            &policy,
-            "hello",
-            timeout,
-            &budget,
-            2,
+            &adapters, &policy, "hello", timeout, &budget, 2,
         );
         attempts
     };
@@ -275,12 +278,7 @@ fn failover_is_deterministic_across_50_containers_under_provider_failure() {
             let adapters = make_adapters(reversed);
             let budget = TokenBudget::new(10_000);
             let (result, attempts) = execute_routed_prompt_metered_failover_recorded(
-                &adapters,
-                &policy,
-                "hello",
-                timeout,
-                &budget,
-                2,
+                &adapters, &policy, "hello", timeout, &budget, 2,
             );
             let (_, _, tokens_used) =
                 result.unwrap_or_else(|error| panic!("container {index}: {error}"));
@@ -305,14 +303,16 @@ fn failover_is_deterministic_across_50_containers_under_provider_failure() {
             &budget,
             2,
         );
-        assert!(result.is_err(), "container {index} succeeded with no provider");
+        assert!(
+            result.is_err(),
+            "container {index} succeeded with no provider"
+        );
         assert_eq!(attempts.len(), 2, "container {index} lost attempt records");
         assert_eq!(attempts[0].provider, "preferred");
         assert_eq!(attempts[1].provider, "fallback2");
-        assert!(attempts.iter().all(|attempt| matches!(
-            &attempt.outcome,
-            AttemptOutcome::Failed(_)
-        )));
+        assert!(attempts
+            .iter()
+            .all(|attempt| matches!(&attempt.outcome, AttemptOutcome::Failed(_))));
     }
 }
 
@@ -322,7 +322,12 @@ fn failover_is_deterministic_across_50_containers_under_provider_failure() {
 fn failover_journals_of_50_containers_are_durable_in_the_ledger() {
     let temp = tempfile::tempdir().expect("tempdir");
     let failing = command_adapter(&temp, "preferred", 0.99, "#!/bin/sh\nexit 9\n");
-    let healthy = command_adapter(&temp, "fallback", 0.80, "#!/bin/sh\nread prompt\nprintf 'ok'\n");
+    let healthy = command_adapter(
+        &temp,
+        "fallback",
+        0.80,
+        "#!/bin/sh\nread prompt\nprintf 'ok'\n",
+    );
     let adapters = vec![failing, healthy];
     let ledger_path: PathBuf = temp.path().join("metering.jsonl");
     let ledger = MeteringLedger::new(&ledger_path);

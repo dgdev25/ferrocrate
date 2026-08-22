@@ -86,10 +86,9 @@ fn apply_layer_cached(
         key,
         entries,
     };
-    let bytes = serde_json::to_vec(&manifest)
-        .map_err(|error| RootfsError::ReadLayer(error.into()))?;
-    crate::fs_atomic::write_atomic(&manifest_path, &bytes)
-        .map_err(RootfsError::ReadLayer)?;
+    let bytes =
+        serde_json::to_vec(&manifest).map_err(|error| RootfsError::ReadLayer(error.into()))?;
+    crate::fs_atomic::write_atomic(&manifest_path, &bytes).map_err(RootfsError::ReadLayer)?;
     Ok(())
 }
 
@@ -107,14 +106,17 @@ fn layer_cache_key(layer_tar_path: &Path) -> Result<String, RootfsError> {
     Ok(hex::encode(rvf_crypto::shake256_256(&bytes)))
 }
 
-fn read_manifest(path: &Path, expected_key: &str) -> Result<Option<CachedLayerManifest>, RootfsError> {
+fn read_manifest(
+    path: &Path,
+    expected_key: &str,
+) -> Result<Option<CachedLayerManifest>, RootfsError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(RootfsError::ReadLayer(error)),
     };
-    let manifest: CachedLayerManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| RootfsError::ReadLayer(error.into()))?;
+    let manifest: CachedLayerManifest =
+        serde_json::from_slice(&bytes).map_err(|error| RootfsError::ReadLayer(error.into()))?;
     if manifest.schema != MANIFEST_SCHEMA || manifest.key != expected_key {
         return Ok(None);
     }
@@ -403,7 +405,9 @@ mod tests {
         header.set_mode(mode);
         header.set_mtime(1_700_000_000);
         header.set_cksum();
-        builder.append_data(&mut header, path, contents).expect("append");
+        builder
+            .append_data(&mut header, path, contents)
+            .expect("append");
     }
 
     fn append_dir(builder: &mut Builder<fs::File>, path: &str, mode: u32) {
@@ -413,7 +417,9 @@ mod tests {
         header.set_entry_type(tar::EntryType::Directory);
         header.set_mtime(1_700_000_000);
         header.set_cksum();
-        builder.append_data(&mut header, path, std::io::empty()).expect("append dir");
+        builder
+            .append_data(&mut header, path, std::io::empty())
+            .expect("append dir");
     }
 
     fn append_symlink(builder: &mut Builder<fs::File>, path: &str, target: &str) {
@@ -474,10 +480,7 @@ mod tests {
                 } else {
                     fs::read(&path).expect("read file")
                 };
-                out.insert(
-                    rel,
-                    (kind.to_string(), md.mode() & 0o7777, content),
-                );
+                out.insert(rel, (kind.to_string(), md.mode() & 0o7777, content));
                 if md.is_dir() {
                     stack.push(path);
                 }
@@ -510,8 +513,7 @@ mod tests {
 
         construct_rootfs_cached(&cold, &[layer1.clone(), layer2.clone()], &cas, &cache)
             .expect("cold construct");
-        construct_rootfs_cached(&warm, &[layer1, layer2], &cas, &cache)
-            .expect("warm construct");
+        construct_rootfs_cached(&warm, &[layer1, layer2], &cas, &cache).expect("warm construct");
 
         assert_eq!(snapshot(&cold), snapshot(&warm));
         // The whiteout removed nothing here (nothing to remove) but layer2's
@@ -534,7 +536,8 @@ mod tests {
         let cas = temp.path().join("cas");
         let cache = temp.path().join("cache");
         let first = temp.path().join("first-rootfs");
-        construct_rootfs_cached(&first, std::slice::from_ref(&layer), &cas, &cache).expect("cold construct");
+        construct_rootfs_cached(&first, std::slice::from_ref(&layer), &cas, &cache)
+            .expect("cold construct");
         let manifest = fs::read_dir(&cache)
             .expect("cache dir")
             .next()
@@ -568,7 +571,8 @@ mod tests {
         let cas = temp.path().join("cas");
         let cache = temp.path().join("cache");
         let rootfs = temp.path().join("rootfs");
-        construct_rootfs_cached(&rootfs, std::slice::from_ref(&layer), &cas, &cache).expect("cold construct");
+        construct_rootfs_cached(&rootfs, std::slice::from_ref(&layer), &cas, &cache)
+            .expect("cold construct");
 
         // Different content, same on-disk shape: cache must not be consulted.
         write_layer(&layer, |b| {
@@ -585,7 +589,9 @@ mod tests {
         // A digest-named blob as stored under images/blobs. The cache key
         // binds to content, not the name: a same-jiffy replacement under an
         // unchanged digest name and equal size must still miss the cache.
-        let layer = temp.path().join("sha256_55afa1ecc21d2bb5e5045f32dafee56272ffd89860bac26f6c32123439af26a4");
+        let layer = temp
+            .path()
+            .join("sha256_55afa1ecc21d2bb5e5045f32dafee56272ffd89860bac26f6c32123439af26a4");
         write_layer(&layer, |b| {
             append_file(b, "a", b"v1", 0o644);
         });

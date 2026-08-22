@@ -66,13 +66,20 @@ pub enum RvfLaunchError {
     UnsupportedGuestOs(String),
     #[error("unsupported guest arch: {0} (supported: x86_64/amd64, aarch64/arm64)")]
     UnsupportedGuestArch(String),
-    #[error("native launch requires arch {image_arch}, host is {host_arch}; use the qemu launcher")]
-    NativeArchMismatch { image_arch: String, host_arch: String },
+    #[error(
+        "native launch requires arch {image_arch}, host is {host_arch}; use the qemu launcher"
+    )]
+    NativeArchMismatch {
+        image_arch: String,
+        host_arch: String,
+    },
     #[error("native launch requires a linux host, host is {0}")]
     NativeHostUnsupported(String),
     #[error("qemu launch requires a non-empty kernel segment (type 0x0e)")]
     KernelSegmentMissing,
-    #[error("memory {0} MiB outside allowed range {QEMU_MEMORY_MIN_MIB}-{QEMU_MEMORY_MAX_MIB} MiB")]
+    #[error(
+        "memory {0} MiB outside allowed range {QEMU_MEMORY_MIN_MIB}-{QEMU_MEMORY_MAX_MIB} MiB"
+    )]
     MemoryOutOfRange(u32),
     #[error("timeout {0}s outside allowed range 1-{QEMU_TIMEOUT_MAX_SECS}s")]
     TimeoutOutOfRange(u64),
@@ -123,9 +130,8 @@ fn validate_guest_platform(manifest: &FerroImageManifest) -> Result<GuestArch, R
     if manifest.os != "linux" {
         return Err(RvfLaunchError::UnsupportedGuestOs(manifest.os.clone()));
     }
-    GuestArch::parse(&manifest.arch).ok_or_else(|| {
-        RvfLaunchError::UnsupportedGuestArch(manifest.arch.clone())
-    })
+    GuestArch::parse(&manifest.arch)
+        .ok_or_else(|| RvfLaunchError::UnsupportedGuestArch(manifest.arch.clone()))
 }
 
 /// Choose the launcher for a validated manifest.
@@ -266,8 +272,8 @@ pub fn plan_qemu_launch(
     serial: &SerialOutput,
 ) -> Result<QemuLaunchPlan, RvfLaunchError> {
     validate_guest_platform(&image.manifest)?;
-    let guest_arch = GuestArch::parse(&image.manifest.arch)
-        .expect("validated arch always maps to a GuestArch");
+    let guest_arch =
+        GuestArch::parse(&image.manifest.arch).expect("validated arch always maps to a GuestArch");
     let binary = guest_arch.qemu_binary();
     if !(QEMU_MEMORY_MIN_MIB..=QEMU_MEMORY_MAX_MIB).contains(&memory_mib) {
         return Err(RvfLaunchError::MemoryOutOfRange(memory_mib));
@@ -363,10 +369,12 @@ pub fn run_qemu_bounded(
     let mut child = command.spawn()?;
     loop {
         match child.try_wait()? {
-            Some(status) => return Ok(QemuRunOutcome {
-                status,
-                timed_out: false,
-            }),
+            Some(status) => {
+                return Ok(QemuRunOutcome {
+                    status,
+                    timed_out: false,
+                })
+            }
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
@@ -461,14 +469,8 @@ mod tests {
         }
         // amd64 image plans the x86_64 QEMU binary.
         let image = image_with_kernel("amd64", "linux");
-        let plan = plan_qemu_launch(
-            &image,
-            Path::new("/tmp/k"),
-            64,
-            5,
-            &SerialOutput::Stdio,
-        )
-        .unwrap();
+        let plan =
+            plan_qemu_launch(&image, Path::new("/tmp/k"), 64, 5, &SerialOutput::Stdio).unwrap();
         assert_eq!(plan.binary, "qemu-system-x86_64");
         assert!(plan.argv.contains(&"console=ttyS0 panic=-1".to_string()));
     }
@@ -506,10 +508,7 @@ mod tests {
             LauncherPreference::Native,
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            RvfLaunchError::NativeArchMismatch { .. }
-        ));
+        assert!(matches!(error, RvfLaunchError::NativeArchMismatch { .. }));
     }
 
     #[test]
@@ -564,8 +563,7 @@ mod tests {
     fn plan_builds_fixed_argv_for_x86_64() {
         let image = image_with_kernel("x86_64", "linux");
         let kernel = Path::new("/tmp/kernel.img");
-        let plan =
-            plan_qemu_launch(&image, kernel, 256, 30, &SerialOutput::Stdio).unwrap();
+        let plan = plan_qemu_launch(&image, kernel, 256, 30, &SerialOutput::Stdio).unwrap();
         assert_eq!(plan.binary, "qemu-system-x86_64");
         assert_eq!(plan.argv[0], "qemu-system-x86_64");
         assert_eq!(plan.argv[1], "-machine");
@@ -589,14 +587,8 @@ mod tests {
     #[test]
     fn plan_uses_virt_machine_and_ttyama0_for_aarch64() {
         let image = image_with_kernel("aarch64", "linux");
-        let plan = plan_qemu_launch(
-            &image,
-            Path::new("/tmp/k"),
-            128,
-            10,
-            &SerialOutput::Stdio,
-        )
-        .unwrap();
+        let plan =
+            plan_qemu_launch(&image, Path::new("/tmp/k"), 128, 10, &SerialOutput::Stdio).unwrap();
         assert_eq!(plan.binary, "qemu-system-aarch64");
         assert!(plan.argv.contains(&"virt".to_string()));
         assert!(plan.argv.contains(&"console=ttyAMA0 panic=-1".to_string()));
@@ -608,17 +600,13 @@ mod tests {
         // A path that would break option parsing if interpolated into an
         // option string: commas, spaces, and an embedded -drive option.
         let hostile = Path::new("/tmp/evil, name -drive file=/etc/shadow");
-        let plan =
-            plan_qemu_launch(&image, hostile, 256, 30, &SerialOutput::Stdio).unwrap();
+        let plan = plan_qemu_launch(&image, hostile, 256, 30, &SerialOutput::Stdio).unwrap();
         let kernel_index = plan
             .argv
             .iter()
             .position(|element| element == "-kernel")
             .unwrap();
-        assert_eq!(
-            plan.argv[kernel_index + 1],
-            hostile.display().to_string()
-        );
+        assert_eq!(plan.argv[kernel_index + 1], hostile.display().to_string());
         // The path must not be split across multiple argv elements.
         assert_eq!(plan.argv[kernel_index + 1].matches(',').count(), 1);
     }
@@ -626,17 +614,17 @@ mod tests {
     #[test]
     fn plan_requires_kernel_segment() {
         let mut image = image_with_kernel("x86_64", "linux");
-        image.segments.retain(|segment| segment.seg_type != SEG_KERNEL);
-        let error =
-            plan_qemu_launch(&image, Path::new("/tmp/k"), 256, 30, &SerialOutput::Stdio)
-                .unwrap_err();
+        image
+            .segments
+            .retain(|segment| segment.seg_type != SEG_KERNEL);
+        let error = plan_qemu_launch(&image, Path::new("/tmp/k"), 256, 30, &SerialOutput::Stdio)
+            .unwrap_err();
         assert!(matches!(error, RvfLaunchError::KernelSegmentMissing));
 
         let mut empty = image_with_kernel("x86_64", "linux");
         empty.segments[0].payload.clear();
-        let error =
-            plan_qemu_launch(&empty, Path::new("/tmp/k"), 256, 30, &SerialOutput::Stdio)
-                .unwrap_err();
+        let error = plan_qemu_launch(&empty, Path::new("/tmp/k"), 256, 30, &SerialOutput::Stdio)
+            .unwrap_err();
         assert!(matches!(error, RvfLaunchError::KernelSegmentMissing));
     }
 
@@ -695,7 +683,9 @@ mod tests {
     fn extract_kernel_without_segment_fails() {
         let temp = tempfile::tempdir().unwrap();
         let mut image = image_with_kernel("x86_64", "linux");
-        image.segments.retain(|segment| segment.seg_type != SEG_KERNEL);
+        image
+            .segments
+            .retain(|segment| segment.seg_type != SEG_KERNEL);
         let error = extract_kernel(&image, &temp.path().join("k")).unwrap_err();
         assert!(matches!(error, RvfLaunchError::KernelSegmentMissing));
     }
@@ -779,8 +769,7 @@ mod tests {
         let image = crate::rvf_image::read_rvf_image(&image_path).unwrap();
         let kernel_path = temp.path().join("kernel");
         extract_kernel(&image, &kernel_path).unwrap();
-        let plan =
-            plan_qemu_launch(&image, &kernel_path, 64, 5, &SerialOutput::Stdio).unwrap();
+        let plan = plan_qemu_launch(&image, &kernel_path, 64, 5, &SerialOutput::Stdio).unwrap();
         assert_eq!(plan.argv[0], "qemu-system-x86_64");
     }
 }

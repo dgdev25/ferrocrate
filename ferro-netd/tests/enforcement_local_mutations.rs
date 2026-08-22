@@ -40,10 +40,14 @@ fn open_server(root: &Path, keys: &Keys) -> NetdServer {
         "boot-a",
         GrantLedger::open(root.join("grants.json")).unwrap(),
     );
-    NetdServer::deterministic(1001, Policy::new("cluster".into(), "node".into(), &manager_public).unwrap(), root.join("kernel.json"))
-        .with_grants(verifier)
-        .load_journal(root.join("ownership.json"))
-        .unwrap()
+    NetdServer::deterministic(
+        1001,
+        Policy::new("cluster".into(), "node".into(), &manager_public).unwrap(),
+        root.join("kernel.json"),
+    )
+    .with_grants(verifier)
+    .load_journal(root.join("ownership.json"))
+    .unwrap()
 }
 
 fn sign_envelope(keys: &Keys, request: NetdRequest, revision: u64) -> SignedEnvelope {
@@ -66,7 +70,8 @@ fn sign_envelope(keys: &Keys, request: NetdRequest, revision: u64) -> SignedEnve
 
 fn result_identity(request: &NetdRequest) -> String {
     match request {
-        NetdRequest::RemoveOverlay { overlay_id } | NetdRequest::ApplyOverlay { overlay_id, .. } => {
+        NetdRequest::RemoveOverlay { overlay_id }
+        | NetdRequest::ApplyOverlay { overlay_id, .. } => {
             format!("overlay:{overlay_id}")
         }
         NetdRequest::AttachEndpoint { endpoint_id, .. }
@@ -243,7 +248,11 @@ fn remove_overlay_requires_create_origin_and_rejects_foreign_origin() {
     let directory = tempfile::tempdir().unwrap();
     let mut server = open_server(directory.path(), &keys);
     assert_eq!(
-        server.handle_peer(1001, &frame(&keys, bridge_apply("owned-overlay"), 1, None), 100),
+        server.handle_peer(
+            1001,
+            &frame(&keys, bridge_apply("owned-overlay"), 1, None),
+            100
+        ),
         NetdResponse::Applied
     );
     assert_eq!(
@@ -275,8 +284,7 @@ fn remove_overlay_requires_create_origin_and_rejects_foreign_origin() {
     assert_eq!(rejected(&response), &RejectionCode::InvalidGrant);
     // The owned overlay and endpoint survive.
     let (links, _) = kernel_state(directory.path());
-    let identities =
-        ferro_core::managed_overlay::managed_interface_identities("owned-overlay");
+    let identities = ferro_core::managed_overlay::managed_interface_identities("owned-overlay");
     assert!(links.contains(&identities.bridge_ifname));
     assert!(links.contains(&"ep-origin".to_string()));
 }
@@ -290,7 +298,11 @@ fn detach_endpoint_authorized_for_a_different_overlay_is_rejected() {
     };
     let mut server = open_server(directory.path(), &keys);
     assert_eq!(
-        server.handle_peer(1001, &frame(&keys, bridge_apply("own-overlay"), 1, None), 100),
+        server.handle_peer(
+            1001,
+            &frame(&keys, bridge_apply("own-overlay"), 1, None),
+            100
+        ),
         NetdResponse::Applied
     );
     let attach = NetdRequest::AttachEndpoint {

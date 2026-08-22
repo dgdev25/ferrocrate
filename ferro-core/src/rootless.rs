@@ -866,8 +866,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&subtree, fs::Permissions::from_mode(0o444))
             .expect("read-only subtree control");
-        let error =
-            super::cgroup_delegation_probe(temp.path()).expect_err("undelegated subtree");
+        let error = super::cgroup_delegation_probe(temp.path()).expect_err("undelegated subtree");
         let message = error.to_string();
         assert!(message.contains("not delegated"));
         assert!(message.contains("loginctl enable-linger"));

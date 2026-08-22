@@ -196,97 +196,6 @@ impl ManagedProcess {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{kill_pid, probe_pid, stop_pid, ManagedProcess, ProcessState};
-    use std::path::Path;
-    use std::time::{Duration, Instant};
-
-    fn shell_path() -> &'static str {
-        if Path::new("/bin/sh").exists() {
-            "/bin/sh"
-        } else {
-            "/usr/bin/sh"
-        }
-    }
-
-    #[test]
-    fn starts_and_waits_for_process() {
-        let mut proc =
-            ManagedProcess::start(shell_path(), &["-c", "exit 0"]).expect("process starts");
-        let status = proc.wait().expect("process exits");
-        assert!(status.success());
-        assert_eq!(proc.state(), ProcessState::Exited);
-    }
-
-    #[test]
-    fn pauses_resumes_and_stops_process() {
-        let mut proc =
-            ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
-
-        proc.pause().expect("pause succeeds");
-        assert_eq!(proc.state(), ProcessState::Paused);
-
-        proc.resume().expect("resume succeeds");
-        assert_eq!(proc.state(), ProcessState::Running);
-
-        let status = proc
-            .stop(Duration::from_millis(150))
-            .expect("stop succeeds");
-        assert!(!status.success());
-        assert_eq!(proc.state(), ProcessState::Exited);
-    }
-
-    #[test]
-    fn stop_pid_terminates_process() {
-        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
-        stop_pid(proc.pid(), Duration::from_millis(100)).expect("stop pid");
-    }
-
-    #[test]
-    fn managed_process_supports_unbounded_graceful_stop() {
-        let marker = std::env::temp_dir().join(format!(
-            "ferrocrate-graceful-stop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock is after epoch")
-                .as_nanos()
-        ));
-        let marker_text = marker.to_string_lossy().into_owned();
-        let command = format!(
-            "trap 'exit 0' TERM; : > '{}'; while :; do sleep 1; done",
-            marker_text
-        );
-        let mut proc =
-            ManagedProcess::start(shell_path(), &["-c", &command]).expect("process starts");
-        let ready_deadline = Instant::now() + Duration::from_secs(1);
-        while !marker.exists() && Instant::now() < ready_deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(
-            marker.exists(),
-            "graceful-stop fixture did not become ready"
-        );
-        let status = proc.stop(Duration::MAX).expect("unbounded stop");
-        let _ = std::fs::remove_file(&marker);
-        assert!(status.success());
-        assert_eq!(proc.state(), ProcessState::Exited);
-    }
-
-    #[test]
-    fn kill_pid_terminates_process() {
-        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
-        kill_pid(proc.pid()).expect("kill pid");
-    }
-
-    #[test]
-    fn probe_pid_matches_signal_zero_semantics() {
-        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 1"]).expect("process starts");
-        probe_pid(proc.pid()).expect("live process probe");
-    }
-}
-
 /// Parse the parent PID from a `/proc/<pid>/stat` line. The comm field may
 /// contain spaces and parentheses, so fields are read after the last `)`.
 fn ppid_from_stat(stat: &str) -> Option<u32> {
@@ -442,4 +351,95 @@ pub fn stop_pid_verified(
     }
     let _ = kill(Pid::from_raw(parent as i32), Signal::SIGKILL);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kill_pid, probe_pid, stop_pid, ManagedProcess, ProcessState};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn shell_path() -> &'static str {
+        if Path::new("/bin/sh").exists() {
+            "/bin/sh"
+        } else {
+            "/usr/bin/sh"
+        }
+    }
+
+    #[test]
+    fn starts_and_waits_for_process() {
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", "exit 0"]).expect("process starts");
+        let status = proc.wait().expect("process exits");
+        assert!(status.success());
+        assert_eq!(proc.state(), ProcessState::Exited);
+    }
+
+    #[test]
+    fn pauses_resumes_and_stops_process() {
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
+
+        proc.pause().expect("pause succeeds");
+        assert_eq!(proc.state(), ProcessState::Paused);
+
+        proc.resume().expect("resume succeeds");
+        assert_eq!(proc.state(), ProcessState::Running);
+
+        let status = proc
+            .stop(Duration::from_millis(150))
+            .expect("stop succeeds");
+        assert!(!status.success());
+        assert_eq!(proc.state(), ProcessState::Exited);
+    }
+
+    #[test]
+    fn stop_pid_terminates_process() {
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
+        stop_pid(proc.pid(), Duration::from_millis(100)).expect("stop pid");
+    }
+
+    #[test]
+    fn managed_process_supports_unbounded_graceful_stop() {
+        let marker = std::env::temp_dir().join(format!(
+            "ferrocrate-graceful-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after epoch")
+                .as_nanos()
+        ));
+        let marker_text = marker.to_string_lossy().into_owned();
+        let command = format!(
+            "trap 'exit 0' TERM; : > '{}'; while :; do sleep 1; done",
+            marker_text
+        );
+        let mut proc =
+            ManagedProcess::start(shell_path(), &["-c", &command]).expect("process starts");
+        let ready_deadline = Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && Instant::now() < ready_deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            marker.exists(),
+            "graceful-stop fixture did not become ready"
+        );
+        let status = proc.stop(Duration::MAX).expect("unbounded stop");
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success());
+        assert_eq!(proc.state(), ProcessState::Exited);
+    }
+
+    #[test]
+    fn kill_pid_terminates_process() {
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 5"]).expect("process starts");
+        kill_pid(proc.pid()).expect("kill pid");
+    }
+
+    #[test]
+    fn probe_pid_matches_signal_zero_semantics() {
+        let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 1"]).expect("process starts");
+        probe_pid(proc.pid()).expect("live process probe");
+    }
 }

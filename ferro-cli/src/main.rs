@@ -3627,8 +3627,8 @@ fn dispatch_rvf(command: &RvfCommands) -> Result<(), String> {
             serial_file,
             execute,
         } => handle_rvf_launch(
-            &image,
-            &launcher,
+            image,
+            launcher,
             *memory,
             *timeout_secs,
             serial_file.as_deref(),

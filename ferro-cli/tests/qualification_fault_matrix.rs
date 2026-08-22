@@ -183,7 +183,6 @@ impl QualDaemon {
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
                 return rest
-                    .trim()
                     .split_whitespace()
                     .next()
                     .and_then(|value| value.parse::<u64>().ok())

@@ -241,8 +241,10 @@ impl<E: WorkloadExecutor> NodeSupervisor<E> {
     /// One convergence pass: recover ambiguous journal records, converge
     /// observed state to the desired workload, and republish discovery.
     pub fn reconcile(&self, now_unix: i64) -> Result<ReconcileReport, SupervisorError> {
-        let mut report = ReconcileReport::default();
-        report.recovered_ambiguous = self.recover_ambiguous(now_unix)?;
+        let mut report = ReconcileReport {
+            recovered_ambiguous: self.recover_ambiguous(now_unix)?,
+            ..Default::default()
+        };
 
         let desired = self.workload_store.load()?;
         let observed = self

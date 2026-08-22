@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Validates that an image reference matches OCI specification format.
-/// Pattern: [registry/]repository[:tag|@sha256:digest]
+/// Pattern: `[registry/]repository[:tag or @sha256:digest]`
 pub fn validate_image_reference(image: &str) -> Result<(), String> {
     // Basic validation: must contain valid characters
     // Full OCI reference regex is complex, this covers common cases

@@ -288,6 +288,64 @@ pub fn apply_readonly_rootfs(rootfs: &Path) -> Result<(), MountError> {
     Ok(())
 }
 
+/// Copy `source` into an empty `destination`, preserving file types
+/// (symlinks stay symlinks; never followed), modes, and mtimes. Used for
+/// Docker-compatible first-use copy-up into named volumes.
+pub(crate) fn copy_tree_preserving(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        let target = destination.join(entry.file_name());
+        if metadata.file_type().is_symlink() {
+            let link = std::fs::read_link(entry.path())?;
+            std::os::unix::fs::symlink(&link, &target)?;
+        } else if metadata.is_dir() {
+            copy_tree_preserving(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+        // fs::copy preserves mode for regular files; dirs and links need an
+        // explicit chmod from the source metadata.
+        let permissions = metadata.permissions();
+        let _ = std::fs::set_permissions(&target, permissions);
+    }
+    Ok(())
+}
+
+/// Docker-compatible named-volume copy-up: an empty volume mounted over a
+/// path where the image already has content receives that content before the
+/// mount, so the image's files are visible inside the volume instead of a
+/// fresh empty directory hiding them. Bind mounts are never copied; a volume
+/// that already holds data is never overwritten.
+pub(crate) fn volume_copy_up_if_empty(
+    volumes_root: &Path,
+    mount: &BindMount,
+    rootfs_dir: &Path,
+) -> Result<(), String> {
+    let source = Path::new(&mount.source);
+    if !source.starts_with(volumes_root) {
+        return Ok(());
+    }
+    let empty = match std::fs::read_dir(source) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => return Ok(()),
+    };
+    if !empty {
+        return Ok(());
+    }
+    let image_path = rootfs_dir.join(&mount.target);
+    let metadata = match std::fs::symlink_metadata(&image_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(()),
+    };
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    copy_tree_preserving(&image_path, source)
+        .map_err(|error| format!("volume copy-up into {} failed: {error}", source.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -395,63 +453,4 @@ mod tests {
 
         apply_bind_mounts(&rootfs, &mounts).expect("bind mount");
     }
-}
-
-/// Copy `source` into an empty `destination`, preserving file types
-/// (symlinks stay symlinks; never followed), modes, and mtimes. Used for
-/// Docker-compatible first-use copy-up into named volumes.
-pub(crate) fn copy_tree_preserving(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let metadata = std::fs::symlink_metadata(entry.path())?;
-        let target = destination.join(entry.file_name());
-        if metadata.file_type().is_symlink() {
-            let link = std::fs::read_link(entry.path())?;
-            std::os::unix::fs::symlink(&link, &target)?;
-        } else if metadata.is_dir() {
-            copy_tree_preserving(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-        // fs::copy preserves mode for regular files; dirs and links need an
-        // explicit chmod from the source metadata.
-        let permissions = metadata.permissions();
-        let _ = std::fs::set_permissions(&target, permissions);
-    }
-    Ok(())
-}
-
-/// Docker-compatible named-volume copy-up: an empty volume mounted over a
-/// path where the image already has content receives that content before the
-/// mount, so the image's files are visible inside the volume instead of a
-/// fresh empty directory hiding them. Bind mounts are never copied; a volume
-/// that already holds data is never overwritten.
-pub(crate) fn volume_copy_up_if_empty(
-    volumes_root: &Path,
-    mount: &BindMount,
-    rootfs_dir: &Path,
-) -> Result<(), String> {
-    let source = Path::new(&mount.source);
-    if !source.starts_with(volumes_root) {
-        return Ok(());
-    }
-    let empty = match std::fs::read_dir(source) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => return Ok(()),
-    };
-    if !empty {
-        return Ok(());
-    }
-    let image_path = rootfs_dir.join(&mount.target);
-    let metadata = match std::fs::symlink_metadata(&image_path) {
-        Ok(metadata) => metadata,
-        Err(_) => return Ok(()),
-    };
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    copy_tree_preserving(&image_path, source)
-        .map_err(|error| format!("volume copy-up into {} failed: {error}", source.display()))
 }

@@ -39,7 +39,7 @@ fn budget_exhaustion_fails_closed_for_50_containers_without_leakage() {
         .collect();
     let exhausted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut workers = Vec::new();
-    for budgets in budgets.iter().cloned() {
+    for budgets in budgets.clone() {
         let exhausted = Arc::clone(&exhausted);
         workers.push(std::thread::spawn(move || {
             let mut rejected = 0;

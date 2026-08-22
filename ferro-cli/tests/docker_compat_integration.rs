@@ -1228,7 +1228,7 @@ fn docker_compat_stop_timeout_and_signal_delivery_semantics() {
         let (status, response) = harness.request("POST", "/v1.45/containers/term-trapper/stop?t=2");
         assert_eq!(status, 204, "stop response={response}");
         let elapsed = started.elapsed();
-        let (status, response) = harness.request("POST", "/v1.45/containers/term-trapper/wait");
+        let (_status, response) = harness.request("POST", "/v1.45/containers/term-trapper/wait");
         let exit_code: i64 = serde_json::from_str::<serde_json::Value>(&response)
             .expect("wait json")
             .get("StatusCode")
@@ -1252,7 +1252,7 @@ fn docker_compat_stop_timeout_and_signal_delivery_semantics() {
         let (status, response) =
             harness.request("POST", "/v1.45/containers/plain-stopper/stop?t=10");
         assert_eq!(status, 204, "plain stop response={response}");
-        let (status, response) = harness.request("POST", "/v1.45/containers/plain-stopper/wait");
+        let (_status, response) = harness.request("POST", "/v1.45/containers/plain-stopper/wait");
         let exit_code: i64 = serde_json::from_str::<serde_json::Value>(&response)
             .expect("wait json")
             .get("StatusCode")
@@ -1307,7 +1307,7 @@ fn docker_compat_stop_timeout_and_signal_delivery_semantics() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(delivered, "USR1 handler marker missing in logs");
-    let (status, response) = harness.request("POST", "/v1.45/containers/usr1-handler/wait");
+    let (_status, response) = harness.request("POST", "/v1.45/containers/usr1-handler/wait");
     let exit_code: i64 = serde_json::from_str::<serde_json::Value>(&response)
         .expect("wait json")
         .get("StatusCode")
@@ -2441,11 +2441,11 @@ fn append_raw_tar_entry(out: &mut Vec<u8>, name: &str, data: &[u8]) {
     out.extend_from_slice(&header);
     out.extend_from_slice(data);
     let padding = (512 - data.len() % 512) % 512;
-    out.extend(std::iter::repeat(0u8).take(padding));
+    out.extend(std::iter::repeat_n(0u8, padding));
 }
 
 fn finish_raw_tar(out: &mut Vec<u8>) {
-    out.extend(std::iter::repeat(0u8).take(1024));
+    out.extend(std::iter::repeat_n(0u8, 1024));
 }
 
 #[test]
@@ -2534,10 +2534,7 @@ fn docker_compat_image_load_rejects_malformed_archives() {
     let harness = DaemonHarness::spawn();
 
     let config_bytes = br#"{"architecture":"amd64","os":"linux"}"#;
-    let config_name = format!(
-        "{}.json",
-        format!("{:x}", sha2::Sha256::digest(config_bytes))
-    );
+    let config_name = format!("{:x}.json", sha2::Sha256::digest(config_bytes));
     let missing_layer_manifest = format!(
         r#"[{{"Config":"{config_name}","RepoTags":["malformed/layer:latest"],"Layers":["layer-0/layer.tar"]}}]"#
     );
@@ -2627,18 +2624,12 @@ fn docker_compat_foreign_architecture_archive_keeps_label_without_execution_clai
             .expect("append layer entry");
         builder.finish().expect("finish layer tar");
     }
+    let diff_id = format!("sha256:{:x}", sha2::Sha256::digest(&layer_tar));
     let config_json = format!(
-        r#"{{"architecture":"arm64","os":"linux","config":{{}},"rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,
-        format!(
-            "sha256:{}",
-            format!("{:x}", sha2::Sha256::digest(&layer_tar))
-        )
+        r#"{{"architecture":"arm64","os":"linux","config":{{}},"rootfs":{{"type":"layers","diff_ids":["{diff_id}"]}}}}"#
     );
     let config_bytes = config_json.as_bytes();
-    let config_name = format!(
-        "{}.json",
-        format!("{:x}", sha2::Sha256::digest(config_bytes))
-    );
+    let config_name = format!("{:x}.json", sha2::Sha256::digest(config_bytes));
     let manifest = format!(
         r#"[{{"Config":"{config_name}","RepoTags":["foreign/arch:latest"],"Layers":["layer-0/layer.tar"]}}]"#
     );

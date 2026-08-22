@@ -6,7 +6,7 @@ use reqwest::header::{
 use reqwest::Certificate;
 use reqwest::Method;
 use std::fs::{File, OpenOptions};
-use std::io::{copy, Read, Seek, Write};
+use std::io::{copy, Read, Seek};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;

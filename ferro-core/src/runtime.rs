@@ -3489,10 +3489,7 @@ impl ContainerRuntime {
     /// not hidden: any line lacking a timestamp record makes that stream
     /// `None`, so callers fail closed instead of guessing.
     #[inline]
-    pub fn logs_timestamped_split(
-        &self,
-        id: &str,
-    ) -> Result<(Option<Vec<TimestampedLine>>, Option<Vec<TimestampedLine>>), RuntimeError> {
+    pub fn logs_timestamped_split(&self, id: &str) -> Result<TimestampedSplit, RuntimeError> {
         let record = self
             .store
             .get(id)?
@@ -6478,12 +6475,12 @@ fn spawn_child_with_logs(
             .spawn()?;
         if let Some(mut pipe) = child.stdout.take() {
             let mut log = stdout_file;
-            let journal = log_journal_path(&stdout_path);
+            let journal = log_journal_path(stdout_path);
             thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
         }
         if let Some(mut pipe) = child.stderr.take() {
             let mut log = stderr_file;
-            let journal = log_journal_path(&stderr_path);
+            let journal = log_journal_path(stderr_path);
             thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
         }
         child
@@ -6503,6 +6500,9 @@ fn spawn_child_with_logs(
     wait_until_launch_stopped(child_id)?;
     Ok((child_id, child, pidfd))
 }
+
+/// stdout/stderr with optional per-line timestamp resolution.
+pub type TimestampedSplit = (Option<Vec<TimestampedLine>>, Option<Vec<TimestampedLine>>);
 
 /// One captured log line with the Unix-epoch nanoseconds recorded when the
 /// line was accepted from the container.
@@ -6531,7 +6531,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
         Ok(file) => file,
         Err(_) => return,
     };
-    let mut reader = pipe;
+    let reader = pipe;
     let mut offset: u64 = log.stream_position().unwrap_or(0);
     // Bound the pending "line" so a workload emitting newline-free output
     // cannot grow the copier's memory without limit: past the cap the pending

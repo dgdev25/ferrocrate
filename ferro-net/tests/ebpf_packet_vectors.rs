@@ -2,8 +2,8 @@
 mod packet;
 
 use packet::{
-    parse_packet_bytes, rewrite_ipv4_destination, rewrite_ipv4_source, rewrite_transport_port,
-    PacketError, PortField, TransportProtocol,
+    parse_packet_bytes, parse_with_link, rewrite_ipv4_destination, rewrite_ipv4_source,
+    rewrite_transport_port, PacketError, PortField, TransportProtocol,
 };
 
 fn tcp_packet() -> Vec<u8> {
@@ -137,6 +137,26 @@ fn assert_all_rewrites_leave_packet_unchanged(input: &[u8]) {
     let mut packet = original.clone();
     assert!(rewrite_transport_port(&mut packet, PortField::Destination, 4321).is_err());
     assert_eq!(packet, original);
+}
+
+#[test]
+fn paged_payload_beyond_linear_head_still_parses() {
+    // A locally generated data segment on a scatter-gather device keeps its
+    // payload in page frags: direct packet access covers only the linear
+    // headers while skb->len covers the whole packet. The parse must
+    // validate the IPv4 total length against the full skb length and must
+    // never read payload bytes, or every data-carrying segment is
+    // misclassified as truncated (the FCNET-27 published-port GET drop).
+    let mut headers = tcp_packet();
+    headers[16] = 0x00;
+    headers[17] = 0x77; // total length 119: 40 header bytes + 79 payload bytes
+    let skb_len = 14 + 119;
+    let view = parse_with_link(skb_len, 14, true, |offset| {
+        headers.get(offset).copied().ok_or(PacketError::Truncated)
+    })
+    .expect("headers-only readable prefix must parse when skb_len covers the payload");
+    assert_eq!(view.packet_end, skb_len);
+    assert_eq!(view.transport, TransportProtocol::Tcp);
 }
 
 #[test]

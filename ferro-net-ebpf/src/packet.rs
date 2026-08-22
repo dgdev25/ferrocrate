@@ -84,7 +84,7 @@ where
     parse_with_link(packet_len, ETHERNET_HEADER_LEN, true, read_byte)
 }
 
-fn parse_with_link<F>(
+pub(crate) fn parse_with_link<F>(
     packet_len: usize,
     ipv4_offset: usize,
     ethernet: bool,
@@ -352,10 +352,17 @@ mod tc {
 
     impl PacketView {
         pub fn parse(ctx: &TcContext) -> Result<Self, PacketError> {
-            let packet_len = ctx
+            // `data_end - data` covers only the linear head. A locally
+            // generated data segment on a scatter-gather device (loopback
+            // included) carries its payload in page frags, so validating the
+            // IPv4 total length against the linear span misclassifies every
+            // such packet as truncated. `skb->len` covers head plus frags;
+            // byte reads go through bpf_skb_load_bytes, which is frag-aware.
+            let linear_len = ctx
                 .data_end()
                 .checked_sub(ctx.data())
                 .ok_or(PacketError::Truncated)?;
+            let packet_len = linear_len.max(ctx.len() as usize);
 
             let ethernet = ctx.load::<u8>(12).ok() == Some((ETHERTYPE_IPV4 >> 8) as u8)
                 && ctx.load::<u8>(13).ok() == Some(ETHERTYPE_IPV4 as u8);

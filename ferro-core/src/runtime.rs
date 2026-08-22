@@ -3667,7 +3667,7 @@ impl ContainerRuntime {
         // the host PID namespace. Signaling the launcher instead would kill
         // the boundary while a TERM-trapping workload never sees the signal.
         let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
-        stop_pid(workload_pid, timeout)?;
+        crate::process_lifecycle::stop_pid_verified(workload_pid, record.pid, timeout)?;
         if workload_pid != record.pid {
             let launcher = nix::unistd::Pid::from_raw(record.pid as i32);
             if crate::process_lifecycle::probe_pid(record.pid).is_ok() {
@@ -3724,7 +3724,16 @@ impl ContainerRuntime {
             // Deliver to the workload's PID 1 (deepest descendant for the
             // rootless bubblewrap boundary), matching Docker's kill target.
             let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
-            signal_pid(workload_pid, signal)?;
+            if !crate::process_lifecycle::signal_pid_verified_parent(
+                workload_pid,
+                record.pid,
+                signal,
+            )? {
+                // The workload vanished between resolution and delivery
+                // (normal for an exiting container); signal the launcher as
+                // the fallback target.
+                signal_pid(record.pid, signal)?;
+            }
             if workload_pid != record.pid
                 && signal == nix::sys::signal::Signal::SIGKILL
                 && crate::process_lifecycle::probe_pid(record.pid).is_ok()

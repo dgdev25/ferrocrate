@@ -296,13 +296,36 @@ fn ppid_from_stat(stat: &str) -> Option<u32> {
     fields.next().and_then(|ppid| ppid.parse::<u32>().ok())
 }
 
+/// Real-time UID of a process from `/proc/<pid>/status`, used to constrain
+/// signal-target resolution to processes owned by the caller. A PID that was
+/// recycled into another user's process must never be selected.
+fn uid_of_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            return rest.split_whitespace().next().and_then(|v| v.parse().ok());
+        }
+    }
+    None
+}
+
+fn own_uid() -> u32 {
+    nix::unistd::Uid::effective().as_raw()
+}
+
 /// The workload's PID 1 for signal delivery. Rootless containers record the
 /// bubblewrap launcher PID; the container's PID 1 is the launcher's direct
 /// child in the host PID namespace (deeper descendants are the workload's
 /// own children and must not be the signal target). Rootful containers exec
 /// the workload directly, so the recorded PID is already PID 1 and has no
 /// launcher child.
+///
+/// PID-recycling safety: only a child owned by the calling UID is eligible,
+/// and callers must re-verify parenthood through
+/// `signal_pid_verified_parent` (or re-resolve) immediately before
+/// signaling; the launcher PID itself stays the fallback target.
 pub fn container_pid1_for_signal(root: u32) -> u32 {
+    let caller = own_uid();
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -312,12 +335,64 @@ pub fn container_pid1_for_signal(root: u32) -> u32 {
             let Ok(stat) = std::fs::read_to_string(format!("/proc/{name}/stat")) else {
                 continue;
             };
-            if ppid_from_stat(&stat) == Some(root) {
-                if let Ok(pid) = name.parse::<u32>() {
-                    return pid;
-                }
+            if ppid_from_stat(&stat) != Some(root) {
+                continue;
+            }
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            if uid_of_pid(pid) == Some(caller) {
+                return pid;
             }
         }
     }
     root
+}
+
+/// Signal `pid` only while it still has the expected parent and owner.
+/// Narrows the PID-recycling window to the gap between one /proc read and
+/// the kill syscall; a recycled PID with a different parent is never
+/// signaled. Returns `Ok(false)` when the process is gone.
+pub fn signal_pid_verified_parent(
+    pid: u32,
+    expected_parent: u32,
+    signal: Signal,
+) -> Result<bool, ProcessLifecycleError> {
+    if pid == expected_parent {
+        signal_pid(pid, signal)?;
+        return Ok(true);
+    }
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(_) => return Ok(false),
+    };
+    if ppid_from_stat(&stat) != Some(expected_parent) || uid_of_pid(pid) != Some(own_uid()) {
+        return Ok(false);
+    }
+    signal_pid(pid, signal)?;
+    Ok(true)
+}
+
+/// Docker-style graceful stop of the workload's PID 1, verified against the
+/// launcher parent before each signal so a recycled PID is never signaled.
+pub fn stop_pid_verified(
+    child: u32,
+    parent: u32,
+    timeout: Duration,
+) -> Result<(), ProcessLifecycleError> {
+    if child == parent {
+        return stop_pid(child, timeout);
+    }
+    if !signal_pid_verified_parent(child, parent, Signal::SIGTERM)? {
+        return Ok(()); // workload already exited
+    }
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !pid_exists(Pid::from_raw(child as i32)) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = signal_pid_verified_parent(child, parent, Signal::SIGKILL);
+    Ok(())
 }

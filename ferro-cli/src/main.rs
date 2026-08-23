@@ -10923,23 +10923,30 @@ fn wait_for_compose_dependencies(
 
 #[cfg(target_os = "linux")]
 fn wait_for_compose_completion(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
-    let id = resolve_container_id(runtime, service)?;
+    let ids = compose_dependency_container_ids(runtime, service)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let record = runtime.inspect(&id).map_err(|err| err.to_string())?;
-        if record.status == "exited" {
-            let code = record.last_exit_code.unwrap_or(0);
-            if code == 0 {
-                return Ok(());
+        let mut all_complete = true;
+        for id in &ids {
+            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+            if record.status == "exited" {
+                let code = record.last_exit_code.unwrap_or(0);
+                if code != 0 {
+                    return Err(format!(
+                        "compose: dependency {service} exited with status {code}"
+                    ));
+                }
+                continue;
             }
-            return Err(format!(
-                "compose: dependency {service} exited with status {code}"
-            ));
+            if matches!(record.status.as_str(), "removed" | "quarantined") {
+                return Err(format!(
+                    "compose: dependency {service} disappeared before successful completion"
+                ));
+            }
+            all_complete = false;
         }
-        if matches!(record.status.as_str(), "removed" | "quarantined") {
-            return Err(format!(
-                "compose: dependency {service} disappeared before successful completion"
-            ));
+        if all_complete {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -10952,19 +10959,25 @@ fn wait_for_compose_completion(runtime: &ContainerRuntime, service: &str) -> Res
 
 #[cfg(target_os = "linux")]
 fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
-    let id = resolve_container_id(runtime, service)?;
+    let ids = compose_dependency_container_ids(runtime, service)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let record = runtime.inspect(&id).map_err(|err| err.to_string())?;
-        match record.health_status.as_str() {
-            "healthy" => return Ok(()),
-            "unhealthy" => {
-                return Err(format!("compose: dependency {service} is unhealthy"));
+        let mut all_healthy = true;
+        for id in &ids {
+            let record = runtime.inspect(id).map_err(|err| err.to_string())?;
+            match record.health_status.as_str() {
+                "healthy" => {}
+                "unhealthy" => {
+                    return Err(format!("compose: dependency {service} is unhealthy"));
+                }
+                "none" => {
+                    return Err(format!("compose: dependency {service} has no healthcheck"));
+                }
+                _ => all_healthy = false,
             }
-            "none" => {
-                return Err(format!("compose: dependency {service} has no healthcheck"));
-            }
-            _ => {}
+        }
+        if all_healthy {
+            return Ok(());
         }
 
         if Instant::now() >= deadline {
@@ -10974,6 +10987,33 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn compose_dependency_container_ids(
+    runtime: &ContainerRuntime,
+    service: &str,
+) -> Result<Vec<String>, String> {
+    let replica_prefix = format!("{service}-");
+    let mut ids = runtime
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| {
+            record.name.as_deref().is_some_and(|name| {
+                name == service
+                    || name
+                        .strip_prefix(&replica_prefix)
+                        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+            })
+        })
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        ids.push(resolve_container_id(runtime, service)?);
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 #[cfg(target_os = "linux")]
@@ -17760,6 +17800,42 @@ mod tests {
         let error = super::wait_for_compose_health(&runtime, "no-health")
             .expect_err("missing healthcheck must fail");
         assert!(error.contains("has no healthcheck"));
+    }
+
+    #[test]
+    fn compose_conditions_wait_for_every_dependency_replica() {
+        let temp = configured_cli_runtime("disabled");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        for (id, name, status, health, code) in [
+            ("health-1", "db-1", "created", "healthy", None),
+            ("health-2", "db-2", "created", "healthy", None),
+            ("job-1", "migrate-1", "exited", "none", Some(0)),
+            ("job-2", "migrate-2", "exited", "none", Some(0)),
+        ] {
+            let record: ferro_core::container_store::ContainerRecord =
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "pid": 0,
+                    "image": "example.invalid/dependency:latest",
+                    "command": ["true"],
+                    "created_at_unix": 1,
+                    "stdout_path": "",
+                    "stderr_path": "",
+                    "status": status,
+                    "health_status": health,
+                    "last_exit_code": code
+                }))
+                .expect("dependency record");
+            store.put(&record).expect("store dependency record");
+        }
+        drop(store);
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        assert!(super::wait_for_compose_health(&runtime, "db").is_ok());
+        assert!(super::wait_for_compose_completion(&runtime, "migrate").is_ok());
     }
 
     use ferro_compose::ComposeFile;

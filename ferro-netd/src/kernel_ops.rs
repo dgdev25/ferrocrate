@@ -204,7 +204,7 @@ impl NetKernelOps for RealNetKernelOps {
     }
     fn apply_addresses(&mut self, interface: &str, addresses: &[String]) -> Result<(), String> {
         for address in addresses {
-            exec_cmd(&[
+            let tagged = exec_cmd(&[
                 "ip".into(),
                 "address".into(),
                 "replace".into(),
@@ -213,6 +213,19 @@ impl NetKernelOps for RealNetKernelOps {
                 interface.into(),
                 "proto".into(),
                 "186".into(),
+            ]);
+            if tagged.is_ok() {
+                continue;
+            }
+            // iproute2 before 6.3 rejects the address protocol attribute;
+            // fall back to an untagged replace on such hosts.
+            exec_cmd(&[
+                "ip".into(),
+                "address".into(),
+                "replace".into(),
+                address.clone(),
+                "dev".into(),
+                interface.into(),
             ])
             .map_err(|e| e.to_string())?;
         }
@@ -387,9 +400,13 @@ fn observe_addresses(interface: &str) -> Result<Vec<String>, ()> {
                 .flatten()
         })
         .filter_map(|address| {
-            if address.get("protocol").and_then(serde_json::Value::as_u64) != Some(186)
-                && address.get("protocol").and_then(serde_json::Value::as_str) != Some("186")
-            {
+            let tagged = address.get("protocol").and_then(serde_json::Value::as_u64) == Some(186)
+                || address.get("protocol").and_then(serde_json::Value::as_str) == Some("186");
+            // iproute2 before 6.3 cannot tag or report the address protocol;
+            // on such hosts accept global-scope addresses instead.
+            let untagged_global = address.get("protocol").is_none()
+                && address.get("scope").and_then(serde_json::Value::as_str) == Some("global");
+            if !tagged && !untagged_global {
                 return None;
             }
             Some(format!(

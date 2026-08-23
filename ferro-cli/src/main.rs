@@ -165,6 +165,15 @@ pub enum Commands {
     Run {
         /// Image reference (`registry/repo:tag`, `repo:tag`, digest, or local tag).
         image: String,
+        /// Keep stdin open and forward it to the container.
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
+        /// Allocate a terminal for the container.
+        #[arg(short = 't', long = "tty")]
+        tty: bool,
+        /// Run in the background instead of attaching this CLI process.
+        #[arg(short = 'd', long = "detach")]
+        detach: bool,
         #[arg(long)]
         name: Option<String>,
         #[arg(long, default_value = "bridge")]
@@ -3105,6 +3114,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Run {
                 image,
+                interactive,
+                tty,
+                detach,
                 cmd,
                 network_backend,
                 network,
@@ -3140,12 +3152,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 pids_max,
                 ai_model,
             } => {
-                // `run` is a detached CLI operation: the workload must remain
-                // manageable after this short-lived process exits.
-                unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
+                let _detach_guard = ScopedEnv::set(
+                    "FERROCRATE_DETACH_WORKLOAD",
+                    detach.then_some("1"),
+                );
+                let _tty_guard = ScopedEnv::set("FERROCRATE_RUN_TTY", tty.then_some("1"));
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|err| err.to_string())?;
-                handle_run(
+                let id = handle_run(
                     &runtime_dir,
                     &runtime,
                     &image_store,
@@ -3175,7 +3189,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     health_start_period,
                     None,
                     &restart_policy,
-                    rm,
+                    false,
                     bridge_cidr.as_deref(),
                     bridge_name.as_deref(),
                     net_limit.as_deref(),
@@ -3186,7 +3200,15 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     ai_model.as_deref(),
                     None,
                     None,
-                )
+                )?;
+                if !detach {
+                    attach_local_container(&runtime_dir, &id, interactive, tty)?;
+                }
+                if rm {
+                    wait_for_container_exit(&runtime, &id)?;
+                    runtime.remove(&id).map_err(|error| error.to_string())?;
+                }
+                Ok(())
             }
             #[cfg(target_os = "linux")]
             Commands::Build {
@@ -4532,7 +4554,7 @@ fn handle_run(
     ai_model: Option<&str>,
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let binding = bind_run_network(runtime_dir, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
     let selected_network_name = binding.association;
@@ -4688,7 +4710,7 @@ fn handle_run(
         wait_for_container_exit(runtime, &record.id)?;
         runtime.remove(&record.id).map_err(|err| err.to_string())?;
     }
-    Ok(())
+    Ok(record.id)
 }
 
 fn handle_completion(shell: &str) -> Result<(), String> {
@@ -5185,6 +5207,135 @@ where
 }
 
 #[cfg(target_os = "linux")]
+fn proxy_docker_hijacked_stream(
+    mut stream: UnixStream,
+    stdin_requested: bool,
+    tty: bool,
+) -> Result<(), String> {
+    if stdin_requested {
+        let mut input_stream = stream
+            .try_clone()
+            .map_err(|error| format!("remote context hijack clone failed: {error}"))?;
+        std::thread::spawn(move || {
+            let mut input = std::io::stdin().lock();
+            let _ = std::io::copy(&mut input, &mut input_stream);
+            let _ = input_stream.shutdown(std::net::Shutdown::Write);
+        });
+    }
+
+    let mut demuxer = DockerLogFrameDemuxer::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let size = stream
+            .read(&mut chunk)
+            .map_err(|error| format!("remote context hijack read failed: {error}"))?;
+        if size == 0 {
+            break;
+        }
+        if tty {
+            std::io::stdout()
+                .write_all(&chunk[..size])
+                .and_then(|_| std::io::stdout().flush())
+                .map_err(|error| format!("remote context stdout failed: {error}"))?;
+        } else {
+            let (stdout, stderr) = demuxer.feed(&chunk[..size]);
+            if !stdout.is_empty() {
+                std::io::stdout()
+                    .write_all(&stdout)
+                    .and_then(|_| std::io::stdout().flush())
+                    .map_err(|error| format!("remote context stdout failed: {error}"))?;
+            }
+            if !stderr.is_empty() {
+                std::io::stderr()
+                    .write_all(&stderr)
+                    .and_then(|_| std::io::stderr().flush())
+                    .map_err(|error| format!("remote context stderr failed: {error}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_hijack(
+    socket_path: &str,
+    path: &str,
+    stdin_requested: bool,
+    tty: bool,
+) -> Result<(), String> {
+    if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
+        return Err("remote context hijack has an invalid socket or path".to_string());
+    }
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("remote context hijack connect failed: {error}"))?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("remote context hijack request failed: {error}"))?;
+
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| format!("remote context hijack response failed: {error}"))?;
+        headers.push(byte[0]);
+        if headers.len() > 64 * 1024 {
+            return Err("remote context hijack response headers are too large".to_string());
+        }
+    }
+    let headers = std::str::from_utf8(&headers)
+        .map_err(|_| "remote context hijack returned non-UTF-8 headers".to_string())?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "remote context hijack returned an invalid HTTP status".to_string())?;
+    if status != 101 {
+        return Err(format!("remote context hijack returned HTTP {status}"));
+    }
+    proxy_docker_hijacked_stream(stream, stdin_requested, tty)
+}
+
+#[cfg(target_os = "linux")]
+fn attach_local_container(
+    runtime_dir: &Path,
+    id: &str,
+    stdin_requested: bool,
+    tty: bool,
+) -> Result<(), String> {
+    let (client, mut server) = UnixStream::pair()
+        .map_err(|error| format!("run: failed to create attach channel: {error}"))?;
+    let runtime_dir = runtime_dir.to_path_buf();
+    let id = id.to_string();
+    let worker = std::thread::Builder::new()
+        .name(format!("ferro-run-attach-{id}"))
+        .spawn(move || {
+            let runtime = ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+            stream_docker_attach(
+                &mut server,
+                &runtime,
+                &id,
+                true,
+                true,
+                stdin_requested,
+                true,
+                true,
+                &[],
+            )
+        })
+        .map_err(|error| format!("run: failed to start attach worker: {error}"))?;
+    let client_result = proxy_docker_hijacked_stream(client, stdin_requested, tty);
+    let server_result = worker
+        .join()
+        .map_err(|_| "run: attach worker panicked".to_string())?;
+    client_result.and(server_result)
+}
+
+#[cfg(target_os = "linux")]
 fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
     let endpoint = match selected_remote_context_endpoint() {
         Ok(endpoint) => endpoint,
@@ -5221,6 +5372,9 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
     let result = match command {
         Commands::Run {
             image,
+            interactive,
+            tty,
+            detach,
             name,
             network,
             network_backend,
@@ -5333,6 +5487,8 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             let payload = serde_json::json!({
                 "Image": image,
                 "Cmd": cmd,
+                "OpenStdin": interactive,
+                "Tty": tty,
                 "Env": env,
                 "Entrypoint": entrypoint,
                 "WorkingDir": workdir,
@@ -5377,6 +5533,18 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "remote run create response omitted Id".to_string())?;
             request("POST", format!("/containers/{id}/start"))?;
+            if !detach {
+                remote_docker_hijack(
+                    &endpoint,
+                    &format!(
+                        "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1",
+                        percent_encode_path_component(id),
+                        if *interactive { 1 } else { 0 }
+                    ),
+                    *interactive,
+                    *tty,
+                )?;
+            }
             if *rm {
                 request(
                     "POST",
@@ -17005,26 +17173,32 @@ fn stream_docker_attach(
     let mut emitted_stdout = initial_stdout.len();
     let mut emitted_stderr = initial_stderr.len();
     let mut input = [0_u8; 16 * 1024];
+    let mut input_closed = false;
     loop {
-        match stream.read(&mut input) {
-            Ok(0) => return Ok(()),
-            Ok(size) => {
-                use std::io::Write as _;
-                if let Some(stdin) = stdin.as_mut() {
-                    stdin
-                        .write_all(&input[..size])
-                        .map_err(|error| format!("docker: writing container stdin: {error}"))?;
-                    stdin
-                        .flush()
-                        .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
+        if !input_closed {
+            match stream.read(&mut input) {
+                Ok(0) => {
+                    input_closed = true;
+                    stdin = None;
                 }
+                Ok(size) => {
+                    use std::io::Write as _;
+                    if let Some(stdin) = stdin.as_mut() {
+                        stdin.write_all(&input[..size]).map_err(|error| {
+                            format!("docker: writing container stdin: {error}")
+                        })?;
+                        stdin.flush().map_err(|error| {
+                            format!("docker: flushing container stdin: {error}")
+                        })?;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error.to_string()),
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => return Err(error.to_string()),
         }
         let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
         if stdout.len() < emitted_stdout {
@@ -17448,6 +17622,29 @@ configs:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_run_interactive_tty_and_detach_flags() {
+        let attached = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "-it",
+            "alpine:latest",
+            "/bin/sh",
+        ])
+        .expect("combined interactive TTY flags must parse");
+        let attached = format!("{:?}", attached.command);
+        assert!(attached.contains("interactive: true"), "{attached}");
+        assert!(attached.contains("tty: true"), "{attached}");
+        assert!(attached.contains("detach: false"), "{attached}");
+
+        let detached = Cli::try_parse_from(["ferrocrate", "run", "-d", "alpine:latest"])
+            .expect("detach flag must parse");
+        let detached = format!("{:?}", detached.command);
+        assert!(detached.contains("interactive: false"), "{detached}");
+        assert!(detached.contains("tty: false"), "{detached}");
+        assert!(detached.contains("detach: true"), "{detached}");
     }
 
     #[test]
@@ -22332,6 +22529,7 @@ volumes:
         let command = Cli::try_parse_from([
             "ferrocrate",
             "run",
+            "-d",
             "alpine:latest",
             "--name",
             "web-name",
@@ -22387,6 +22585,88 @@ volumes:
         assert!(create.contains("\"SecurityOpt\":[\"no-new-privileges\"]"));
         assert!(create.contains("\"80/tcp\":[{\"HostPort\":\"8080\"}]"));
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
+    }
+
+    #[test]
+    fn remote_run_it_uses_the_attach_hijack() {
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("remote interactive run config");
+        let socket = temp.path().join("remote-run-it.sock");
+        let listener = UnixListener::bind(&socket).expect("bind remote run socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let mut requests = Vec::new();
+            while requests.len() < 3 && std::time::Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept remote interactive run request: {error}"),
+                };
+                let mut request = Vec::new();
+                if requests.len() < 2 {
+                    stream
+                        .read_to_end(&mut request)
+                        .expect("read create/start request");
+                } else {
+                    let mut byte = [0_u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).expect("read hijack request");
+                        request.push(byte[0]);
+                    }
+                }
+                let response = match requests.len() {
+                    0 => b"HTTP/1.1 201 Created\r\nContent-Length: 34\r\nConnection: close\r\n\r\n{\"Id\":\"remote-id\",\"Warnings\":null}".as_slice(),
+                    1 => b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+                    _ => b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nattached\n".as_slice(),
+                };
+                requests.push(request);
+                stream.write_all(response).expect("write run response");
+            }
+            requests
+        });
+        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        handle_context(ContextCommands::Create {
+            name: "remote".to_string(),
+            endpoint: format!("unix://{}", socket.display()),
+        })
+        .expect("create remote context");
+        handle_context(ContextCommands::Use {
+            name: "remote".to_string(),
+        })
+        .expect("select remote context");
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "-it",
+            "alpine:latest",
+            "/bin/sh",
+        ])
+        .expect("parse interactive run")
+        .command;
+        dispatch_remote_context(&command)
+            .expect("remote context should claim run")
+            .expect("interactive run should succeed");
+        let requests = worker.join().expect("remote interactive run worker");
+        assert_eq!(requests.len(), 3, "attached run must open a hijack request");
+        let create = String::from_utf8_lossy(&requests[0]);
+        assert!(create.contains("\"OpenStdin\":true"), "create={create}");
+        assert!(create.contains("\"Tty\":true"), "create={create}");
+        let attach = String::from_utf8_lossy(&requests[2]);
+        assert!(attach.contains("POST /containers/remote-id/attach?"), "{attach}");
+        assert!(attach.contains("stdin=1"), "{attach}");
+        assert!(attach.contains("Connection: Upgrade"), "{attach}");
 
         match previous {
             Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
@@ -22490,7 +22770,7 @@ volumes:
             name: "remote".to_string(),
         })
         .expect("select context");
-        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine:latest", "--rm"])
+        let command = Cli::try_parse_from(["ferrocrate", "run", "-d", "alpine:latest", "--rm"])
             .expect("parse run")
             .command;
         dispatch_remote_context(&command)

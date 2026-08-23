@@ -478,8 +478,11 @@ pub enum Commands {
     /// Run a command inside a running container.
     Exec {
         container: String,
+        /// Keep stdin open and forward it to the command.
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
         /// Allocate a rootful kernel PTY for the command.
-        #[arg(long)]
+        #[arg(short = 't', long = "tty")]
         tty: bool,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
@@ -3384,9 +3387,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Exec {
                 container,
+                interactive,
                 tty,
                 cmd,
-            } => handle_exec(&runtime, &container, &cmd, tty),
+            } => handle_exec(&runtime, &container, &cmd, interactive, tty),
             Commands::Pull { image, lazy } => {
                 handle_pull(&image_store, &image, lazy, &surface_authorization)
             }
@@ -5263,16 +5267,30 @@ fn remote_docker_hijack(
     stdin_requested: bool,
     tty: bool,
 ) -> Result<(), String> {
+    remote_docker_hijack_with_body(socket_path, path, None, stdin_requested, tty)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_hijack_with_body(
+    socket_path: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    stdin_requested: bool,
+    tty: bool,
+) -> Result<(), String> {
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context hijack has an invalid socket or path".to_string());
     }
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|error| format!("remote context hijack connect failed: {error}"))?;
+    let body = body.unwrap_or_default();
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+        "POST {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
     );
     stream
         .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(body))
         .map_err(|error| format!("remote context hijack request failed: {error}"))?;
 
     let mut headers = Vec::new();
@@ -5850,6 +5868,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         })(),
         Commands::Exec {
             container,
+            interactive,
             tty,
             cmd,
         } => (|| -> Result<(), String> {
@@ -5858,6 +5877,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             }
             let payload = serde_json::json!({
                 "Cmd": cmd,
+                "AttachStdin": interactive,
                 "AttachStdout": true,
                 "AttachStderr": true,
                 "Tty": tty,
@@ -5877,10 +5897,22 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .get("Id")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "remote exec create response omitted Id".to_string())?;
-            let start = serde_json::to_vec(&serde_json::json!({
-                "Detach": false,
-                "Tty": tty,
-            }))
+            if *interactive {
+                let start = serde_json::to_vec(
+                    &serde_json::json!({"Detach": false, "Tty": tty}),
+                )
+                .map_err(|error| error.to_string())?;
+                return remote_docker_hijack_with_body(
+                    &endpoint,
+                    &format!("/exec/{}/start", percent_encode_path_component(id)),
+                    Some(&start),
+                    true,
+                    *tty,
+                );
+            }
+            let start = serde_json::to_vec(
+                &serde_json::json!({"Detach": false, "Tty": tty}),
+            )
             .map_err(|error| error.to_string())?;
             let raw = request_with_body(
                 "POST",
@@ -9545,6 +9577,7 @@ fn handle_exec(
     runtime: &ContainerRuntime,
     container: &str,
     cmd: &[String],
+    interactive: bool,
     tty: bool,
 ) -> Result<(), String> {
     if container.trim().is_empty() {
@@ -9554,7 +9587,17 @@ fn handle_exec(
         return Err("exec: command is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
-    let result = if tty {
+    let result = if interactive {
+        let mut input = Vec::new();
+        std::io::stdin()
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut input)
+            .map_err(|error| format!("exec: read stdin failed: {error}"))?;
+        if input.len() > 4 * 1024 * 1024 {
+            return Err("exec: stdin exceeds 4 MiB".to_string());
+        }
+        runtime.exec_with_input(&resolved, cmd, &input, tty)
+    } else if tty {
         runtime.exec_tty(&resolved, cmd)
     } else {
         runtime.exec(&resolved, cmd)
@@ -11713,6 +11756,7 @@ struct DockerHealthSpec {
 struct DockerExecSpec {
     container: String,
     cmd: Vec<String>,
+    attach_stdin: bool,
     running: bool,
     exit_code: Option<i32>,
 }
@@ -11722,6 +11766,8 @@ struct DockerExecSpec {
 struct DockerExecCreateRequest {
     #[serde(rename = "Cmd")]
     cmd: Vec<String>,
+    #[serde(rename = "AttachStdin", default)]
+    attach_stdin: bool,
     #[serde(rename = "Tty", default)]
     tty: bool,
 }
@@ -12725,6 +12771,7 @@ fn handle_docker_compat_connection(
     let mut stats_follow: Option<String> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_output: Option<Vec<u8>> = None;
+    let mut exec_hijack_stdin = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -13645,6 +13692,7 @@ fn handle_docker_compat_connection(
                         DockerExecSpec {
                             container: resolved_container,
                             cmd: request.cmd,
+                            attach_stdin: request.attach_stdin,
                             running: false,
                             exit_code: None,
                         },
@@ -13667,7 +13715,7 @@ fn handle_docker_compat_connection(
                     "Running": spec.running,
                     "ExitCode": spec.exit_code,
                     "Pid": 0,
-                    "OpenStdin": false,
+                    "OpenStdin": spec.attach_stdin,
                     "OpenStderr": true,
                     "OpenStdout": true,
                     "CanRemove": false,
@@ -13698,6 +13746,23 @@ fn handle_docker_compat_connection(
                     spec.running = true;
                     spec.clone()
                 };
+                let upgraded = request.headers.get("connection").is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+                }) && request
+                    .headers
+                    .get("upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
+                if upgraded && spec.attach_stdin && !start.detach {
+                    exec_hijack_stdin = Some((
+                        id.to_string(),
+                        spec,
+                        start.tty,
+                        runtime.request_origin(),
+                    ));
+                    return Ok(docker_hijack_headers());
+                }
                 if start.detach {
                     // Docker's detached exec contract returns as soon as the
                     // process has been admitted. Running it synchronously
@@ -13766,14 +13831,6 @@ fn handle_docker_compat_connection(
                         state.exit_code = Some(result.exit_code);
                     }
                 }
-                let upgraded = request.headers.get("connection").is_some_and(|value| {
-                    value
-                        .split(',')
-                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-                }) && request
-                    .headers
-                    .get("upgrade")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
                 if upgraded {
                     exec_hijack_output = Some(if start.detach {
                         Vec::new()
@@ -14909,6 +14966,43 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_stdin {
+        let mut input = Vec::new();
+        {
+            let mut bounded = (&mut stream).take(4 * 1024 * 1024 + 1);
+            bounded
+                .read_to_end(&mut input)
+                .map_err(|error| format!("docker: reading exec stdin failed: {error}"))?;
+        }
+        if input.len() > 4 * 1024 * 1024 {
+            return Err("docker: exec stdin exceeds 4 MiB".to_string());
+        }
+        let runtime = ContainerRuntime::new(&runtime_dir)
+            .map(|runtime| {
+                if let Some(origin) = request_origin {
+                    runtime.with_request_origin(origin)
+                } else {
+                    runtime
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        let result = runtime.exec_with_input(&spec.container, &spec.cmd, &input, tty);
+        let exit_code = result.as_ref().map_or(-1, |result| result.exit_code);
+        if let Ok(mut execs) = state.execs.lock() {
+            if let Some(exec) = execs.get_mut(&exec_id) {
+                exec.running = false;
+                exec.exit_code = Some(exit_code);
+            }
+        }
+        let result = result.map_err(|error| error.to_string())?;
+        let output = if tty {
+            format!("{}{}", result.stdout, result.stderr).into_bytes()
+        } else {
+            docker_raw_stream(&result.stdout, &result.stderr)
+        };
+        stream.write_all(&output).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     if let Some(output) = exec_hijack_output {
         stream.write_all(&output).map_err(|err| err.to_string())?;
         return Ok(());
@@ -20482,6 +20576,7 @@ volumes:
         let _guard = TestRuntimeDir::new();
         let err = dispatch(Commands::Exec {
             container: "c1".to_string(),
+            interactive: false,
             tty: false,
             cmd: vec![],
         })
@@ -22997,11 +23092,11 @@ volumes:
     fn exec_handler_requires_container_and_command() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()], false)
+        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()], false, false)
             .expect_err("container required");
         assert!(err.contains("exec: container is required"));
 
-        let err = handle_exec(&runtime, "c1", &[], false).expect_err("command required");
+        let err = handle_exec(&runtime, "c1", &[], false, false).expect_err("command required");
         assert!(err.contains("exec: command is required"));
     }
 

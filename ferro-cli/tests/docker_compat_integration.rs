@@ -994,6 +994,96 @@ fn docker_compat_exec_inspect_reports_created_exec_state() {
 }
 
 #[test]
+fn docker_compat_exec_hijack_forwards_stdin() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful exec-stdin fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/exec-stdin:latest");
+    let create_body = r#"{"Image":"compat/exec-stdin:latest","Cmd":["/bin/busybox","sleep","5"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_request = format!(
+        "POST /v1.45/containers/create?name=exec-stdin HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    assert_eq!(harness.request_raw(&create_request).0, 201);
+    assert_eq!(
+        harness
+            .request("POST", "/v1.45/containers/exec-stdin/start")
+            .0,
+        204
+    );
+
+    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["/bin/busybox","cat"]}"#;
+    let exec_request = format!(
+        "POST /v1.45/containers/exec-stdin/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        exec_body.len(),
+        exec_body
+    );
+    let (status, response) = harness.request_raw(&exec_request);
+    assert_eq!(status, 201, "exec create response={response}");
+    let exec_id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("exec create JSON")
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .expect("exec id")
+        .to_string();
+
+    let (status, response) = harness.request("GET", &format!("/v1.45/exec/{exec_id}/json"));
+    assert_eq!(status, 200, "exec inspect response={response}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&response).expect("exec inspect JSON");
+    assert_eq!(inspect["OpenStdin"], true);
+
+    let start_body = r#"{"Detach":false,"Tty":false}"#;
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect exec stdin socket");
+    stream
+        .write_all(
+            format!(
+                "POST /v1.45/exec/{exec_id}/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: {}\r\n\r\n{}",
+                start_body.len(),
+                start_body
+            )
+            .as_bytes(),
+        )
+        .expect("write exec start request");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .expect("read exec start headers");
+        headers.push(byte[0]);
+    }
+    assert!(
+        String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+        "headers={}",
+        String::from_utf8_lossy(&headers)
+    );
+    stream
+        .write_all(b"stdin-through-exec\n")
+        .expect("write exec stdin");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("close exec stdin");
+    let mut output = Vec::new();
+    stream.read_to_end(&mut output).expect("read exec output");
+    assert!(
+        output
+            .windows(b"stdin-through-exec\n".len())
+            .any(|window| window == b"stdin-through-exec\n"),
+        "exec output={output:?}"
+    );
+
+    assert_eq!(
+        harness
+            .request("DELETE", "/v1.45/containers/exec-stdin?force=true")
+            .0,
+        204
+    );
+}
+
+#[test]
 fn docker_compat_rootful_exec_tty_uses_public_socket() {
     if !nix::unistd::geteuid().is_root() {
         eprintln!("skipping rootful TTY exec fixture: requires root");

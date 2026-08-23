@@ -52,6 +52,30 @@ pub fn exec_in_rootless_rootfs(
     execute_process(command, timeout)
 }
 
+/// Execute a rootless command and close its stdin after forwarding `input`.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_in_rootless_rootfs_with_input(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    let command = build_rootless_bwrap(
+        rootfs,
+        command,
+        env,
+        workdir,
+        mounts,
+        tmpfs_mounts,
+        readonly_rootfs,
+    )?;
+    execute_process_with_input(command, input)
+}
+
 /// Execute a rootless command with stdout/stderr attached to one PTY.
 ///
 /// Bubblewrap recreates the same rootfs and mount boundary as ordinary
@@ -96,6 +120,30 @@ pub fn exec_in_rootless_rootfs_tty(
         stdout: String::from_utf8_lossy(&output).into_owned(),
         stderr: String::new(),
     })
+}
+
+/// Execute a rootless TTY command with caller-provided terminal input.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_in_rootless_rootfs_tty_with_input(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    let mut command = build_rootless_bwrap(
+        rootfs,
+        command,
+        env,
+        workdir,
+        mounts,
+        tmpfs_mounts,
+        readonly_rootfs,
+    )?;
+    execute_tty_process(&mut command, input)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +258,24 @@ pub fn exec_in_container(
     execute_command(&nsenter, &args)
 }
 
+/// Execute a rootful container command with bounded caller-provided stdin.
+pub fn exec_in_container_with_input(
+    target_pid: u32,
+    command: &[String],
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args(target_pid, command)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let mut command = Command::new(nsenter);
+    command.args(args);
+    execute_process_with_input(command, input)
+}
+
 pub fn exec_in_container_with_timeout(
     target_pid: u32,
     command: &[String],
@@ -258,6 +324,60 @@ pub fn exec_in_container_tty(
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         // Linux reports EIO when the last PTY slave closes; for a PTY this is
         // the normal end-of-stream signal rather than an execution failure.
+        if error.raw_os_error() != Some(nix::libc::EIO) {
+            return Err(ContainerExecError::Io(error));
+        }
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output).into_owned(),
+        stderr: String::new(),
+    })
+}
+
+/// Execute a rootful TTY command with caller-provided terminal input.
+pub fn exec_in_container_tty_with_input(
+    target_pid: u32,
+    command: &[String],
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args(target_pid, command)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let mut command = Command::new(nsenter);
+    command.args(args);
+    execute_tty_process(&mut command, input)
+}
+
+fn execute_tty_process(
+    command: &mut Command,
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    use std::io::Write as _;
+
+    let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let (master, slave) = pty.into_parts();
+    let slave = File::from(slave);
+    command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    crate::pty::configure_command(command)?;
+    let mut child = command.spawn()?;
+    let mut master = File::from(master);
+    let mut writer = master.try_clone()?;
+    writer.write_all(input)?;
+    // In canonical terminal mode, EOT after the caller's bytes communicates
+    // stdin completion without becoming part of the command's input.
+    writer.write_all(&[0x04])?;
+    drop(writer);
+    let mut output = Vec::new();
+    if let Err(error) = (&mut master).take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         if error.raw_os_error() != Some(nix::libc::EIO) {
             return Err(ContainerExecError::Io(error));
         }
@@ -329,6 +449,36 @@ fn execute_process(
     }
     let status = child.wait()?;
     collect_output(child, status.code().unwrap_or(-1))
+}
+
+fn execute_process_with_input(
+    mut command: Command,
+    input: &[u8],
+) -> Result<ExecResult, ContainerExecError> {
+    use std::io::Write as _;
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::other("exec stdin pipe is unavailable"))
+    })?;
+    stdin.write_all(input)?;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    Ok(ExecResult {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(
+            &output.stdout[..output.stdout.len().min(MAX_OUTPUT_SIZE as usize)],
+        )
+        .into_owned(),
+        stderr: String::from_utf8_lossy(
+            &output.stderr[..output.stderr.len().min(MAX_OUTPUT_SIZE as usize)],
+        )
+        .into_owned(),
+    })
 }
 
 fn spawn_command(binary: &Path, args: &[String]) -> Result<Child, ContainerExecError> {

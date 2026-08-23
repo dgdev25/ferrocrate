@@ -11,8 +11,10 @@ use crate::authorization::{
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
 use crate::container_exec::{
-    exec_in_container, exec_in_container_tty, exec_in_container_with_timeout,
-    exec_in_rootless_rootfs, exec_in_rootless_rootfs_tty,
+    exec_in_container, exec_in_container_tty, exec_in_container_tty_with_input,
+    exec_in_container_with_input, exec_in_container_with_timeout, exec_in_rootless_rootfs,
+    exec_in_rootless_rootfs_tty, exec_in_rootless_rootfs_tty_with_input,
+    exec_in_rootless_rootfs_with_input,
 };
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
@@ -3338,7 +3340,7 @@ impl ContainerRuntime {
         let permit = self.authorize_existing(Action::ContainerExec, id)?;
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
-        let result = self.exec_authorized(proof, intent, id, cmd, None, true);
+        let result = self.exec_authorized(proof, intent, id, cmd, None, true, None);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
@@ -3361,7 +3363,33 @@ impl ContainerRuntime {
         let permit = self.authorize_existing(Action::ContainerExec, id)?;
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
-        let result = self.exec_authorized(proof, intent, id, cmd, timeout, false);
+        let result = self.exec_authorized(proof, intent, id, cmd, timeout, false, None);
+        self.store
+            .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
+        self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
+        self.store.finish_mutation(id, operation_id)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
+        result
+    }
+
+    /// Execute a command after forwarding all supplied stdin bytes and then
+    /// closing the command's input channel.
+    pub fn exec_with_input(
+        &self,
+        id: &str,
+        cmd: &[String],
+        input: &[u8],
+        tty: bool,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let permit = self.authorize_existing(Action::ContainerExec, id)?;
+        let operation_id = permit.operation_id();
+        let (proof, intent) = permit.execution_authority();
+        let result = self.exec_authorized(proof, intent, id, cmd, None, tty, Some(input));
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
@@ -3383,6 +3411,7 @@ impl ContainerRuntime {
         cmd: &[String],
         timeout: Option<Duration>,
         tty: bool,
+        input: Option<&[u8]>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let record = self
             .store
@@ -3401,17 +3430,33 @@ impl ContainerRuntime {
                     .iter()
                     .map(|mount| (mount.target.clone(), mount.size.clone()))
                     .collect::<Vec<_>>();
-                exec_in_rootless_rootfs_tty(
-                    &rootfs,
-                    cmd,
-                    &record.env,
-                    record.workdir.as_deref(),
-                    &mounts,
-                    &tmpfs_mounts,
-                    record.readonly_rootfs,
-                )?
+                if let Some(input) = input {
+                    exec_in_rootless_rootfs_tty_with_input(
+                        &rootfs,
+                        cmd,
+                        &record.env,
+                        record.workdir.as_deref(),
+                        &mounts,
+                        &tmpfs_mounts,
+                        record.readonly_rootfs,
+                        input,
+                    )?
+                } else {
+                    exec_in_rootless_rootfs_tty(
+                        &rootfs,
+                        cmd,
+                        &record.env,
+                        record.workdir.as_deref(),
+                        &mounts,
+                        &tmpfs_mounts,
+                        record.readonly_rootfs,
+                    )?
+                }
             } else {
-                exec_in_container_tty(record.pid, cmd)?
+                match input {
+                    Some(input) => exec_in_container_tty_with_input(record.pid, cmd, input)?,
+                    None => exec_in_container_tty(record.pid, cmd)?,
+                }
             }
         } else if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             let mounts = record
@@ -3424,20 +3469,34 @@ impl ContainerRuntime {
                 .iter()
                 .map(|mount| (mount.target.clone(), mount.size.clone()))
                 .collect::<Vec<_>>();
-            exec_in_rootless_rootfs(
-                &rootfs,
-                cmd,
-                &record.env,
-                record.workdir.as_deref(),
-                &mounts,
-                &tmpfs_mounts,
-                record.readonly_rootfs,
-                timeout,
-            )?
+            if let Some(input) = input {
+                exec_in_rootless_rootfs_with_input(
+                    &rootfs,
+                    cmd,
+                    &record.env,
+                    record.workdir.as_deref(),
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                    input,
+                )?
+            } else {
+                exec_in_rootless_rootfs(
+                    &rootfs,
+                    cmd,
+                    &record.env,
+                    record.workdir.as_deref(),
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                    timeout,
+                )?
+            }
         } else {
-            match timeout {
-                Some(timeout) => exec_in_container_with_timeout(record.pid, cmd, timeout)?,
-                None => exec_in_container(record.pid, cmd)?,
+            match (input, timeout) {
+                (Some(input), _) => exec_in_container_with_input(record.pid, cmd, input)?,
+                (None, Some(timeout)) => exec_in_container_with_timeout(record.pid, cmd, timeout)?,
+                (None, None) => exec_in_container(record.pid, cmd)?,
             }
         };
         let _ = log_event(

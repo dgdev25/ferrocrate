@@ -46,6 +46,8 @@ use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
 use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, ResourceKind};
 #[cfg(target_os = "linux")]
 use ferro_core::container_store::ResourceLimitRecord;
+#[cfg(target_os = "linux")]
+use ferro_core::container_exec::ExecOutputStream;
 use ferro_core::docker_auth::resolve_registry_auth;
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
@@ -12770,8 +12772,7 @@ fn handle_docker_compat_connection(
     let mut log_follow: Option<(String, Option<String>, bool, bool, bool)> = None;
     let mut stats_follow: Option<String> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
-    let mut exec_hijack_output: Option<Vec<u8>> = None;
-    let mut exec_hijack_stdin = None;
+    let mut exec_hijack_session = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer(
@@ -13754,8 +13755,8 @@ fn handle_docker_compat_connection(
                     .headers
                     .get("upgrade")
                     .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
-                if upgraded && spec.attach_stdin && !start.detach {
-                    exec_hijack_stdin = Some((
+                if upgraded && !start.detach {
+                    exec_hijack_session = Some((
                         id.to_string(),
                         spec,
                         start.tty,
@@ -13831,16 +13832,7 @@ fn handle_docker_compat_connection(
                         state.exit_code = Some(result.exit_code);
                     }
                 }
-                if upgraded {
-                    exec_hijack_output = Some(if start.detach {
-                        Vec::new()
-                    } else if start.tty {
-                        format!("{}{}", result.stdout, result.stderr).into_bytes()
-                    } else {
-                        docker_raw_stream(&result.stdout, &result.stderr)
-                    });
-                    docker_hijack_headers()
-                } else if start.detach {
+                if start.detach {
                     http_response(200, &[], "application/vnd.docker.raw-stream")
                 } else if start.tty {
                     let output = format!("{}{}", result.stdout, result.stderr);
@@ -14966,17 +14958,18 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
-    if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_stdin {
-        let mut input = Vec::new();
-        {
-            let mut bounded = (&mut stream).take(4 * 1024 * 1024 + 1);
-            bounded
-                .read_to_end(&mut input)
-                .map_err(|error| format!("docker: reading exec stdin failed: {error}"))?;
-        }
-        if input.len() > 4 * 1024 * 1024 {
-            return Err("docker: exec stdin exceeds 4 MiB".to_string());
-        }
+    if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
+        let input = if spec.attach_stdin {
+            Some(
+                Box::new(
+                    stream
+                        .try_clone()
+                        .map_err(|error| format!("docker: cloning exec stream failed: {error}"))?,
+                ) as Box<dyn Read + Send>,
+            )
+        } else {
+            None
+        };
         let runtime = ContainerRuntime::new(&runtime_dir)
             .map(|runtime| {
                 if let Some(origin) = request_origin {
@@ -14986,7 +14979,23 @@ fn handle_docker_compat_connection(
                 }
             })
             .map_err(|error| error.to_string())?;
-        let result = runtime.exec_with_input(&spec.container, &spec.cmd, &input, tty);
+        let result = runtime.exec_streaming(
+            &spec.container,
+            &spec.cmd,
+            input,
+            tty,
+            &mut |output_stream, bytes| {
+                if tty {
+                    stream.write_all(bytes)
+                } else {
+                    let stream_id = match output_stream {
+                        ExecOutputStream::Stdout => 1,
+                        ExecOutputStream::Stderr => 2,
+                    };
+                    stream.write_all(&docker_raw_stream_frame(stream_id, bytes))
+                }
+            },
+        );
         let exit_code = result.as_ref().map_or(-1, |result| result.exit_code);
         if let Ok(mut execs) = state.execs.lock() {
             if let Some(exec) = execs.get_mut(&exec_id) {
@@ -14994,17 +15003,7 @@ fn handle_docker_compat_connection(
                 exec.exit_code = Some(exit_code);
             }
         }
-        let result = result.map_err(|error| error.to_string())?;
-        let output = if tty {
-            format!("{}{}", result.stdout, result.stderr).into_bytes()
-        } else {
-            docker_raw_stream(&result.stdout, &result.stderr)
-        };
-        stream.write_all(&output).map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    if let Some(output) = exec_hijack_output {
-        stream.write_all(&output).map_err(|err| err.to_string())?;
+        result.map_err(|error| error.to_string())?;
         return Ok(());
     }
     if let Some(query) = event_follow_query {
@@ -16892,11 +16891,18 @@ fn docker_raw_stream(stdout: &str, stderr: &str) -> Vec<u8> {
         if payload.is_empty() {
             continue;
         }
-        output.push(stream);
-        output.extend_from_slice(&[0, 0, 0]);
-        output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        output.extend_from_slice(payload);
+        output.extend_from_slice(&docker_raw_stream_frame(stream, payload));
     }
+    output
+}
+
+#[cfg(target_os = "linux")]
+fn docker_raw_stream_frame(stream: u8, payload: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(payload.len() + 8);
+    output.push(stream);
+    output.extend_from_slice(&[0, 0, 0]);
+    output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    output.extend_from_slice(payload);
     output
 }
 

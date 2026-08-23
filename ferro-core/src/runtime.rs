@@ -11,10 +11,10 @@ use crate::authorization::{
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
 use crate::container_exec::{
-    exec_in_container, exec_in_container_tty, exec_in_container_tty_with_input,
-    exec_in_container_with_input, exec_in_container_with_timeout, exec_in_rootless_rootfs,
-    exec_in_rootless_rootfs_tty, exec_in_rootless_rootfs_tty_with_input,
-    exec_in_rootless_rootfs_with_input,
+    exec_in_container, exec_in_container_streaming, exec_in_container_tty,
+    exec_in_container_tty_with_input, exec_in_container_with_input, exec_in_container_with_timeout,
+    exec_in_rootless_rootfs, exec_in_rootless_rootfs_streaming, exec_in_rootless_rootfs_tty,
+    exec_in_rootless_rootfs_tty_with_input, exec_in_rootless_rootfs_with_input, ExecOutputStream,
 };
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
@@ -3401,6 +3401,92 @@ impl ContainerRuntime {
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
+    }
+
+    /// Execute an attached command while stdin and process output remain live
+    /// for the duration of the session.
+    pub fn exec_streaming(
+        &self,
+        id: &str,
+        cmd: &[String],
+        input: Option<Box<dyn Read + Send>>,
+        tty: bool,
+        output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let permit = self.authorize_existing(Action::ContainerExec, id)?;
+        let operation_id = permit.operation_id();
+        let (proof, intent) = permit.execution_authority();
+        let result = self.exec_streaming_authorized(proof, intent, id, cmd, input, tty, output);
+        self.store
+            .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
+        self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
+        self.store.finish_mutation(id, operation_id)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
+        result
+    }
+
+    fn exec_streaming_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        cmd: &[String],
+        input: Option<Box<dyn Read + Send>>,
+        tty: bool,
+        output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
+        let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
+            let mounts = record
+                .mounts
+                .iter()
+                .map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only))
+                .collect::<Vec<_>>();
+            let tmpfs_mounts = record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| (mount.target.clone(), mount.size.clone()))
+                .collect::<Vec<_>>();
+            exec_in_rootless_rootfs_streaming(
+                &rootfs,
+                cmd,
+                &record.env,
+                record.workdir.as_deref(),
+                &mounts,
+                &tmpfs_mounts,
+                record.readonly_rootfs,
+                input,
+                tty,
+                output,
+            )?
+        } else {
+            exec_in_container_streaming(record.pid, cmd, input, tty, output)?
+        };
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("exec", Some(&record.id), Some(&record.image), None, None),
+        );
+        let _ = log_audit_event(
+            &self.runtime_dir,
+            make_audit_event(
+                "exec",
+                audit_actor().as_str(),
+                Some(&record.id),
+                Some(&record.image),
+                None,
+                None,
+            ),
+        );
+        Ok(result)
     }
 
     fn exec_authorized(

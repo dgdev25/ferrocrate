@@ -1015,7 +1015,7 @@ fn docker_compat_exec_hijack_forwards_stdin() {
         204
     );
 
-    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["/bin/busybox","cat"]}"#;
+    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Cmd":["/bin/busybox","sh","-c","printf 'exec-ready\\n'; read line; printf 'exec-done:%s\\n' \"$line\""]}"#;
     let exec_request = format!(
         "POST /v1.45/containers/exec-stdin/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         exec_body.len(),
@@ -1061,17 +1061,34 @@ fn docker_compat_exec_hijack_forwards_stdin() {
         String::from_utf8_lossy(&headers)
     );
     stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set pre-input exec stream timeout");
+    let mut first_output = [0_u8; 4096];
+    let first_size = stream
+        .read(&mut first_output)
+        .expect("exec must stream output before stdin closes");
+    assert!(
+        first_output[..first_size]
+            .windows(b"exec-ready\n".len())
+            .any(|window| window == b"exec-ready\n"),
+        "first exec output={:?}",
+        &first_output[..first_size]
+    );
+    stream
         .write_all(b"stdin-through-exec\n")
         .expect("write exec stdin");
     stream
         .shutdown(std::net::Shutdown::Write)
         .expect("close exec stdin");
-    let mut output = Vec::new();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set completion exec stream timeout");
+    let mut output = first_output[..first_size].to_vec();
     stream.read_to_end(&mut output).expect("read exec output");
     assert!(
         output
-            .windows(b"stdin-through-exec\n".len())
-            .any(|window| window == b"stdin-through-exec\n"),
+            .windows(b"exec-done:stdin-through-exec\n".len())
+            .any(|window| window == b"exec-done:stdin-through-exec\n"),
         "exec output={output:?}"
     );
 

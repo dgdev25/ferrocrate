@@ -1,7 +1,9 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -10,6 +12,12 @@ pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutputStream {
+    Stdout,
+    Stderr,
 }
 
 #[derive(Debug, Error)]
@@ -74,6 +82,33 @@ pub fn exec_in_rootless_rootfs_with_input(
         readonly_rootfs,
     )?;
     execute_process_with_input(command, input)
+}
+
+/// Execute a rootless command while forwarding stdin and emitting output as
+/// soon as the child writes it.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_in_rootless_rootfs_streaming(
+    rootfs: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    mounts: &[(String, String, bool)],
+    tmpfs_mounts: &[(String, Option<String>)],
+    readonly_rootfs: bool,
+    input: Option<Box<dyn Read + Send>>,
+    tty: bool,
+    output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
+) -> Result<ExecResult, ContainerExecError> {
+    let command = build_rootless_bwrap(
+        rootfs,
+        command,
+        env,
+        workdir,
+        mounts,
+        tmpfs_mounts,
+        readonly_rootfs,
+    )?;
+    execute_process_streaming(command, input, tty, output)
 }
 
 /// Execute a rootless command with stdout/stderr attached to one PTY.
@@ -274,6 +309,27 @@ pub fn exec_in_container_with_input(
     let mut command = Command::new(nsenter);
     command.args(args);
     execute_process_with_input(command, input)
+}
+
+/// Execute a rootful container command while forwarding both directions of
+/// the attached session concurrently.
+pub fn exec_in_container_streaming(
+    target_pid: u32,
+    command: &[String],
+    input: Option<Box<dyn Read + Send>>,
+    tty: bool,
+    output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args(target_pid, command)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let mut command = Command::new(nsenter);
+    command.args(args);
+    execute_process_streaming(command, input, tty, output)
 }
 
 pub fn exec_in_container_with_timeout(
@@ -478,6 +534,142 @@ fn execute_process_with_input(
             &output.stderr[..output.stderr.len().min(MAX_OUTPUT_SIZE as usize)],
         )
         .into_owned(),
+    })
+}
+
+fn execute_process_streaming(
+    mut command: Command,
+    input: Option<Box<dyn Read + Send>>,
+    tty: bool,
+    output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
+) -> Result<ExecResult, ContainerExecError> {
+    if tty {
+        return execute_tty_process_streaming(&mut command, input, output);
+    }
+
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    if let (Some(mut source), Some(mut destination)) = (input, child.stdin.take()) {
+        thread::spawn(move || {
+            let _ = std::io::copy(&mut source, &mut destination);
+        });
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::other("exec stdout pipe is unavailable"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::other("exec stderr pipe is unavailable"))
+    })?;
+    for (stream, mut reader) in [
+        (
+            ExecOutputStream::Stdout,
+            Box::new(stdout) as Box<dyn Read + Send>,
+        ),
+        (
+            ExecOutputStream::Stderr,
+            Box::new(stderr) as Box<dyn Read + Send>,
+        ),
+    ] {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if sender.send((stream, buffer[..read].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send((stream, Vec::new()));
+                        let _ = error;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    drop(sender);
+
+    let mut stdout_capture = Vec::new();
+    let mut stderr_capture = Vec::new();
+    for (stream, bytes) in receiver {
+        if bytes.is_empty() {
+            continue;
+        }
+        if let Err(error) = output(stream, &bytes) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ContainerExecError::Io(error));
+        }
+        let capture = match stream {
+            ExecOutputStream::Stdout => &mut stdout_capture,
+            ExecOutputStream::Stderr => &mut stderr_capture,
+        };
+        let remaining = (MAX_OUTPUT_SIZE as usize).saturating_sub(capture.len());
+        capture.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout_capture).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_capture).into_owned(),
+    })
+}
+
+fn execute_tty_process_streaming(
+    command: &mut Command,
+    input: Option<Box<dyn Read + Send>>,
+    output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
+) -> Result<ExecResult, ContainerExecError> {
+    let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let (master, slave) = pty.into_parts();
+    let slave = File::from(slave);
+    command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    crate::pty::configure_command(command)?;
+    let mut child = command.spawn()?;
+    let mut master = File::from(master);
+    if let Some(mut source) = input {
+        let mut writer = master.try_clone()?;
+        thread::spawn(move || {
+            let _ = std::io::copy(&mut source, &mut writer);
+            let _ = writer.write_all(&[0x04]);
+        });
+    }
+
+    let mut capture = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                output(ExecOutputStream::Stdout, &buffer[..read])?;
+                let remaining = (MAX_OUTPUT_SIZE as usize).saturating_sub(capture.len());
+                capture.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+            Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+            Err(error) => return Err(ContainerExecError::Io(error)),
+        }
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&capture).into_owned(),
+        stderr: String::new(),
     })
 }
 

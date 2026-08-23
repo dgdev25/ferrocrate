@@ -12456,6 +12456,17 @@ fn docker_event_kind(method: &str, path: &str) -> Option<(&'static str, String)>
     } else {
         path.rsplit('/').next().unwrap_or("request")
     };
+    // Container lifecycle is owned by `ContainerRuntime`: it is the only
+    // component that can observe asynchronous exits and it emits exactly one
+    // durable event for each transition.  Recording the HTTP route here would
+    // duplicate start/stop/kill/restart events (and invent a `die` event for
+    // any similarly named route).  Keep request-derived events for creation,
+    // destruction, image, network, volume, and plugin operations.
+    if event_type == "container"
+        && matches!(action, "start" | "stop" | "kill" | "restart" | "die")
+    {
+        return None;
+    }
     Some((event_type, action.to_string()))
 }
 
@@ -20898,7 +20909,16 @@ volumes:
     fn docker_event_store_is_durable_and_filterable() {
         let temp = tempfile::tempdir().expect("event runtime");
         let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
-        store.append("POST", "/containers/c1/start", 204).unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/containers/create",
+                201,
+                &HashMap::new(),
+                br#"{}"#,
+                br#"{"Id":"c1"}"#,
+            )
+            .unwrap();
         store.append("POST", "/networks/n1", 404).unwrap();
         let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         assert_eq!(reopened.next_id, 2);
@@ -20906,13 +20926,13 @@ volumes:
         filter.insert("container".to_string(), "c1".to_string());
         let events = reopened.query(&filter).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].action, "start");
-        assert_eq!(events[0].status, 204);
+        assert_eq!(events[0].action, "create");
+        assert_eq!(events[0].status, 201);
 
         let mut docker_filters = HashMap::new();
         docker_filters.insert(
             "filters".to_string(),
-            r#"{"event":["start"],"type":["container"],"container":["c1"]}"#.to_string(),
+            r#"{"event":["create"],"type":["container"],"container":["c1"]}"#.to_string(),
         );
         assert_eq!(reopened.query(&docker_filters).unwrap().len(), 1);
 
@@ -20969,6 +20989,25 @@ volumes:
         assert_eq!(
             docker_event_kind("DELETE", "/images/i1"),
             Some(("image", "untag".to_string()))
+        );
+    }
+
+    #[test]
+    fn docker_event_routes_leave_container_lifecycle_to_runtime() {
+        for action in ["start", "stop", "kill", "restart", "die"] {
+            assert_eq!(
+                docker_event_kind("POST", &format!("/containers/c1/{action}")),
+                None,
+                "{action} must be emitted by the runtime, not the HTTP request"
+            );
+        }
+        assert_eq!(
+            docker_event_kind("POST", "/containers/create"),
+            Some(("container", "create".to_string()))
+        );
+        assert_eq!(
+            docker_event_kind("DELETE", "/containers/c1"),
+            Some(("container", "destroy".to_string()))
         );
     }
 
@@ -22127,18 +22166,27 @@ volumes:
     fn docker_event_query_filters_persisted_actor_attributes() {
         let temp = tempfile::tempdir().expect("event runtime");
         let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
-        store.append("POST", "/containers/c1/start", 204).unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/containers/create",
+                201,
+                &HashMap::new(),
+                br#"{}"#,
+                br#"{"Id":"c1"}"#,
+            )
+            .unwrap();
 
         let mut query = HashMap::new();
         query.insert(
             "filters".to_string(),
-            r#"{"label":["method=POST","path=/containers/c1/start"]}"#.to_string(),
+            r#"{"label":["method=POST","path=/containers/create"]}"#.to_string(),
         );
         assert_eq!(store.query(&query).unwrap().len(), 1);
 
         query.insert(
             "filters".to_string(),
-            r#"{"label":["path=/containers/c1/stop"]}"#.to_string(),
+            r#"{"label":["path=/containers/c1/start"]}"#.to_string(),
         );
         assert!(store.query(&query).unwrap().is_empty());
     }
@@ -22189,9 +22237,9 @@ volumes:
         let temp = tempfile::tempdir().expect("event runtime");
         let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         store
-            .append("POST", "/containers/early/start", 200)
+            .append("POST", "/networks/early/connect", 200)
             .unwrap();
-        store.append("POST", "/containers/late/start", 200).unwrap();
+        store.append("POST", "/networks/late/connect", 200).unwrap();
         let mut query = HashMap::new();
         query.insert("since".to_string(), "0.000000001".to_string());
         query.insert("until".to_string(), "18446744072.000000000".to_string());

@@ -919,7 +919,7 @@ fn docker_compat_external_workload_death_is_a_runtime_die_event() {
 }
 
 #[test]
-fn docker_compat_stop_has_a_runtime_event_without_http_request_metadata() {
+fn docker_compat_start_and_stop_events_are_emitted_exactly_once_by_runtime() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
     let id = create_sleeping_restart_container(&harness, "runtime-stop-event", "no");
@@ -927,15 +927,32 @@ fn docker_compat_stop_has_a_runtime_event_without_http_request_metadata() {
     assert_eq!(status, 204, "stop response={response}");
     let (status, events) = harness.request("GET", "/v1.45/events");
     assert_eq!(status, 200, "events response={events}");
+    let lifecycle: Vec<_> = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["Actor"]["ID"] == id)
+        .filter(|event| matches!(event["Action"].as_str(), Some("start" | "stop")))
+        .collect();
+    assert_eq!(
+        lifecycle
+            .iter()
+            .filter(|event| event["Action"] == "start")
+            .count(),
+        1,
+        "events={events}"
+    );
+    assert_eq!(
+        lifecycle
+            .iter()
+            .filter(|event| event["Action"] == "stop")
+            .count(),
+        1,
+        "events={events}"
+    );
     assert!(
-        events
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .any(|event| {
-                event["Action"] == "stop"
-                    && event["Actor"]["ID"] == id
-                    && event["Actor"]["Attributes"].get("method").is_none()
-            }),
+        lifecycle
+            .iter()
+            .all(|event| event["Actor"]["Attributes"].get("method").is_none()),
         "events={events}"
     );
 }

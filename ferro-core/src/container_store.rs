@@ -113,6 +113,8 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub restart_policy: RestartPolicy,
     #[serde(default)]
+    pub restart_count: u32,
+    #[serde(default)]
     pub last_exit_code: Option<i32>,
     pub created_at_unix: u64,
     pub stdout_path: String,
@@ -234,6 +236,7 @@ impl ContainerRecord {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: 0,
             stdout_path: String::new(),

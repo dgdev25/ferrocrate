@@ -2585,6 +2585,7 @@ async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: Default::default(),
+            restart_count: 0,
             last_exit_code: Some(0),
             created_at_unix: 1,
             stdout_path: String::new(),

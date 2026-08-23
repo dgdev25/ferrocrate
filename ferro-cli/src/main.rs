@@ -16067,6 +16067,9 @@ fn docker_inspect_payload(
         "Id": record.id,
         "Name": format!("/{name}"),
         "Image": record.image,
+        "Created": docker_timestamp(record.created_at_unix),
+        "RestartCount": record.restart_count,
+        "Mounts": docker_container_mount_summaries(record),
         "Config": {
             "Image": record.image,
             "Env": record.env,
@@ -16111,6 +16114,11 @@ fn docker_inspect_payload(
         "NetworkSettings": docker_network_settings(record),
         "State": {
             "Status": record.status,
+            "Running": record.status == "running",
+            "Paused": record.status == "paused",
+            "Restarting": record.status == "restarting",
+            "OOMKilled": false,
+            "Dead": record.status == "dead",
             "Pid": record.pid,
             "ExitCode": record.last_exit_code,
             "StartedAt": docker_timestamp(record.created_at_unix),
@@ -16250,6 +16258,9 @@ fn docker_pending_inspect_payload(
         "Id": id,
         "Name": format!("/{}", spec.name.as_deref().unwrap_or(id)),
         "Image": spec.image,
+        "Created": docker_timestamp(spec.created_at_unix),
+        "RestartCount": 0,
+        "Mounts": docker_pending_mount_summaries(&spec.binds).unwrap_or_default(),
         "Config": {
             "Image": spec.image,
             "Env": spec.env,
@@ -16304,6 +16315,11 @@ fn docker_pending_inspect_payload(
         },
         "State": {
             "Status": "created",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
             "Pid": 0,
             "ExitCode": 0,
             "StartedAt": docker_timestamp(0),
@@ -20933,6 +20949,41 @@ volumes:
             "api"
         );
         assert_eq!(payload["NetworkSettings"]["SandboxKey"], "/run/netns/api");
+    }
+
+    #[test]
+    fn docker_inspect_projects_lifecycle_booleans_restart_count_created_and_mounts() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "inspect-wire",
+                "pid": 4242,
+                "image": "alpine:3.20",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "restart_count": 3,
+                "mounts": [{
+                    "source": "/srv/data",
+                    "target": "/data",
+                    "read_only": true
+                }]
+            }))
+            .expect("inspect record");
+
+        let payload = docker_inspect_payload(&record, false);
+        assert_eq!(payload["Created"], "1970-01-01T00:00:01.000000000Z");
+        assert_eq!(payload["RestartCount"], 3);
+        assert_eq!(payload["State"]["Running"], true);
+        assert_eq!(payload["State"]["Paused"], false);
+        assert_eq!(payload["State"]["Restarting"], false);
+        assert_eq!(payload["State"]["OOMKilled"], false);
+        assert_eq!(payload["State"]["Dead"], false);
+        assert_eq!(payload["Mounts"][0]["Type"], "bind");
+        assert_eq!(payload["Mounts"][0]["Source"], "/srv/data");
+        assert_eq!(payload["Mounts"][0]["Destination"], "/data");
+        assert_eq!(payload["Mounts"][0]["RW"], false);
     }
 
     #[test]

@@ -3151,6 +3151,7 @@ impl ContainerRuntime {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: restart_policy.clone(),
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: stdout_path.display().to_string(),
@@ -11654,6 +11655,7 @@ fn update_pid_status(
     }
     record.pid = pid;
     record.status = status.to_string();
+    record.restart_count = record.restart_count.saturating_add(1);
     db.put(&record)?;
     Ok(())
 }
@@ -13370,6 +13372,7 @@ mod tests {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
@@ -13433,6 +13436,7 @@ mod tests {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
@@ -13944,6 +13948,7 @@ mod tests {
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "/tmp/fixture.stdout".to_string(),
@@ -15239,6 +15244,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             health_failures: 0,
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
+            restart_count: 0,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),

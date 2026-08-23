@@ -1,0 +1,13 @@
+generated_at_utc=2026-08-23T20:47:27Z
+host=Linux 7.0.0-30-generic x86_64 GNU/Linux
+git_commit=1773d013
+docker_version=29.7.2
+ferro_cli=/data/dev/ferrocrate/.worktrees/main-clean/target/release/ferro-cli
+image=public.ecr.aws/docker/library/alpine:latest
+pull_image=alpine:3.19
+cold_pull_rounds_available=0
+isolated_docker_contract=0
+docker_config_isolated=true
+rounds=10
+slow_rounds=5
+timeout_seconds=60

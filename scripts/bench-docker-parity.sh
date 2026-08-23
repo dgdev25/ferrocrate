@@ -126,6 +126,7 @@ command -v timeout >/dev/null 2>&1 || { echo "timeout is required" >&2; exit 1; 
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-docker-parity.XXXXXX")"
+bench_elapsed_file="$work_root/last-elapsed"
 docker_config="$work_root/docker-config"
 mkdir -p "$docker_config"
 samples_file="$output_dir/samples.tsv"
@@ -142,14 +143,34 @@ declare -a docker_volumes=()
 declare -a docker_images=()
 failures=0
 
+# GNU timeout on this host quantizes its wait to ~100 ms, which flattens
+# every fast operation into wrapper latency. A minimal Python runner
+# enforces the bound and records the child's precise wall time to
+# $bench_elapsed_file; record_sample prefers that over its own clock.
+bench_timer_run() {
+  python3 - "$timeout_seconds" "$bench_elapsed_file" "$@" <<'PYEOF'
+import subprocess, sys, time
+bound = float(sys.argv[1])
+out = sys.argv[2]
+cmd = sys.argv[3:]
+start = time.perf_counter()
+try:
+    code = subprocess.run(cmd, timeout=bound).returncode
+except subprocess.TimeoutExpired:
+    code = 124
+elapsed = time.perf_counter() - start
+with open(out, "w") as handle:
+    handle.write(f"{elapsed:.6f}")
+sys.exit(code)
+PYEOF
+}
+
 docker_cmd() {
-  timeout --foreground --kill-after=5s "${timeout_seconds}s" \
-    env DOCKER_CONFIG="$docker_config" docker "$@"
+  bench_timer_run env DOCKER_CONFIG="$docker_config" docker "$@"
 }
 
 ferro_cmd() {
-  timeout --foreground --kill-after=5s "${timeout_seconds}s" \
-    env FERROCRATE_RUNTIME_DIR="$current_ferro_runtime" "$ferro_bin" "$@"
+  bench_timer_run env FERROCRATE_RUNTIME_DIR="$current_ferro_runtime" "$ferro_bin" "$@"
 }
 
 engine_cmd() {
@@ -289,13 +310,18 @@ record_sample() {
   local operation="$1" engine="$2" round="$3"
   shift 3
   local started ended elapsed status=ok
+  rm -f -- "$bench_elapsed_file"
   started="$(date +%s%N)"
   if ! "$@" >"$work_root/${operation}-${engine}-${round}.log" 2>&1; then
     status=failed
     failures=$((failures + 1))
   fi
   ended="$(date +%s%N)"
-  elapsed="$(awk -v started="$started" -v ended="$ended" 'BEGIN { printf "%.6f", (ended - started) / 1000000000 }')"
+  if [[ -s "$bench_elapsed_file" ]]; then
+    elapsed="$(cat "$bench_elapsed_file")"
+  else
+    elapsed="$(awk -v started="$started" -v ended="$ended" 'BEGIN { printf "%.6f", (ended - started) / 1000000000 }')"
+  fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$operation" "$engine" "$round" "$elapsed" "$status" >>"$samples_tmp"
   # Continue after a failed timed invocation so the evidence has a row for
   # every attempted command and the summary can mark that median unavailable.

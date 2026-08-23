@@ -4129,8 +4129,51 @@ fn run_stage_commands(
                 "RUN instruction produced empty command".to_string(),
             ));
         }
-        let mut cmd = Command::new(&run.args[0]);
-        cmd.args(&run.args[1..]);
+        let rootless_bwrap = if running_as_root {
+            None
+        } else {
+            Some(crate::rootless::bubblewrap_path().ok_or_else(|| {
+                DockerfileBuildError::Invalid(
+                    "rootless RUN sandbox requires trusted bubblewrap (bwrap)".to_string(),
+                )
+            })?)
+        };
+        let mut cmd = if let Some(bwrap) = &rootless_bwrap {
+            let mut command = Command::new(bwrap);
+            command
+                .args([
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--unshare-pid",
+                    "--unshare-net",
+                    "--unshare-uts",
+                    "--uid",
+                    "0",
+                    "--gid",
+                    "0",
+                    "--bind",
+                ])
+                .arg(rootfs)
+                .arg("/")
+                .arg("--chdir")
+                .arg(
+                    workdir
+                        .filter(|dir| !dir.trim().is_empty())
+                        .map(|dir| {
+                            if dir.starts_with('/') {
+                                dir.to_string()
+                            } else {
+                                format!("/{dir}")
+                            }
+                        })
+                        .unwrap_or_else(|| "/".to_string()),
+                );
+            command
+        } else {
+            let mut command = Command::new(&run.args[0]);
+            command.args(&run.args[1..]);
+            command
+        };
         cmd.stdin(Stdio::null());
         // When an output cap is configured, capture the child's streams so
         // runaway output fails the build instead of exhausting host memory.
@@ -4315,6 +4358,26 @@ fn run_stage_commands(
             .iter()
             .map(|(source, target, _, _, read_only)| (source.clone(), target.clone(), *read_only))
             .collect::<Vec<_>>();
+        if rootless_bwrap.is_some() {
+            for (target, _size, read_only) in &tmpfs_specs {
+                let target = build_root_relative_path(&rootfs, target)?;
+                cmd.arg("--tmpfs").arg(&target);
+                if *read_only {
+                    cmd.arg("--remount-ro").arg(&target);
+                }
+            }
+            for (source, target, read_only) in &bind_for_child {
+                let target = build_root_relative_path(&rootfs, target)?;
+                cmd.arg(if *read_only { "--ro-bind" } else { "--bind" })
+                    .arg(source)
+                    .arg(target);
+            }
+            for (source, target) in &ssh_for_child {
+                let target = build_root_relative_path(&rootfs, target)?;
+                cmd.arg("--bind").arg(source).arg(target);
+            }
+            cmd.arg("--").args(&run.args);
+        }
         // SAFETY: pre_exec runs in the child process between fork and exec to install
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
@@ -4326,22 +4389,9 @@ fn run_stage_commands(
                             format!("build pre_exec unshare root namespaces: {err}"),
                         )
                     })?;
-                } else {
-                    setup_build_namespace().map_err(|err| {
-                        io::Error::new(
-                            err.kind(),
-                            format!("build pre_exec unshare namespaces: {err}"),
-                        )
-                    })?;
-                    apply_user_namespace_map().map_err(|err| {
-                        io::Error::new(
-                            err.kind(),
-                            format!("build pre_exec map user namespace: {err}"),
-                        )
-                    })?;
                 }
                 #[cfg(unix)]
-                for (target, size, read_only) in &tmpfs_for_child {
+                for (target, size, read_only) in tmpfs_for_child.iter().filter(|_| running_as_root) {
                     let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
                     if *read_only {
                         flags |= MsFlags::MS_RDONLY;
@@ -4359,7 +4409,7 @@ fn run_stage_commands(
                     })?;
                 }
                 #[cfg(unix)]
-                for (source, target, read_only) in &bind_for_child {
+                for (source, target, read_only) in bind_for_child.iter().filter(|_| running_as_root) {
                     mount(
                         Some(source),
                         target,
@@ -4384,7 +4434,7 @@ fn run_stage_commands(
                     }
                 }
                 #[cfg(unix)]
-                for (source, target) in &ssh_for_child {
+                for (source, target) in ssh_for_child.iter().filter(|_| running_as_root) {
                     mount(
                         Some(source),
                         target,
@@ -4394,12 +4444,15 @@ fn run_stage_commands(
                     )
                     .map_err(|err| io::Error::other(format!("build pre_exec mount SSH agent: {err}")))?;
                 }
-                enter_build_rootfs(&command_rootfs, workdir.as_deref()).map_err(|err| {
-                    io::Error::new(err.kind(), format!("build pre_exec enter rootfs: {err}"))
-                })?;
-                apply_build_identity(run_user.as_deref()).map_err(|err| {
-                    io::Error::new(err.kind(), format!("build pre_exec set identity: {err}"))
-                })?;
+                if running_as_root {
+                    enter_build_rootfs(&command_rootfs, workdir.as_deref()).map_err(|err| {
+                        io::Error::new(err.kind(), format!("build pre_exec enter rootfs: {err}"))
+                    })?;
+                    apply_build_identity(run_user.as_deref()).map_err(|err| {
+                        io::Error::new(err.kind(), format!("build pre_exec set identity: {err}"))
+                    })?;
+                }
+                if running_as_root {
                 if let Err(err) = set_no_new_privileges() {
                     if err.raw_os_error() == Some(nix::libc::EINVAL)
                         || err.raw_os_error() == Some(nix::libc::EPERM)
@@ -4430,6 +4483,7 @@ fn run_stage_commands(
                             )));
                         }
                     }
+                }
                 }
                 apply_build_limits(&child_limits).map_err(|err| {
                     io::Error::new(err.kind(), format!("build pre_exec apply limits: {err}"))
@@ -4735,6 +4789,19 @@ fn validate_mount_target(
     Ok(resolved)
 }
 
+fn build_root_relative_path(
+    rootfs: &Path,
+    host_target: &Path,
+) -> Result<PathBuf, DockerfileBuildError> {
+    let relative = host_target.strip_prefix(rootfs).map_err(|_| {
+        DockerfileBuildError::Invalid(format!(
+            "build mount target escaped rootfs: {}",
+            host_target.display()
+        ))
+    })?;
+    Ok(Path::new("/").join(relative))
+}
+
 #[derive(Clone, Debug, Default)]
 struct BuildLimits {
     memory_bytes: Option<u64>,
@@ -4962,18 +5029,6 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
         .map_err(|err| DockerfileBuildError::Invalid(format!("build seccomp profile: {err}")))
 }
 
-fn setup_build_namespace() -> io::Result<()> {
-    use nix::sched::{unshare, CloneFlags};
-    unshare(
-        CloneFlags::CLONE_NEWUSER
-            | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWUTS
-            | CloneFlags::CLONE_NEWNET,
-    )
-    .map_err(|err| io::Error::other(err.to_string()))?;
-    make_mount_namespace_private()
-}
-
 fn setup_build_namespace_root() -> io::Result<()> {
     use nix::sched::{unshare, CloneFlags};
     unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
@@ -4995,21 +5050,6 @@ fn make_mount_namespace_private() -> io::Result<()> {
         None::<&str>,
     )
     .map_err(|err| io::Error::other(format!("make mount namespace private: {err}")))
-}
-
-fn apply_user_namespace_map() -> io::Result<()> {
-    let host_uid = nix::unistd::Uid::current().as_raw();
-    let host_gid = nix::unistd::Gid::current().as_raw();
-    // Kernel requires setgroups to be disabled before writing gid_map in userns.
-    if let Err(err) = fs::write("/proc/self/setgroups", "deny") {
-        if err.kind() != io::ErrorKind::NotFound {
-            return Err(io::Error::other(format!("setgroups: {err}")));
-        }
-    }
-    fs::write("/proc/self/uid_map", format!("0 {host_uid} 1"))
-        .map_err(|err| io::Error::other(format!("uid_map: {err}")))?;
-    fs::write("/proc/self/gid_map", format!("0 {host_gid} 1"))
-        .map_err(|err| io::Error::other(format!("gid_map: {err}")))
 }
 
 fn enter_build_rootfs(rootfs: &Path, workdir: Option<&str>) -> io::Result<()> {
@@ -7684,11 +7724,25 @@ mod tests {
     fn host_blocks_rootless_build_sandbox() -> bool {
         // The sandbox uses the rootful unshare set when euid is 0 and the
         // user-namespace set otherwise; probe the one that would run.
-        let args: [&str; 3] = if nix::unistd::Uid::effective().is_root() {
-            ["-m", "--propagation", "unchanged"]
-        } else {
-            ["-Ur", "--propagation", "unchanged"]
-        };
+        if !nix::unistd::Uid::effective().is_root() {
+            return crate::rootless::bubblewrap_path().is_none_or(|bwrap| {
+                !std::process::Command::new(bwrap)
+                    .args([
+                        "--unshare-user",
+                        "--uid",
+                        "0",
+                        "--gid",
+                        "0",
+                        "--ro-bind",
+                        "/",
+                        "/",
+                        "/bin/true",
+                    ])
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+        }
+        let args = ["-m", "--propagation", "unchanged"];
         match std::process::Command::new("unshare")
             .args(args)
             .arg("/bin/true")
@@ -7700,6 +7754,44 @@ mod tests {
             Ok(status) => !status.success(),
             Err(_) => true,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootless_build_namespace_maps_identity_before_private_mount() {
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("skipping: rootless namespace ordering requires an unprivileged uid");
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).expect("context");
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /busybox\nRUN [\"/busybox\", \"true\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, context.join("busybox")).expect("busybox");
+        let runtime = temp.path().join("runtime");
+        let store =
+            crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/rootless-run:latest"),
+            &runtime,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("rootless RUN should succeed: {error}"));
     }
 
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";

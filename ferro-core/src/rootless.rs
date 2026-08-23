@@ -346,7 +346,7 @@ pub(crate) fn cgroup_not_delegated_message(probed: &Path) -> String {
     )
 }
 
-fn bubblewrap_path() -> Option<PathBuf> {
+pub(crate) fn bubblewrap_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|directory| directory.join("bwrap"))

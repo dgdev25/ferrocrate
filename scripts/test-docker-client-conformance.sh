@@ -10,10 +10,22 @@ if [[ ! -x "$harness" ]]; then
 fi
 
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-conformance-contract.XXXXXX")"
-trap 'rm -rf -- "$work_root"' EXIT
 fake_bin="$work_root/bin"
 fake_state="$work_root/state"
 mkdir -p "$fake_bin" "$fake_state"
+
+cleanup_contract_test() {
+  local pid_file pid
+  for pid_file in "$fake_state"/*.pid; do
+    [[ -f "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  [[ -z "${unrelated_pid:-}" ]] || kill -KILL "$unrelated_pid" 2>/dev/null || true
+  rm -rf -- "$work_root"
+}
+trap cleanup_contract_test EXIT
 
 cat >"$fake_bin/ferro-cli" <<'FAKE_FERRO'
 #!/usr/bin/env bash
@@ -41,6 +53,32 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 [[ -n "$socket" ]] || { echo "fake daemon did not receive --socket" >&2; exit 64; }
+printf '%s\n' "$socket" >"$FAKE_STATE/daemon.socket"
+
+if [[ "${FAKE_REPLACE_CONFIGURED_FERRO:-0}" == 1 ]]; then
+  mv -f -- "$FAKE_REPLACEMENT_FERRO" "$FAKE_CONFIGURED_FERRO"
+fi
+
+if [[ "${FAKE_SPAWN_DAEMON_DESCENDANT:-0}" == 1 ]]; then
+  setsid env -u FERROCRATE_CONFORMANCE_PROCESS_TOKEN \
+    -u FERROCRATE_CONFORMANCE_WRAPPER_TOKEN \
+    python3 - "$FAKE_STATE/daemon-descendant.pid" <<'PY' &
+import os
+import signal
+import sys
+import time
+
+with open(sys.argv[1], "w", encoding="utf-8") as pid_file:
+    pid_file.write(f"{os.getpid()}\n")
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+PY
+  for _ in $(seq 1 100); do
+    [[ -s "$FAKE_STATE/daemon-descendant.pid" ]] && break
+    sleep 0.01
+  done
+fi
 
 exec python3 - "$socket" <<'PY'
 import os
@@ -70,7 +108,33 @@ cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 set -euo pipefail
 
 id="${FERROCRATE_CONFORMANCE_RECORD_ID:-unrecorded}"
-printf '%s\t%s\n' "$id" "$*" >>"$FAKE_STATE/docker.calls"
+printf '%s\t%s\t%s\t%s\t%s\n' \
+  "$id" "${DOCKER_HOST:-unset}" "${DOCKER_CONFIG:-unset}" \
+  "${DOCKER_BUILDKIT:-unset}" "$*" >>"$FAKE_STATE/docker.calls"
+
+if [[ "$id" == compose-logs && "${FAKE_SPAWN_COMPOSE_DESCENDANT:-0}" == 1 ]]; then
+  setsid env -u FERROCRATE_CONFORMANCE_PROCESS_TOKEN \
+    -u FERROCRATE_CONFORMANCE_WRAPPER_TOKEN \
+    python3 - "$FAKE_STATE/compose-descendant.pid" <<'PY' &
+import os
+import signal
+import sys
+import time
+
+with open(sys.argv[1], "w", encoding="utf-8") as pid_file:
+    pid_file.write(f"{os.getpid()}\n")
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+PY
+  for _ in $(seq 1 100); do
+    [[ -s "$FAKE_STATE/compose-descendant.pid" ]] && break
+    sleep 0.01
+  done
+  # Keep the plugin parent present long enough for the ownership tracker to
+  # observe the marker-stripping fork before it is reparented.
+  sleep 0.5
+fi
 
 output=""
 previous=""
@@ -124,6 +188,45 @@ spaced_ferro="$spaced_ferro_dir/ferro cli"
 mkdir -p "$spaced_ferro_dir"
 cp "$fake_bin/ferro-cli" "$spaced_ferro"
 
+cat >"$fake_bin/mv" <<'FAKE_MV'
+#!/usr/bin/env bash
+set -euo pipefail
+
+destination="${!#}"
+if [[ -n "${FAKE_MV_FAIL_DESTINATION:-}" && "$destination" == "$FAKE_MV_FAIL_DESTINATION" &&
+      ! -e "${FAKE_MV_FAILURE_MARKER:?}" ]]; then
+  : >"$FAKE_MV_FAILURE_MARKER"
+  exit 73
+fi
+if [[ -n "${FAKE_MV_TERM_DESTINATION:-}" && "$destination" == "$FAKE_MV_TERM_DESTINATION" &&
+      ! -e "${FAKE_MV_TERM_MARKER:?}" ]]; then
+  : >"$FAKE_MV_TERM_MARKER"
+  kill -TERM "$PPID"
+  sleep 0.1
+  exit 74
+fi
+exec /usr/bin/mv "$@"
+FAKE_MV
+chmod +x "$fake_bin/mv"
+
+setsid python3 - "$fake_state/unrelated.pid" <<'PY' &
+import os
+import signal
+import sys
+import time
+
+with open(sys.argv[1], "w", encoding="utf-8") as pid_file:
+    pid_file.write(f"{os.getpid()}\n")
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+PY
+unrelated_pid=$!
+for _ in $(seq 1 100); do
+  [[ -s "$fake_state/unrelated.pid" ]] && break
+  sleep 0.01
+done
+
 expected_ids="$work_root/expected.ids"
 cat >"$expected_ids" <<'EXPECTED'
 cli-version
@@ -168,7 +271,11 @@ execution_log="$work_root/docker-client-conformance.log"
 set +e
 PATH="$fake_bin:$PATH" \
   FAKE_STATE="$fake_state" \
+  FAKE_SPAWN_DAEMON_DESCENDANT=1 \
+  FAKE_SPAWN_COMPOSE_DESCENDANT=1 \
   FERROCRATE_BIN="$spaced_ferro" \
+  DOCKER_HOST="unix://$work_root/caller.sock" \
+  DOCKER_CONFIG="$work_root/caller-docker-config" \
   DOCKER_BUILDKIT=0 \
   FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS=2 \
   FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS=2 \
@@ -192,7 +299,7 @@ diff -u "$expected_ids" "$call_ids"
 
 assert_recorded_command_starts_with() {
   local id="$1" expected="$2" actual
-  actual="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print $2; exit }' "$fake_state/docker.calls")"
+  actual="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print $5; exit }' "$fake_state/docker.calls")"
   if [[ "$actual" != "$expected"* ]]; then
     echo "$id executed '$actual'; expected command beginning '$expected'" >&2
     exit 1
@@ -220,7 +327,7 @@ assert_recorded_command_starts_with system-prune "system prune "
 
 assert_compose_tail() {
   local id="$1" expected="$2" actual after_file tail
-  actual="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print $2; exit }' "$fake_state/docker.calls")"
+  actual="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print $5; exit }' "$fake_state/docker.calls")"
   after_file="${actual#* --file }"
   tail="${after_file#* }"
   if [[ "$tail" != "$expected" ]]; then
@@ -264,6 +371,42 @@ grep -Fq 'FerroCrate: ferrocrate 0.1.0-contract' "$scoreboard" || {
   echo "configured FERROCRATE_BIN path with spaces was not used for version metadata" >&2
   exit 1
 }
+
+daemon_socket="$(cat "$fake_state/daemon.socket")"
+expected_host="unix://$daemon_socket"
+expected_config="${daemon_socket%/runtime/docker.sock}/docker-config"
+awk -F '\t' -v host="$expected_host" -v config="$expected_config" '
+  $2 != host || $3 != config || $4 != "0" { exit 1 }
+' "$fake_state/docker.calls" || {
+  echo "a Docker/Compose invocation escaped the isolated endpoint/config/classic-builder contract" >&2
+  exit 1
+}
+awk -F '\t' '$1 == "system-prune" { found = ($2 ~ /^unix:\/\/.*\/runtime\/docker\.sock$/ && $3 ~ /\/docker-config$/ && $4 == "0") } END { exit !found }' \
+  "$fake_state/docker.calls"
+
+assert_process_gone() {
+  local label="$1" pid_file="$2" pid
+  [[ -s "$pid_file" ]] || { echo "$label did not record its PID" >&2; exit 1; }
+  pid="$(cat "$pid_file")"
+  for _ in $(seq 1 100); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.01
+  done
+  echo "$label survived conformance cleanup (pid=$pid)" >&2
+  exit 1
+}
+
+assert_process_gone "escaped daemon workload" "$fake_state/daemon-descendant.pid"
+assert_process_gone "escaped Compose plugin descendant" "$fake_state/compose-descendant.pid"
+kill -0 "$unrelated_pid" 2>/dev/null || {
+  echo "conformance cleanup touched an unrelated process" >&2
+  exit 1
+}
+
+source_commit="$(git -C "$repo_root" rev-parse HEAD)"
+binary_sha256="$(sha256sum "$spaced_ferro" | awk '{ print $1 }')"
+grep -Fq "FerroCrate source commit: \`$source_commit\`" "$scoreboard"
+grep -Fq "FerroCrate binary SHA-256: \`$binary_sha256\`" "$scoreboard"
 
 extract_log_results() {
   awk -F '\t' 'NR > 1 { print $1 "\t" $2 "\t" $5 "\t" $6 }' "$1"
@@ -340,6 +483,20 @@ set -e
 }
 grep -Fq 'FerroCrate: unavailable' "$hang_scoreboard"
 
+# Output names that are lexically different but resolve to the same directory
+# entry must be rejected before setup. Otherwise the second publication move
+# can silently replace the first member of the evidence pair.
+alias_parent="$work_root/alias-parent"
+mkdir -p "$alias_parent"
+set +e
+DOCKER_BUILDKIT=0 FERROCRATE_BIN="$spaced_ferro" \
+  "$harness" --output "$alias_parent/score.md" --log "$alias_parent/./score.md" \
+  >"$work_root/alias.stdout" 2>"$work_root/alias.stderr"
+alias_status=$?
+set -e
+[[ "$alias_status" == 2 ]]
+grep -Fq 'HARNESS ERROR: --output and --log must be different paths' "$work_root/alias.stderr"
+
 # Existing directories are invalid file targets and must be rejected before
 # any daemon/client setup or atomic publication attempt.
 output_directory="$work_root/output-directory"
@@ -384,6 +541,110 @@ set -e
 grep -Fq 'HARNESS ERROR:' "$work_root/setup.stderr"
 [[ "$(cat "$setup_scoreboard")" == "prior scoreboard" ]]
 [[ "$(cat "$setup_log")" == "prior log" ]]
+
+# The published hash/version must describe the exact executable snapshot that
+# launched the daemon, even if the configured path is atomically replaced
+# while that daemon is running.
+provenance_ferro="$work_root/provenance-ferro"
+provenance_replacement="$work_root/provenance-ferro.replacement"
+cp "$fake_bin/ferro-cli" "$provenance_ferro"
+cat >"$provenance_replacement" <<'REPLACEMENT_FERRO'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --version ]]; then
+  echo "ferrocrate 9.9.9-replacement"
+  exit 0
+fi
+exit 64
+REPLACEMENT_FERRO
+chmod +x "$provenance_ferro" "$provenance_replacement"
+provenance_hash="$(sha256sum "$provenance_ferro" | awk '{ print $1 }')"
+provenance_scoreboard="$work_root/provenance-scoreboard.md"
+provenance_log="$work_root/provenance.log"
+set +e
+PATH="$fake_bin:$PATH" \
+  FAKE_STATE="$fake_state" \
+  FAKE_REPLACE_CONFIGURED_FERRO=1 \
+  FAKE_CONFIGURED_FERRO="$provenance_ferro" \
+  FAKE_REPLACEMENT_FERRO="$provenance_replacement" \
+  FERROCRATE_BIN="$provenance_ferro" \
+  DOCKER_BUILDKIT=0 \
+  FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS=2 \
+  FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS=2 \
+  "$harness" --output "$provenance_scoreboard" --log "$provenance_log" >/dev/null
+provenance_status=$?
+set -e
+[[ "$provenance_status" == 1 ]]
+grep -Fq "FerroCrate: ferrocrate 0.1.0-contract" "$provenance_scoreboard"
+grep -Fq "FerroCrate binary SHA-256: \`$provenance_hash\`" "$provenance_scoreboard"
+
+# Publishing the raw log and rendered scoreboard is one transaction. A failure
+# replacing the second member must restore both prior artifacts.
+pair_scoreboard="$work_root/pair-scoreboard.md"
+pair_log="$work_root/pair.log"
+prior_scoreboard_target="$work_root/prior-scoreboard-target"
+ln -s "$prior_scoreboard_target" "$pair_scoreboard"
+printf 'prior paired log\n' >"$pair_log"
+set +e
+PATH="$fake_bin:$PATH" \
+  FAKE_STATE="$fake_state" \
+  FAKE_MV_FAIL_DESTINATION="$pair_log" \
+  FAKE_MV_FAILURE_MARKER="$work_root/mv-failed-once" \
+  FERROCRATE_BIN="$spaced_ferro" \
+  DOCKER_BUILDKIT=0 \
+  FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS=2 \
+  FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS=2 \
+  "$harness" --output "$pair_scoreboard" --log "$pair_log" \
+  >"$work_root/pair.stdout" 2>"$work_root/pair.stderr"
+pair_status=$?
+set -e
+[[ "$pair_status" == 2 ]] || {
+  echo "expected paired publication failure exit 2, got $pair_status" >&2
+  exit 1
+}
+[[ -L "$pair_scoreboard" && "$(readlink "$pair_scoreboard")" == "$prior_scoreboard_target" ]]
+[[ "$(cat "$pair_log")" == "prior paired log" ]]
+
+# A termination between the two installation moves must also roll back both
+# members. Command-failure rollback alone is insufficient for a supervised run.
+term_pair_scoreboard="$work_root/term-pair-scoreboard.md"
+term_pair_log="$work_root/term-pair.log"
+printf 'prior terminated scoreboard\n' >"$term_pair_scoreboard"
+printf 'prior terminated log\n' >"$term_pair_log"
+set +e
+PATH="$fake_bin:$PATH" \
+  FAKE_STATE="$fake_state" \
+  FAKE_MV_TERM_DESTINATION="$term_pair_log" \
+  FAKE_MV_TERM_MARKER="$work_root/mv-terminated-once" \
+  FERROCRATE_BIN="$spaced_ferro" \
+  DOCKER_BUILDKIT=0 \
+  FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS=2 \
+  FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS=2 \
+  "$harness" --output "$term_pair_scoreboard" --log "$term_pair_log" \
+  >"$work_root/term-pair.stdout" 2>"$work_root/term-pair.stderr"
+term_pair_status=$?
+set -e
+[[ "$term_pair_status" == 143 ]] || {
+  echo "expected terminated publication exit 143, got $term_pair_status" >&2
+  exit 1
+}
+[[ "$(cat "$term_pair_scoreboard")" == "prior terminated scoreboard" ]]
+[[ "$(cat "$term_pair_log")" == "prior terminated log" ]]
+
+# The repository's default scoreboard must retain its genuine raw record in a
+# tracked, non-ignored location so a clean checkout preserves the evidence chain.
+durable_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+git -C "$repo_root" check-ignore -q "$durable_log" && {
+  echo "durable conformance log is ignored: $durable_log" >&2
+  exit 1
+}
+git -C "$repo_root" ls-files --error-unmatch \
+  "${durable_log#"$repo_root/"}" >/dev/null
+grep -Fq 'docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv' \
+  "$repo_root/docs/compatibility/parity-scoreboard.md"
+grep -Eq 'FerroCrate source commit: `?[0-9a-f]{40}`?' \
+  "$repo_root/docs/compatibility/parity-scoreboard.md"
+grep -Eq 'FerroCrate binary SHA-256: `?[0-9a-f]{64}`?' \
+  "$repo_root/docs/compatibility/parity-scoreboard.md"
 
 bash -n "$harness"
 echo "docker client conformance contract tests passed"

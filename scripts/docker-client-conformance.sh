@@ -4,10 +4,11 @@
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/process-tree-ownership.sh"
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/debug/ferro-cli}"
 fixture="$repo_root/tests/fixtures/real-app/compose.yml"
 output="$repo_root/docs/compatibility/parity-scoreboard.md"
-execution_log="$repo_root/target/docker-client-conformance/docker-client-conformance.log"
+execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
 command_timeout="${FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS:-240}"
 daemon_timeout="${FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS:-20}"
 
@@ -20,7 +21,7 @@ record every declared invocation, and atomically generate a Markdown scoreboard.
 
 Options:
   --output <path>  Markdown scoreboard (default: docs/compatibility/parity-scoreboard.md)
-  --log <path>     Tab-separated execution log (default: target/docker-client-conformance/docker-client-conformance.log)
+  --log <path>     Tab-separated execution log (default: docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv)
   -h, --help       Show this help
 
 Required environment:
@@ -76,6 +77,8 @@ command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
 command -v timeout >/dev/null 2>&1 || harness_error "timeout is required"
 command -v setsid >/dev/null 2>&1 || harness_error "setsid is required for bounded daemon cleanup"
 command -v awk >/dev/null 2>&1 || harness_error "awk is required"
+command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
+command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
 [[ -x /bin/busybox ]] || harness_error "/bin/busybox is required for the offline image fixture"
 [[ -f "$fixture" ]] || harness_error "missing Compose fixture: $fixture"
 [[ -f "$repo_root/tests/fixtures/real-app/webroot/index.html" ]] || harness_error "incomplete Compose fixture: webroot/index.html"
@@ -86,6 +89,20 @@ log_parent="$(dirname "$execution_log")"
 mkdir -p "$output_parent" || harness_error "cannot create output directory: $output_parent"
 mkdir -p "$log_parent" || harness_error "cannot create log directory: $log_parent"
 
+canonical_publication_path() {
+  local path="$1" parent base canonical_parent
+  parent="$(dirname -- "$path")"
+  base="$(basename -- "$path")"
+  canonical_parent="$(cd "$parent" && pwd -P)" || return 1
+  printf '%s/%s\n' "$canonical_parent" "$base"
+}
+
+output="$(canonical_publication_path "$output")" || harness_error "cannot resolve output path: $output"
+execution_log="$(canonical_publication_path "$execution_log")" || harness_error "cannot resolve log path: $execution_log"
+[[ "$output" != "$execution_log" ]] || harness_error "--output and --log must be different paths"
+output_parent="$(dirname "$output")"
+log_parent="$(dirname "$execution_log")"
+
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-client-conformance.XXXXXX")" ||
   harness_error "cannot create temporary work directory"
 runtime_dir="$work_root/runtime"
@@ -95,11 +112,32 @@ outputs_dir="$work_root/outputs"
 mkdir -p "$runtime_dir" "$docker_config" "$context_dir" "$outputs_dir" ||
   harness_error "cannot initialize temporary work directory"
 
+# Execute an immutable, run-private snapshot. The daemon and version probe use
+# the same bytes named by the published hash even if a concurrent build replaces
+# the configured executable while the conformance run is in flight.
+ferro_snapshot="$work_root/ferro-cli.snapshot"
+cp -- "$ferro_bin" "$ferro_snapshot" || harness_error "cannot snapshot FerroCrate binary: $ferro_bin"
+chmod 0500 "$ferro_snapshot" || harness_error "cannot make FerroCrate binary snapshot executable"
+binary_sha256="$(sha256sum "$ferro_snapshot" | awk '{ print $1 }')" ||
+  harness_error "cannot hash the FerroCrate binary snapshot"
+source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" ||
+  harness_error "cannot resolve the FerroCrate source commit"
+
 socket="$runtime_dir/docker.sock"
 host="unix://$socket"
 log_tmp="$work_root/executions.tsv"
 scoreboard_tmp=""
+log_publish_tmp=""
+output_backup=""
+log_backup=""
+publish_active=0
+publish_output_had_prior=0
+publish_log_had_prior=0
+publish_output_installed=0
+publish_log_installed=0
 daemon_pid=""
+daemon_tracker_pid=""
+daemon_process_registry="$work_root/daemon-processes.tsv"
 daemon_ready=0
 run_id="scoreboard"
 run_prefix="ferrocrate-conformance-$run_id"
@@ -109,30 +147,168 @@ container="$run_prefix-main"
 attach_container="$run_prefix-attach"
 compose_project="$run_prefix-compose"
 host_port=18093
+process_token_base="ferrocrate-conformance-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+daemon_process_token="$process_token_base-daemon"
+cleanup_sequence=0
+
+process_has_token() {
+  local pid="$1" variable="$2" value="$3" entry
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/environ" ]] || return 1
+  while IFS= read -r -d '' entry; do
+    [[ "$entry" == "$variable=$value" ]] && return 0
+  done <"/proc/$pid/environ" 2>/dev/null
+  return 1
+}
+
+owned_processes() {
+  local variable="$1" value="$2" environ_file pid
+  grep -lFzx -- "$variable=$value" /proc/[0-9]*/environ 2>/dev/null |
+    while IFS= read -r environ_file; do
+      pid="${environ_file#/proc/}"
+      printf '%s\n' "${pid%/environ}"
+    done
+}
+
+terminate_owned_processes() {
+  local variable="$1" value="$2" pid
+  local -a pids=()
+  mapfile -t pids < <(owned_processes "$variable" "$value")
+  for pid in "${pids[@]}"; do
+    process_has_token "$pid" "$variable" "$value" || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 50); do
+    mapfile -t pids < <(owned_processes "$variable" "$value")
+    ((${#pids[@]} == 0)) && return 0
+    sleep 0.02
+  done
+  mapfile -t pids < <(owned_processes "$variable" "$value")
+  for pid in "${pids[@]}"; do
+    process_has_token "$pid" "$variable" "$value" || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  return 0
+}
+
+run_bounded_owned() {
+  local bound="$1" kill_after="$2" token="$3"
+  shift 3
+  local status supervisor_pid tracker_pid="" registry
+  registry="$work_root/processes-$token.tsv"
+  timeout --signal=TERM --kill-after="${kill_after}s" "${bound}s" \
+    env FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$token" "$@" &
+  supervisor_pid=$!
+  if ! ferrocrate_start_process_tracker "$supervisor_pid" "$registry" tracker_pid; then
+    kill -TERM -- "-$supervisor_pid" 2>/dev/null || kill -TERM "$supervisor_pid" 2>/dev/null || true
+    wait "$supervisor_pid" 2>/dev/null || true
+    return 125
+  fi
+  wait "$supervisor_pid"
+  status=$?
+  ferrocrate_terminate_process_tree "$tracker_pid" "$registry"
+  terminate_owned_processes FERROCRATE_CONFORMANCE_PROCESS_TOKEN "$token"
+  rm -f -- "$registry"
+  return "$status"
+}
+
+next_cleanup_token() {
+  cleanup_sequence=$((cleanup_sequence + 1))
+  printf '%s-cleanup-%s' "$process_token_base" "$cleanup_sequence"
+}
+
+restore_evidence_pair() {
+  local output_had_prior="$1" log_had_prior="$2"
+  local output_installed="$3" log_installed="$4" restore_failed=0
+  [[ "$output_installed" == 0 ]] || rm -f -- "$output"
+  [[ "$log_installed" == 0 ]] || rm -f -- "$execution_log"
+  if [[ "$output_had_prior" == 1 && ( -e "$output_backup" || -L "$output_backup" ) ]]; then
+    if mv -fT -- "$output_backup" "$output"; then
+      output_backup=""
+    else
+      restore_failed=1
+    fi
+  fi
+  if [[ "$log_had_prior" == 1 && ( -e "$log_backup" || -L "$log_backup" ) ]]; then
+    if mv -fT -- "$log_backup" "$execution_log"; then
+      log_backup=""
+    else
+      restore_failed=1
+    fi
+  fi
+  return "$restore_failed"
+}
+
+publish_evidence_pair() {
+  publish_output_had_prior=0
+  publish_log_had_prior=0
+  publish_output_installed=0
+  publish_log_installed=0
+  output_backup="$(mktemp "$output_parent/.parity-scoreboard.previous.XXXXXX")" || return 1
+  rm -f -- "$output_backup" || return 1
+  log_backup="$(mktemp "$log_parent/.docker-client-conformance.previous.XXXXXX")" || return 1
+  rm -f -- "$log_backup" || return 1
+  publish_active=1
+
+  if [[ -e "$output" || -L "$output" ]]; then
+    mv -fT -- "$output" "$output_backup" || return 1
+    publish_output_had_prior=1
+  fi
+  if [[ -e "$execution_log" || -L "$execution_log" ]]; then
+    if ! mv -fT -- "$execution_log" "$log_backup"; then
+      restore_evidence_pair "$publish_output_had_prior" "$publish_log_had_prior" \
+        "$publish_output_installed" "$publish_log_installed" && publish_active=0
+      return 1
+    fi
+    publish_log_had_prior=1
+  fi
+  if ! mv -fT -- "$scoreboard_tmp" "$output"; then
+    restore_evidence_pair "$publish_output_had_prior" "$publish_log_had_prior" \
+      "$publish_output_installed" "$publish_log_installed" && publish_active=0
+    return 1
+  fi
+  publish_output_installed=1
+  if ! mv -fT -- "$log_publish_tmp" "$execution_log"; then
+    restore_evidence_pair "$publish_output_had_prior" "$publish_log_had_prior" \
+      "$publish_output_installed" "$publish_log_installed" && publish_active=0
+    return 1
+  fi
+  publish_log_installed=1
+
+  rm -f -- "$output_backup" "$log_backup"
+  output_backup=""
+  log_backup=""
+  scoreboard_tmp=""
+  log_publish_tmp=""
+  publish_active=0
+  return 0
+}
 
 cleanup() {
-  local fixture_pids
+  local fixture_pids cleanup_token
   if [[ "$daemon_ready" == 1 ]]; then
-    timeout --foreground --kill-after=3s 15s \
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker compose --project-name "$compose_project" --file "$fixture" down --timeout 2 \
+        docker compose --project-name "$compose_project" --file "$fixture" down --timeout 2 \
       >/dev/null 2>&1 || true
-    timeout --foreground --kill-after=3s 15s \
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker rm --force "$container" "$attach_container" >/dev/null 2>&1 || true
-    timeout --foreground --kill-after=3s 15s \
+        docker rm --force "$container" "$attach_container" >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker image rm --force "$image" >/dev/null 2>&1 || true
+        docker image rm --force "$image" >/dev/null 2>&1 || true
   fi
   if [[ -n "$daemon_pid" ]]; then
-    kill -TERM -- "-$daemon_pid" 2>/dev/null || kill "$daemon_pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-      kill -0 "$daemon_pid" 2>/dev/null || break
-      sleep 0.05
-    done
-    kill -KILL -- "-$daemon_pid" 2>/dev/null || kill -KILL "$daemon_pid" 2>/dev/null || true
+    if process_has_token "$daemon_pid" FERROCRATE_CONFORMANCE_PROCESS_TOKEN "$daemon_process_token"; then
+      kill -TERM -- "-$daemon_pid" 2>/dev/null || kill "$daemon_pid" 2>/dev/null || true
+    fi
+    ferrocrate_terminate_process_tree "$daemon_tracker_pid" "$daemon_process_registry"
+    daemon_tracker_pid=""
     wait "$daemon_pid" 2>/dev/null || true
   fi
+  terminate_owned_processes FERROCRATE_CONFORMANCE_PROCESS_TOKEN "$daemon_process_token"
   if [[ -d "$runtime_dir" ]]; then
     fixture_pids="$(ps -eo pid=,args= | awk -v root="$runtime_dir" 'index($0, root) && /\/bwrap/ { print $1 }')"
     if [[ -n "$fixture_pids" ]]; then
@@ -141,7 +317,21 @@ cleanup() {
       kill -KILL $fixture_pids 2>/dev/null || true
     fi
   fi
+  if [[ "$publish_active" == 1 ]]; then
+    # A signal can arrive after mv succeeds but before the following assignment.
+    # A vanished staging path proves that member reached its destination.
+    if [[ -n "$scoreboard_tmp" && ! -e "$scoreboard_tmp" && ! -L "$scoreboard_tmp" ]]; then
+      publish_output_installed=1
+    fi
+    if [[ -n "$log_publish_tmp" && ! -e "$log_publish_tmp" && ! -L "$log_publish_tmp" ]]; then
+      publish_log_installed=1
+    fi
+    restore_evidence_pair "$publish_output_had_prior" "$publish_log_had_prior" \
+      "$publish_output_installed" "$publish_log_installed" || true
+    publish_active=0
+  fi
   [[ -z "$scoreboard_tmp" ]] || rm -f -- "$scoreboard_tmp"
+  [[ -z "$log_publish_tmp" ]] || rm -f -- "$log_publish_tmp"
   rm -rf -- "$work_root"
 }
 trap cleanup EXIT
@@ -159,12 +349,15 @@ printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "
 rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-1}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 setsid env \
+  FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$daemon_process_token" \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
   FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
-  "$ferro_bin" daemon --docker-compat --socket "$socket" \
+  "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
   >"$work_root/daemon.stdout" 2>"$work_root/daemon.stderr" &
 daemon_pid=$!
+ferrocrate_start_process_tracker "$daemon_pid" "$daemon_process_registry" daemon_tracker_pid ||
+  harness_error "cannot start daemon descendant tracker"
 
 for (( attempt = 0; attempt < daemon_timeout * 10; attempt++ )); do
   if [[ -S "$socket" ]]; then
@@ -203,15 +396,16 @@ shell_command() {
 record_command() {
   local id="$1" area="$2"
   shift 2
-  local command_text started ended duration exit_code status stdout_file stderr_file
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
   sequence=$((sequence + 1))
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
   command_text="$(shell_command "$@")"
   started="$(date +%s%N)"
-  if timeout --foreground --kill-after=5s "${command_timeout}s" \
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned "$command_timeout" 5 "$command_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
@@ -299,8 +493,9 @@ record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"
 host_metadata="$(uname -srm)"
-ferro_version="$(timeout --kill-after=5s "${command_timeout}s" \
-  "$ferro_bin" --version 2>/dev/null | head -n 1)"
+version_token="$process_token_base-version"
+ferro_version="$(run_bounded_owned "$command_timeout" 5 "$version_token" \
+  "$ferro_snapshot" --version 2>/dev/null | head -n 1)"
 docker_client_version="$(awk '/^ Version:/ { print $2; exit }' "$outputs_dir/001.stdout")"
 docker_server_version="$(awk '/^Server:/ { server = 1; next } server && /^[[:space:]]+Version:/ { print $2; exit }' "$outputs_dir/001.stdout")"
 compose_version="$(head -n 1 "$outputs_dir/002.stdout" | tr '\t\r\n' '   ' | sed 's/[[:space:]]*$//')"
@@ -312,6 +507,14 @@ fi
 [[ -n "$docker_client_version" ]] || docker_client_version="unavailable"
 [[ -n "$docker_server_version" ]] || docker_server_version="unavailable"
 [[ -n "$compose_version" ]] || compose_version="unavailable"
+current_binary_sha256="$(sha256sum "$ferro_snapshot" | awk '{ print $1 }')" ||
+  harness_error "cannot re-hash the FerroCrate binary snapshot"
+[[ "$current_binary_sha256" == "$binary_sha256" ]] ||
+  harness_error "FerroCrate binary snapshot changed during conformance execution"
+current_source_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" ||
+  harness_error "cannot re-resolve the FerroCrate source commit"
+[[ "$current_source_commit" == "$source_commit" ]] ||
+  harness_error "FerroCrate source commit changed during conformance execution"
 
 scoreboard_tmp="$(mktemp "$output_parent/.parity-scoreboard.tmp.XXXXXX")" ||
   harness_error "cannot create atomic scoreboard file"
@@ -328,6 +531,8 @@ stop later invocations.
 - Generated (UTC date): $generated_at
 - Host: $host_metadata
 - FerroCrate: $ferro_version
+- FerroCrate source commit: \`$source_commit\`
+- FerroCrate binary SHA-256: \`$binary_sha256\`
 - Docker client: $docker_client_version
 - Docker-compatible server: $docker_server_version
 - Compose client: $compose_version
@@ -369,9 +574,7 @@ EOF
 log_publish_tmp="$(mktemp "$log_parent/.docker-client-conformance.tmp.XXXXXX")" ||
   harness_error "cannot create atomic execution log"
 cp "$log_tmp" "$log_publish_tmp" || harness_error "cannot stage execution log"
-mv -f -- "$log_publish_tmp" "$execution_log" || harness_error "cannot publish execution log"
-mv -f -- "$scoreboard_tmp" "$output" || harness_error "cannot publish scoreboard"
-scoreboard_tmp=""
+publish_evidence_pair || harness_error "cannot publish scoreboard and execution log as one evidence pair"
 
 echo "Docker client conformance complete: PASS=$pass_count FAIL=$fail_count ERROR=$error_count TOTAL=$sequence"
 if (( fail_count > 0 || error_count > 0 )); then

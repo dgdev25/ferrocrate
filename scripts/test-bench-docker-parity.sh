@@ -249,4 +249,54 @@ if grep -Fxq 'foreign-image-alias-deleted' "$alias_log"; then
   exit 1
 fi
 
+assert_interrupted_build_is_cleaned() {
+  local case_name="$1" build_number="$2" interrupted_log runner_pid_file status tag
+  interrupted_log="$tmp_root/$case_name.log"
+  runner_pid_file="$tmp_root/$case_name.runner.pid"
+  set +e
+  PATH="$fixture_dir:$PATH" \
+    FERROCRATE_BIN="$fixture_dir/ferro-cli" \
+    FAKE_DOCKER_LOG="$interrupted_log" \
+    FAKE_DOCKER_STATE="$tmp_root/$case_name.state" \
+    FAKE_DOCKER_SIGNAL_BUILD_NUMBER="$build_number" \
+    FAKE_BENCH_RUNNER_PID_FILE="$runner_pid_file" \
+    "$runner" --rounds 1 --slow-rounds 1 --timeout 5 \
+    --output-dir "$tmp_root/$case_name-output" \
+    >"$tmp_root/$case_name.stdout" 2>"$tmp_root/$case_name.stderr" &
+  interrupted_pid=$!
+  printf '%s\n' "$interrupted_pid" >"$runner_pid_file"
+  wait "$interrupted_pid"
+  status=$?
+  set -e
+  [[ "$status" == 143 ]] || {
+    echo "$case_name interruption returned $status; expected 143" >&2
+    exit 1
+  }
+  tag="$(awk -v wanted="$build_number" '
+    $1 == "build" {
+      count++
+      if (count == wanted) {
+        for (field = 1; field <= NF; field++) {
+          if ($field == "--tag") { print $(field + 1); exit }
+        }
+      }
+    }
+  ' "$interrupted_log")"
+  [[ -n "$tag" ]] || { echo "$case_name did not capture its build tag" >&2; exit 1; }
+  grep -Eq "^image inspect --format .* ${tag//./\\.}$" "$interrupted_log" || {
+    echo "$case_name cleanup did not inspect the interrupted build tag" >&2
+    exit 1
+  }
+  grep -Fxq 'image rm sha256:2222222222222222222222222222222222222222222222222222222222222222' \
+    "$interrupted_log" || {
+    echo "$case_name cleanup did not remove the interrupted run-owned build image" >&2
+    exit 1
+  }
+}
+
+# Build tags must be cleanup-owned before both a measured build and the cached
+# prewarm. A TERM at either boundary must still remove a run-labelled image.
+assert_interrupted_build_is_cleaned interrupted-no-cache-build 1
+assert_interrupted_build_is_cleaned interrupted-cached-prewarm 2
+
 echo "docker parity benchmark contract tests passed"

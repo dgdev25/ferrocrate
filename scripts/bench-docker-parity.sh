@@ -441,20 +441,20 @@ build_once() {
 build_copy_only_no_cache() {
   local engine="$1" round="$2" tag
   tag="$(new_name build-copy-only-no-cache "$engine" "$round"):latest"
-  record_sample build-copy-only-no-cache "$engine" "$round" build_once "$engine" "$tag" 1
   if [[ "$engine" == docker ]]; then
     docker_images+=("$tag")
   fi
+  record_sample build-copy-only-no-cache "$engine" "$round" build_once "$engine" "$tag" 1
 }
 
 build_copy_only_cached() {
   local engine="$1" round="$2" tag
   tag="$(new_name build-copy-only-cached "$engine" "$round"):latest"
-  build_once "$engine" "$tag" 0 >/dev/null
-  record_sample build-copy-only-cached "$engine" "$round" build_once "$engine" "$tag" 0
   if [[ "$engine" == docker ]]; then
     docker_images+=("$tag")
   fi
+  build_once "$engine" "$tag" 0 >/dev/null
+  record_sample build-copy-only-cached "$engine" "$round" build_once "$engine" "$tag" 0
 }
 
 run_operation() {

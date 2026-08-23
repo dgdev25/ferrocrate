@@ -30,6 +30,28 @@ if [[ "${1:-}" == run || "${1:-}" == volume || "${1:-}" == build ]]; then
     fi
   done
 fi
+if [[ "${1:-}" == build && -n "${FAKE_DOCKER_SIGNAL_BUILD_NUMBER:-}" ]]; then
+  build_count_file="${FAKE_DOCKER_STATE:?}.build-count"
+  build_count=0
+  [[ ! -f "$build_count_file" ]] || build_count="$(cat "$build_count_file")"
+  build_count=$((build_count + 1))
+  printf '%s\n' "$build_count" >"$build_count_file"
+  if [[ "$build_count" == "$FAKE_DOCKER_SIGNAL_BUILD_NUMBER" ]]; then
+    for _ in $(seq 1 200); do
+      [[ -s "${FAKE_BENCH_RUNNER_PID_FILE:?}" ]] && break
+      sleep 0.01
+    done
+    runner_pid="$(cat "$FAKE_BENCH_RUNNER_PID_FILE")"
+    kill -TERM "$runner_pid"
+    for _ in $(seq 1 200); do
+      [[ ! -r "/proc/$runner_pid/stat" ]] && break
+      runner_state="$(awk '{ print $3 }' "/proc/$runner_pid/stat" 2>/dev/null || true)"
+      [[ "$runner_state" == Z ]] && break
+      sleep 0.01
+    done
+    exit 143
+  fi
+fi
 if [[ "${1:-}" == image && "${2:-}" == rm && "${3:-}" == alpine:3.19 && "${FAKE_DOCKER_FAIL_PULL_EVICTION:-0}" == 1 ]]; then
   exit 42
 fi

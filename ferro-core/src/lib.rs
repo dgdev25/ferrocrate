@@ -26,6 +26,25 @@ pub mod cgroups;
 pub mod container_exec;
 pub mod container_store;
 pub mod docker_auth;
+pub mod docker_events;
+#[cfg(test)]
+mod docker_events_red_test {
+    #[test]
+    fn runtime_event_journal_preserves_docker_wire_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = crate::docker_events::DockerEventJournal::open(dir.path()).unwrap();
+        journal
+            .append_container("die", "c1", "busybox", [("exitCode", "137")])
+            .unwrap();
+        let event = journal.read().unwrap().pop().unwrap();
+        assert_eq!(event.action, "die");
+        assert_eq!(event.resource.as_deref(), Some("c1"));
+        assert_eq!(
+            event.attributes.get("exitCode").map(String::as_str),
+            Some("137")
+        );
+    }
+}
 #[cfg(target_os = "linux")]
 pub mod dockerfile_build;
 #[cfg(not(target_os = "linux"))]

@@ -49,6 +49,8 @@ use ferro_core::container_store::ResourceLimitRecord;
 #[cfg(target_os = "linux")]
 use ferro_core::container_exec::ExecOutputStream;
 use ferro_core::docker_auth::resolve_registry_auth;
+#[cfg(target_os = "linux")]
+use ferro_core::docker_events::{DockerEvent, DockerEventJournal};
 use ferro_core::entitlements::{self, Entitlement, Feature};
 #[cfg(target_os = "linux")]
 use ferro_core::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
@@ -11876,27 +11878,8 @@ fn docker_compat_id(prefix: &str, sequence: &AtomicU64) -> String {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DockerEvent {
-    id: u64,
-    time: u64,
-    #[serde(default)]
-    time_nano: u64,
-    event_type: String,
-    action: String,
-    scope: String,
-    resource: Option<String>,
-    status: u16,
-    /// Stable actor attributes are persisted with the event rather than
-    /// reconstructed at response time. This keeps filtered/replayed events
-    /// deterministic after a daemon restart.
-    #[serde(default)]
-    attributes: BTreeMap<String, String>,
-}
-
-#[cfg(target_os = "linux")]
 struct DockerEventStore {
-    path: PathBuf,
+    journal: DockerEventJournal,
     next_id: u64,
 }
 
@@ -11973,18 +11956,22 @@ impl DockerCompatState {
 #[cfg(target_os = "linux")]
 impl DockerEventStore {
     fn open(path: PathBuf) -> Result<Self, String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let mut next_id = 0;
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-                if let Ok(event) = serde_json::from_str::<DockerEvent>(line) {
-                    next_id = next_id.max(event.id.saturating_add(1));
-                }
-            }
-        }
-        Ok(Self { path, next_id })
+        let runtime_dir = path
+            .parent()
+            .ok_or_else(|| "docker: event journal has no parent".to_string())?;
+        let journal = DockerEventJournal::open(runtime_dir)?;
+        // Opening is deliberately tolerant of a corrupt journal: callers
+        // must still be able to reach `query`, which reports the malformed
+        // record to the Docker client instead of turning startup into a
+        // generic open failure.
+        let next_id = journal
+            .read()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|event| event.id.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        Ok(Self { journal, next_id })
     }
 
     #[allow(dead_code)]
@@ -12040,28 +12027,21 @@ impl DockerEventStore {
         attributes.extend(request_attributes);
         attributes.extend(response_attributes);
         attributes.extend(actor_attributes);
-        let event = DockerEvent {
-            id: self.next_id,
-            time: timestamp.as_secs(),
-            time_nano: timestamp.as_nanos().min(u64::MAX as u128) as u64,
-            event_type: event_type.to_string(),
-            action,
-            scope: "local".to_string(),
-            resource,
+        let _ = timestamp;
+        self.journal.append(
+            event_type,
+            &action,
+            resource.as_deref(),
             status,
             attributes,
-        };
-        self.next_id = self.next_id.saturating_add(1);
-        let bytes = serde_json::to_vec(&event).map_err(|error| error.to_string())?;
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| error.to_string())?;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.write_all(b"\n").map_err(|error| error.to_string())?;
-        file.sync_data().map_err(|error| error.to_string())?;
+        )?;
+        self.next_id = self
+            .journal
+            .read()?
+            .into_iter()
+            .map(|event| event.id.saturating_add(1))
+            .max()
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -12070,7 +12050,6 @@ impl DockerEventStore {
         // listing endpoint. Validate them before evaluating any predicates so
         // malformed input cannot silently degrade into an unfiltered stream.
         parse_docker_event_filters(query)?;
-        let contents = std::fs::read_to_string(&self.path).unwrap_or_default();
         let since = query
             .get("since")
             .map(|value| parse_event_time_bound(value, "since"))
@@ -12117,14 +12096,7 @@ impl DockerEventStore {
         let filter_volumes = filter_values("volume");
         let filter_scopes = filter_values("scope");
         let filter_labels = filter_values("label");
-        let parsed_events = contents
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<DockerEvent>(line)
-                    .map_err(|error| format!("event journal contains malformed record: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let parsed_events = self.journal.read()?;
         parsed_events
             .into_iter()
             .filter(|item| since.is_none_or(|value| event_time_nanos(item) >= value))

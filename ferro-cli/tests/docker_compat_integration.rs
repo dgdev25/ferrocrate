@@ -873,6 +873,74 @@ fn docker_compat_recovered_watcher_does_not_restart_operator_kill() {
 }
 
 #[test]
+fn docker_compat_external_workload_death_is_a_runtime_die_event() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/lifecycle-events:latest");
+    let create_body = r#"{"Image":"compat/lifecycle-events:latest","Cmd":["/bin/busybox","sleep","120"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=external-die-event",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response={response}");
+    let inspect = inspect_container(&harness, &id);
+    let pid = inspect["State"]["Pid"].as_i64().expect("workload pid");
+    let start_time = pid_start_time(pid).expect("workload start time");
+    kill_pid_only_if_identity_matches(pid, start_time);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if inspect_container(&harness, &id)["State"]["Status"] == "exited" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (status, events) = harness.request("GET", "/v1.45/events");
+    assert_eq!(status, 200, "events response={events}");
+    assert!(
+        events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| {
+                event["Action"] == "die"
+                    && event["Actor"]["ID"] == id
+                    && event["Actor"]["Attributes"]["exitCode"] == "137"
+                    && event["Actor"]["Attributes"].get("method").is_none()
+            }),
+        "events={events}"
+    );
+}
+
+#[test]
+fn docker_compat_stop_has_a_runtime_event_without_http_request_metadata() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(&harness, "runtime-stop-event", "no");
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/stop"));
+    assert_eq!(status, 204, "stop response={response}");
+    let (status, events) = harness.request("GET", "/v1.45/events");
+    assert_eq!(status, 200, "events response={events}");
+    assert!(
+        events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| {
+                event["Action"] == "stop"
+                    && event["Actor"]["ID"] == id
+                    && event["Actor"]["Attributes"].get("method").is_none()
+            }),
+        "events={events}"
+    );
+}
+
+#[test]
 fn docker_compat_daemon_boot_restarts_always_record_with_mismatched_identity() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
@@ -2543,6 +2611,20 @@ fn docker_compat_healthcheck_reaches_healthy_and_reports_streak() {
     assert!(
         inspect["Config"]["Healthcheck"].is_object(),
         "inspect={inspect}"
+    );
+    let id = inspect["Id"].as_str().expect("health container ID");
+    let (status, events) = harness.request("GET", "/v1.45/events");
+    assert_eq!(status, 200, "events response={events}");
+    assert!(
+        events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| {
+                event["Action"] == "health_status: healthy"
+                    && event["Actor"]["ID"] == id
+                    && event["Actor"]["Attributes"].get("method").is_none()
+            }),
+        "events={events}"
     );
 
     let (status, body) = harness.request("DELETE", "/v1.45/containers/health-container?force=true");

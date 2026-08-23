@@ -3147,6 +3147,7 @@ impl ContainerRuntime {
             mounts.to_vec(),
             tmpfs_mounts.to_vec(),
             readonly_rootfs,
+            self.runtime_dir.clone(),
         )
         .inspect_err(|_e| {
             // Kill any partially spawned process on error
@@ -3345,6 +3346,13 @@ impl ContainerRuntime {
                 None,
             ),
         );
+        emit_docker_container_event(
+            &self.runtime_dir,
+            "start",
+            &record.id,
+            &record.image,
+            std::iter::empty::<(&str, String)>(),
+        );
         let _ = log_audit_event(
             &self.runtime_dir,
             make_audit_event(
@@ -3362,10 +3370,11 @@ impl ContainerRuntime {
             let id = record.id.clone();
             let pid = record.pid;
             let cancel = Arc::new(AtomicBool::new(false));
+            let runtime_dir = self.runtime_dir.clone();
             // Store cancellation token for later signaling
             self.health_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
-                run_health_checks(store, id, pid, config, cancel);
+                run_health_checks(store, id, pid, config, cancel, runtime_dir);
             });
         }
 
@@ -3910,6 +3919,13 @@ impl ContainerRuntime {
             &self.runtime_dir,
             make_event("stop", Some(id), Some(&record.image), Some("stopped"), None),
         );
+        emit_docker_container_event(
+            &self.runtime_dir,
+            "stop",
+            id,
+            &record.image,
+            std::iter::empty::<(&str, String)>(),
+        );
         let _ = log_audit_event(
             &self.runtime_dir,
             make_audit_event(
@@ -3945,6 +3961,10 @@ impl ContainerRuntime {
         id: &str,
         signal: Option<nix::sys::signal::Signal>,
     ) -> Result<(), RuntimeError> {
+        let signal_name = signal
+            .map(|signal| signal as i32)
+            .unwrap_or_default()
+            .to_string();
         let record = self
             .store
             .get(id)?
@@ -4005,6 +4025,13 @@ impl ContainerRuntime {
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
+        );
+        emit_docker_container_event(
+            &self.runtime_dir,
+            "kill",
+            id,
+            &record.image,
+            [("signal", signal_name)],
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -4463,6 +4490,7 @@ impl ContainerRuntime {
                 })
                 .collect(),
             record.readonly_rootfs,
+            self.runtime_dir.clone(),
         )?;
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -4569,16 +4597,24 @@ impl ContainerRuntime {
                 None,
             ),
         );
+        emit_docker_container_event(
+            &self.runtime_dir,
+            if stop_existing { "restart" } else { "start" },
+            id,
+            &record.image,
+            std::iter::empty::<(&str, String)>(),
+        );
 
         if let Some(config) = record.health.clone() {
             let store = self.store.clone_db();
             let id = record.id.clone();
             let pid = record.pid;
             let cancel = Arc::new(AtomicBool::new(false));
+            let runtime_dir = self.runtime_dir.clone();
             // Store cancellation token for later signaling
             self.health_cancel.insert(id.clone(), cancel.clone());
             thread::spawn(move || {
-                run_health_checks(store, id, pid, config, cancel);
+                run_health_checks(store, id, pid, config, cancel, runtime_dir);
             });
         }
 
@@ -6057,6 +6093,7 @@ fn spawn_process_with_logs(
     mounts: Vec<BindMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
     readonly_rootfs: bool,
+    runtime_dir: PathBuf,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -6086,6 +6123,7 @@ fn spawn_process_with_logs(
     let user = user.map(|val| val.to_string());
     let netns_name = netns_name.map(|val| val.to_string());
     let seccomp_for_restart = seccomp_profile.cloned();
+    let oom_kills = oom_kill_count(&container_id);
     thread::spawn(move || {
         supervise_child(
             child,
@@ -6110,6 +6148,8 @@ fn spawn_process_with_logs(
             mounts,
             tmpfs_mounts,
             readonly_rootfs,
+            runtime_dir,
+            oom_kills,
         );
     });
 
@@ -7075,6 +7115,8 @@ fn supervise_child(
     mounts: Vec<BindMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
     readonly_rootfs: bool,
+    runtime_dir: PathBuf,
+    mut oom_kills: u64,
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
     let mut adaptive_policy = ferro_mind::ai::restart::AdaptiveRestartPolicy::new(&container_id);
@@ -7161,6 +7203,27 @@ fn supervise_child(
             }
             Err(_) => "exited".to_string(),
         };
+        emit_docker_container_event(
+            &runtime_dir,
+            "die",
+            &container_id,
+            persisted_restart_image(&store, &container_id)
+                .as_deref()
+                .unwrap_or_default(),
+            [("exitCode", exit_code.to_string())],
+        );
+        let observed_oom_kills = oom_kill_count(&container_id);
+        if observed_oom_kills > oom_kills {
+            emit_docker_container_event(
+                &runtime_dir,
+                "oom",
+                &container_id,
+                persisted_restart_image(&store, &container_id)
+                    .as_deref()
+                    .unwrap_or_default(),
+                std::iter::empty::<(&str, String)>(),
+            );
+        }
 
         let uptime_secs = container_start_time.elapsed().as_secs();
         if ai_enabled {
@@ -7351,6 +7414,63 @@ fn supervise_child(
             );
         }
         restart_count += 1;
+        oom_kills = oom_kill_count(&container_id);
+        emit_docker_container_event(
+            &runtime_dir,
+            "restart",
+            &container_id,
+            persisted_restart_image(&store, &container_id)
+                .as_deref()
+                .unwrap_or_default(),
+            std::iter::empty::<(&str, String)>(),
+        );
+        emit_docker_container_event(
+            &runtime_dir,
+            "start",
+            &container_id,
+            persisted_restart_image(&store, &container_id)
+                .as_deref()
+                .unwrap_or_default(),
+            std::iter::empty::<(&str, String)>(),
+        );
+    }
+}
+
+fn persisted_restart_image(store: &SqliteContainerStore, id: &str) -> Option<String> {
+    store.get(id).ok().flatten().map(|record| record.image)
+}
+
+fn oom_kill_count(id: &str) -> u64 {
+    fs::read_to_string(
+        configured_cgroup_root()
+            .join("ferrocrate")
+            .join(id)
+            .join("memory.events"),
+    )
+    .ok()
+    .and_then(|events| {
+        events.lines().find_map(|line| {
+            line.split_once(' ')
+                .filter(|(key, _)| *key == "oom_kill")
+                .and_then(|(_, value)| value.parse().ok())
+        })
+    })
+    .unwrap_or(0)
+}
+
+fn emit_docker_container_event<I, K, V>(
+    runtime_dir: &Path,
+    action: &str,
+    id: &str,
+    image: &str,
+    attributes: I,
+) where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    if let Ok(mut journal) = crate::docker_events::DockerEventJournal::open(runtime_dir) {
+        let _ = journal.append_container(action, id, image, attributes);
     }
 }
 
@@ -12135,6 +12255,7 @@ fn run_health_checks(
     pid: u32,
     config: HealthConfig,
     cancel: Arc<AtomicBool>,
+    runtime_dir: PathBuf,
 ) {
     // Cancellation-aware start period sleep
     if config.start_period_secs > 0 {
@@ -12172,8 +12293,23 @@ fn run_health_checks(
         match result {
             Ok(exec) if exec.exit_code == 0 => {
                 failures = 0;
+                let changed = store
+                    .get(&id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| record.health_status != "healthy");
                 if let Err(e) = update_health(&store, &id, "healthy", failures, now) {
                     warn!("failed to update health for {id}: {e}");
+                } else if changed {
+                    if let Some(record) = store.get(&id).ok().flatten() {
+                        emit_docker_container_event(
+                            &runtime_dir,
+                            "health_status: healthy",
+                            &id,
+                            &record.image,
+                            std::iter::empty::<(&str, String)>(),
+                        );
+                    }
                 }
             }
             Ok(_) | Err(_) => {
@@ -12183,8 +12319,25 @@ fn run_health_checks(
                 } else {
                     "starting"
                 };
+                let changed = store
+                    .get(&id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| record.health_status != status);
                 match update_health(&store, &id, status, failures, now) {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        if changed && status == "unhealthy" {
+                            if let Some(record) = store.get(&id).ok().flatten() {
+                                emit_docker_container_event(
+                                    &runtime_dir,
+                                    "health_status: unhealthy",
+                                    &id,
+                                    &record.image,
+                                    std::iter::empty::<(&str, String)>(),
+                                );
+                            }
+                        }
+                    }
                     Ok(false) => return, // Container gone
                     Err(_) => {}
                 }
@@ -13695,6 +13848,16 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+
+        let events = crate::docker_events::DockerEventJournal::open(temp.path())
+            .expect("event journal")
+            .read()
+            .expect("events");
+        assert!(events.iter().any(|event| {
+            event.action == "die"
+                && event.resource.as_deref() == Some(record.id.as_str())
+                && event.attributes.get("exitCode").map(String::as_str) == Some("17")
+        }));
 
         runtime
             .stop(&record.id, std::time::Duration::from_millis(50))

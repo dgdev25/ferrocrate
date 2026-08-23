@@ -3411,12 +3411,14 @@ impl ContainerRuntime {
         cmd: &[String],
         input: Option<Box<dyn Read + Send>>,
         tty: bool,
+        tty_ready: &mut dyn FnMut(&Path) -> io::Result<()>,
         output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let permit = self.authorize_existing(Action::ContainerExec, id)?;
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
-        let result = self.exec_streaming_authorized(proof, intent, id, cmd, input, tty, output);
+        let result =
+            self.exec_streaming_authorized(proof, intent, id, cmd, input, tty, tty_ready, output);
         self.store
             .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
@@ -3438,6 +3440,7 @@ impl ContainerRuntime {
         cmd: &[String],
         input: Option<Box<dyn Read + Send>>,
         tty: bool,
+        tty_ready: &mut dyn FnMut(&Path) -> io::Result<()>,
         output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         let record = self
@@ -3466,10 +3469,11 @@ impl ContainerRuntime {
                 record.readonly_rootfs,
                 input,
                 tty,
+                tty_ready,
                 output,
             )?
         } else {
-            exec_in_container_streaming(record.pid, cmd, input, tty, output)?
+            exec_in_container_streaming(record.pid, cmd, input, tty, tty_ready, output)?
         };
         let _ = log_event(
             &self.runtime_dir,

@@ -97,6 +97,7 @@ pub fn exec_in_rootless_rootfs_streaming(
     readonly_rootfs: bool,
     input: Option<Box<dyn Read + Send>>,
     tty: bool,
+    tty_ready: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
 ) -> Result<ExecResult, ContainerExecError> {
     let command = build_rootless_bwrap(
@@ -108,7 +109,7 @@ pub fn exec_in_rootless_rootfs_streaming(
         tmpfs_mounts,
         readonly_rootfs,
     )?;
-    execute_process_streaming(command, input, tty, output)
+    execute_process_streaming(command, input, tty, tty_ready, output)
 }
 
 /// Execute a rootless command with stdout/stderr attached to one PTY.
@@ -318,6 +319,7 @@ pub fn exec_in_container_streaming(
     command: &[String],
     input: Option<Box<dyn Read + Send>>,
     tty: bool,
+    tty_ready: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
 ) -> Result<ExecResult, ContainerExecError> {
     let args = build_nsenter_args(target_pid, command)?;
@@ -329,7 +331,7 @@ pub fn exec_in_container_streaming(
     })?;
     let mut command = Command::new(nsenter);
     command.args(args);
-    execute_process_streaming(command, input, tty, output)
+    execute_process_streaming(command, input, tty, tty_ready, output)
 }
 
 pub fn exec_in_container_with_timeout(
@@ -541,10 +543,11 @@ fn execute_process_streaming(
     mut command: Command,
     input: Option<Box<dyn Read + Send>>,
     tty: bool,
+    tty_ready: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
 ) -> Result<ExecResult, ContainerExecError> {
     if tty {
-        return execute_tty_process_streaming(&mut command, input, output);
+        return execute_tty_process_streaming(&mut command, input, tty_ready, output);
     }
 
     command
@@ -631,9 +634,11 @@ fn execute_process_streaming(
 fn execute_tty_process_streaming(
     command: &mut Command,
     input: Option<Box<dyn Read + Send>>,
+    tty_ready: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> std::io::Result<()>,
 ) -> Result<ExecResult, ContainerExecError> {
     let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let tty_device = pty.slave_name()?;
     let (master, slave) = pty.into_parts();
     let slave = File::from(slave);
     command
@@ -642,6 +647,11 @@ fn execute_tty_process_streaming(
         .stderr(Stdio::from(slave));
     crate::pty::configure_command(command)?;
     let mut child = command.spawn()?;
+    if let Err(error) = tty_ready(&tty_device) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ContainerExecError::Io(error));
+    }
     let mut master = File::from(master);
     if let Some(mut source) = input {
         let mut writer = master.try_clone()?;

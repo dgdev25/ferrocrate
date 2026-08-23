@@ -59,9 +59,9 @@ impl PtyPair {
     /// Return the kernel device path for the slave side while it is live.
     /// Callers may persist this path for a later Docker resize request.
     pub fn slave_name(&self) -> io::Result<PathBuf> {
-        // SAFETY: the master descriptor is owned by this live PTY pair and
+        // SAFETY: the slave descriptor is owned by this live PTY pair and
         // libc writes a NUL-terminated path into its static buffer.
-        let name = unsafe { nix::libc::ttyname(self.master.as_raw_fd()) };
+        let name = unsafe { nix::libc::ttyname(self.slave.as_raw_fd()) };
         if name.is_null() {
             return Err(io::Error::last_os_error());
         }

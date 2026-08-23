@@ -1101,6 +1101,99 @@ fn docker_compat_exec_hijack_forwards_stdin() {
 }
 
 #[test]
+fn docker_compat_exec_resize_updates_live_tty() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful exec-resize fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/exec-resize:latest");
+    let create_body = r#"{"Image":"compat/exec-resize:latest","Cmd":["/bin/busybox","sleep","5"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create_request = format!(
+        "POST /v1.45/containers/create?name=exec-resize HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    assert_eq!(harness.request_raw(&create_request).0, 201);
+    assert_eq!(
+        harness
+            .request("POST", "/v1.45/containers/exec-resize/start")
+            .0,
+        204
+    );
+
+    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Cmd":["/bin/busybox","sh","-c","stty size; read line; stty size"]}"#;
+    let exec_request = format!(
+        "POST /v1.45/containers/exec-resize/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        exec_body.len(),
+        exec_body
+    );
+    let (status, response) = harness.request_raw(&exec_request);
+    assert_eq!(status, 201, "exec create response={response}");
+    let exec_id = serde_json::from_str::<serde_json::Value>(&response).expect("exec create JSON")
+        ["Id"]
+        .as_str()
+        .expect("exec id")
+        .to_string();
+
+    let start_body = r#"{"Detach":false,"Tty":true}"#;
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect exec resize socket");
+    stream
+        .write_all(
+            format!(
+                "POST /v1.45/exec/{exec_id}/start HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: {}\r\n\r\n{}",
+                start_body.len(),
+                start_body
+            )
+            .as_bytes(),
+        )
+        .expect("write exec resize start request");
+    let mut received = Vec::new();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("set exec resize read timeout");
+    while !received
+        .windows(b"24 80".len())
+        .any(|window| window == b"24 80")
+    {
+        let mut buffer = [0_u8; 512];
+        let read = stream
+            .read(&mut buffer)
+            .expect("read initial exec TTY size");
+        assert!(read > 0, "exec TTY closed before reporting its size");
+        received.extend_from_slice(&buffer[..read]);
+    }
+
+    let (status, response) =
+        harness.request("POST", &format!("/v1.45/exec/{exec_id}/resize?h=40&w=100"));
+    assert_eq!(status, 200, "exec resize response={response}");
+    stream
+        .write_all(b"continue\n")
+        .expect("release resized exec");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("close resized exec stdin");
+    while !received
+        .windows(b"40 100".len())
+        .any(|window| window == b"40 100")
+    {
+        let mut buffer = [0_u8; 512];
+        let read = stream
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("read resized exec output ({received:?}): {error}"));
+        assert!(read > 0, "exec TTY closed before reporting resized size");
+        received.extend_from_slice(&buffer[..read]);
+    }
+
+    assert_eq!(
+        harness
+            .request("DELETE", "/v1.45/containers/exec-resize?force=true")
+            .0,
+        204
+    );
+}
+
+#[test]
 fn docker_compat_rootful_exec_tty_uses_public_socket() {
     if !nix::unistd::geteuid().is_root() {
         eprintln!("skipping rootful TTY exec fixture: requires root");

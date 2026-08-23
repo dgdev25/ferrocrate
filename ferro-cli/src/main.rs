@@ -11761,6 +11761,7 @@ struct DockerExecSpec {
     attach_stdin: bool,
     running: bool,
     exit_code: Option<i32>,
+    tty_device: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -13696,6 +13697,7 @@ fn handle_docker_compat_connection(
                             attach_stdin: request.attach_stdin,
                             running: false,
                             exit_code: None,
+                            tty_device: None,
                         },
                     );
                 let body = serde_json::json!({"Id": id});
@@ -13723,6 +13725,43 @@ fn handle_docker_compat_connection(
                     "ProcessConfig": {"entrypoint": spec.cmd.first().cloned().unwrap_or_default(), "arguments": spec.cmd},
                 });
                 http_response(200, body.to_string().as_bytes(), "application/json")
+            }
+            ("POST", path) if path.starts_with("/exec/") && path.ends_with("/resize") => {
+                let id = path.trim_start_matches("/exec/").trim_end_matches("/resize");
+                let parse_dimension = |key: &str| -> Result<u16, String> {
+                    let value = query
+                        .get(key)
+                        .ok_or_else(|| format!("docker: resize requires {key}"))?;
+                    let parsed = value.parse::<u32>().map_err(|_| {
+                        format!("docker: resize {key} must be a positive integer")
+                    })?;
+                    u16::try_from(parsed)
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            format!("docker: resize {key} must be within terminal bounds")
+                        })
+                };
+                let width = parse_dimension("w")?;
+                let height = parse_dimension("h")?;
+                let tty_device = {
+                    let execs = state
+                        .execs
+                        .lock()
+                        .map_err(|error| format!("docker: exec lock poisoned: {error}"))?;
+                    let spec = execs
+                        .get(id)
+                        .ok_or_else(|| format!("docker: exec not found: {id}"))?;
+                    if !spec.running {
+                        return Err(format!("docker: exec is not running: {id}"));
+                    }
+                    spec.tty_device
+                        .clone()
+                        .ok_or_else(|| format!("docker: exec has no active TTY: {id}"))?
+                };
+                ferro_core::pty::PtyPair::set_size_path(&tty_device, height, width)
+                    .map_err(|error| format!("docker: exec resize failed: {error}"))?;
+                http_response(200, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/exec/") && path.ends_with("/start") => {
                 let id = path.trim_start_matches("/exec/").trim_end_matches("/start");
@@ -14984,6 +15023,17 @@ fn handle_docker_compat_connection(
             &spec.cmd,
             input,
             tty,
+            &mut |tty_device| {
+                let mut execs = state
+                    .execs
+                    .lock()
+                    .map_err(|error| std::io::Error::other(format!("exec lock poisoned: {error}")))?;
+                let exec = execs.get_mut(&exec_id).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "exec session disappeared")
+                })?;
+                exec.tty_device = Some(tty_device.to_path_buf());
+                Ok(())
+            },
             &mut |output_stream, bytes| {
                 if tty {
                     stream.write_all(bytes)
@@ -15001,6 +15051,7 @@ fn handle_docker_compat_connection(
             if let Some(exec) = execs.get_mut(&exec_id) {
                 exec.running = false;
                 exec.exit_code = Some(exit_code);
+                exec.tty_device = None;
             }
         }
         result.map_err(|error| error.to_string())?;

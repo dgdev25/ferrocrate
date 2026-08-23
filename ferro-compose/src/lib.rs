@@ -393,6 +393,16 @@ impl ComposeFile {
                 )));
             }
 
+            if service
+                .networks
+                .as_ref()
+                .is_some_and(|networks| networks.len() > 1)
+            {
+                return Err(ComposeError::Validation(format!(
+                    "service '{name}' declares multiple networks; one durable attachment is supported"
+                )));
+            }
+
             if let Some(depends_on) = &service.depends_on {
                 for dep in depends_on.iter() {
                     if !self.services.contains_key(dep) {
@@ -554,6 +564,24 @@ services:
             ComposeError::Validation(msg) => assert!(msg.contains("unknown service")),
             _ => panic!("unexpected error"),
         }
+    }
+
+    #[test]
+    fn rejects_multiple_service_networks_during_parse() {
+        let content = r#"
+services:
+  api:
+    image: alpine:latest
+    networks: [frontend, metrics]
+networks:
+  frontend: {}
+  metrics: {}
+"#;
+        let error = ComposeFile::parse(content, &HashMap::new())
+            .expect_err("multiple attachments must fail during parsing");
+        assert!(error.to_string().contains("service 'api'"));
+        assert!(error.to_string().contains("multiple networks"));
+        assert!(error.to_string().contains("one durable attachment"));
     }
 
     #[test]

@@ -11438,6 +11438,7 @@ struct DockerHealthcheck {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DockerHostConfig {
     #[serde(rename = "Binds")]
     binds: Option<Vec<String>>,
@@ -20908,6 +20909,24 @@ volumes:
             None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn docker_create_spec_rejects_unsupported_host_config_fields() {
+        for field in [
+            r#""Privileged":true"#,
+            r#""CapDrop":["NET_RAW"]"#,
+            r#""Devices":[{"PathOnHost":"/dev/null","PathInContainer":"/dev/null"}]"#,
+            r#""Ulimits":[{"Name":"nofile","Soft":1024,"Hard":1024}]"#,
+            r#""CpusetCpus":"0""#,
+            r#""LogConfig":{"Type":"json-file"}"#,
+            r#""Mounts":[{"Type":"bind","Source":"/tmp","Target":"/data"}]"#,
+        ] {
+            let body = format!(r#"{{"Image":"busybox","HostConfig":{{{field}}}}}"#);
+            let error = parse_docker_create_spec(body.as_bytes(), None)
+                .expect_err("unsupported HostConfig fields must fail closed");
+            assert!(error.contains("unknown field"), "field={field} error={error}");
+        }
     }
 
     #[test]

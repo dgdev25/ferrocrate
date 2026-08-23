@@ -399,11 +399,12 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "POST",
-        // Registry credential verification needs an external registry.
+        // The implemented route validates its required local request fields
+        // before attempting registry credential verification.
         path: "/auth",
-        coverage: Coverage::Unsupported,
-        expected_status: 501,
-        body: r#"{"username":"u","password":"p"}"#,
+        coverage: Coverage::Implemented,
+        expected_status: 400,
+        body: "",
     },
     ApiCase {
         method: "POST",

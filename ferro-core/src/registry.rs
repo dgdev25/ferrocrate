@@ -118,6 +118,39 @@ impl RegistryClient {
         })
     }
 
+    /// Validate credentials against the registry's Docker Distribution v2
+    /// endpoint. Success means the registry accepted the supplied identity;
+    /// authentication and transport failures remain distinguishable errors.
+    pub fn validate_credentials(
+        &self,
+        registry: &str,
+        auth: &RegistryAuth,
+    ) -> Result<(), RegistryError> {
+        let registry = registry.trim().trim_end_matches('/');
+        if registry.is_empty() {
+            return Err(RegistryError::InvalidReference(
+                "registry must not be empty".to_string(),
+            ));
+        }
+        let registry = registry
+            .strip_suffix("/v2")
+            .or_else(|| registry.strip_suffix("/v1"))
+            .unwrap_or(registry);
+        let url = if registry.starts_with("http://") || registry.starts_with("https://") {
+            format!("{registry}/v2/")
+        } else {
+            format!("{}://{registry}/v2/", registry_scheme(registry))
+        };
+        let response =
+            self.send_request_with_auth(Method::GET, &url, Vec::new(), None, Some(auth))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        Err(RegistryError::HttpStatus { status, body })
+    }
+
     /// Pull and parse OCI image manifest from registry using optional basic auth.
     pub fn pull_manifest(
         &self,
@@ -1005,6 +1038,29 @@ mod tests {
             .pull_manifest(&image, Some(&auth))
             .expect("manifest should be pulled");
         assert_eq!(manifest.schema_version, 2);
+    }
+
+    #[test]
+    fn validates_registry_credentials_against_v2_endpoint() {
+        let server = Server::run();
+        let auth_value = format!("Basic {}", STANDARD.encode("user:pass"));
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/v2/"),
+                request::headers(contains(("authorization", auth_value)))
+            ])
+            .respond_with(status_code(200)),
+        );
+        let client = RegistryClient::new().expect("client");
+        client
+            .validate_credentials(
+                &server.addr().to_string(),
+                &RegistryAuth {
+                    username: "user".to_string(),
+                    password: "pass".to_string(),
+                },
+            )
+            .expect("credentials accepted");
     }
 
     #[test]

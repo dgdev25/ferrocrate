@@ -215,6 +215,28 @@ pub fn write_ferrocrate_auth_file(
     Ok(())
 }
 
+pub fn store_registry_auth(registry: &str, auth: &RegistryAuth) -> Result<(), DockerAuthError> {
+    let path = ferrocrate_auth_path()
+        .ok_or_else(|| DockerAuthError::Read("credential store path is unavailable".into()))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DockerAuthError::Read(error.to_string()))?;
+    }
+    let mut auths = load_ferrocrate_auths()?.unwrap_or_default();
+    auths.insert(normalize_registry_key(registry), auth.clone());
+    write_ferrocrate_auth_file(&path, &auths)
+}
+
+pub fn remove_registry_auth(registry: &str) -> Result<bool, DockerAuthError> {
+    let path = ferrocrate_auth_path()
+        .ok_or_else(|| DockerAuthError::Read("credential store path is unavailable".into()))?;
+    let mut auths = load_ferrocrate_auths()?.unwrap_or_default();
+    let removed = auths.remove(&normalize_registry_key(registry)).is_some();
+    if removed {
+        write_ferrocrate_auth_file(&path, &auths)?;
+    }
+    Ok(removed)
+}
+
 pub fn ferrocrate_auth_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("FERROCRATE_AUTH_FILE") {
         return Some(PathBuf::from(path));
@@ -486,9 +508,10 @@ fn normalize_registry_key(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_registry_key, resolve_auth_for_registry, trusted_helper_path, DockerAuthError,
-        ScopedEnvVar,
+        normalize_registry_key, remove_registry_auth, resolve_auth_for_registry,
+        store_registry_auth, trusted_helper_path, DockerAuthError, ScopedEnvVar,
     };
+    use crate::registry::RegistryAuth;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -642,5 +665,36 @@ mod tests {
             DockerAuthError::InvalidAuth(registry) => assert_eq!(registry, "ghcr.io"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn login_and_logout_update_the_ferrocrate_credential_store() {
+        let _guard = DOCKER_ENV_LOCK.lock().expect("lock env");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth_path = dir.path().join("registry-auth.json");
+        let _auth_guard = ScopedEnvVar::set(
+            "FERROCRATE_AUTH_FILE",
+            auth_path.to_str().expect("auth path"),
+        );
+
+        store_registry_auth(
+            "https://index.docker.io/v1/",
+            &RegistryAuth {
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+            },
+        )
+        .expect("store login");
+        let stored = resolve_auth_for_registry("registry-1.docker.io")
+            .expect("resolve")
+            .expect("stored auth");
+        assert_eq!(stored.username, "alice");
+        assert_eq!(stored.password, "secret");
+
+        assert!(remove_registry_auth("registry-1.docker.io").expect("remove login"));
+        assert!(resolve_auth_for_registry("registry-1.docker.io")
+            .expect("resolve after logout")
+            .is_none());
+        assert!(!remove_registry_auth("registry-1.docker.io").expect("idempotent logout"));
     }
 }

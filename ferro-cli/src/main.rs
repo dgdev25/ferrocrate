@@ -48,7 +48,9 @@ use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, Re
 use ferro_core::container_store::ResourceLimitRecord;
 #[cfg(target_os = "linux")]
 use ferro_core::container_exec::ExecOutputStream;
-use ferro_core::docker_auth::resolve_registry_auth;
+use ferro_core::docker_auth::{
+    remove_registry_auth, resolve_registry_auth, store_registry_auth,
+};
 #[cfg(target_os = "linux")]
 use ferro_core::docker_events::{DockerEvent, DockerEventJournal};
 use ferro_core::entitlements::{self, Entitlement, Feature};
@@ -340,6 +342,20 @@ pub enum Commands {
         /// Docker image-prune selector (`dangling=true|false` or `until=UNIX_SECONDS`).
         #[arg(long = "filter")]
         filters: Vec<String>,
+    },
+    /// Authenticate to a container registry and store the verified credentials.
+    Login {
+        #[arg(default_value = "registry-1.docker.io")]
+        registry: String,
+        #[arg(short = 'u', long)]
+        username: String,
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Remove stored credentials for a container registry.
+    Logout {
+        #[arg(default_value = "registry-1.docker.io")]
+        registry: String,
     },
     #[cfg(target_os = "linux")]
     /// Manage named volumes.
@@ -3302,6 +3318,12 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::ImagePrune { filters } => {
                 handle_image_prune(&image_store, &surface_authorization, &filters)
             }
+            Commands::Login {
+                registry,
+                username,
+                password_stdin,
+            } => handle_login(&registry, &username, password_stdin),
+            Commands::Logout { registry } => handle_logout(&registry),
             Commands::Volume { command } => {
                 handle_volume(&runtime_dir, command, &surface_authorization)
             }
@@ -6581,6 +6603,39 @@ fn handle_migrate_docker_auth(output: Option<&str>) -> Result<(), String> {
     };
     ferro_core::docker_auth::write_ferrocrate_auth_file(&path, &auths)
         .map_err(|err| format!("migrate docker-auth: {err}"))?;
+    Ok(())
+}
+
+fn handle_login(registry: &str, username: &str, password_stdin: bool) -> Result<(), String> {
+    if !password_stdin {
+        return Err("login: use --password-stdin to provide the registry password".to_string());
+    }
+    let mut password = String::new();
+    std::io::stdin()
+        .read_to_string(&mut password)
+        .map_err(|error| format!("login: failed to read password: {error}"))?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("login: username and password must not be empty".to_string());
+    }
+    let auth = ferro_core::registry::RegistryAuth {
+        username: username.to_string(),
+        password: password.to_string(),
+    };
+    RegistryClient::new()
+        .map_err(|error| format!("login: registry client initialization failed: {error}"))?
+        .validate_credentials(registry, &auth)
+        .map_err(|error| format!("login: registry rejected credentials: {error}"))?;
+    store_registry_auth(registry, &auth)
+        .map_err(|error| format!("login: failed to store credentials: {error}"))?;
+    println!("Login Succeeded");
+    Ok(())
+}
+
+fn handle_logout(registry: &str) -> Result<(), String> {
+    remove_registry_auth(registry)
+        .map_err(|error| format!("logout: failed to update credential store: {error}"))?;
+    println!("Removed login credentials for {registry}");
     Ok(())
 }
 
@@ -12959,14 +13014,38 @@ fn handle_docker_compat_connection(
             }
             ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
             ("POST", "/auth") => {
-                // Registry credential verification needs an external
-                // registry; there is no local backend, so report the
-                // boundary explicitly rather than accepting or silently
-                // ignoring submitted credentials.
-                docker_error_response(
-                    501,
-                    "auth is unsupported: no registry credential backend is configured",
-                )
+                let payload: serde_json::Value = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("docker: invalid auth request: {error}"))?;
+                let username = payload
+                    .get("username")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "docker: auth username is required".to_string())?;
+                let password = payload
+                    .get("password")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "docker: auth password is required".to_string())?;
+                let registry = payload
+                    .get("serveraddress")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("registry-1.docker.io");
+                let auth = ferro_core::registry::RegistryAuth {
+                    username: username.to_string(),
+                    password: password.to_string(),
+                };
+                RegistryClient::new()
+                    .map_err(|error| format!("docker: registry client initialization failed: {error}"))?
+                    .validate_credentials(registry, &auth)
+                    .map_err(|error| format!("docker: registry rejected credentials: {error}"))?;
+                store_registry_auth(registry, &auth)
+                    .map_err(|error| format!("docker: failed to store credentials: {error}"))?;
+                let body = serde_json::json!({
+                    "Status": "Login Succeeded",
+                    "IdentityToken": ""
+                });
+                http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/version") => {
                 let body = serde_json::json!({
@@ -14483,7 +14562,17 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
                 http_response(200, &body, "application/json")
             }
+            ("POST", "/session") => docker_error_response(
+                501,
+                "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
+            ),
             ("POST", "/build") => {
+                if query.get("version").is_some_and(|value| value == "2") {
+                    return Ok(docker_error_response(
+                        501,
+                        "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
+                    ));
+                }
                 let dockerfile = query
                     .get("dockerfile")
                     .map(String::as_str)
@@ -18806,6 +18895,29 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_registry_login_and_logout_commands() {
+        let login = Cli::parse_from([
+            "ferrocrate",
+            "login",
+            "registry.example.com",
+            "--username",
+            "alice",
+            "--password-stdin",
+        ]);
+        assert!(matches!(
+            login.command,
+            Commands::Login { registry, username, password_stdin: true }
+                if registry == "registry.example.com" && username == "alice"
+        ));
+
+        let logout = Cli::parse_from(["ferrocrate", "logout", "registry.example.com"]);
+        assert!(matches!(
+            logout.command,
+            Commands::Logout { registry } if registry == "registry.example.com"
+        ));
     }
 
     #[cfg(target_os = "linux")]

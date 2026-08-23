@@ -50,4 +50,86 @@ if [[ "${FERROCRATE_RUN_AUTHENTICATED_OVERLAY_ROW:-1}" == 1 ]]; then
     >"$evidence_dir/authenticated-overlay.log" 2>&1
 fi
 
+conformance_timeout="${FERROCRATE_MATRIX_CONFORMANCE_TIMEOUT_SECONDS:-900}"
+[[ "$conformance_timeout" =~ ^[1-9][0-9]*$ ]] && (( conformance_timeout <= 3600 )) || {
+  echo "host matrix row $row_id conformance harness failure: FERROCRATE_MATRIX_CONFORMANCE_TIMEOUT_SECONDS must be an integer in 1..3600" >&2
+  exit 2
+}
+command -v timeout >/dev/null 2>&1 || {
+  echo "host matrix row $row_id conformance harness failure: timeout is required" >&2
+  exit 2
+}
+
+parity_scoreboard="$evidence_dir/parity-scoreboard.md"
+conformance_log="$evidence_dir/docker-client-conformance.log"
+parity_scoreboard_tmp="$(mktemp "$evidence_dir/.parity-scoreboard.md.tmp.XXXXXX")" || {
+  echo "host matrix row $row_id conformance harness failure: cannot create temporary scoreboard" >&2
+  exit 2
+}
+conformance_log_tmp="$(mktemp "$evidence_dir/.docker-client-conformance.log.tmp.XXXXXX")" || {
+  rm -f -- "$parity_scoreboard_tmp"
+  echo "host matrix row $row_id conformance harness failure: cannot create temporary execution log" >&2
+  exit 2
+}
+
+cleanup_conformance_temps() {
+  rm -f -- "$parity_scoreboard_tmp" "$conformance_log_tmp"
+}
+
+remove_stale_conformance_evidence() {
+  local artifact
+  for artifact in "$parity_scoreboard" "$conformance_log"; do
+    if [[ -L "$artifact" || -e "$artifact" ]]; then
+      [[ -L "$artifact" || -f "$artifact" ]] || return 1
+      rm -f -- "$artifact" || return 1
+    fi
+  done
+}
+
+if ! remove_stale_conformance_evidence; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot safely remove stale conformance evidence" >&2
+  exit 2
+fi
+
+set +e
+timeout --foreground --kill-after=5s "${conformance_timeout}s" \
+  env DOCKER_BUILDKIT=0 bash "$repo_root/scripts/docker-client-conformance.sh" \
+  --output "$parity_scoreboard_tmp" \
+  --log "$conformance_log_tmp"
+conformance_status=$?
+set -e
+
+if [[ "$conformance_status" == 124 ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: timed out after ${conformance_timeout}s" >&2
+  exit 2
+fi
+if [[ "$conformance_status" != 0 && "$conformance_status" != 1 ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: exit=$conformance_status" >&2
+  exit 2
+fi
+if [[ ! -s "$parity_scoreboard_tmp" || ! -s "$conformance_log_tmp" ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: exit=$conformance_status without two fresh evidence files" >&2
+  exit 2
+fi
+if ! mv -f -- "$parity_scoreboard_tmp" "$parity_scoreboard"; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot publish parity scoreboard" >&2
+  exit 2
+fi
+if ! mv -f -- "$conformance_log_tmp" "$conformance_log"; then
+  rm -f -- "$parity_scoreboard"
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot publish conformance execution log" >&2
+  exit 2
+fi
+
+if [[ "$conformance_status" == 1 ]]; then
+  echo "host matrix row $row_id completed conformance evidence with command failures: $parity_scoreboard, $conformance_log" >&2
+  exit 1
+fi
+
 printf 'host matrix row passed: %s\n' "$row_id"

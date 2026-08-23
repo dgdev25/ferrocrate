@@ -504,3 +504,41 @@ fn granted_restart_rejects_unexpired_lower_revision_before_kernel_effect() {
         Some(&vec!["10.2.0.0/16".into()])
     );
 }
+
+/// Regression: overlay gateway addresses belong on the bridge only. If the
+/// WireGuard interface is configured with them too, the kernel assigns the
+/// same address twice (wg first, bridge second) and the bridge apply fails
+/// on real hosts.
+#[test]
+fn wireguard_overlay_keeps_gateway_addresses_off_the_wireguard_interface() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = Keys {
+        manager: SigningKey::from_bytes(&[75; 32]),
+        helper: SigningKey::from_bytes(&[76; 32]),
+    };
+    let mut server = open_server(directory.path(), &keys, Default::default());
+    assert_eq!(
+        server.handle_peer(
+            1001,
+            &frame(&keys, wireguard("10.1.0.1/24", "10.1.0.0/16"), 1, None),
+            100
+        ),
+        NetdResponse::Applied
+    );
+    drop(server);
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("kernel.json")).unwrap())
+            .unwrap();
+    let interfaces = ferro_core::managed_overlay::managed_interface_identities("matrix-overlay");
+    assert_eq!(
+        state["wireguard"][interfaces.wireguard_ifname.as_str()][0],
+        serde_json::json!([]),
+        "WireGuard interface must be configured without gateway addresses"
+    );
+    assert_eq!(
+        state["addresses"][interfaces.bridge_ifname.as_str()],
+        serde_json::json!(["10.1.0.1/24"]),
+        "bridge must own the overlay gateway address"
+    );
+}

@@ -93,7 +93,7 @@ impl NetdServer {
                     crate::protocol::OverlayMode::WireGuard => {
                         if self
                             .kernel
-                            .apply_wireguard(&interfaces.wireguard, &addresses, &peers)
+                            .apply_wireguard(&interfaces.wireguard, &[], &peers)
                             .is_err()
                         {
                             if created_bridge {

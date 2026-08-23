@@ -11233,6 +11233,7 @@ fn run_compose_service(
         "on-failure" => "on-failure",
         _ => "no",
     };
+    let health = compose_service_health_config(service)?;
     let replicas = if instance_override.is_some() {
         1
     } else {
@@ -11279,7 +11280,7 @@ fn run_compose_service(
             None,
             None,
             None,
-            None,
+            health.clone(),
             restart,
             false,
             None,
@@ -11326,6 +11327,7 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
+    let health = compose_service_health_config(service)?;
     let requested_network = network_override
         .map(str::to_string)
         .unwrap_or(compose_service_network(service, name, default_network)?);
@@ -11363,7 +11365,7 @@ fn compose_service_execution_digest(
             &env,
             &labels,
             &HashMap::new(),
-            None,
+            health.as_ref(),
             &restart,
             &[],
             compose_limits.as_ref(),
@@ -11391,6 +11393,69 @@ fn compose_service_command(service: &ComposeService) -> Vec<String> {
         }
         None => Vec::new(),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn compose_service_health_config(
+    service: &ComposeService,
+) -> Result<Option<ferro_core::container_store::HealthConfig>, String> {
+    let Some(health) = service.healthcheck.as_ref() else {
+        return Ok(None);
+    };
+    let test = health
+        .test
+        .as_deref()
+        .ok_or_else(|| "compose: healthcheck.test is required".to_string())?;
+    let Some(mode) = test.first().map(String::as_str) else {
+        return Err("compose: healthcheck.test must not be empty".to_string());
+    };
+    let cmd = match mode {
+        "NONE" if test.len() == 1 => return Ok(None),
+        "CMD" if test.len() > 1 => test[1..].to_vec(),
+        "CMD-SHELL" if test.len() > 1 => vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            test[1..].join(" "),
+        ],
+        "NONE" => return Err("compose: NONE healthcheck takes no command".to_string()),
+        "CMD" | "CMD-SHELL" => {
+            return Err(format!("compose: {mode} healthcheck requires a command"));
+        }
+        other => return Err(format!("compose: unsupported healthcheck mode {other}")),
+    };
+    Ok(Some(ferro_core::container_store::HealthConfig {
+        cmd,
+        interval_secs: compose_health_duration(health.interval.as_deref(), 30)?,
+        timeout_secs: compose_health_duration(health.timeout.as_deref(), 5)?,
+        retries: health.retries.unwrap_or(3),
+        start_period_secs: compose_health_duration(health.start_period.as_deref(), 0)?,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn compose_health_duration(value: Option<&str>, default: u64) -> Result<u64, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let split = value
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .ok_or_else(|| format!("compose: invalid healthcheck duration {value}"))?;
+    let amount = value[..split]
+        .parse::<f64>()
+        .map_err(|_| format!("compose: invalid healthcheck duration {value}"))?;
+    let multiplier = match &value[split..] {
+        "ns" => 1e-9,
+        "us" | "µs" => 1e-6,
+        "ms" => 1e-3,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return Err(format!("compose: invalid healthcheck duration {value}")),
+    };
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(format!("compose: invalid healthcheck duration {value}"));
+    }
+    Ok((amount * multiplier).ceil() as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -18710,6 +18775,30 @@ volumes:
                 .expect_err("rootless container namespace join");
             assert!(error.contains("requires rootful namespace joining"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_healthcheck_is_converted_to_runtime_configuration() {
+        let service: ferro_compose::Service = serde_json::from_value(serde_json::json!({
+            "healthcheck": {
+                "test": ["CMD-SHELL", "test -f /tmp/ready"],
+                "interval": "2s",
+                "timeout": "1500ms",
+                "retries": 4,
+                "start_period": "3s"
+            }
+        }))
+        .expect("compose service");
+
+        let health = super::compose_service_health_config(&service)
+            .expect("valid healthcheck")
+            .expect("enabled healthcheck");
+        assert_eq!(health.cmd, ["/bin/sh", "-c", "test -f /tmp/ready"]);
+        assert_eq!(health.interval_secs, 2);
+        assert_eq!(health.timeout_secs, 2);
+        assert_eq!(health.retries, 4);
+        assert_eq!(health.start_period_secs, 3);
     }
 
     #[cfg(target_os = "linux")]

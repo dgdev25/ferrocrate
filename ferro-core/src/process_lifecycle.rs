@@ -321,11 +321,24 @@ pub fn owned_descendants_deepest_first(root: u32) -> Vec<u32> {
     out
 }
 
+/// Kernel start time (clock ticks) of a process, or None when it is gone.
+pub fn process_start_time_of(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Docker-style graceful stop of the workload's PID 1, verified against the
 /// launcher parent before each signal so a recycled PID is never signaled.
+/// `parent_start` is the launcher's kernel start time captured at spawn; the
+/// SIGKILL escalation re-verifies it so a launcher PID recycled during the
+/// graceful wait never has its subtree collected.
 pub fn stop_pid_verified(
     child: u32,
     parent: u32,
+    parent_start: Option<u64>,
     timeout: Duration,
 ) -> Result<(), ProcessLifecycleError> {
     if child == parent {
@@ -346,6 +359,11 @@ pub fn stop_pid_verified(
     }
     // Escalation collects the container's whole process tree: without a
     // private PID namespace, killing only PID 1 orphans its grandchildren.
+    // Re-verify the launcher's identity first: if the PID was recycled
+    // during the graceful wait, the subtree under it is not the container.
+    if parent_start.is_none() || process_start_time_of(parent) != parent_start {
+        return Ok(());
+    }
     for pid in owned_descendants_deepest_first(parent) {
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
     }

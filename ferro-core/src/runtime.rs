@@ -2010,7 +2010,7 @@ impl ContainerRuntime {
             if reservation.action == "container.run"
                 && record.status == "running"
                 && process_exists(record.pid)
-                && process_start_time_for_pid(record.pid).is_some()
+                && pid_identity_matches(&record)
                 && self
                     .runtime_dir
                     .join("containers")
@@ -2039,7 +2039,7 @@ impl ContainerRuntime {
                 && self.authorization.provenance_matches(&record)
                 && record.status == "running"
                 && process_exists(record.pid)
-                && process_start_time_for_pid(record.pid).is_some()
+                && pid_identity_matches(&record)
                 && self
                     .runtime_dir
                     .join("containers")
@@ -3133,6 +3133,7 @@ impl ContainerRuntime {
             id: container_id.clone(),
             name: name.map(|val| val.to_string()),
             pid: child_id,
+            process_start_time: process_start_time_for_pid(child_id),
             image: image.to_string(),
             command: command.clone(),
             tty,
@@ -3672,11 +3673,20 @@ impl ContainerRuntime {
         // bubblewrap launcher PID; the workload is its deepest descendant in
         // the host PID namespace. Signaling the launcher instead would kill
         // the boundary while a TERM-trapping workload never sees the signal.
-        let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
-        crate::process_lifecycle::stop_pid_verified(workload_pid, record.pid, timeout)?;
-        if workload_pid != record.pid {
-            let launcher = nix::unistd::Pid::from_raw(record.pid as i32);
-            if crate::process_lifecycle::probe_pid(record.pid).is_ok() {
+        // A stale record whose PID was recycled by an unrelated process must
+        // never be signaled: verify the kernel start time captured at spawn
+        // before any destructive delivery. On mismatch the workload is gone;
+        // publishing the stopped state is the only remaining effect.
+        if pid_identity_matches(&record) {
+            let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
+            crate::process_lifecycle::stop_pid_verified(
+                workload_pid,
+                record.pid,
+                record.process_start_time,
+                timeout,
+            )?;
+            if workload_pid != record.pid && pid_identity_matches(&record) {
+                let launcher = nix::unistd::Pid::from_raw(record.pid as i32);
                 let _ = nix::sys::signal::kill(launcher, nix::sys::signal::Signal::SIGKILL);
             }
         }
@@ -3730,7 +3740,12 @@ impl ContainerRuntime {
             // Host-PID-namespace execution makes the container's whole
             // process tree the signal target for SIGKILL (nothing may be
             // orphaned); named signals go to the verified workload PID 1.
-            if signal == nix::sys::signal::Signal::SIGKILL {
+            // Every destructive branch first verifies the recorded PID still
+            // names the process captured at spawn: a recycled PID's subtree
+            // is the operator's own session, not a container.
+            if !pid_identity_matches(&record) {
+                // The workload is gone; publish the killed state only.
+            } else if signal == nix::sys::signal::Signal::SIGKILL {
                 for pid in crate::process_lifecycle::owned_descendants_deepest_first(record.pid) {
                     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal);
                 }
@@ -4198,6 +4213,7 @@ impl ContainerRuntime {
         }
 
         record.pid = child_id;
+        record.process_start_time = process_start_time_for_pid(child_id);
         record.status = "running".to_string();
         // A replacement starts a new lifecycle; do not expose the old
         // supervisor's signal-derived exit code while it is being launched.
@@ -5361,6 +5377,18 @@ pub fn netns_deletion_decision(
     } else {
         NetnsDeletionDecision::RefuseIdentityMismatch
     }
+}
+
+/// True only when the recorded PID still names the same kernel process the
+/// record captured at spawn. A record without a stored start time (written
+/// by an older version, or a fixture) can never be verified and must never
+/// be the target of a destructive signal: after a reboot the recorded PID
+/// may belong to an unrelated process — killing it (or its subtree) can
+/// take down the operator's own session.
+fn pid_identity_matches(record: &ContainerRecord) -> bool {
+    record
+        .process_start_time
+        .is_some_and(|expected| process_start_time_for_pid(record.pid) == Some(expected))
 }
 
 fn process_start_time_for_pid(pid: u32) -> Option<u64> {
@@ -11654,6 +11682,7 @@ fn update_pid_status(
         return Err(ContainerStoreError::MutationConflict);
     }
     record.pid = pid;
+    record.process_start_time = crate::container_store::process_start_time(pid);
     record.status = status.to_string();
     record.restart_count = record.restart_count.saturating_add(1);
     db.put(&record)?;
@@ -13358,6 +13387,7 @@ mod tests {
             id: "stale-running".to_string(),
             name: None,
             pid: 999_999,
+            process_start_time: None,
             image: "alpine:latest".to_string(),
             command: vec!["sleep".to_string(), "1".to_string()],
             tty: false,
@@ -13422,6 +13452,7 @@ mod tests {
             id: "live-running".to_string(),
             name: None,
             pid: std::process::id(),
+            process_start_time: super::process_start_time_for_pid(std::process::id()),
             image: "alpine:latest".to_string(),
             command: vec!["sleep".to_string(), "1".to_string()],
             tty: false,
@@ -13929,11 +13960,32 @@ mod tests {
         }
     }
 
+    /// Regression: a destructive signal must never target a PID whose
+    /// kernel identity differs from what the record captured at spawn. A
+    /// recycled PID (for example after a host reboot) would otherwise have
+    /// its whole subtree SIGKILLed — including the operator's own session.
+    #[test]
+    fn destructive_signals_require_matching_pid_identity() {
+        let mut record = fixture_container_record("identity", "running");
+        record.pid = std::process::id();
+        // No stored identity: never verified.
+        record.process_start_time = None;
+        assert!(!super::pid_identity_matches(&record));
+        // Wrong identity (recycled PID): never verified.
+        record.process_start_time = Some(1);
+        assert!(!super::pid_identity_matches(&record));
+        // Matching identity verifies.
+        record.process_start_time = super::process_start_time_for_pid(std::process::id());
+        assert!(record.process_start_time.is_some());
+        assert!(super::pid_identity_matches(&record));
+    }
+
     fn fixture_container_record(id: &str, status: &str) -> ContainerRecord {
         ContainerRecord {
             id: id.to_string(),
             name: None,
             pid: 999_999,
+            process_start_time: None,
             image: "fixture:latest".to_string(),
             command: vec!["true".to_string()],
             tty: false,
@@ -15230,6 +15282,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             id: "c-existing".to_string(),
             name: None,
             pid: 1234,
+            process_start_time: None,
             image: "alpine:latest".to_string(),
             command: vec!["sleep".to_string(), "1".to_string()],
             tty: false,

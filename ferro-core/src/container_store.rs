@@ -84,6 +84,12 @@ pub struct ContainerRecord {
     #[serde(default)]
     pub name: Option<String>,
     pub pid: u32,
+    /// Kernel start time (clock ticks) of the recorded workload PID,
+    /// captured at spawn. Destructive signals must verify the live process
+    /// still has this start time; a recycled PID never matches. Records
+    /// written before this field existed never pass verification.
+    #[serde(default)]
+    pub process_start_time: Option<u64>,
     pub image: String,
     pub command: Vec<String>,
     /// Whether the workload was created with a Docker-compatible terminal.
@@ -222,6 +228,7 @@ impl ContainerRecord {
             id,
             name: None,
             pid: 0,
+            process_start_time: None,
             image,
             command: Vec::new(),
             tty: false,

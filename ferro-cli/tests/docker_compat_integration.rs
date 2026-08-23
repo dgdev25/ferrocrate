@@ -580,6 +580,137 @@ fn docker_compat_update_changes_pending_restart_policy() {
 }
 
 #[test]
+fn docker_compat_inspect_preserves_bounded_on_failure_retry_count() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=bounded-restart-compat",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+
+    let inspect = inspect_container(&harness, &id);
+    assert_eq!(inspect["HostConfig"]["RestartPolicy"]["Name"], "on-failure");
+    assert_eq!(
+        inspect["HostConfig"]["RestartPolicy"]["MaximumRetryCount"],
+        2
+    );
+    assert_eq!(inspect["RestartCount"], 0);
+}
+
+#[test]
+fn docker_compat_bounded_on_failure_restarts_exactly_the_configured_count() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/bounded-restart:latest");
+    let create_body = r#"{"Image":"compat/bounded-restart:latest","Cmd":["/bin/busybox","false"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=bounded-restart-count",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response={response}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let inspect = inspect_container(&harness, &id);
+        if inspect["State"]["Status"] == "exited" && inspect["RestartCount"] == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bounded restart policy did not settle after two retries: inspect={inspect}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/bounded-recovery:latest");
+    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; sleep 2; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=bounded-recovery",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response={response}");
+
+    let first_retry_deadline = Instant::now() + Duration::from_secs(10);
+    let first_retry_pid = loop {
+        let inspect = inspect_container(&harness, &id);
+        if inspect["State"]["Status"] == "running" && inspect["RestartCount"] == 1 {
+            break inspect["State"]["Pid"].as_i64().expect("first retry PID");
+        }
+        assert!(
+            Instant::now() < first_retry_deadline,
+            "first retry was not running: inspect={inspect}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    // The next failing workload is supervised by the daemon's boot watcher,
+    // not by the original Child wait loop. That automatic launch must still
+    // consume the second (and final) retry slot.
+    harness.restart();
+
+    let recovered_restart_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let inspect = inspect_container(&harness, &id);
+        if inspect["State"]["Status"] == "running"
+            && inspect["State"]["Pid"].as_i64() != Some(first_retry_pid)
+        {
+            assert_eq!(
+                inspect["RestartCount"], 2,
+                "the recovered launch must atomically consume retry two: inspect={inspect}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < recovered_restart_deadline,
+            "daemon recovery did not launch the final retry: inspect={inspect}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let terminal_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let inspect = inspect_container(&harness, &id);
+        if inspect["State"]["Status"] == "exited" && inspect["RestartCount"] == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < terminal_deadline,
+            "recovered bounded restart policy did not settle: inspect={inspect}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn docker_compat_update_combines_limits_and_restart_policy() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;

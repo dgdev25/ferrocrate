@@ -374,6 +374,10 @@ pub enum RestartPolicy {
     #[default]
     No,
     OnFailure,
+    /// Docker's `on-failure:N` policy. A zero limit is represented by the
+    /// legacy `OnFailure` variant so persisted records retain their existing
+    /// wire representation and semantics (unbounded retries).
+    OnFailureWithRetries(u32),
     Always,
     UnlessStopped,
 }

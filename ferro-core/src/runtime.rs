@@ -1948,11 +1948,14 @@ impl ContainerRuntime {
             let restart = match record.restart_policy {
                 RestartPolicy::Always => true,
                 RestartPolicy::UnlessStopped => !record.user_stopped,
-                RestartPolicy::OnFailure => record.last_exit_code.is_some_and(|code| code != 0),
+                RestartPolicy::OnFailure | RestartPolicy::OnFailureWithRetries(_) => {
+                    record.last_exit_code.is_some_and(|code| code != 0)
+                        && restart_limit_allows(&record.restart_policy, record.restart_count)
+                }
                 RestartPolicy::No => false,
             };
             if restart && record.status != "running" {
-                self.start(&record.id)?;
+                self.start_from_reconciliation(&record.id)?;
             }
         }
         Ok(())
@@ -1983,9 +1986,10 @@ impl ContainerRuntime {
                 &current.restart_policy,
                 &current.status,
                 current.last_exit_code.unwrap_or(-1),
+                current.restart_count,
             ) {
                 if let Ok(runtime) = ContainerRuntime::new(&runtime_dir) {
-                    let _ = runtime.start(&current.id);
+                    let _ = runtime.start_from_reconciliation(&current.id);
                 }
             }
             return;
@@ -4137,7 +4141,7 @@ impl ContainerRuntime {
 
     pub fn restart(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::ContainerRestart, id, |runtime, proof, intent| {
-            runtime.restart_authorized(proof, intent, id, timeout, true)
+            runtime.restart_authorized(proof, intent, id, timeout, true, false, false)
         })
     }
 
@@ -4146,7 +4150,13 @@ impl ContainerRuntime {
     /// it uses the same durable launch/recovery protocol as restart.
     pub fn start(&self, id: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::ContainerStart, id, |runtime, proof, intent| {
-            runtime.restart_authorized(proof, intent, id, Duration::ZERO, false)
+            runtime.restart_authorized(proof, intent, id, Duration::ZERO, false, true, false)
+        })
+    }
+
+    fn start_from_reconciliation(&self, id: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::ContainerStart, id, |runtime, proof, intent| {
+            runtime.restart_authorized(proof, intent, id, Duration::ZERO, false, false, true)
         })
     }
 
@@ -4360,6 +4370,8 @@ impl ContainerRuntime {
         id: &str,
         timeout: Duration,
         stop_existing: bool,
+        reset_restart_count: bool,
+        consume_recovery_retry: bool,
     ) -> Result<(), RuntimeError> {
         let mut record = self
             .store
@@ -4371,6 +4383,15 @@ impl ContainerRuntime {
         if !stop_existing && record.status == "running" {
             return Err(RuntimeError::InvalidState(
                 "container is already running".into(),
+            ));
+        }
+        // Reconciliation restarts do not go through a child supervisor, so
+        // they must consume their bounded `on-failure:N` slot as part of the
+        // same durable launch mutation. Keeping this in memory until the
+        // replacement PID is persisted means a failed spawn consumes nothing.
+        if consume_recovery_retry && !consume_reconciliation_retry(&mut record) {
+            return Err(RuntimeError::InvalidState(
+                "bounded on-failure restart limit is exhausted".into(),
             ));
         }
 
@@ -4506,6 +4527,9 @@ impl ContainerRuntime {
         record.process_start_time = process_start_time_for_pid(child_id);
         record.status = "running".to_string();
         record.user_stopped = false;
+        if reset_restart_count {
+            record.restart_count = 0;
+        }
         // A replacement starts a new lifecycle; do not expose the old
         // supervisor's signal-derived exit code while it is being launched.
         record.last_exit_code = None;
@@ -7152,7 +7176,32 @@ fn supervise_child(
             }
         }
 
-        if !should_restart(&restart_policy, &current_status, exit_code) {
+        // Docker considers a start healthy after it has survived a grace
+        // window. Reset the durable consecutive-failure budget at that
+        // point, so a later failure receives a fresh `on-failure:N` budget.
+        const RESTART_SUCCESS_GRACE_SECS: u64 = 10;
+        if uptime_secs >= RESTART_SUCCESS_GRACE_SECS {
+            let _ = store.reset_restart_count_for_process(&container_id, child.id());
+        }
+        let persisted_restart = store.get(&container_id).ok().flatten();
+        let durable_restart_count = persisted_restart
+            .as_ref()
+            .map(|record| record.restart_count)
+            .unwrap_or(restart_count);
+        // Docker's update endpoint changes policy without replacing the
+        // workload. Read the durable configuration at each exit so its retry
+        // budget applies to the next restart decision rather than only to a
+        // future explicit start.
+        let effective_restart_policy = persisted_restart
+            .as_ref()
+            .map(|record| &record.restart_policy)
+            .unwrap_or(&restart_policy);
+        if !should_restart(
+            effective_restart_policy,
+            &current_status,
+            exit_code,
+            durable_restart_count,
+        ) {
             break;
         }
 
@@ -11954,7 +12003,12 @@ fn short_id(value: &str, max: usize) -> String {
         .collect()
 }
 
-fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool {
+fn should_restart(
+    policy: &RestartPolicy,
+    status: &str,
+    exit_code: i32,
+    restart_count: u32,
+) -> bool {
     if status == "stopped" || status == "killed" {
         return false;
     }
@@ -11963,6 +12017,34 @@ fn should_restart(policy: &RestartPolicy, status: &str, exit_code: i32) -> bool 
         RestartPolicy::Always => true,
         RestartPolicy::UnlessStopped => true,
         RestartPolicy::OnFailure => exit_code != 0,
+        RestartPolicy::OnFailureWithRetries(_) => {
+            exit_code != 0 && restart_limit_allows(policy, restart_count)
+        }
+    }
+}
+
+fn restart_limit_allows(policy: &RestartPolicy, restart_count: u32) -> bool {
+    match policy {
+        RestartPolicy::OnFailureWithRetries(maximum_retry_count) => {
+            restart_count < *maximum_retry_count
+        }
+        _ => true,
+    }
+}
+
+/// Consume one automatic daemon-recovery restart only for bounded
+/// `on-failure:N`. The caller persists the mutated record with the launched
+/// replacement PID, so a spawn failure cannot spend a retry.
+fn consume_reconciliation_retry(record: &mut ContainerRecord) -> bool {
+    match record.restart_policy {
+        RestartPolicy::OnFailureWithRetries(maximum_retry_count) => {
+            if record.restart_count >= maximum_retry_count {
+                return false;
+            }
+            record.restart_count = record.restart_count.saturating_add(1);
+            true
+        }
+        _ => true,
     }
 }
 
@@ -13541,11 +13623,15 @@ mod tests {
                 .expect("inspect stopped record")
                 .user_stopped
         );
+        let mut stopped = runtime.inspect(&record.id).expect("inspect stopped record");
+        stopped.restart_count = 2;
+        runtime.store.put(&stopped).expect("seed restart count");
 
         runtime.start(&record.id).expect("start");
         let started = runtime.inspect(&record.id).expect("inspect");
         assert_eq!(started.status, "running");
         assert!(!started.user_stopped);
+        assert_eq!(started.restart_count, 0);
         runtime.kill(&record.id).expect("kill after start");
         assert!(
             runtime
@@ -17058,5 +17144,25 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert!(!super::launch_state_is_stopped(
             "Name:\tsh\nState:\tS (sleeping)\n"
         ));
+    }
+
+    #[test]
+    fn on_failure_retry_limit_allows_exactly_the_configured_restarts() {
+        let policy = RestartPolicy::OnFailureWithRetries(2);
+
+        assert!(super::should_restart(&policy, "exited", 1, 0));
+        assert!(super::should_restart(&policy, "exited", 1, 1));
+        assert!(!super::should_restart(&policy, "exited", 1, 2));
+    }
+
+    #[test]
+    fn reconciliation_start_consumes_the_remaining_bounded_retry() {
+        let mut record = fixture_container_record("bounded-recovery", "exited");
+        record.restart_policy = RestartPolicy::OnFailureWithRetries(2);
+        record.restart_count = 1;
+
+        assert!(super::consume_reconciliation_retry(&mut record));
+        assert_eq!(record.restart_count, 2);
+        assert!(!super::consume_reconciliation_retry(&mut record));
     }
 }

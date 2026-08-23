@@ -672,6 +672,30 @@ impl SqliteContainerStore {
         })
     }
 
+    /// Reset the durable consecutive-restart counter only when the record
+    /// still belongs to the process whose healthy lifetime we observed.
+    pub(crate) fn reset_restart_count_for_process(
+        &self,
+        id: &str,
+        expected_pid: u32,
+    ) -> Result<bool, ContainerStoreError> {
+        self.transaction(|transaction| {
+            let Some(mut record) = Self::get_tx(transaction, id)? else {
+                return Ok(false);
+            };
+            if record.pid != expected_pid || record.pending_mutation.is_some() {
+                return Ok(false);
+            }
+            record.restart_count = 0;
+            let payload = Self::encode(&record)?;
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![id, payload],
+            )?;
+            Ok(true)
+        })
+    }
+
     pub(crate) fn update_health(
         &self,
         id: &str,

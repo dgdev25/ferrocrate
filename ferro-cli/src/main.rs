@@ -5471,12 +5471,17 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 *health_retries,
                 *health_start_period,
             )?;
-            let restart_name = match parse_restart_policy(restart_policy)? {
+            let restart_policy = parse_restart_policy(restart_policy)?;
+            let restart_name = match &restart_policy {
                 ferro_core::container_store::RestartPolicy::No => "no",
-                ferro_core::container_store::RestartPolicy::OnFailure => "on-failure",
+                ferro_core::container_store::RestartPolicy::OnFailure
+                | ferro_core::container_store::RestartPolicy::OnFailureWithRetries(_) => {
+                    "on-failure"
+                }
                 ferro_core::container_store::RestartPolicy::Always => "always",
                 ferro_core::container_store::RestartPolicy::UnlessStopped => "unless-stopped",
             };
+            let maximum_retry_count = docker_restart_maximum_retry_count(&restart_policy);
             let labels = parse_key_values("run: label", labels)?;
             let entrypoint = entrypoint.as_deref().map(parse_entrypoint).transpose()?;
             let mappings = parse_publish(publish)?;
@@ -5521,7 +5526,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "NetworkMode": network_mode,
                     "RestartPolicy": {
                         "Name": restart_name,
-                        "MaximumRetryCount": 0,
+                        "MaximumRetryCount": maximum_retry_count,
                     },
                     "Healthcheck": health.as_ref().map(docker_runtime_healthcheck),
                     "ReadonlyRootfs": read_only,
@@ -9544,12 +9549,24 @@ fn effective_readonly(profile: &str, read_only: bool, read_write: bool) -> Resul
 fn parse_restart_policy(
     policy: &str,
 ) -> Result<ferro_core::container_store::RestartPolicy, String> {
+    if let Some(limit) = policy.strip_prefix("on-failure:") {
+        let limit = limit
+            .parse::<u32>()
+            .map_err(|_| "run: on-failure retry count must be a non-negative integer".to_string())?;
+        return Ok(if limit == 0 {
+            ferro_core::container_store::RestartPolicy::OnFailure
+        } else {
+            ferro_core::container_store::RestartPolicy::OnFailureWithRetries(limit)
+        });
+    }
     match policy {
         "no" => Ok(ferro_core::container_store::RestartPolicy::No),
         "on-failure" => Ok(ferro_core::container_store::RestartPolicy::OnFailure),
         "always" => Ok(ferro_core::container_store::RestartPolicy::Always),
         "unless-stopped" => Ok(ferro_core::container_store::RestartPolicy::UnlessStopped),
-        _ => Err("run: restart must be no|on-failure|always|unless-stopped".to_string()),
+        _ => Err(
+            "run: restart must be no|on-failure[:N]|always|unless-stopped".to_string(),
+        ),
     }
 }
 
@@ -13925,7 +13942,7 @@ fn handle_docker_compat_connection(
                         spec.pids_max = value;
                     }
                     if let Some(value) = update.restart_policy.clone() {
-                        spec.restart_policy = docker_restart_policy_name(&value).to_string();
+                        spec.restart_policy = docker_restart_policy_cli_value(&value);
                     }
                     drop(pending);
                     if let Err(error) = state.persist_pending() {
@@ -16067,7 +16084,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cpu_quota,
         cpu_period,
         pids_max,
-        restart_policy: docker_restart_policy_name(&restart_policy).to_string(),
+        restart_policy: docker_restart_policy_cli_value(&restart_policy),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -16136,24 +16153,55 @@ fn parse_docker_restart_policy(
     if policy.maximum_retry_count < 0 {
         return Err("docker: RestartPolicy.MaximumRetryCount cannot be negative".to_string());
     }
-    if policy.maximum_retry_count != 0 {
-        return Err("docker: RestartPolicy.MaximumRetryCount is unsupported".to_string());
-    }
-    parse_restart_policy(if policy.name.trim().is_empty() {
+    let name = if policy.name.trim().is_empty() {
         "no"
     } else {
         policy.name.trim()
-    })
-    .map(Some)
+    };
+    let maximum_retry_count = u32::try_from(policy.maximum_retry_count)
+        .map_err(|_| "docker: RestartPolicy.MaximumRetryCount is too large".to_string())?;
+    if name == "on-failure" && maximum_retry_count != 0 {
+        return Ok(Some(
+            ferro_core::container_store::RestartPolicy::OnFailureWithRetries(
+                maximum_retry_count,
+            ),
+        ));
+    }
+    parse_restart_policy(name).map(Some)
 }
 
 #[cfg(target_os = "linux")]
 fn docker_restart_policy_name(policy: &ferro_core::container_store::RestartPolicy) -> &'static str {
     match policy {
         ferro_core::container_store::RestartPolicy::No => "no",
-        ferro_core::container_store::RestartPolicy::OnFailure => "on-failure",
+        ferro_core::container_store::RestartPolicy::OnFailure
+        | ferro_core::container_store::RestartPolicy::OnFailureWithRetries(_) => "on-failure",
         ferro_core::container_store::RestartPolicy::Always => "always",
         ferro_core::container_store::RestartPolicy::UnlessStopped => "unless-stopped",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_restart_maximum_retry_count(
+    policy: &ferro_core::container_store::RestartPolicy,
+) -> u32 {
+    match policy {
+        ferro_core::container_store::RestartPolicy::OnFailureWithRetries(maximum_retry_count) => {
+            *maximum_retry_count
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_restart_policy_cli_value(
+    policy: &ferro_core::container_store::RestartPolicy,
+) -> String {
+    match policy {
+        ferro_core::container_store::RestartPolicy::OnFailureWithRetries(maximum_retry_count) => {
+            format!("on-failure:{maximum_retry_count}")
+        }
+        _ => docker_restart_policy_name(policy).to_string(),
     }
 }
 
@@ -16423,7 +16471,7 @@ fn docker_inspect_payload(
                 .and_then(|limits| limits.pids_max)
                 .unwrap_or(0),
             "RestartPolicy": {
-                "MaximumRetryCount": 0,
+                "MaximumRetryCount": docker_restart_maximum_retry_count(&record.restart_policy),
                 "Name": docker_restart_policy_name(&record.restart_policy),
             },
         },
@@ -16598,8 +16646,12 @@ fn docker_pending_inspect_payload(
             "CpuPeriod": spec.cpu_period.unwrap_or(0),
             "PidsLimit": spec.pids_max.unwrap_or(0),
             "RestartPolicy": {
-                "MaximumRetryCount": 0,
-                "Name": spec.restart_policy,
+                "MaximumRetryCount": parse_restart_policy(&spec.restart_policy)
+                    .map(|policy| docker_restart_maximum_retry_count(&policy))
+                    .unwrap_or(0),
+                "Name": parse_restart_policy(&spec.restart_policy)
+                    .map(|policy| docker_restart_policy_name(&policy))
+                    .unwrap_or("no"),
             },
         },
         "NetworkSettings": {
@@ -20602,6 +20654,14 @@ volumes:
     }
 
     #[test]
+    fn parses_bounded_on_failure_restart_policy() {
+        assert_eq!(
+            parse_restart_policy("on-failure:2").expect("bounded restart policy"),
+            ferro_core::container_store::RestartPolicy::OnFailureWithRetries(2)
+        );
+    }
+
+    #[test]
     fn rejects_invalid_capability() {
         let err = parse_capabilities(&["notacap".to_string()]).expect_err("invalid");
         assert!(err.contains("unknown capability"));
@@ -22292,10 +22352,14 @@ volumes:
             update.restart_policy,
             Some(ferro_core::container_store::RestartPolicy::Always)
         );
-        assert!(parse_docker_update_request(
-            br#"{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}"#
+        let update = parse_docker_update_request(
+            br#"{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}"#,
         )
-        .is_err());
+        .expect("bounded on-failure update");
+        assert_eq!(
+            update.restart_policy,
+            Some(ferro_core::container_store::RestartPolicy::OnFailureWithRetries(2))
+        );
     }
 
     #[cfg(unix)]

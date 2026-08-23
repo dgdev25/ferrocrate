@@ -7033,7 +7033,28 @@ fn build_limits(
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+fn retry_transient_cas<T>(
+    mut operation: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    // The supervisor publishes terminal state from its own process; client
+    // lifecycle mutations can transiently lose the store's compare-and-swap
+    // to that publication. The conflict resolves itself — retry briefly.
+    let mut last = operation();
+    for _ in 0..4 {
+        match &last {
+            Err(error) if error.contains("compare-and-swap") => {
+                std::thread::sleep(Duration::from_millis(50));
+                last = operation();
+            }
+            _ => break,
+        }
+    }
+    last
+}
+
 fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
     let mut archive = tar::Archive::new(Cursor::new(archive));
     for entry in archive
         .entries()
@@ -7076,6 +7097,18 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
                 std::io::copy(&mut entry, &mut output).map_err(|error| {
                     format!("docker build: extract context file failed: {error}")
                 })?;
+                // Preserve the client's file mode: COPY propagates it into
+                // the image, and dropping it strips execute bits from every
+                // binary shipped through the build context.
+                if let Ok(mode) = entry.header().mode() {
+                    std::fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(mode & 0o7777),
+                    )
+                    .map_err(|error| {
+                        format!("docker build: set context file mode failed: {error}")
+                    })?;
+                }
             }
             kind => {
                 return Err(format!(
@@ -9549,7 +9582,9 @@ fn parse_key_values(kind: &str, entries: &[String]) -> Result<HashMap<String, St
         let mut parts = entry.splitn(2, '=');
         let key = parts.next().unwrap_or("").trim();
         let value = parts.next().unwrap_or("").trim();
-        if key.is_empty() || value.is_empty() {
+        // Docker permits empty label values (`--label key` and `key=`), and
+        // compose relies on it for labels like project.environment_file.
+        if key.is_empty() {
             return Err(format!("{kind}: must be key=value"));
         }
         out.insert(key.to_string(), value.to_string());
@@ -11779,7 +11814,6 @@ struct DockerCreateRequest {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DockerUpdateRequest {
     #[serde(rename = "Memory")]
     memory: Option<i64>,
@@ -11791,6 +11825,10 @@ struct DockerUpdateRequest {
     pids_limit: Option<i64>,
     #[serde(rename = "RestartPolicy")]
     restart_policy: Option<DockerRestartPolicy>,
+    /// Docker's CLI sends the full UpdateConfig with zeroed defaults; only
+    /// meaningfully-set unsupported fields fail closed.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[cfg(target_os = "linux")]
@@ -11830,7 +11868,6 @@ struct DockerHealthcheck {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DockerHostConfig {
     #[serde(rename = "Binds")]
     binds: Option<Vec<String>>,
@@ -11850,6 +11887,55 @@ struct DockerHostConfig {
     pids_limit: Option<i64>,
     #[serde(rename = "RestartPolicy")]
     restart_policy: Option<DockerRestartPolicy>,
+    /// Every other HostConfig field the client sent. Docker's CLI always
+    /// transmits the full HostConfig shape with default values; those are
+    /// accepted, while any field carrying a meaningful value that this
+    /// runtime does not implement fails closed by name.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// True for values that only restate a default: null, false, 0, -1, empty
+/// strings/arrays/objects, and containers whose members are all
+/// default-shaped (covers LogConfig {Type:"",Config:{}} and ConsoleSize
+/// [0,0]).
+#[cfg(target_os = "linux")]
+fn docker_value_is_default_shaped(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Bool(flag) => !flag,
+        serde_json::Value::Number(number) => {
+            number.as_i64().is_some_and(|v| v == 0 || v == -1)
+                || number.as_f64().is_some_and(|v| v == 0.0)
+        }
+        serde_json::Value::String(text) => text.is_empty(),
+        serde_json::Value::Array(items) => items.iter().all(docker_value_is_default_shaped),
+        serde_json::Value::Object(map) => map.values().all(docker_value_is_default_shaped),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reject_meaningful_host_config_extras(
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for (field, value) in extra {
+        // The daemon has no effect for ContainerIDFile: Docker's CLI writes
+        // the cid file itself from the create response.
+        if field == "ContainerIDFile" {
+            continue;
+        }
+        // "default" restates NetworkMode's default and appears in other
+        // string fields the same way.
+        if value.as_str() == Some("default") {
+            continue;
+        }
+        if !docker_value_is_default_shaped(value) {
+            return Err(format!(
+                "docker: unsupported HostConfig field {field} is set; this runtime does not implement it"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -12935,6 +13021,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>, bool, bool, bool)> = None;
     let mut stats_follow: Option<String> = None;
+    let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_session = None;
     let response_result: Result<Vec<u8>, String> = (|| {
@@ -13013,6 +13100,9 @@ fn handle_docker_compat_connection(
                 }
             }
             ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
+            // Docker's client pings with HEAD first and only falls back to
+            // GET on failure; answer both.
+            ("HEAD", "/_ping") => http_response(200, &[], "text/plain"),
             ("POST", "/auth") => {
                 let payload: serde_json::Value = serde_json::from_slice(&request.body)
                     .map_err(|error| format!("docker: invalid auth request: {error}"))?;
@@ -14241,6 +14331,14 @@ fn handle_docker_compat_connection(
                     "FERROCRATE_RUN_TTY",
                     spec.tty.then_some("1"),
                 );
+                // Docker's Binds mixes host-path binds (absolute source)
+                // with named volumes; named volumes resolve through the
+                // volume store, never as literal paths.
+                let (path_binds, volume_binds): (Vec<String>, Vec<String>) = spec
+                    .binds
+                    .iter()
+                    .cloned()
+                    .partition(|entry| entry.starts_with('/'));
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -14250,9 +14348,9 @@ fn handle_docker_compat_connection(
                     &spec.cmd,
                     &spec.network_mode,
                     &network_backend,
-                    &spec.binds,
+                    &path_binds,
                     &[],
-                    &[],
+                    &volume_binds,
                     false,
                     false,
                     &spec.env,
@@ -14298,7 +14396,7 @@ fn handle_docker_compat_connection(
                     .trim_end_matches("/stop");
                 let timeout = parse_docker_stop_timeout(&query)?;
                 let id = resolve_container_id(&runtime, requested_id)?;
-                runtime.stop(&id, timeout).map_err(|err| err.to_string())?;
+                retry_transient_cas(|| runtime.stop(&id, timeout).map_err(|err| err.to_string()))?;
                 http_response(204, &[], "text/plain")
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/restart") => {
@@ -14424,15 +14522,27 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
-                let record = runtime.inspect(&id).ok();
-                if condition != "removed" {
-                    wait_for_container_exit_with_timeout(&runtime, &id, timeout)?;
+                if condition == "removed" {
+                    let record = runtime.inspect(&id).ok();
+                    let body = serde_json::json!({
+                        "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
+                        "Error": serde_json::Value::Null
+                    });
+                    return Ok(http_response(
+                        200,
+                        body.to_string().as_bytes(),
+                        "application/json",
+                    ));
                 }
-                let body = serde_json::json!({
-                    "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
-                    "Error": serde_json::Value::Null
-                });
-                http_response(200, body.to_string().as_bytes(), "application/json")
+                // Docker's daemon sends the wait response headers before the
+                // wait completes and the JSON body when it does; the Go
+                // client's ContainerWait returns on headers. Sending the
+                // whole response at exit stalls `docker attach` (and every
+                // client composing wait with other calls) for the container's
+                // entire lifetime. Defer the blocking wait to the streaming
+                // epilogue.
+                wait_follow = Some((id, condition.to_string(), timeout));
+                docker_chunked_headers(200, "application/json")
             }
             ("DELETE", path) if path.starts_with("/containers/") => {
                 let id = path.trim_start_matches("/containers/");
@@ -14477,17 +14587,24 @@ fn handle_docker_compat_connection(
                             if !force {
                                 return Err(format!("container {resolved_id} is still running"));
                             }
-                            runtime
-                                .kill_with_signal(
-                                    &resolved_id,
-                                    Some(nix::sys::signal::Signal::SIGKILL),
-                                )
-                                .map_err(|error| error.to_string())?;
+                            retry_transient_cas(|| {
+                                runtime
+                                    .kill_with_signal(
+                                        &resolved_id,
+                                        Some(nix::sys::signal::Signal::SIGKILL),
+                                    )
+                                    .map_err(|error| error.to_string())
+                            })?;
                         }
                     }
-                    runtime
-                        .remove(&resolved_id)
-                        .map_err(|err| err.to_string())?;
+                    // The supervisor publishes the terminal state from its
+                    // own process; a remove issued right after stop can lose
+                    // the store's compare-and-swap to that publication. The
+                    // conflict is transient by construction — retry briefly
+                    // instead of surfacing it to the client.
+                    retry_transient_cas(|| {
+                        runtime.remove(&resolved_id).map_err(|err| err.to_string())
+                    })?;
                     http_response(204, &[], "text/plain")
                 }
             }
@@ -14553,9 +14670,12 @@ fn handle_docker_compat_connection(
                     max_entries,
                 )
                 .map_err(|error| format!("docker build prune: {error}"))?;
+                // Docker's CachePruneReport declares CachesDeleted as a list
+                // of cache IDs; a count makes `docker system prune` fail to
+                // decode the response.
                 let body = serde_json::json!({
                     "Removed": removed,
-                    "CachesDeleted": removed,
+                    "CachesDeleted": serde_json::Value::Array(Vec::new()),
                     "SpaceReclaimed": 0,
                     "MaxEntries": max_entries,
                 });
@@ -15276,6 +15396,49 @@ fn handle_docker_compat_connection(
         let follow_runtime =
             ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
         stream_docker_stats(&mut stream, &follow_runtime, &id)?;
+        return Ok(());
+    }
+    if let Some((id, condition, timeout)) = wait_follow {
+        let follow_runtime =
+            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        if condition == "next-exit" {
+            // A created container has not produced its next exit yet: block
+            // through the pre-start window before waiting for the exit.
+            let start_deadline = timeout
+                .map(|value| Instant::now() + value)
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+            while follow_runtime
+                .inspect(&id)
+                .map(|record| record.status == "created")
+                .unwrap_or(false)
+            {
+                if Instant::now() >= start_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let wait_result = wait_for_container_exit_with_timeout(&follow_runtime, &id, timeout);
+        // The exit code must be observed after the wait completes; the
+        // pre-wait record still carries the previous lifecycle's code.
+        let body = match wait_result {
+            Ok(()) => {
+                let record = follow_runtime.inspect(&id).ok();
+                serde_json::json!({
+                    "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
+                    "Error": serde_json::Value::Null
+                })
+            }
+            Err(error) => serde_json::json!({
+                "StatusCode": -1,
+                "Error": {"Message": error}
+            }),
+        }
+        .to_string();
+        let chunk = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+        stream
+            .write_all(chunk.as_bytes())
+            .map_err(|error| format!("docker: wait stream write failed: {error}"))?;
         return Ok(());
     }
     if let Some((
@@ -16020,14 +16183,22 @@ fn docker_volume_matches_filters(
             return false;
         }
     }
+    // Volume records do not persist labels; a label selector matches only
+    // when it selects nothing (compose probes for its project volumes this
+    // way and creates them on an empty result).
+    if let Some(labels) = filters.get("label") {
+        if !labels.is_empty() {
+            return false;
+        }
+    }
     true
 }
 
 fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
     for key in filters.keys() {
-        if !matches!(key.as_str(), "name" | "driver") {
+        if !matches!(key.as_str(), "name" | "driver" | "label") {
             return Err(format!(
-                "docker: volume filter `{key}` is unsupported; supported filters: name, driver"
+                "docker: volume filter `{key}` is unsupported; supported filters: name, driver, label"
             ));
         }
     }
@@ -16059,7 +16230,13 @@ fn docker_network_matches_filters(
                     || (value == "custom" && record.name != "bridge")
             })
     });
-    name_matches && driver_matches && scope_matches && type_matches
+    // Network records do not persist labels; a label selector can therefore
+    // only match when it selects nothing. Compose uses this filter to find
+    // its own project networks and treats an empty result as "create it".
+    let label_matches = filters
+        .get("label")
+        .is_none_or(|values| values.is_empty());
+    name_matches && driver_matches && scope_matches && type_matches && label_matches
 }
 
 #[cfg(target_os = "linux")]
@@ -16121,9 +16298,9 @@ fn docker_network_containers_from_records(
 
 fn validate_docker_network_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
     for key in filters.keys() {
-        if !matches!(key.as_str(), "name" | "driver" | "scope" | "type") {
+        if !matches!(key.as_str(), "name" | "driver" | "scope" | "type" | "label") {
             return Err(format!(
-                "docker: network filter `{key}` is unsupported; supported filters: name, driver, scope, type"
+                "docker: network filter `{key}` is unsupported; supported filters: name, driver, scope, type, label"
             ));
         }
     }
@@ -16226,7 +16403,9 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cpu_period: None,
         pids_limit: None,
         restart_policy: None,
+        extra: serde_json::Map::new(),
     });
+    reject_meaningful_host_config_extras(&host_config.extra)?;
     let publish = port_bindings_to_publish(host_config.port_bindings)?;
     let network_mode = match host_config.network_mode.as_deref() {
         None | Some("default") | Some("bridge") => "bridge".to_string(),
@@ -16285,6 +16464,7 @@ fn normalize_docker_limit(value: Option<i64>, field: &str) -> Result<Option<u64>
 fn parse_docker_update_request(body: &[u8]) -> Result<DockerResourceUpdate, String> {
     let request: DockerUpdateRequest = serde_json::from_slice(body)
         .map_err(|error| format!("docker: invalid update payload: {error}"))?;
+    reject_meaningful_host_config_extras(&request.extra)?;
     let cpu_quota = request
         .cpu_quota
         .map(|value| normalize_docker_limit(Some(value), "CpuQuota"))
@@ -16701,7 +16881,22 @@ fn docker_network_settings(
         "HairpinMode": false,
         "LinkLocalIPv6Address": "",
         "LinkLocalIPv6PrefixLen": 0,
-        "Ports": {},
+        // Docker's port map: {"8080/tcp": [{"HostIp": ..., "HostPort": ...}]}.
+        // The record does not persist the bind address, so the wildcard is
+        // reported; `docker port` and compose read this shape.
+        "Ports": record
+            .ports
+            .iter()
+            .map(|port| {
+                (
+                    format!("{}/{}", port.container_port, port.protocol),
+                    serde_json::json!([{
+                        "HostIp": "0.0.0.0",
+                        "HostPort": port.host_port.to_string(),
+                    }]),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>(),
         "SandboxKey": record.netns.clone().unwrap_or_default(),
         "SecondaryIPAddresses": null,
         "SecondaryIPv6Addresses": null,
@@ -20897,7 +21092,10 @@ volumes:
 
     #[test]
     fn rejects_invalid_label_entry() {
-        let err = parse_key_values("label", &["bad".to_string()]).expect_err("invalid");
+        // A bare key is a valid empty-valued label, matching Docker.
+        let bare = parse_key_values("label", &["bare".to_string()]).expect("bare key");
+        assert_eq!(bare.get("bare").map(String::as_str), Some(""));
+        let err = parse_key_values("label", &["=value".to_string()]).expect_err("invalid");
         assert!(err.contains("label"));
     }
 
@@ -21625,8 +21823,35 @@ volumes:
             let body = format!(r#"{{"Image":"busybox","HostConfig":{{{field}}}}}"#);
             let error = parse_docker_create_spec(body.as_bytes(), None)
                 .expect_err("unsupported HostConfig fields must fail closed");
-            assert!(error.contains("unknown field"), "field={field} error={error}");
+            assert!(
+                error.contains("unsupported HostConfig field"),
+                "field={field} error={error}"
+            );
         }
+    }
+
+    /// Docker's CLI sends the complete HostConfig shape with default values
+    /// on every create; a compatible daemon accepts it (Docker 29 payload).
+    #[test]
+    fn docker_create_spec_accepts_full_default_host_config() {
+        let body = r#"{"Image":"busybox","Cmd":["true"],"HostConfig":{
+            "Binds":null,"ContainerIDFile":"","LogConfig":{"Type":"","Config":{}},
+            "NetworkMode":"default","PortBindings":{},"RestartPolicy":{"Name":"no","MaximumRetryCount":0},
+            "AutoRemove":false,"VolumeDriver":"","VolumesFrom":null,"ConsoleSize":[0,0],
+            "CapAdd":null,"CapDrop":null,"CgroupnsMode":"","Dns":[],"DnsOptions":[],"DnsSearch":[],
+            "ExtraHosts":null,"GroupAdd":null,"IpcMode":"","Cgroup":"","Links":null,"OomScoreAdj":0,
+            "PidMode":"","Privileged":false,"PublishAllPorts":false,"ReadonlyRootfs":false,
+            "SecurityOpt":null,"UTSMode":"","UsernsMode":"","ShmSize":0,"Isolation":"",
+            "CpuShares":0,"Memory":0,"NanoCpus":0,"CgroupParent":"","BlkioWeight":0,
+            "BlkioWeightDevice":[],"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],
+            "BlkioDeviceReadIOps":[],"BlkioDeviceWriteIOps":[],"CpuPeriod":0,"CpuQuota":0,
+            "CpuRealtimePeriod":0,"CpuRealtimeRuntime":0,"CpusetCpus":"","CpusetMems":"",
+            "Devices":[],"DeviceCgroupRules":null,"DeviceRequests":null,"MemoryReservation":0,
+            "MemorySwap":0,"MemorySwappiness":-1,"OomKillDisable":false,"PidsLimit":0,
+            "Ulimits":null,"CpuCount":0,"CpuPercent":0,"IOMaximumIOps":0,"IOMaximumBandwidth":0,
+            "MaskedPaths":null,"ReadonlyPaths":null}}"#;
+        parse_docker_create_spec(body.as_bytes(), None)
+            .expect("full default Docker client HostConfig must be accepted");
     }
 
     #[test]
@@ -22330,8 +22555,14 @@ volumes:
             driver: "bridge",
         };
         assert!(!docker_network_matches_filters(&builtin, &filters));
-        let unsupported =
+        // Labels are accepted (compose probes with them) but never stored,
+        // so a valued selector matches no network.
+        let labeled =
             serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
+        assert!(validate_docker_network_filters(&labeled).is_ok());
+        assert!(!docker_network_matches_filters(&custom, &labeled));
+        let unsupported =
+            serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
         assert!(validate_docker_network_filters(&unsupported).is_err());
     }
 

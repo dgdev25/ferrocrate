@@ -195,8 +195,10 @@ run_bounded_owned() {
   shift 3
   local status supervisor_pid tracker_pid="" registry
   registry="$work_root/processes-$token.tsv"
+  # `&` implicitly rebinds stdin to /dev/null in non-interactive shells;
+  # the explicit inheritance keeps caller-provided stdin (login passwords).
   timeout --signal=TERM --kill-after="${kill_after}s" "${bound}s" \
-    env FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$token" "$@" &
+    env FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$token" "$@" <&0 &
   supervisor_pid=$!
   if ! ferrocrate_start_process_tracker "$supervisor_pid" "$registry" tracker_pid; then
     kill -TERM -- "-$supervisor_pid" 2>/dev/null || kill -TERM "$supervisor_pid" 2>/dev/null || true
@@ -332,7 +334,11 @@ cleanup() {
   fi
   [[ -z "$scoreboard_tmp" ]] || rm -f -- "$scoreboard_tmp"
   [[ -z "$log_publish_tmp" ]] || rm -f -- "$log_publish_tmp"
-  rm -rf -- "$work_root"
+  # FERROCRATE_CONFORMANCE_KEEP_WORKDIR=1 preserves per-command stdout and
+  # stderr for failure diagnosis; the default removes everything.
+  if [[ "${FERROCRATE_CONFORMANCE_KEEP_WORKDIR:-0}" != 1 ]]; then
+    rm -rf -- "$work_root"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -432,6 +438,42 @@ record_command() {
   record_stdin="/dev/null"
 }
 
+# A command whose success is a nonzero exit WITH a daemon-mediated error
+# (matches dockerd behavior for the same input). A zero exit, a timeout, or
+# a client-side transport failure is a FAIL.
+record_expected_daemon_error() {
+  local id="$1" area="$2"
+  shift 2
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="$(shell_command "$@") [expected daemon error]"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned "$command_timeout" 5 "$command_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
+      <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$exit_code" != 0 ]] && [[ "$exit_code" != 124 && "$exit_code" != 137 ]] \
+      && grep -q "Error response from daemon" "$stderr_file"; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+  record_stdin="/dev/null"
+}
+
 # Client identity and engine prerequisites.
 record_command cli-version client version
 record_command compose-version compose compose version
@@ -476,7 +518,11 @@ record_command attach-container-remove container rm --force "$attach_container"
 # evidence without sending credentials to an external registry.
 record_command registry-search registry search busybox --limit 5
 record_stdin="$work_root/login-password.txt"
-record_command registry-login registry login --username conformance --password-stdin 127.0.0.1:1
+# Login against an unreachable registry cannot succeed on any engine; the
+# parity contract is that the daemon mediates a well-formed error (as
+# dockerd does) instead of an internal failure. PASS when the client exits
+# nonzero with a daemon-mediated error message.
+record_expected_daemon_error registry-login registry login --username conformance --password-stdin 127.0.0.1:1
 record_command registry-logout registry logout 127.0.0.1:1
 
 # Genuine Compose plugin invocations against the repository's representative

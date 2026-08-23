@@ -222,7 +222,25 @@ impl DaemonHarness {
 
         let mut parts = text.splitn(2, "\r\n\r\n");
         let headers = parts.next().unwrap_or_default();
-        let body = parts.next().unwrap_or_default().to_string();
+        let mut body = parts.next().unwrap_or_default().to_string();
+        // A real HTTP client decodes chunked transfer framing; several
+        // routes (wait, follow streams) legitimately answer chunked.
+        if headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
+        {
+            let mut decoded = String::new();
+            let mut rest = body.as_str();
+            while let Some((size_line, tail)) = rest.split_once("\r\n") {
+                let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+                if size == 0 || tail.len() < size {
+                    break;
+                }
+                decoded.push_str(&tail[..size]);
+                rest = tail[size..].strip_prefix("\r\n").unwrap_or("");
+            }
+            body = decoded;
+        }
         let status_line = headers.lines().next().unwrap_or_default();
         let code = status_line
             .split_whitespace()

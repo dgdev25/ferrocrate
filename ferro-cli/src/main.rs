@@ -12729,18 +12729,13 @@ fn handle_docker_compat_connection(
                 let mut entries: Vec<serde_json::Value> = records
                     .iter()
                     .map(|record| {
-                        let name = record.name.clone().unwrap_or_else(|| record.id.clone());
-                        serde_json::json!({
-                            "Id": record.id,
-                            "Image": record.image,
-                            "Command": record.command.join(" "),
-                            "Created": record.created_at_unix,
-                            "State": record.status,
-                            "Status": record.status,
-                            "Names": vec![format!("/{name}")],
-                        })
+                        let image_id = resolve_reference(&store, &record.image)
+                            .map_err(|error| error.to_string())?
+                            .map(|image| image.digest)
+                            .unwrap_or_default();
+                        Ok(docker_container_list_entry(record, &image_id))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
                 if all {
                     let pending = state
                         .pending
@@ -12750,16 +12745,11 @@ fn handle_docker_compat_connection(
                         if !docker_pending_matches_filters(id, spec, &filters) {
                             continue;
                         }
-                        let name = spec.name.as_deref().unwrap_or(id);
-                        entries.push(serde_json::json!({
-                            "Id": id,
-                            "Image": spec.image,
-                            "Command": spec.cmd.join(" "),
-                            "Created": 0,
-                            "State": "created",
-                            "Status": "created",
-                            "Names": [format!("/{name}")],
-                        }));
+                        let image_id = resolve_reference(&store, &spec.image)
+                            .map_err(|error| error.to_string())?
+                            .map(|image| image.digest)
+                            .unwrap_or_default();
+                        entries.push(docker_pending_list_entry(id, spec, &image_id)?);
                     }
                 }
                 if let Some(limit) = limit {
@@ -15924,6 +15914,140 @@ fn validate_docker_container_name(name: &str) -> Result<(), String> {
         return Err("docker: container name contains unsupported characters".to_string());
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_port_summaries(
+    ports: &[ferro_core::container_store::PortMappingRecord],
+) -> Vec<serde_json::Value> {
+    ports
+        .iter()
+        .map(|port| {
+            serde_json::json!({
+                "IP": "0.0.0.0",
+                "PrivatePort": port.container_port,
+                "PublicPort": port.host_port,
+                "Type": port.protocol,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_bind_mount_summary(source: &str, destination: &str, read_only: bool) -> serde_json::Value {
+    serde_json::json!({
+        "Type": "bind",
+        "Name": "",
+        "Source": source,
+        "Destination": destination,
+        "Driver": "",
+        "Mode": if read_only { "ro" } else { "rw" },
+        "RW": !read_only,
+        "Propagation": "rprivate",
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_container_mount_summaries(
+    record: &ferro_core::container_store::ContainerRecord,
+) -> Vec<serde_json::Value> {
+    let mut mounts = record
+        .mounts
+        .iter()
+        .map(|mount| docker_bind_mount_summary(&mount.source, &mount.target, mount.read_only))
+        .collect::<Vec<_>>();
+    mounts.extend(record.tmpfs_mounts.iter().map(|mount| {
+        serde_json::json!({
+            "Type": "tmpfs",
+            "Name": "",
+            "Source": "",
+            "Destination": mount.target,
+            "Driver": "",
+            "Mode": mount.size.as_deref().unwrap_or(""),
+            "RW": true,
+            "Propagation": "",
+        })
+    }));
+    mounts
+}
+
+#[cfg(target_os = "linux")]
+fn docker_pending_mount_summaries(binds: &[String]) -> Result<Vec<serde_json::Value>, String> {
+    parse_bind_mounts(binds).map(|mounts| {
+        mounts
+            .iter()
+            .map(|mount| {
+                docker_bind_mount_summary(
+                    &mount.source.to_string_lossy(),
+                    &format!("/{}", mount.target.to_string_lossy()),
+                    mount.read_only,
+                )
+            })
+            .collect()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_container_list_entry(
+    record: &ferro_core::container_store::ContainerRecord,
+    image_id: &str,
+) -> serde_json::Value {
+    let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+    serde_json::json!({
+        "Id": record.id,
+        "Image": record.image,
+        "ImageID": image_id,
+        "Command": record.command.join(" "),
+        "Created": record.created_at_unix,
+        "State": record.status,
+        "Status": record.status,
+        "Names": [format!("/{name}")],
+        "Labels": record.labels,
+        "Ports": docker_port_summaries(&record.ports),
+        "NetworkSettings": {"Networks": docker_network_settings(record)["Networks"].clone()},
+        "Mounts": docker_container_mount_summaries(record),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_pending_list_entry(
+    id: &str,
+    spec: &DockerCreateSpec,
+    image_id: &str,
+) -> Result<serde_json::Value, String> {
+    let name = spec.name.as_deref().unwrap_or(id);
+    let labels = spec
+        .labels
+        .iter()
+        .filter_map(|entry| entry.split_once('='))
+        .collect::<BTreeMap<_, _>>();
+    let ports = parse_publish(&spec.publish)?;
+    let network = serde_json::json!({
+        "NetworkID": spec.network_mode,
+        "EndpointID": "",
+        "Gateway": "",
+        "IPAddress": "",
+        "IPPrefixLen": 0,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "MacAddress": "",
+        "DNSNames": [],
+    });
+    Ok(serde_json::json!({
+        "Id": id,
+        "Image": spec.image,
+        "ImageID": image_id,
+        "Command": spec.cmd.join(" "),
+        "Created": spec.created_at_unix,
+        "State": "created",
+        "Status": "created",
+        "Names": [format!("/{name}")],
+        "Labels": labels,
+        "Ports": docker_port_summaries(&ports),
+        "NetworkSettings": {"Networks": {spec.network_mode.clone(): network}},
+        "Mounts": docker_pending_mount_summaries(&spec.binds)?,
+    }))
 }
 
 #[cfg(target_os = "linux")]

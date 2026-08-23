@@ -260,6 +260,62 @@ fn docker_compat_routes_support_version_prefix() {
 }
 
 #[test]
+fn docker_container_list_projects_identity_labels_ports_networks_and_mounts() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/list-wire:latest");
+
+    let (images_status, images_body) = harness.request("GET", "/v1.45/images/json");
+    assert_eq!(images_status, 200, "images response: {images_body}");
+    let images: serde_json::Value = serde_json::from_str(&images_body).expect("images JSON");
+    let image_id = images
+        .as_array()
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry["Id"].as_str())
+        .expect("built image ID");
+
+    let create_body = r#"{
+        "Image":"compat/list-wire:latest",
+        "Cmd":["true"],
+        "Labels":{"com.docker.compose.project":"wire-test"},
+        "HostConfig":{
+            "Binds":["/tmp:/workspace:ro"],
+            "PortBindings":{"8080/tcp":[{"HostPort":"18080"}]},
+            "NetworkMode":"bridge"
+        }
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/containers/create?name=wire-list HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (create_status, create_response) = harness.request_raw(&create_request);
+    assert_eq!(create_status, 201, "create response: {create_response}");
+
+    let (list_status, list_body) = harness.request("GET", "/v1.45/containers/json?all=1");
+    assert_eq!(list_status, 200, "list response: {list_body}");
+    let entries: serde_json::Value = serde_json::from_str(&list_body).expect("list JSON");
+    let entry = entries
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["Names"][0] == "/wire-list")
+        })
+        .expect("created container in list");
+
+    assert_eq!(entry["ImageID"], image_id);
+    assert_eq!(entry["Labels"]["com.docker.compose.project"], "wire-test");
+    assert_eq!(entry["Ports"][0]["PrivatePort"], 8080);
+    assert_eq!(entry["Ports"][0]["PublicPort"], 18080);
+    assert_eq!(entry["Ports"][0]["Type"], "tcp");
+    assert!(entry["NetworkSettings"]["Networks"]["bridge"].is_object());
+    assert_eq!(entry["Mounts"][0]["Type"], "bind");
+    assert_eq!(entry["Mounts"][0]["Source"], "/tmp");
+    assert_eq!(entry["Mounts"][0]["Destination"], "/workspace");
+    assert_eq!(entry["Mounts"][0]["RW"], false);
+}
+
+#[test]
 fn docker_compat_unknown_route_returns_docker_json_error() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("GET", "/v1.45/does-not-exist");

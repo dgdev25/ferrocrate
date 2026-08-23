@@ -125,7 +125,7 @@ impl NetKernelOps for RealNetKernelOps {
                     Ok(value) => value,
                     Err(()) => return LiveEffectObservation::Unknown,
                 };
-                let addresses = match observe_addresses(bridge_ifname) {
+                let addresses = match observe_addresses(route_interface) {
                     Ok(value) => value,
                     Err(()) => return LiveEffectObservation::Unknown,
                 };

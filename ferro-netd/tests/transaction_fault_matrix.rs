@@ -505,12 +505,11 @@ fn granted_restart_rejects_unexpired_lower_revision_before_kernel_effect() {
     );
 }
 
-/// Regression: overlay gateway addresses belong on the bridge only. If the
-/// WireGuard interface is configured with them too, the kernel assigns the
-/// same address twice (wg first, bridge second) and the bridge apply fails
-/// on real hosts.
+/// Regression: in WireGuard mode the overlay addresses belong on the
+/// WireGuard interface (crypto routing needs the source address there), and
+/// the bridge must not receive a duplicate assignment.
 #[test]
-fn wireguard_overlay_keeps_gateway_addresses_off_the_wireguard_interface() {
+fn wireguard_overlay_addresses_land_on_the_wireguard_interface_not_the_bridge() {
     let directory = tempfile::tempdir().unwrap();
     let keys = Keys {
         manager: SigningKey::from_bytes(&[75; 32]),
@@ -532,13 +531,14 @@ fn wireguard_overlay_keeps_gateway_addresses_off_the_wireguard_interface() {
             .unwrap();
     let interfaces = ferro_core::managed_overlay::managed_interface_identities("matrix-overlay");
     assert_eq!(
-        state["wireguard"][interfaces.wireguard_ifname.as_str()][0],
-        serde_json::json!([]),
-        "WireGuard interface must be configured without gateway addresses"
-    );
-    assert_eq!(
-        state["addresses"][interfaces.bridge_ifname.as_str()],
+        state["addresses"][interfaces.wireguard_ifname.as_str()],
         serde_json::json!(["10.1.0.1/24"]),
-        "bridge must own the overlay gateway address"
+        "WireGuard interface must own the overlay address"
+    );
+    assert!(
+        state["addresses"]
+            .get(interfaces.bridge_ifname.as_str())
+            .is_none(),
+        "bridge must not receive a duplicate overlay address"
     );
 }

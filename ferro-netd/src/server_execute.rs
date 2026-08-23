@@ -93,7 +93,7 @@ impl NetdServer {
                     crate::protocol::OverlayMode::WireGuard => {
                         if self
                             .kernel
-                            .apply_wireguard(&interfaces.wireguard, &[], &peers)
+                            .apply_wireguard(&interfaces.wireguard, &addresses, &peers)
                             .is_err()
                         {
                             if created_bridge {
@@ -121,7 +121,7 @@ impl NetdServer {
                 for (index, address) in addresses.iter().enumerate() {
                     if self
                         .kernel
-                        .apply_addresses(&interfaces.bridge, std::slice::from_ref(address))
+                        .apply_addresses(route_interface, std::slice::from_ref(address))
                         .is_err()
                     {
                         reject_effect!(
@@ -173,15 +173,22 @@ impl NetdServer {
                         checkpoint!(&identity, &format!("stale_route_removed:{index}"));
                     }
                 }
-                let obsolete_addresses = previous_addresses
-                    .iter()
-                    .filter(|address| !addresses.contains(address))
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let previous_address_interface = previous_interface
+                    .as_deref()
+                    .unwrap_or(interfaces.bridge.as_str());
+                let obsolete_addresses = if previous_address_interface == route_interface {
+                    previous_addresses
+                        .iter()
+                        .filter(|address| !addresses.contains(address))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    previous_addresses.clone()
+                };
                 for (index, address) in obsolete_addresses.iter().enumerate() {
                     if self
                         .kernel
-                        .remove_addresses(&interfaces.bridge, std::slice::from_ref(address))
+                        .remove_addresses(previous_address_interface, std::slice::from_ref(address))
                         .is_err()
                     {
                         reject_effect!(
@@ -266,13 +273,13 @@ impl NetdServer {
                 }
                 if was_owned {
                     effect_started = true;
+                    let route_interface = self
+                        .effect_receipts
+                        .get(&format!("overlay:{overlay_id}"))
+                        .and_then(crate::effect_receipt::EffectReceipt::route_interface)
+                        .unwrap_or(&interfaces.wireguard)
+                        .to_string();
                     if let Some(routes) = self.routes.get(&overlay_id) {
-                        let route_interface = self
-                            .effect_receipts
-                            .get(&format!("overlay:{overlay_id}"))
-                            .and_then(crate::effect_receipt::EffectReceipt::route_interface)
-                            .unwrap_or(&interfaces.wireguard)
-                            .to_string();
                         for (index, route) in routes.clone().iter().enumerate() {
                             if self
                                 .kernel
@@ -292,7 +299,7 @@ impl NetdServer {
                         for (index, address) in addresses.clone().iter().enumerate() {
                             if self
                                 .kernel
-                                .remove_addresses(&interfaces.bridge, std::slice::from_ref(address))
+                                .remove_addresses(&route_interface, std::slice::from_ref(address))
                                 .is_err()
                             {
                                 reject_effect!(

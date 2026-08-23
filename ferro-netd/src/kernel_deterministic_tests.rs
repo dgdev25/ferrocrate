@@ -26,7 +26,7 @@ fn exact_receipts_reject_each_partial_kernel_field() {
         .apply_wireguard(&interfaces.wireguard, &[], &peers)
         .unwrap();
     kernel
-        .apply_addresses(&interfaces.bridge, &addresses)
+        .apply_addresses(&interfaces.wireguard, &addresses)
         .unwrap();
     kernel.apply_routes(&interfaces.wireguard, &routes).unwrap();
     kernel.ensure_forwarding().unwrap();
@@ -52,7 +52,7 @@ fn exact_receipts_reject_each_partial_kernel_field() {
     kernel
         .state
         .addresses
-        .get_mut(&interfaces.bridge)
+        .get_mut(&interfaces.wireguard)
         .unwrap()
         .clear();
     assert_eq!(
@@ -66,7 +66,7 @@ fn exact_receipts_reject_each_partial_kernel_field() {
     kernel
         .state
         .addresses
-        .insert(interfaces.bridge.clone(), addresses);
+        .insert(interfaces.wireguard.clone(), addresses);
     kernel
         .state
         .routes

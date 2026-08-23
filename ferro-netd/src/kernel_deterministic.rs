@@ -121,7 +121,7 @@ impl NetKernelOps for PersistentKernelOps {
                 let (addresses, actual_peers) = self
                     .state
                     .addresses
-                    .get(bridge_ifname)
+                    .get(route_interface)
                     .cloned()
                     .map(|addresses| {
                         (

@@ -17089,6 +17089,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 "alpine:latest".into(),
             );
             record.pid = old.id();
+            // The identity-gated stop path refuses to signal a PID without a
+            // matching kernel start time; a live fixture must carry it.
+            record.process_start_time = super::process_start_time_for_pid(old.id());
             record.status = "running".into();
             record.command = vec!["/bin/busybox".into(), "sleep".into(), "60".into()];
             record.stdout_path = container_dir.join("stdout").display().to_string();

@@ -18,6 +18,14 @@ fn compose_project(root: &std::path::Path) -> std::path::PathBuf {
     project
 }
 
+/// Kernel start time (clock ticks) of a live process, read the same way the
+/// runtime's identity check reads it. Test-local because the core helper is
+/// crate-private.
+fn start_time_of(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 fn live_web_record(
     root: &std::path::Path,
     witnessed: bool,
@@ -44,6 +52,13 @@ fn live_web_record(
             "mutation_generation": 1
         }))
         .unwrap();
+    // A live workload must carry the identity the runtime verifies before
+    // signaling; without it, stop treats the PID as recycled and no-ops.
+    record.process_start_time = start_time_of(pid);
+    assert!(
+        record.process_start_time.is_some(),
+        "live fixture process must have a readable start time"
+    );
     if witnessed {
         // Initialize through the production loader, then bind the persisted
         // record to that runtime's durable identity. This models a record

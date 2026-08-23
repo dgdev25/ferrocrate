@@ -1878,7 +1878,7 @@ impl ContainerRuntime {
             if record.pending_mutation.is_some() {
                 continue;
             }
-            if process_exists(record.pid) {
+            if pid_identity_matches(&record) {
                 continue;
             }
 
@@ -1892,9 +1892,7 @@ impl ContainerRuntime {
                 .authorization
                 .begin_internal_container_recovery(&record.id)?;
             record.status = "exited".to_string();
-            if record.last_exit_code.is_none() {
-                record.last_exit_code = Some(-1);
-            }
+            record.last_exit_code = Some(-1);
             self.store.put(&record)?;
             self.authorization.finish_internal_recovery(
                 recovery,
@@ -1932,6 +1930,66 @@ impl ContainerRuntime {
             );
         }
         Ok(())
+    }
+
+    /// Reconcile durable workload state before a long-lived daemon begins
+    /// serving requests. Records without a verified live identity have
+    /// already been marked exited by `reconcile_persisted_state`; eligible
+    /// policies are then replayed through the normal start transition.
+    pub fn reconcile_daemon_boot(&self) -> Result<(), RuntimeError> {
+        self.reconcile_persisted_state()?;
+        for record in self.store.list()? {
+            if matches!(record.status.as_str(), "running" | "paused")
+                && pid_identity_matches(&record)
+            {
+                self.watch_surviving_workload(record);
+                continue;
+            }
+            let restart = match record.restart_policy {
+                RestartPolicy::Always => true,
+                RestartPolicy::UnlessStopped => !record.user_stopped,
+                RestartPolicy::OnFailure => record.last_exit_code.is_some_and(|code| code != 0),
+                RestartPolicy::No => false,
+            };
+            if restart && record.status != "running" {
+                self.start(&record.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn watch_surviving_workload(&self, record: ContainerRecord) {
+        let store = self.store.clone_db();
+        let runtime_dir = self.runtime_dir.clone();
+        thread::spawn(move || loop {
+            if pid_identity_matches(&record) {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let _ = store.update_exit_for_process(
+                &record.id,
+                record.pid,
+                record.process_start_time,
+                -1,
+            );
+            let Ok(Some(current)) = store.get(&record.id) else {
+                return;
+            };
+            // This poller reattaches a workload after daemon recovery, but it
+            // must retain the regular supervisor's terminal-state semantics:
+            // an explicit stop or kill is never a restart trigger, even when
+            // the configured policy is `always`.
+            if should_restart(
+                &current.restart_policy,
+                &current.status,
+                current.last_exit_code.unwrap_or(-1),
+            ) {
+                if let Ok(runtime) = ContainerRuntime::new(&runtime_dir) {
+                    let _ = runtime.start(&current.id);
+                }
+            }
+            return;
+        });
     }
 
     fn reconcile_pending_mutations(&self) -> Result<(), RuntimeError> {
@@ -2011,7 +2069,6 @@ impl ContainerRuntime {
             // recovery below remains authoritative.
             if reservation.action == "container.run"
                 && record.status == "running"
-                && process_exists(record.pid)
                 && pid_identity_matches(&record)
                 && self
                     .runtime_dir
@@ -2040,7 +2097,6 @@ impl ContainerRuntime {
             let run_live_effects = reservation.action == "container.run"
                 && self.authorization.provenance_matches(&record)
                 && record.status == "running"
-                && process_exists(record.pid)
                 && pid_identity_matches(&record)
                 && self
                     .runtime_dir
@@ -2129,7 +2185,7 @@ impl ContainerRuntime {
                     .store
                     .get(&operation.container_id)?
                     .is_some_and(|record| {
-                        record.status == "quarantined" && process_exists(record.pid)
+                        record.status == "quarantined" && pid_identity_matches(&record)
                     })
             {
                 continue;
@@ -2140,7 +2196,7 @@ impl ContainerRuntime {
                     .get(&operation.container_id)?
                     .is_some_and(|record| {
                         record.status != "running"
-                            || !process_exists(record.pid)
+                            || !pid_identity_matches(&record)
                             || !self.authorization.provenance_matches(&record)
                     })
             {
@@ -5537,7 +5593,7 @@ fn recovery_truth_matches(
             record.status == "running"
                 && operation.and_then(|op| op.state_after.as_deref()) == Some("running")
                 && operation.and_then(|op| op.freezer_state_after) == Some(false)
-                && process_exists(record.pid)
+                && pid_identity_matches(record)
         }
         "container.stop" | "container.kill" => operation.is_some_and(|operation| {
             let expected = if action == "container.stop" {
@@ -5551,7 +5607,7 @@ fn recovery_truth_matches(
         }),
         "container.restart" => {
             record.status == "running"
-                && process_exists(record.pid)
+                && pid_identity_matches(record)
                 && operation.is_some_and(|op| {
                     op.execution_generation_after == Some(op.generation.saturating_add(1))
                         && op.pid_after == Some(record.pid)
@@ -5564,7 +5620,7 @@ fn recovery_truth_matches(
                 && operation.effect_succeeded == Some(true)
                 && record.creation_provenance.is_verifiable()
                 && record.status == "running"
-                && process_exists(record.pid)
+                && pid_identity_matches(record)
                 && operation.pid_after == Some(record.pid)
                 && operation.process_start_time_after == process_start_time_for_pid(record.pid)
                 && operation.execution_generation_after == Some(operation.generation)
@@ -13774,6 +13830,28 @@ mod tests {
         let reconciled = runtime.inspect("live-running").expect("inspect");
         assert_eq!(reconciled.status, "running");
         assert_eq!(reconciled.last_exit_code, None);
+    }
+
+    #[test]
+    fn startup_reconcile_marks_running_pid_without_start_time_exited() {
+        let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("store");
+        let mut record = fixture_container_record("unverified-running", "running");
+        record.pid = std::process::id();
+        record.process_start_time = None;
+        record.network_name = None;
+        record.namespace_owned = false;
+        store.put(&record).expect("seed unverified record");
+        drop(store);
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let reconciled = runtime.inspect("unverified-running").expect("inspect");
+        assert_eq!(reconciled.status, "exited");
+        assert_eq!(reconciled.last_exit_code, Some(-1));
     }
 
     #[test]

@@ -12642,6 +12642,9 @@ fn run_daemon(
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     let runtime_dir = runtime_dir();
     let runtime_dir = Arc::new(runtime_dir);
+    ContainerRuntime::new(runtime_dir.as_ref())
+        .and_then(|runtime| runtime.reconcile_daemon_boot())
+        .map_err(|error| format!("daemon boot reconciliation: {error}"))?;
     let store = Arc::new(store.clone());
     let volume_store = Arc::new(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,

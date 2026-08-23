@@ -636,11 +636,23 @@ impl SqliteContainerStore {
         expected_pid: u32,
         exit_code: i32,
     ) -> Result<Option<String>, ContainerStoreError> {
+        self.update_exit_for_process(id, expected_pid, None, exit_code)
+    }
+
+    pub(crate) fn update_exit_for_process(
+        &self,
+        id: &str,
+        expected_pid: u32,
+        expected_start_time: Option<u64>,
+        exit_code: i32,
+    ) -> Result<Option<String>, ContainerStoreError> {
         self.transaction(|transaction| {
             let Some(mut record) = Self::get_tx(transaction, id)? else {
                 return Ok(None);
             };
-            if record.pid != expected_pid {
+            if record.pid != expected_pid
+                || expected_start_time.is_some() && record.process_start_time != expected_start_time
+            {
                 return Ok(None);
             }
             if record.pending_mutation.is_some() {

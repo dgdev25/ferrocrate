@@ -4,6 +4,7 @@
 mod cli_fixture;
 
 use base64::Engine;
+use ferro_core::sqlite_container_store::SqliteContainerStore;
 use sha2::Digest;
 use std::fs;
 use std::io::{Read, Write};
@@ -82,6 +83,7 @@ struct DaemonHarness {
     _runtime_dir: tempfile::TempDir,
     socket_path: PathBuf,
     kernel_state_path: PathBuf,
+    mode: String,
 }
 
 impl Drop for DaemonHarness {
@@ -102,12 +104,39 @@ impl DaemonHarness {
         // Private per-daemon state file: only active because the env var is set.
         let kernel_state_path = runtime_dir.path().join("network-kernel-state.json");
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        let mut child = Self::spawn_process(&runtime_dir, &socket_path, &kernel_state_path, mode);
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if socket_path.exists() && UnixStream::connect(&socket_path).is_ok() {
+                return Self {
+                    child,
+                    _runtime_dir: runtime_dir,
+                    socket_path,
+                    kernel_state_path,
+                    mode: mode.to_string(),
+                };
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "daemon socket did not become ready: {}",
+            socket_path.display()
+        );
+    }
+
+    fn spawn_process(
+        runtime_dir: &tempfile::TempDir,
+        socket_path: &Path,
+        kernel_state_path: &Path,
+        mode: &str,
+    ) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
-            .env(
-                "FERROCRATE_NETWORK_KERNEL_STATE",
-                kernel_state_path.as_os_str(),
-            )
+            .env("FERROCRATE_NETWORK_KERNEL_STATE", kernel_state_path)
             .env(
                 "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
                 format!("docker-{mode}"),
@@ -122,27 +151,45 @@ impl DaemonHarness {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn daemon");
+            .expect("spawn daemon")
+    }
+
+    fn stop_daemon(&mut self) {
+        self.child.kill().expect("kill daemon");
+        self.child.wait().expect("reap daemon");
+    }
+
+    fn start_daemon(&mut self) {
+        self.child = Self::spawn_process(
+            &self._runtime_dir,
+            &self.socket_path,
+            &self.kernel_state_path,
+            &self.mode,
+        );
 
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(5) {
-            if socket_path.exists() && UnixStream::connect(&socket_path).is_ok() {
-                return Self {
-                    child,
-                    _runtime_dir: runtime_dir,
-                    socket_path,
-                    kernel_state_path,
-                };
+            if self.socket_path.exists() && UnixStream::connect(&self.socket_path).is_ok() {
+                return;
             }
             thread::sleep(Duration::from_millis(25));
         }
 
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
         panic!(
             "daemon socket did not become ready: {}",
-            socket_path.display()
+            self.socket_path.display()
         );
+    }
+
+    fn restart(&mut self) {
+        self.stop_daemon();
+        self.start_daemon();
+    }
+
+    fn runtime_dir(&self) -> &Path {
+        self._runtime_dir.path()
     }
 
     fn kernel_state(&self) -> KernelStateFile {
@@ -561,6 +608,226 @@ fn docker_compat_update_combines_limits_and_restart_policy() {
     assert_eq!(inspect["HostConfig"]["Memory"], 67_108_864u64);
     assert_eq!(inspect["HostConfig"]["PidsLimit"], 32u64);
     assert_eq!(inspect["HostConfig"]["RestartPolicy"]["Name"], "always");
+}
+
+fn create_sleeping_restart_container(harness: &DaemonHarness, name: &str, policy: &str) -> String {
+    let create_body = format!(
+        r#"{{"Image":"compat/daemon-reconcile:latest","Cmd":["/bin/busybox","sleep","120"],"HostConfig":{{"NetworkMode":"none","RestartPolicy":{{"Name":"{policy}"}}}}}}"#
+    );
+    let (status, response) = harness.request_bytes(
+        "POST",
+        &format!("/v1.45/containers/create?name={name}"),
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "{name} create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "{name} start response={response}");
+    id
+}
+
+fn inspect_container(harness: &DaemonHarness, id: &str) -> serde_json::Value {
+    let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
+    assert_eq!(status, 200, "{id} inspect response={response}");
+    serde_json::from_str(&response).expect("inspect JSON")
+}
+
+fn pid_start_time(pid: i64) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+fn kill_pid_only_if_identity_matches(pid: i64, expected_start_time: u64) {
+    assert_eq!(
+        pid_start_time(pid),
+        Some(expected_start_time),
+        "refusing to signal a PID whose identity changed"
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("kill verified test workload");
+}
+
+#[test]
+fn docker_compat_daemon_restart_reattaches_and_supervises_live_workload() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(&harness, "daemon-reconcile-live", "always");
+    let initial = inspect_container(&harness, &id);
+    let original_pid = initial["State"]["Pid"].as_i64().expect("running PID");
+    let original_start_time = pid_start_time(original_pid).expect("running PID start time");
+
+    // The daemon dies but its detached workload must keep its identity and
+    // become watched again by the new daemon process.
+    harness.restart();
+    let recovered = inspect_container(&harness, &id);
+    assert_eq!(
+        recovered["State"]["Status"], "running",
+        "inspect={recovered}"
+    );
+    assert_eq!(
+        recovered["State"]["Pid"].as_i64(),
+        Some(original_pid),
+        "live workload must not be relaunched at daemon boot: inspect={recovered}"
+    );
+
+    // Once that reattached workload exits, its poll watcher must publish the
+    // exit and apply its normal `always` restart policy.
+    kill_pid_only_if_identity_matches(original_pid, original_start_time);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let current = inspect_container(&harness, &id);
+        if current["State"]["Status"] == "running"
+            && current["State"]["Pid"]
+                .as_i64()
+                .is_some_and(|pid| pid != original_pid)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reattached workload exit was not supervised: inspect={current}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let (status, response) =
+        harness.request("DELETE", &format!("/v1.45/containers/{id}?force=true"));
+    assert_eq!(status, 204, "cleanup response={response}");
+}
+
+#[test]
+fn docker_compat_recovered_watcher_does_not_restart_operator_kill() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id =
+        create_sleeping_restart_container(&harness, "daemon-reconcile-operator-kill", "always");
+
+    // This first reboot makes the poll watcher (rather than the original
+    // Child supervisor) responsible for the workload's next terminal state.
+    harness.restart();
+    assert_eq!(
+        inspect_container(&harness, &id)["State"]["Status"],
+        "running"
+    );
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/kill"));
+    assert_eq!(status, 204, "operator kill response={response}");
+
+    // Keep observing past the watcher's poll interval. A recovered watcher
+    // must preserve `killed` as a terminal operator action even for `always`;
+    // it must not re-launch the process after detecting the missing identity.
+    thread::sleep(Duration::from_millis(400));
+    let final_state = inspect_container(&harness, &id);
+    assert_eq!(
+        final_state["State"]["Status"], "killed",
+        "operator kill must not be converted into a restart: inspect={final_state}"
+    );
+
+    let (status, response) =
+        harness.request("DELETE", &format!("/v1.45/containers/{id}?force=true"));
+    assert_eq!(status, 204, "cleanup response={response}");
+}
+
+#[test]
+fn docker_compat_daemon_boot_restarts_always_record_with_mismatched_identity() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(&harness, "daemon-reconcile-stale", "always");
+    let original = inspect_container(&harness, &id);
+    let original_pid = original["State"]["Pid"].as_i64().expect("running PID");
+    let original_start_time = pid_start_time(original_pid).expect("running PID start time");
+
+    // Simulate a durable record whose PID was recycled. The actual process is
+    // deliberately still live: boot reconciliation must treat it as dead
+    // without signalling it, then start a new `always` workload.
+    harness.stop_daemon();
+    let store = SqliteContainerStore::open(harness.runtime_dir().join("containers.db"))
+        .expect("open persisted store");
+    let mut record = store.get(&id).expect("read record").expect("record exists");
+    record.process_start_time = Some(original_start_time.saturating_add(1));
+    store.put(&record).expect("persist mismatched identity");
+    drop(store);
+    harness.start_daemon();
+
+    let restarted = inspect_container(&harness, &id);
+    assert_eq!(
+        restarted["State"]["Status"], "running",
+        "inspect={restarted}"
+    );
+    assert_ne!(
+        restarted["State"]["Pid"].as_i64(),
+        Some(original_pid),
+        "mismatched PID must be treated as dead: inspect={restarted}"
+    );
+    assert_eq!(
+        pid_start_time(original_pid),
+        Some(original_start_time),
+        "daemon boot must never signal a mismatched-identity PID"
+    );
+
+    let (status, response) =
+        harness.request("DELETE", &format!("/v1.45/containers/{id}?force=true"));
+    assert_eq!(status, 204, "cleanup restarted record response={response}");
+    kill_pid_only_if_identity_matches(original_pid, original_start_time);
+}
+
+#[test]
+fn docker_compat_daemon_boot_does_not_restart_unless_stopped_workload() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(
+        &harness,
+        "daemon-reconcile-user-stopped",
+        "unless-stopped",
+    );
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/stop?t=0"));
+    assert_eq!(status, 204, "operator stop response={response}");
+    // Model the crash window after an operator stop has durably recorded
+    // intent but before a stale `running` record was reconciled. Without boot
+    // reconciliation this stays `running`, so this is a real red test against
+    // the pre-Item-2 daemon path.
+    harness.stop_daemon();
+    let store = SqliteContainerStore::open(harness.runtime_dir().join("containers.db"))
+        .expect("open persisted store");
+    let mut stale = store.get(&id).expect("read record").expect("record exists");
+    assert!(stale.user_stopped, "operator stop must persist intent");
+    stale.status = "running".to_string();
+    store.put(&stale).expect("persist stale running record");
+    drop(store);
+    harness.start_daemon();
+
+    let record = SqliteContainerStore::open(harness.runtime_dir().join("containers.db"))
+        .expect("open persisted store")
+        .get(&id)
+        .expect("read record")
+        .expect("record exists");
+    assert!(
+        record.user_stopped,
+        "operator stop intent must survive daemon boot"
+    );
+    let after_boot = inspect_container(&harness, &id);
+    assert_ne!(
+        after_boot["State"]["Status"], "running",
+        "unless-stopped record must remain stopped at boot: inspect={after_boot}"
+    );
+
+    let (status, response) =
+        harness.request("DELETE", &format!("/v1.45/containers/{id}?force=true"));
+    assert_eq!(status, 204, "cleanup response={response}");
 }
 
 #[test]

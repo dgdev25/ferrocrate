@@ -16755,12 +16755,97 @@ fn stream_docker_logs(
 }
 
 #[cfg(target_os = "linux")]
-fn docker_stats_payload(stats: &ferro_core::cgroups::CgroupStats) -> serde_json::Value {
+#[derive(Debug, Clone, Copy)]
+struct DockerCpuSnapshot {
+    total_usage: u64,
+    usage_in_usermode: u64,
+    usage_in_kernelmode: u64,
+    system_cpu_usage: u64,
+    online_cpus: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn docker_host_cpu_usage_nanos() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = stat.lines().next()?;
+    let mut fields = line.split_whitespace();
+    if fields.next()? != "cpu" {
+        return None;
+    }
+    let ticks = fields.try_fold(0_u64, |total, field| {
+        field
+            .parse::<u64>()
+            .ok()
+            .map(|value| total.saturating_add(value))
+    })?;
+    // SAFETY: sysconf only reads the process' immutable clock-tick setting.
+    let ticks_per_second = unsafe { nix::libc::sysconf(nix::libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        return None;
+    }
+    Some(
+        ((ticks as u128).saturating_mul(1_000_000_000) / ticks_per_second as u128)
+            .min(u64::MAX as u128) as u64,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn docker_cpu_snapshot(stats: &ferro_core::cgroups::CgroupStats) -> DockerCpuSnapshot {
+    DockerCpuSnapshot {
+        total_usage: stats.cpu_usage_usec.unwrap_or(0).saturating_mul(1_000),
+        usage_in_usermode: stats.cpu_user_usec.unwrap_or(0).saturating_mul(1_000),
+        usage_in_kernelmode: stats.cpu_system_usec.unwrap_or(0).saturating_mul(1_000),
+        system_cpu_usage: docker_host_cpu_usage_nanos().unwrap_or(0),
+        online_cpus: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_cpu_stats(snapshot: DockerCpuSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "cpu_usage": {
+            "total_usage": snapshot.total_usage,
+            "usage_in_usermode": snapshot.usage_in_usermode,
+            "usage_in_kernelmode": snapshot.usage_in_kernelmode,
+        },
+        "system_cpu_usage": snapshot.system_cpu_usage,
+        "online_cpus": snapshot.online_cpus,
+        "throttling_data": {},
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_stats_payload_with_previous(
+    stats: &ferro_core::cgroups::CgroupStats,
+    current: DockerCpuSnapshot,
+    previous: Option<DockerCpuSnapshot>,
+) -> serde_json::Value {
+    let previous = previous.unwrap_or(DockerCpuSnapshot {
+        total_usage: 0,
+        usage_in_usermode: 0,
+        usage_in_kernelmode: 0,
+        system_cpu_usage: 0,
+        online_cpus: current.online_cpus,
+    });
     serde_json::json!({
         "memory_stats": {"usage": stats.memory_current, "limit": stats.memory_max},
         "pids_stats": {"current": stats.pids_current, "limit_reached": stats.pids_limit_reached},
-        "cpu_stats": {"cpu_usage": {"total_usage": stats.cpu_usage_usec}}
+        "cpu_stats": docker_cpu_stats(current),
+        "precpu_stats": docker_cpu_stats(previous),
+        "networks": {},
+        "blkio_stats": {
+            "io_service_bytes_recursive": [],
+            "io_serviced_recursive": [],
+        },
     })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_stats_payload(stats: &ferro_core::cgroups::CgroupStats) -> serde_json::Value {
+    let current = docker_cpu_snapshot(stats);
+    docker_stats_payload_with_previous(stats, current, None)
 }
 
 #[cfg(target_os = "linux")]
@@ -16797,10 +16882,17 @@ fn stream_docker_stats(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("docker: stats stream write timeout setup failed: {error}"))?;
+    let mut previous_cpu = None;
     loop {
         let stats = runtime.stats(id).map_err(|error| error.to_string())?;
-        let mut body =
-            serde_json::to_vec(&docker_stats_payload(&stats)).map_err(|error| error.to_string())?;
+        let current_cpu = docker_cpu_snapshot(&stats);
+        let mut body = serde_json::to_vec(&docker_stats_payload_with_previous(
+            &stats,
+            current_cpu,
+            previous_cpu,
+        ))
+        .map_err(|error| error.to_string())?;
+        previous_cpu = Some(current_cpu);
         body.push(b'\n');
         write_chunk(stream, &body)?;
         stream.flush().map_err(|error| error.to_string())?;
@@ -22562,6 +22654,24 @@ volumes:
         let payload = docker_stats_payload(&stats);
         assert_eq!(payload["pids_stats"]["current"], 3);
         assert_eq!(payload["pids_stats"]["limit_reached"], 4);
+        assert_eq!(payload["cpu_stats"]["cpu_usage"]["total_usage"], 5_000);
+        assert_eq!(
+            payload["cpu_stats"]["cpu_usage"]["usage_in_usermode"],
+            6_000
+        );
+        assert_eq!(
+            payload["cpu_stats"]["cpu_usage"]["usage_in_kernelmode"],
+            7_000
+        );
+        assert!(payload["cpu_stats"]["system_cpu_usage"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert!(payload["cpu_stats"]["online_cpus"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert!(payload["precpu_stats"].is_object());
+        assert!(payload["networks"].is_object());
+        assert!(payload["blkio_stats"]["io_service_bytes_recursive"].is_array());
     }
 
     #[test]

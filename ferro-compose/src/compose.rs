@@ -142,12 +142,14 @@ pub fn compose_up(project: &ComposeProject) -> ComposeResult<Vec<String>> {
 
 /// Computes the shutdown order (reverse of startup order).
 ///
-/// Services are stopped in reverse dependency order to ensure
-/// dependent services stop before their dependencies.
+/// Services are stopped in reverse dependency order so dependents stop before
+/// their dependencies. The order comes from the same `depends_on` graph
+/// `compose_up` uses — reversing the alphabetically-sorted service list got
+/// this wrong whenever alphabetical and dependency order diverge.
 pub fn compose_down(project: &ComposeProject) -> ComposeResult<Vec<String>> {
-    let mut services = project.services();
-    services.reverse();
-    Ok(services)
+    let mut ordered = compose_up(project)?;
+    ordered.reverse();
+    Ok(ordered)
 }
 
 /// Lists all services in the project (sorted alphabetically).
@@ -251,6 +253,35 @@ services:
         let project = ComposeProject::load(&path).expect("load");
         let down = compose_down(&project).expect("down");
         assert_eq!(down.last().map(|v| v.as_str()), Some("db"));
+    }
+
+    #[test]
+    fn compose_down_stops_dependents_before_dependencies() {
+        // Alphabetical order (app, zk) diverges from dependency order
+        // (zk before app): app depends_on zk, so down must stop app first.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("docker-compose.yml");
+        fs::write(
+            &path,
+            r#"
+version: "3.8"
+services:
+  app:
+    image: busybox:latest
+    depends_on:
+      - zk
+  zk:
+    image: zookeeper:3.8
+"#,
+        )
+        .expect("write compose");
+        let project = ComposeProject::load(&path).expect("load");
+        let down = compose_down(&project).expect("down");
+        assert_eq!(
+            down,
+            vec!["app".to_string(), "zk".to_string()],
+            "dependent 'app' must stop before its dependency 'zk'"
+        );
     }
 
     #[test]

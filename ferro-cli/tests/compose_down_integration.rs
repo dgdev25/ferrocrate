@@ -76,15 +76,16 @@ fn live_web_record(
 }
 
 #[test]
-fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
-    // The fixture needs a live process that the test user cannot signal. A
-    // root test process can signal PID 1, so there is no portable permission
-    // failure in that mode; retain the test for the unprivileged Compose path
-    // where this regression occurred.
-    if nix::unistd::Uid::effective().is_root() {
-        eprintln!("SKIP: requires an unprivileged caller to exercise stop denial");
-        return;
-    }
+fn compose_down_treats_unverifiable_pid_as_exited_and_deletes() {
+    // The record carries a live PID (host init) with no stored process
+    // identity, so the runtime can prove the PID is not the container's
+    // workload and must send no signal at all. Down publishes the stop and
+    // deletes the record. The previous version of this test asserted the
+    // opposite ("stop fails, delete skipped"): stopping this fixture made
+    // the runtime signal a caller-owned child of PID 1 and, on timeout,
+    // escalate to SIGKILL of every process the test user owns — which is
+    // why broad test runs killed the operator's desktop session. A real
+    // stop-failure path needs a fault-injection fixture, not a foreign PID.
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -120,10 +121,16 @@ fn compose_down_stop_failure_explicitly_skips_dependent_delete() {
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("stop failed; delete skipped"));
+    assert!(
+        output.status.success(),
+        "down must succeed for an unverifiable PID: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
-    assert!(store.get(&record.id).unwrap().is_some());
+    assert!(
+        store.get(&record.id).unwrap().is_none(),
+        "record must be deleted once the workload is provably gone"
+    );
 }
 
 #[test]

@@ -2581,6 +2581,18 @@ fn docker_compat_auth_validates_credentials_with_registry() {
     assert!(response.contains("Login Succeeded"), "response={response}");
 }
 
+#[test]
+fn docker_compat_buildkit_routes_name_the_supported_classic_mode() {
+    const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
+    let harness = DaemonHarness::spawn();
+    for (method, path) in [("POST", "/build?version=2"), ("POST", "/session")] {
+        let (status, body) = harness.request(method, path);
+        assert_eq!(status, 501, "{path} response={body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
+        assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+    }
+}
+
 /// Decode a complete Docker multiplexed raw stream into (stream id, payload)
 /// frames; any truncated or invalid header is an error.
 fn decode_raw_frames(raw: &[u8]) -> Result<Vec<(u8, &[u8])>, String> {

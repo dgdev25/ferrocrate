@@ -14562,7 +14562,17 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
                 http_response(200, &body, "application/json")
             }
+            ("POST", "/session") => docker_error_response(
+                501,
+                "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
+            ),
             ("POST", "/build") => {
+                if query.get("version").is_some_and(|value| value == "2") {
+                    return Ok(docker_error_response(
+                        501,
+                        "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
+                    ));
+                }
                 let dockerfile = query
                     .get("dockerfile")
                     .map(String::as_str)

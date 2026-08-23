@@ -42,7 +42,7 @@ use crate::mounts::{
     TmpfsMount,
 };
 use crate::observability::{log_audit_event, log_event, make_audit_event, make_event};
-use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, stop_pid, ProcessLifecycleError};
+use crate::process_lifecycle::{kill_pid, probe_pid, signal_pid, ProcessLifecycleError};
 #[cfg(target_os = "linux")]
 use crate::pty::PtyPair;
 use crate::registry::parse_image_reference;
@@ -3155,6 +3155,7 @@ impl ContainerRuntime {
             health_checked_at_unix: None,
             restart_policy: restart_policy.clone(),
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: stdout_path.display().to_string(),
@@ -3816,6 +3817,7 @@ impl ContainerRuntime {
         // terminal states as a successful no-op so the following delete can
         // complete instead of reporting a spurious post-effect conflict.
         if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
+            self.persist_user_stopped(proof, id, true)?;
             return Ok(());
         }
         // Docker signals the workload's PID 1. Rootless containers record the
@@ -3841,7 +3843,9 @@ impl ContainerRuntime {
         }
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
-        self.persist_effect_status(proof, intent, id, "running", "stopped")?;
+        self.persist_effect_status_with_user_stopped(
+            proof, intent, id, "running", "stopped", true,
+        )?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("stop", Some(id), Some(&record.image), Some("stopped"), None),
@@ -3896,17 +3900,26 @@ impl ContainerRuntime {
                 // The workload is gone; publish the killed state only.
             } else if signal == nix::sys::signal::Signal::SIGKILL {
                 for pid in crate::process_lifecycle::owned_descendants_deepest_first(record.pid) {
+                    if !pid_identity_matches(&record) {
+                        break;
+                    }
                     let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal);
                 }
-                let _ =
-                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(record.pid as i32), signal);
+                if pid_identity_matches(&record) {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(record.pid as i32),
+                        signal,
+                    );
+                }
             } else {
                 let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
-                if !crate::process_lifecycle::signal_pid_verified_parent(
-                    workload_pid,
-                    record.pid,
-                    signal,
-                )? {
+                let delivered = pid_identity_matches(&record)
+                    && crate::process_lifecycle::signal_pid_verified_parent(
+                        workload_pid,
+                        record.pid,
+                        signal,
+                    )?;
+                if !delivered && pid_identity_matches(&record) {
                     // The workload vanished between resolution and delivery
                     // (normal for an exiting container); signal the launcher
                     // as the fallback target.
@@ -3915,13 +3928,20 @@ impl ContainerRuntime {
             }
         } else {
             // Docker's signal 0 is an existence probe. It must not publish a
-            // killed state or trigger cleanup side effects.
+            // killed state or trigger cleanup side effects. A PID without the
+            // stored kernel start time is a dead workload, so never probe a
+            // potentially recycled process.
+            if !pid_identity_matches(&record) {
+                return Err(RuntimeError::InvalidState(
+                    "container workload is not running".to_string(),
+                ));
+            }
             probe_pid(record.pid)?;
             return Ok(());
         }
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
-        self.persist_effect_status(proof, intent, id, "running", "killed")?;
+        self.persist_effect_status_with_user_stopped(proof, intent, id, "running", "killed", true)?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
@@ -3948,6 +3968,44 @@ impl ContainerRuntime {
         expected_status: &str,
         next_status: &str,
     ) -> Result<(), RuntimeError> {
+        self.persist_effect_status_optionally_with_user_stopped(
+            proof,
+            intent,
+            id,
+            expected_status,
+            next_status,
+            None,
+        )
+    }
+
+    fn persist_effect_status_with_user_stopped(
+        &self,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        expected_status: &str,
+        next_status: &str,
+        user_stopped: bool,
+    ) -> Result<(), RuntimeError> {
+        self.persist_effect_status_optionally_with_user_stopped(
+            proof,
+            intent,
+            id,
+            expected_status,
+            next_status,
+            Some(user_stopped),
+        )
+    }
+
+    fn persist_effect_status_optionally_with_user_stopped(
+        &self,
+        proof: &AuthorizedRequest,
+        intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        expected_status: &str,
+        next_status: &str,
+        user_stopped: Option<bool>,
+    ) -> Result<(), RuntimeError> {
         let result = if intent.is_some() {
             self.phase_hook
                 .reached(
@@ -3966,12 +4024,13 @@ impl ContainerRuntime {
                         .map(|reservation| reservation.operation_id)
                 })
                 .ok_or(ContainerStoreError::MutationConflict)?;
-            self.store.transition_status_for_mutation(
+            self.store.transition_status_and_user_stopped_for_mutation(
                 id,
                 operation_id,
                 proof.canonical().resource_generation(),
                 expected_status,
                 next_status,
+                user_stopped,
             )
         } else {
             let operation_id = self
@@ -3983,15 +4042,41 @@ impl ContainerRuntime {
                         .map(|reservation| reservation.operation_id)
                 })
                 .ok_or(ContainerStoreError::MutationConflict)?;
-            self.store.transition_status_for_mutation(
+            self.store.transition_status_and_user_stopped_for_mutation(
                 id,
                 operation_id,
                 proof.canonical().resource_generation(),
                 expected_status,
                 next_status,
+                user_stopped,
             )
         };
         result.map_err(RuntimeError::PostEffectPersistence)
+    }
+
+    fn persist_user_stopped(
+        &self,
+        proof: &AuthorizedRequest,
+        id: &str,
+        user_stopped: bool,
+    ) -> Result<(), RuntimeError> {
+        let operation_id = self
+            .store
+            .get(id)?
+            .and_then(|record| {
+                record
+                    .pending_mutation
+                    .map(|reservation| reservation.operation_id)
+            })
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        self.store
+            .set_user_stopped_for_mutation(
+                id,
+                operation_id,
+                proof.canonical().resource_generation(),
+                user_stopped,
+            )
+            .map_err(RuntimeError::PostEffectPersistence)
     }
 
     pub fn restart(&self, id: &str, timeout: Duration) -> Result<(), RuntimeError> {
@@ -4239,7 +4324,7 @@ impl ContainerRuntime {
             .reached("restart", LifecyclePhasePoint::NetworkApplied)?;
 
         if stop_existing {
-            stop_pid(record.pid, timeout)?;
+            stop_existing_for_restart(&record, timeout)?;
             cleanup_security_ebpf_monitor(&record.id)?;
             cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         }
@@ -4364,6 +4449,7 @@ impl ContainerRuntime {
         record.pid = child_id;
         record.process_start_time = process_start_time_for_pid(child_id);
         record.status = "running".to_string();
+        record.user_stopped = false;
         // A replacement starts a new lifecycle; do not expose the old
         // supervisor's signal-derived exit code while it is being launched.
         record.last_exit_code = None;
@@ -5538,6 +5624,24 @@ fn pid_identity_matches(record: &ContainerRecord) -> bool {
     record
         .process_start_time
         .is_some_and(|expected| process_start_time_for_pid(record.pid) == Some(expected))
+}
+
+/// Stops a workload only when its recorded PID still has the kernel start
+/// time captured for this container. A mismatched identity is already dead
+/// from the runtime's perspective and must never be signalled.
+fn stop_existing_for_restart(
+    record: &ContainerRecord,
+    timeout: Duration,
+) -> Result<(), RuntimeError> {
+    if pid_identity_matches(record) {
+        crate::process_lifecycle::stop_pid_verified(
+            record.pid,
+            record.pid,
+            record.process_start_time,
+            timeout,
+        )?;
+    }
+    Ok(())
 }
 
 fn process_start_time_for_pid(pid: u32) -> Option<u64> {
@@ -13375,15 +13479,24 @@ mod tests {
         runtime
             .stop(&record.id, std::time::Duration::from_millis(50))
             .expect("stop");
+        assert!(
+            runtime
+                .inspect(&record.id)
+                .expect("inspect stopped record")
+                .user_stopped
+        );
 
         runtime.start(&record.id).expect("start");
-        assert_eq!(
-            runtime.inspect(&record.id).expect("inspect").status,
-            "running"
+        let started = runtime.inspect(&record.id).expect("inspect");
+        assert_eq!(started.status, "running");
+        assert!(!started.user_stopped);
+        runtime.kill(&record.id).expect("kill after start");
+        assert!(
+            runtime
+                .inspect(&record.id)
+                .expect("inspect killed record")
+                .user_stopped
         );
-        runtime
-            .stop(&record.id, std::time::Duration::from_millis(50))
-            .expect("stop after start");
 
         runtime.remove(&record.id).expect("remove");
 
@@ -13460,7 +13573,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_updates_pid() {
+    fn restart_updates_pid_and_clears_user_stop_intent() {
         if !can_run_containers() {
             eprintln!("SKIP: requires root privileges for container operations");
             return;
@@ -13495,6 +13608,13 @@ mod tests {
             )
             .expect("run");
 
+        let mut stopped_by_user = runtime.inspect(&record.id).expect("inspect before restart");
+        stopped_by_user.user_stopped = true;
+        runtime
+            .store
+            .put(&stopped_by_user)
+            .expect("persist user stop intent");
+
         runtime
             .restart(&record.id, std::time::Duration::from_millis(50))
             .expect("restart");
@@ -13505,6 +13625,7 @@ mod tests {
             .find(|c| c.id == record.id)
             .expect("record");
         assert_ne!(updated.pid, record.pid);
+        assert!(!updated.user_stopped);
 
         // The replaced supervisor must not publish its signal-derived `-1`
         // after the replacement exits successfully.
@@ -13552,6 +13673,7 @@ mod tests {
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
@@ -13617,6 +13739,7 @@ mod tests {
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),
@@ -14150,6 +14273,7 @@ mod tests {
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "/tmp/fixture.stdout".to_string(),
@@ -14177,6 +14301,79 @@ mod tests {
             managed_cleanup_provenance: None,
             managed_host_veth: None,
         }
+    }
+
+    #[test]
+    fn restart_never_signals_a_pid_without_matching_start_time() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn unrelated process");
+        let mut record = fixture_container_record("stale-restart", "running");
+        record.pid = child.id();
+        record.process_start_time = Some(0);
+
+        super::stop_existing_for_restart(&record, std::time::Duration::from_millis(1))
+            .expect("stale workload is already dead");
+        assert!(
+            child.try_wait().expect("check unrelated process").is_none(),
+            "restart must not signal a PID whose identity does not match"
+        );
+        child.kill().expect("cleanup unrelated process");
+        child.wait().expect("reap unrelated process");
+    }
+
+    #[test]
+    fn explicit_stop_and_kill_persist_user_stop_intent_for_dead_workloads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+
+        let stopped = fixture_container_record("explicit-stop", "running");
+        runtime.store.put(&stopped).expect("seed stop record");
+        runtime
+            .stop(&stopped.id, std::time::Duration::ZERO)
+            .expect("stop dead workload");
+        assert!(
+            runtime
+                .inspect(&stopped.id)
+                .expect("inspect stopped record")
+                .user_stopped
+        );
+
+        let killed = fixture_container_record("explicit-kill", "running");
+        runtime.store.put(&killed).expect("seed kill record");
+        runtime.kill(&killed.id).expect("kill dead workload");
+        assert!(
+            runtime
+                .inspect(&killed.id)
+                .expect("inspect killed record")
+                .user_stopped
+        );
+    }
+
+    #[test]
+    fn signal_zero_rejects_a_pid_without_matching_start_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn unrelated process");
+        let mut record = fixture_container_record("stale-signal-zero", "running");
+        record.pid = child.id();
+        record.process_start_time = Some(0);
+        runtime.store.put(&record).expect("seed stale record");
+
+        assert!(
+            runtime.kill_with_signal(&record.id, None).is_err(),
+            "signal zero must treat a mismatched PID identity as dead"
+        );
+        assert!(
+            child.try_wait().expect("check unrelated process").is_none(),
+            "signal zero must not target an unrelated process"
+        );
+        child.kill().expect("cleanup unrelated process");
+        child.wait().expect("reap unrelated process");
     }
 
     #[derive(Default)]
@@ -15447,6 +15644,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: now_unix(),
             stdout_path: "stdout.log".to_string(),

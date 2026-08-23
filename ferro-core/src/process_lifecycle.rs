@@ -327,7 +327,12 @@ pub fn process_start_time_of(pid: u32) -> Option<u64> {
         return None;
     }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 /// Docker-style graceful stop of the workload's PID 1, verified against the
@@ -341,8 +346,30 @@ pub fn stop_pid_verified(
     parent_start: Option<u64>,
     timeout: Duration,
 ) -> Result<(), ProcessLifecycleError> {
+    let parent_identity_matches =
+        || parent_start.is_some() && process_start_time_of(parent) == parent_start;
+    if !parent_identity_matches() {
+        return Ok(());
+    }
     if child == parent {
-        return stop_pid(child, timeout);
+        signal_pid(parent, Signal::SIGTERM)?;
+        if timeout == Duration::MAX {
+            while parent_identity_matches() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            return Ok(());
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !parent_identity_matches() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if parent_identity_matches() {
+            signal_pid(parent, Signal::SIGKILL)?;
+        }
+        return Ok(());
     }
     if !signal_pid_verified_parent(child, parent, Signal::SIGTERM)? {
         return Ok(()); // workload already exited
@@ -361,19 +388,24 @@ pub fn stop_pid_verified(
     // private PID namespace, killing only PID 1 orphans its grandchildren.
     // Re-verify the launcher's identity first: if the PID was recycled
     // during the graceful wait, the subtree under it is not the container.
-    if parent_start.is_none() || process_start_time_of(parent) != parent_start {
+    if !parent_identity_matches() {
         return Ok(());
     }
     for pid in owned_descendants_deepest_first(parent) {
+        if !parent_identity_matches() {
+            return Ok(());
+        }
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
     }
-    let _ = kill(Pid::from_raw(parent as i32), Signal::SIGKILL);
+    if parent_identity_matches() {
+        let _ = kill(Pid::from_raw(parent as i32), Signal::SIGKILL);
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_pid, probe_pid, stop_pid, ManagedProcess, ProcessState};
+    use super::{kill_pid, probe_pid, stop_pid, stop_pid_verified, ManagedProcess, ProcessState};
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -459,5 +491,21 @@ mod tests {
     fn probe_pid_matches_signal_zero_semantics() {
         let proc = ManagedProcess::start(shell_path(), &["-c", "sleep 1"]).expect("process starts");
         probe_pid(proc.pid()).expect("live process probe");
+    }
+
+    #[test]
+    fn verified_stop_does_not_signal_when_parent_start_time_mismatches() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn unrelated process");
+        stop_pid_verified(child.id(), child.id(), Some(0), Duration::from_millis(1))
+            .expect("mismatched identity is treated as dead");
+        assert!(
+            child.try_wait().expect("check unrelated process").is_none(),
+            "verified stop must not signal a PID with a mismatched start time"
+        );
+        child.kill().expect("cleanup unrelated process");
+        child.wait().expect("reap unrelated process");
     }
 }

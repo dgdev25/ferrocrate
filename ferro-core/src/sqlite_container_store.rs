@@ -344,13 +344,14 @@ impl SqliteContainerStore {
         Ok(())
     }
 
-    pub(crate) fn transition_status_for_mutation(
+    pub(crate) fn transition_status_and_user_stopped_for_mutation(
         &self,
         id: &str,
         operation_id: [u8; 16],
         expected_generation: u64,
         expected_status: &str,
         next_status: &str,
+        user_stopped: Option<bool>,
     ) -> Result<(), ContainerStoreError> {
         self.transaction(|transaction| {
             let mut record =
@@ -368,6 +369,39 @@ impl SqliteContainerStore {
                 return Err(ContainerStoreError::MutationConflict);
             }
             record.status = next_status.to_string();
+            if let Some(user_stopped) = user_stopped {
+                record.user_stopped = user_stopped;
+            }
+            let payload = Self::encode(&record)?;
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![id, payload],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn set_user_stopped_for_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        expected_generation: u64,
+        user_stopped: bool,
+    ) -> Result<(), ContainerStoreError> {
+        self.transaction(|transaction| {
+            let mut record =
+                Self::get_tx(transaction, id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            let reservation = record
+                .pending_mutation
+                .as_ref()
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != expected_generation
+                || record.mutation_generation != expected_generation
+            {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            record.user_stopped = user_stopped;
             let payload = Self::encode(&record)?;
             transaction.execute(
                 "UPDATE containers SET payload=?2 WHERE id=?1",
@@ -720,7 +754,14 @@ mod tests {
             .reserve_mutation("container-1", "created", 1, operation_id, "container.start")
             .expect("reserve");
         store
-            .transition_status_for_mutation("container-1", operation_id, 1, "created", "running")
+            .transition_status_and_user_stopped_for_mutation(
+                "container-1",
+                operation_id,
+                1,
+                "created",
+                "running",
+                None,
+            )
             .expect("transition");
         store
             .mark_mutation_effect("container-1", operation_id, true)
@@ -740,6 +781,34 @@ mod tests {
         store
             .finish_mutation("container-1", operation_id)
             .expect("idempotent finish");
+    }
+
+    #[test]
+    fn sqlite_store_round_trips_user_stop_intent_and_defaults_legacy_records() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SqliteContainerStore::open(temp.path()).expect("open");
+        let mut stopped = record("operator-stopped");
+        stopped.user_stopped = true;
+        store.put(&stopped).expect("put stopped record");
+
+        let restored = store
+            .get("operator-stopped")
+            .expect("get")
+            .expect("stored record");
+        assert!(restored.user_stopped);
+
+        let legacy: ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "legacy-record",
+            "pid": 0,
+            "image": "alpine:latest",
+            "command": [],
+            "created_at_unix": 0,
+            "stdout_path": "stdout.log",
+            "stderr_path": "stderr.log",
+            "status": "created"
+        }))
+        .expect("legacy record deserializes");
+        assert!(!legacy.user_stopped);
     }
 
     #[test]

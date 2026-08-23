@@ -120,6 +120,10 @@ pub struct ContainerRecord {
     pub restart_policy: RestartPolicy,
     #[serde(default)]
     pub restart_count: u32,
+    /// Set only by an explicit operator stop or kill. This is durable intent
+    /// used by restart reconciliation for the `unless-stopped` policy.
+    #[serde(default)]
+    pub user_stopped: bool,
     #[serde(default)]
     pub last_exit_code: Option<i32>,
     pub created_at_unix: u64,
@@ -244,6 +248,7 @@ impl ContainerRecord {
             health_checked_at_unix: None,
             restart_policy: RestartPolicy::No,
             restart_count: 0,
+            user_stopped: false,
             last_exit_code: None,
             created_at_unix: 0,
             stdout_path: String::new(),

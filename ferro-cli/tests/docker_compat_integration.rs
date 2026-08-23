@@ -8,6 +8,7 @@ use ferro_core::sqlite_container_store::SqliteContainerStore;
 use sha2::Digest;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -136,6 +137,10 @@ impl DaemonHarness {
     ) -> Child {
         Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env(
+                "FERROCRATE_AUTH_FILE",
+                runtime_dir.path().join("registry-auth.json"),
+            )
             .env("FERROCRATE_NETWORK_KERNEL_STATE", kernel_state_path)
             .env(
                 "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
@@ -2516,14 +2521,6 @@ fn docker_compat_put_archive_replaces_type_changing_entries() {
 fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     let harness = DaemonHarness::spawn();
 
-    let auth_request = "POST /auth HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"username\":\"u\",\"password\":\"p\"}";
-    let (status, body) = harness.request_raw(auth_request);
-    assert_eq!(status, 501, "auth response={body}");
-    assert!(
-        body.contains("auth is unsupported") && body.contains("registry credential backend"),
-        "body={body}"
-    );
-
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/attach/ws");
     assert_eq!(status, 501, "attach/ws response={body}");
     assert!(
@@ -2541,6 +2538,47 @@ fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     // An empty ps_args stays a no-op and preserves the missing-container 404.
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=");
     assert_eq!(status, 404, "empty ps_args response={body}");
+}
+
+#[test]
+fn docker_compat_auth_validates_credentials_with_registry() {
+    let registry = TcpListener::bind("127.0.0.1:0").expect("registry listener");
+    let address = registry.local_addr().expect("registry address");
+    let registry_thread = thread::spawn(move || {
+        let (mut stream, _) = registry.accept().expect("registry request");
+        let mut request = [0u8; 4096];
+        let read = stream.read(&mut request).expect("read registry request");
+        let request = String::from_utf8_lossy(&request[..read]);
+        let expected = base64::engine::general_purpose::STANDARD.encode("alice:secret");
+        assert!(
+            request.starts_with("GET /v2/ HTTP/1.1"),
+            "request={request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: basic {expected}").to_ascii_lowercase()),
+            "request={request}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("registry response");
+    });
+    let harness = DaemonHarness::spawn();
+    let body = serde_json::json!({
+        "username": "alice",
+        "password": "secret",
+        "serveraddress": address.to_string()
+    })
+    .to_string();
+    let request = format!(
+        "POST /auth HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 200, "auth response={response}");
+    registry_thread.join().expect("registry thread");
+    assert!(response.contains("Login Succeeded"), "response={response}");
 }
 
 /// Decode a complete Docker multiplexed raw stream into (stream id, payload)

@@ -1,0 +1,12 @@
+[Unit]
+Description=FerroCrate container runtime daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ferrocrate daemon --docker-compat
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

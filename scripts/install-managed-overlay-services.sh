@@ -12,7 +12,7 @@ config_root=${FERROCRATE_CONFIG_ROOT:-/etc/ferrocrate}
 state_root=${FERROCRATE_STATE_ROOT:-/var/lib/ferrocrate}
 runtime_group=${FERROCRATE_RUNTIME_GROUP:-ferrocrate}
 
-for binary in ferro-mgr ferro-agent ferro-netd; do
+for binary in ferrocrate ferro-mgr ferro-agent ferro-netd; do
   if [[ ! -x "$install_root/$binary" ]]; then
     echo "missing installed binary: $install_root/$binary" >&2
     exit 1
@@ -27,7 +27,7 @@ done
 install -d -m 0750 -o ferro-mgr -g "$runtime_group" "$state_root"
 install -d -m 0770 -o ferro-agent -g "$runtime_group" /run/ferrocrate
 install -d -m 0750 -o root -g "$runtime_group" "$config_root"
-for unit in ferro-mgr ferro-agent ferro-netd; do
+for unit in ferrocrate ferro-mgr ferro-agent ferro-netd; do
   install -m 0644 "$repo_root/packaging/systemd/$unit.service" "/etc/systemd/system/$unit.service"
 done
 

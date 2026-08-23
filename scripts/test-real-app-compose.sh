@@ -6,7 +6,7 @@ set -euo pipefail
 # host loopback via rootless host networking.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-project="$repo_root/scripts/test-fixtures/real-app"
+project="$repo_root/tests/fixtures/real-app"
 timeout_secs="${FERROCRATE_REAL_APP_TIMEOUT_SECONDS:-240}"
 BIN="${FERROCRATE_BIN:-$repo_root/target/release/ferro-cli}"
 runtime="$(mktemp -d)"

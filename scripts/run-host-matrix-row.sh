@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
+source "$repo_root/scripts/process-tree-ownership.sh"
 manifest="$repo_root/docs/evidence/host-matrix/rows.tsv"
 row_id="${1:-}"
 
@@ -50,4 +51,162 @@ if [[ "${FERROCRATE_RUN_AUTHENTICATED_OVERLAY_ROW:-1}" == 1 ]]; then
     >"$evidence_dir/authenticated-overlay.log" 2>&1
 fi
 
+conformance_timeout="${FERROCRATE_MATRIX_CONFORMANCE_TIMEOUT_SECONDS:-900}"
+[[ "$conformance_timeout" =~ ^[1-9][0-9]*$ ]] && (( conformance_timeout <= 3600 )) || {
+  echo "host matrix row $row_id conformance harness failure: FERROCRATE_MATRIX_CONFORMANCE_TIMEOUT_SECONDS must be an integer in 1..3600" >&2
+  exit 2
+}
+command -v timeout >/dev/null 2>&1 || {
+  echo "host matrix row $row_id conformance harness failure: timeout is required" >&2
+  exit 2
+}
+
+parity_scoreboard="$evidence_dir/parity-scoreboard.md"
+conformance_log="$evidence_dir/docker-client-conformance.log"
+parity_scoreboard_tmp="$(mktemp "$evidence_dir/.parity-scoreboard.md.tmp.XXXXXX")" || {
+  echo "host matrix row $row_id conformance harness failure: cannot create temporary scoreboard" >&2
+  exit 2
+}
+conformance_log_tmp="$(mktemp "$evidence_dir/.docker-client-conformance.log.tmp.XXXXXX")" || {
+  rm -f -- "$parity_scoreboard_tmp"
+  echo "host matrix row $row_id conformance harness failure: cannot create temporary execution log" >&2
+  exit 2
+}
+conformance_process_registry="$(mktemp "$evidence_dir/.conformance-processes.tmp.XXXXXX")" || {
+  rm -f -- "$parity_scoreboard_tmp" "$conformance_log_tmp"
+  echo "host matrix row $row_id conformance harness failure: cannot create process registry" >&2
+  exit 2
+}
+conformance_supervisor_pid=""
+conformance_tracker_pid=""
+
+cleanup_conformance_temps() {
+  rm -f -- "$parity_scoreboard_tmp" "$conformance_log_tmp" "$conformance_process_registry"
+}
+
+process_has_token() {
+  local pid="$1" value="$2" entry
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/environ" ]] || return 1
+  while IFS= read -r -d '' entry; do
+    [[ "$entry" == "FERROCRATE_CONFORMANCE_WRAPPER_TOKEN=$value" ]] && return 0
+  done <"/proc/$pid/environ" 2>/dev/null
+  return 1
+}
+
+owned_conformance_processes() {
+  local value="$1" environ_file pid
+  grep -lFzx -- "FERROCRATE_CONFORMANCE_WRAPPER_TOKEN=$value" \
+    /proc/[0-9]*/environ 2>/dev/null |
+    while IFS= read -r environ_file; do
+      pid="${environ_file#/proc/}"
+      printf '%s\n' "${pid%/environ}"
+    done
+}
+
+terminate_conformance_processes() {
+  local value="$1" pid
+  local -a pids=()
+  mapfile -t pids < <(owned_conformance_processes "$value")
+  for pid in "${pids[@]}"; do
+    process_has_token "$pid" "$value" || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 50); do
+    mapfile -t pids < <(owned_conformance_processes "$value")
+    ((${#pids[@]} == 0)) && return 0
+    sleep 0.02
+  done
+  mapfile -t pids < <(owned_conformance_processes "$value")
+  for pid in "${pids[@]}"; do
+    process_has_token "$pid" "$value" || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
+
+conformance_process_token="ferrocrate-host-row-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+
+cleanup_conformance_execution() {
+  if [[ -n "$conformance_tracker_pid" ]]; then
+    ferrocrate_terminate_process_tree "$conformance_tracker_pid" "$conformance_process_registry"
+    conformance_tracker_pid=""
+  fi
+  terminate_conformance_processes "$conformance_process_token"
+  cleanup_conformance_temps
+}
+trap cleanup_conformance_execution EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+remove_stale_conformance_evidence() {
+  local artifact
+  for artifact in "$parity_scoreboard" "$conformance_log"; do
+    if [[ -L "$artifact" || -e "$artifact" ]]; then
+      [[ -L "$artifact" || -f "$artifact" ]] || return 1
+      rm -f -- "$artifact" || return 1
+    fi
+  done
+}
+
+if ! remove_stale_conformance_evidence; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot safely remove stale conformance evidence" >&2
+  exit 2
+fi
+
+set +e
+timeout --signal=TERM --kill-after=5s "${conformance_timeout}s" \
+  env FERROCRATE_CONFORMANCE_WRAPPER_TOKEN="$conformance_process_token" \
+  DOCKER_BUILDKIT=0 bash "$repo_root/scripts/docker-client-conformance.sh" \
+  --output "$parity_scoreboard_tmp" \
+  --log "$conformance_log_tmp" &
+conformance_supervisor_pid=$!
+if ! ferrocrate_start_process_tracker "$conformance_supervisor_pid" \
+    "$conformance_process_registry" conformance_tracker_pid; then
+  kill -TERM -- "-$conformance_supervisor_pid" 2>/dev/null ||
+    kill -TERM "$conformance_supervisor_pid" 2>/dev/null || true
+  wait "$conformance_supervisor_pid" 2>/dev/null || true
+  echo "host matrix row $row_id conformance harness failure: cannot track conformance descendants" >&2
+  exit 2
+fi
+wait "$conformance_supervisor_pid"
+conformance_status=$?
+set -e
+ferrocrate_terminate_process_tree "$conformance_tracker_pid" "$conformance_process_registry"
+conformance_tracker_pid=""
+terminate_conformance_processes "$conformance_process_token"
+
+if [[ "$conformance_status" == 124 ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: timed out after ${conformance_timeout}s" >&2
+  exit 2
+fi
+if [[ "$conformance_status" != 0 && "$conformance_status" != 1 ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: exit=$conformance_status" >&2
+  exit 2
+fi
+if [[ ! -s "$parity_scoreboard_tmp" || ! -s "$conformance_log_tmp" ]]; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: exit=$conformance_status without two fresh evidence files" >&2
+  exit 2
+fi
+if ! mv -f -- "$parity_scoreboard_tmp" "$parity_scoreboard"; then
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot publish parity scoreboard" >&2
+  exit 2
+fi
+if ! mv -f -- "$conformance_log_tmp" "$conformance_log"; then
+  rm -f -- "$parity_scoreboard"
+  cleanup_conformance_temps
+  echo "host matrix row $row_id conformance harness failure: cannot publish conformance execution log" >&2
+  exit 2
+fi
+
+if [[ "$conformance_status" == 1 ]]; then
+  echo "host matrix row $row_id completed conformance evidence with command failures: $parity_scoreboard, $conformance_log" >&2
+  exit 1
+fi
+
+trap - EXIT INT TERM
+cleanup_conformance_temps
 printf 'host matrix row passed: %s\n' "$row_id"

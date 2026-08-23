@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${FAKE_DOCKER_LOG:-}" ]]; then
+  printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
+fi
+if [[ "${FAKE_DOCKER_SAME_ID_FOREIGN_ALIAS:-0}" == 1 && "${1:-}" == image && "${2:-}" == rm ]]; then
+  if [[ "${3:-}" == -f && "${4:-}" == sha256:2222222222222222222222222222222222222222222222222222222222222222 ]]; then
+    printf 'foreign-image-alias-deleted\n' >>"$FAKE_DOCKER_LOG"
+    exit 0
+  fi
+  if [[ "${3:-}" == sha256:2222222222222222222222222222222222222222222222222222222222222222 ]]; then
+    printf 'foreign-image-alias-preserved\n' >>"$FAKE_DOCKER_LOG"
+    exit 1
+  fi
+fi
+if [[ "${FAKE_DOCKER_REPLACE_AFTER_INSPECT:-0}" == 1 && -n "${FAKE_DOCKER_STATE:-}" ]]; then
+  if [[ "${1:-}" == rm && "${3:-}" == ferrocrate-parity-* && -f "${FAKE_DOCKER_STATE}.container-replaced" ]]; then
+    printf 'replacement-container-deleted %s\n' "$3" >>"$FAKE_DOCKER_LOG"
+  elif [[ "${1:-}" == image && "${2:-}" == rm && "${3:-}" == ferrocrate-parity-* && -f "${FAKE_DOCKER_STATE}.image-replaced" ]]; then
+    printf 'replacement-image-deleted %s\n' "$3" >>"$FAKE_DOCKER_LOG"
+  elif [[ "${1:-}" == volume && "${2:-}" == rm && "${3:-}" == ferrocrate-parity-* && -f "${FAKE_DOCKER_STATE}.volume-replaced" ]]; then
+    printf 'replacement-volume-deleted %s\n' "$3" >>"$FAKE_DOCKER_LOG"
+  fi
+fi
+if [[ "${1:-}" == run || "${1:-}" == volume || "${1:-}" == build ]]; then
+  for argument in "$@"; do
+    if [[ "$argument" == io.ferrocrate.parity-run=* && -n "${FAKE_DOCKER_STATE:-}" ]]; then
+      printf '%s\n' "${argument#io.ferrocrate.parity-run=}" >"$FAKE_DOCKER_STATE"
+    fi
+  done
+fi
+if [[ "${1:-}" == build && -n "${FAKE_DOCKER_SIGNAL_BUILD_NUMBER:-}" ]]; then
+  build_count_file="${FAKE_DOCKER_STATE:?}.build-count"
+  build_count=0
+  [[ ! -f "$build_count_file" ]] || build_count="$(cat "$build_count_file")"
+  build_count=$((build_count + 1))
+  printf '%s\n' "$build_count" >"$build_count_file"
+  if [[ "$build_count" == "$FAKE_DOCKER_SIGNAL_BUILD_NUMBER" ]]; then
+    for _ in $(seq 1 200); do
+      [[ -s "${FAKE_BENCH_RUNNER_PID_FILE:?}" ]] && break
+      sleep 0.01
+    done
+    runner_pid="$(cat "$FAKE_BENCH_RUNNER_PID_FILE")"
+    kill -TERM "$runner_pid"
+    for _ in $(seq 1 200); do
+      [[ ! -r "/proc/$runner_pid/stat" ]] && break
+      runner_state="$(awk '{ print $3 }' "/proc/$runner_pid/stat" 2>/dev/null || true)"
+      [[ "$runner_state" == Z ]] && break
+      sleep 0.01
+    done
+    exit 143
+  fi
+fi
+if [[ "${1:-}" == image && "${2:-}" == rm && "${3:-}" == alpine:3.19 && "${FAKE_DOCKER_FAIL_PULL_EVICTION:-0}" == 1 ]]; then
+  exit 42
+fi
+if [[ "${1:-}" == image && "${2:-}" == ls ]]; then
+  if [[ " $* " == *' reference=alpine:3.19 '* && "${FAKE_DOCKER_FAIL_PULL_EVICTION:-0}" == 1 ]]; then
+    printf 'sha256:3333333333333333333333333333333333333333333333333333333333333333\n'
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == container && "${2:-}" == inspect || "${1:-}" == volume && "${2:-}" == inspect || "${1:-}" == image && "${2:-}" == inspect && "${3:-}" != alpine:3.19 ]]; then
+  owner=''
+  if [[ "${FAKE_DOCKER_FOREIGN_CONTAINER:-0}" == 1 ]]; then
+    owner='foreign-run'
+  elif [[ -n "${FAKE_DOCKER_STATE:-}" && -f "${FAKE_DOCKER_STATE}" ]]; then
+    owner="$(cat "$FAKE_DOCKER_STATE")"
+  fi
+  if [[ "${FAKE_DOCKER_REPLACE_AFTER_INSPECT:-0}" == 1 && -n "$owner" ]]; then
+    : >"${FAKE_DOCKER_STATE}.${1}-replaced"
+  fi
+  if [[ " $* " == *' .Id '* ]]; then
+    if [[ "${1:-}" == image ]]; then
+      printf '%s\tsha256:2222222222222222222222222222222222222222222222222222222222222222\n' "$owner"
+    else
+      printf '%s\t1111111111111111111111111111111111111111111111111111111111111111\n' "$owner"
+    fi
+  elif [[ -n "$owner" ]]; then
+    printf '%s\n' "$owner"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == image && "${2:-}" == inspect ]]; then
+  [[ "${3:-}" == alpine:3.19 ]] && exit 1
+  exit 0
+fi
+if [[ "${1:-}" == version ]]; then
+  printf 'fixture-docker\n'
+  exit 0
+fi
+if [[ "${FAKE_DOCKER_FAIL_PS_A:-0}" == 1 && "${1:-}" == ps && "${2:-}" == -a ]]; then
+  exit 42
+fi
+if [[ "${FAKE_DOCKER_FAIL_RUN:-0}" == 1 && "${1:-}" == run ]]; then
+  exit 124
+fi
+exit 0

@@ -1074,15 +1074,15 @@ fn plugin_management_family_reports_explicit_boundaries() {
 }
 
 #[test]
-fn unsupported_network_attachment_mutations_report_an_explicit_boundary() {
+fn network_attachment_mutations_validate_real_docker_payloads() {
     let harness = DaemonHarness::spawn();
     for operation in ["connect", "disconnect"] {
         let path = format!("/networks/matrix-network/{operation}");
-        let (status, body) = harness.request("POST", &path, "{}");
+        let (status, body) =
+            harness.request("POST", &path, r#"{"Container":"missing-container"}"#);
         assert_eq!(status, 404, "{operation} status: {body}");
         assert!(
-            body.contains(&format!("network {operation} is unsupported"))
-                && body.contains("one durable network attachment"),
+            body.contains("container not found") && !body.contains("unsupported"),
             "{operation} body={body}"
         );
     }

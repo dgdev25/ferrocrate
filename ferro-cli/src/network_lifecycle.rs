@@ -1648,7 +1648,12 @@ pub(crate) fn delete_authorized(
 
     if associations
         .iter()
-        .any(|record| record.network_name.as_deref() == Some(logical_name))
+        .any(|record| {
+            record
+                .effective_network_endpoints()
+                .iter()
+                .any(|endpoint| endpoint.network_name == logical_name)
+        })
     {
         finish_permit(permit, false)?;
         return Err(NetworkLifecycleError::InUse(logical_name.to_string()));

@@ -10239,6 +10239,36 @@ fn resolve_named_network(runtime_dir: &Path, name: &str) -> Result<NetworkRecord
         .ok_or_else(|| format!("network: not found {name}"))
 }
 
+fn docker_named_endpoint_config(
+    runtime_dir: &Path,
+    name: &str,
+) -> Result<ferro_core::runtime::NamedNetworkEndpointConfig, String> {
+    if name == "bridge" {
+        let cidr = std::env::var("FERROCRATE_BRIDGE_CIDR")
+            .unwrap_or_else(|_| "10.0.0.1/24".to_string());
+        let (gateway, prefix) = parse_ipv4_cidr(&cidr)?;
+        let subnet = subnet_network_addr(gateway, prefix);
+        return Ok(ferro_core::runtime::NamedNetworkEndpointConfig {
+            network_name: "bridge".to_string(),
+            generation: 1,
+            bridge_name: std::env::var("FERROCRATE_BRIDGE_NAME")
+                .unwrap_or_else(|_| "ferro0".to_string()),
+            ipv4_subnet: format!("{subnet}/{prefix}"),
+            ipv4_gateway: gateway.to_string(),
+            ipv6_gateway_cidr: std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok(),
+        });
+    }
+    let record = resolve_named_network(runtime_dir, name)?;
+    Ok(ferro_core::runtime::NamedNetworkEndpointConfig {
+        network_name: record.name,
+        generation: record.generation,
+        bridge_name: record.bridge_name,
+        ipv4_subnet: record.subnet,
+        ipv4_gateway: record.gateway,
+        ipv6_gateway_cidr: record.ipv6_cidr,
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn handle_network(
     runtime_dir: &Path,
@@ -10430,7 +10460,10 @@ fn handle_network_authorized(
                         &filters,
                     )
                     && !associations.iter().any(|container| {
-                        container.network_name.as_deref() == Some(record.name.as_str())
+                        container
+                            .effective_network_endpoints()
+                            .iter()
+                            .any(|endpoint| endpoint.network_name == record.name)
                     })
             }) {
                 let proof = authorization
@@ -11359,7 +11392,12 @@ fn remove_owned_compose_networks(
         };
         if associations
             .iter()
-            .any(|container| container.network_name.as_deref() == Some(record.name.as_str()))
+            .any(|container| {
+                container
+                    .effective_network_endpoints()
+                    .iter()
+                    .any(|endpoint| endpoint.network_name == record.name)
+            })
         {
             return Err(format!(
                 "compose: cannot remove owned network {name} while containers remain attached"
@@ -13309,6 +13347,49 @@ struct DockerIpamConfig {
     subnet: Option<String>,
     #[serde(rename = "Gateway")]
     gateway: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize)]
+struct DockerNetworkConnectWireRequest {
+    #[serde(rename = "Container")]
+    container: String,
+    #[serde(rename = "EndpointConfig", default)]
+    endpoint_config: DockerEndpointConfig,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, Deserialize)]
+struct DockerEndpointConfig {
+    #[serde(rename = "Aliases", default)]
+    aliases: Vec<String>,
+    #[serde(rename = "IPAMConfig", default)]
+    ipam: DockerEndpointIpamConfig,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, Deserialize)]
+struct DockerEndpointIpamConfig {
+    #[serde(rename = "IPv4Address", default)]
+    ipv4_address: String,
+    #[serde(rename = "IPv6Address", default)]
+    ipv6_address: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+struct DockerNetworkConnectRequest {
+    container: String,
+    aliases: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct DockerNetworkDisconnectRequest {
+    #[serde(rename = "Container")]
+    container: String,
+    #[serde(rename = "Force", default)]
+    force: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -16133,18 +16214,76 @@ fn handle_docker_compat_connection(
             ("POST", path)
                 if path.starts_with("/networks/") && path.ends_with("/connect") =>
             {
-                docker_error_response(
-                    404,
-                    "docker: network connect is unsupported; containers currently support one durable network attachment",
-                )
+                let network_name = path
+                    .trim_start_matches("/networks/")
+                    .trim_end_matches("/connect")
+                    .trim_end_matches('/');
+                let request = parse_docker_network_connect_request(&request.body)?;
+                let id = resolve_container_id(&runtime, &request.container)?;
+                let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                let permit = surface_authorization
+                    .authorize_named(
+                        &origin,
+                        AuthorizationAction::NetworkAttach,
+                        ResourceKind::Network,
+                        &config.network_name,
+                        config.generation,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let result = runtime.connect_network(&id, config);
+                match result {
+                    Ok(()) => {
+                        permit.finish(true).map_err(|error| error.to_string())?;
+                        http_response(200, &[], "text/plain")
+                    }
+                    Err(error) => {
+                        if matches!(error, ferro_core::runtime::RuntimeError::PostEffectPersistence(_)) {
+                            permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                        } else {
+                            permit.finish(false).map_err(|finish| finish.to_string())?;
+                        }
+                        return Err(error.to_string());
+                    }
+                }
             }
             ("POST", path)
                 if path.starts_with("/networks/") && path.ends_with("/disconnect") =>
             {
-                docker_error_response(
-                    404,
-                    "docker: network disconnect is unsupported; containers currently support one durable network attachment",
-                )
+                let network_name = path
+                    .trim_start_matches("/networks/")
+                    .trim_end_matches("/disconnect")
+                    .trim_end_matches('/');
+                let request = parse_docker_network_disconnect_request(&request.body)?;
+                let id = resolve_container_id(&runtime, &request.container)?;
+                let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                let permit = surface_authorization
+                    .authorize_named(
+                        &origin,
+                        AuthorizationAction::NetworkDetach,
+                        ResourceKind::Network,
+                        &config.network_name,
+                        config.generation,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let result = runtime.disconnect_network(&id, &config.network_name);
+                match result {
+                    Ok(()) => {
+                        permit.finish(true).map_err(|error| error.to_string())?;
+                        http_response(200, &[], "text/plain")
+                    }
+                    Err(error) if request.force && error.to_string().contains("not connected") => {
+                        permit.finish(true).map_err(|finish| finish.to_string())?;
+                        http_response(200, &[], "text/plain")
+                    }
+                    Err(error) => {
+                        if matches!(error, ferro_core::runtime::RuntimeError::PostEffectPersistence(_)) {
+                            permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                        } else {
+                            permit.finish(false).map_err(|finish| finish.to_string())?;
+                        }
+                        return Err(error.to_string());
+                    }
+                }
             }
             ("POST", path) if path.starts_with("/images/") && path.ends_with("/push") => {
                 let encoded = path
@@ -17321,10 +17460,8 @@ fn docker_network_ipv6_config(record: &NetworkRecord) -> Option<serde_json::Valu
     }))
 }
 
-/// Project the runtime's single persisted network association into Docker's
-/// network-inspect container map.  This is intentionally a read-only view:
-/// network connect/disconnect mutation remains unsupported until the runtime
-/// can represent multiple attachments with durable endpoint identities.
+/// Project every durable endpoint association into Docker's network-inspect
+/// container map.
 #[cfg(target_os = "linux")]
 fn docker_network_containers(
     runtime: &ContainerRuntime,
@@ -17341,9 +17478,13 @@ fn docker_network_containers_from_records(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut containers = serde_json::Map::new();
     for container in records {
-        if container.network_name.as_deref() != Some(network) {
+        let Some(endpoint) = container
+            .effective_network_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.network_name == network)
+        else {
             continue;
-        }
+        };
         let name = container
             .name
             .as_deref()
@@ -17353,10 +17494,10 @@ fn docker_network_containers_from_records(
             container.id.clone(),
             serde_json::json!({
                 "Name": name,
-                "EndpointID": "",
+                "EndpointID": endpoint.endpoint_id,
                 "MacAddress": "",
-                "IPv4Address": container.ip_address.as_deref().unwrap_or_default(),
-                "IPv6Address": container.ipv6_address.as_deref().unwrap_or_default(),
+                "IPv4Address": endpoint.ipv4_address.as_deref().unwrap_or_default(),
+                "IPv6Address": endpoint.ipv6_address.as_deref().unwrap_or_default(),
             }),
         );
     }
@@ -17976,18 +18117,48 @@ fn docker_network_settings(
         .unwrap_or_else(|| "none".to_string());
     let ipv4 = record.ip_address.clone().unwrap_or_default();
     let ipv6 = record.ipv6_address.clone().unwrap_or_default();
-    let network = serde_json::json!({
-        "NetworkID": network_name,
-        "EndpointID": "",
-        "Gateway": "",
-        "IPAddress": ipv4,
-        "IPPrefixLen": if record.ip_address.is_some() { 24 } else { 0 },
-        "IPv6Gateway": "",
-        "GlobalIPv6Address": ipv6,
-        "GlobalIPv6PrefixLen": if record.ipv6_address.is_some() { 64 } else { 0 },
-        "MacAddress": "",
-        "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
-    });
+    let mut networks = serde_json::Map::new();
+    for endpoint in record.effective_network_endpoints() {
+        let ipv4_prefix = endpoint
+            .ownership
+            .as_ref()
+            .and_then(|ownership| ownership.source_cidr.as_deref())
+            .and_then(|cidr| cidr.split_once('/'))
+            .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+            .unwrap_or_else(|| u8::from(endpoint.ipv4_address.is_some()) * 24);
+        networks.insert(
+            endpoint.network_name.clone(),
+            serde_json::json!({
+                "NetworkID": endpoint.network_name,
+                "EndpointID": endpoint.endpoint_id,
+                "Gateway": "",
+                "IPAddress": endpoint.ipv4_address.unwrap_or_default(),
+                "IPPrefixLen": ipv4_prefix,
+                "IPv6Gateway": "",
+                "GlobalIPv6Address": endpoint.ipv6_address.clone().unwrap_or_default(),
+                "GlobalIPv6PrefixLen": if endpoint.ipv6_address.is_some() { 64 } else { 0 },
+                "MacAddress": "",
+                "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+            }),
+        );
+    }
+    if networks.is_empty() {
+        networks.insert(
+            network_name.clone(),
+            serde_json::json!({
+                "NetworkID": network_name,
+                "EndpointID": "",
+                "Gateway": "",
+                "IPAddress": ipv4,
+                "IPPrefixLen": if record.ip_address.is_some() { 24 } else { 0 },
+                "IPv6Gateway": "",
+                "GlobalIPv6Address": ipv6,
+                "GlobalIPv6PrefixLen": if record.ipv6_address.is_some() { 64 } else { 0 },
+                "MacAddress": "",
+                "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+            }),
+        );
+    }
     serde_json::json!({
         "Bridge": "",
         "SandboxID": record.netns.clone().unwrap_or_default(),
@@ -18021,7 +18192,7 @@ fn docker_network_settings(
         "IPPrefixLen": if record.ip_address.is_some() { 24 } else { 0 },
         "IPv6Gateway": "",
         "MacAddress": "",
-        "Networks": { network_name: network },
+        "Networks": networks,
     })
 }
 
@@ -18242,6 +18413,41 @@ fn parse_docker_network_create_spec(body: &[u8]) -> Result<DockerNetworkCreateSp
         return Err("docker: network name is required".to_string());
     }
     Ok(spec)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_network_connect_request(
+    body: &[u8],
+) -> Result<DockerNetworkConnectRequest, String> {
+    let request: DockerNetworkConnectWireRequest = serde_json::from_slice(body)
+        .map_err(|error| format!("docker: invalid network connect payload: {error}"))?;
+    if request.container.trim().is_empty() {
+        return Err("docker: network connect requires Container".to_string());
+    }
+    if !request.endpoint_config.ipam.ipv4_address.trim().is_empty()
+        || !request.endpoint_config.ipam.ipv6_address.trim().is_empty()
+    {
+        return Err(
+            "docker: network connect does not support caller-selected endpoint addresses"
+                .to_string(),
+        );
+    }
+    Ok(DockerNetworkConnectRequest {
+        container: request.container,
+        aliases: request.endpoint_config.aliases,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_network_disconnect_request(
+    body: &[u8],
+) -> Result<DockerNetworkDisconnectRequest, String> {
+    let request: DockerNetworkDisconnectRequest = serde_json::from_slice(body)
+        .map_err(|error| format!("docker: invalid network disconnect payload: {error}"))?;
+    if request.container.trim().is_empty() {
+        return Err("docker: network disconnect requires Container".to_string());
+    }
+    Ok(request)
 }
 
 #[cfg(target_os = "linux")]
@@ -21603,9 +21809,17 @@ volumes:
                 "stdout_path": "stdout",
                 "stderr_path": "stderr",
                 "status": "exited",
-                "network_name": "app-net",
-                "ip_address": "172.30.0.2",
-                "ipv6_address": "fd42:30::2"
+                "network_name": "primary-net",
+                "ip_address": "172.29.0.2",
+                "network_endpoints": [{
+                    "network_name": "app-net",
+                    "endpoint_id": "veth-app",
+                    "interface_name": "eth1",
+                    "ip_address": "172.30.0.2",
+                    "ipv4_address": "172.30.0.2",
+                    "ipv6_address": "fd42:30::2",
+                    "generation": 1
+                }]
             }))
             .expect("decode attached record");
         let mut detached = ferro_core::container_store::ContainerRecord {
@@ -21613,6 +21827,7 @@ volumes:
             ..attached.clone()
         };
         detached.network_name = None;
+        detached.network_endpoints.clear();
         let projected =
             super::docker_network_containers_from_records(&[attached, detached], "app-net");
         assert_eq!(projected.len(), 1);
@@ -21643,6 +21858,23 @@ volumes:
                 .and_then(|config| config.subnet.as_deref()),
             Some("fd42:4242::/64")
         );
+    }
+
+    #[test]
+    fn parses_docker_network_connect_and_disconnect_payloads() {
+        let connect = super::parse_docker_network_connect_request(
+            br#"{"Container":"api","EndpointConfig":{"Aliases":["api-alias"]}}"#,
+        )
+        .expect("connect payload");
+        assert_eq!(connect.container, "api");
+        assert_eq!(connect.aliases, vec!["api-alias"]);
+
+        let disconnect = super::parse_docker_network_disconnect_request(
+            br#"{"Container":"api","Force":true}"#,
+        )
+        .expect("disconnect payload");
+        assert_eq!(disconnect.container, "api");
+        assert!(disconnect.force);
     }
 
     #[test]
@@ -23624,7 +23856,24 @@ volumes:
                 "network_name": "app-net",
                 "netns": "/run/netns/api",
                 "ip_address": "172.30.0.2",
-                "ipv6_address": "fd42:30::2"
+                "ipv6_address": "fd42:30::2",
+                "network_endpoints": [
+                    {
+                        "network_name": "app-net",
+                        "endpoint_id": "veth-app",
+                        "interface_name": "eth0",
+                        "ipv4_address": "172.30.0.2",
+                        "ipv6_address": "fd42:30::2",
+                        "generation": 1
+                    },
+                    {
+                        "network_name": "audit-net",
+                        "endpoint_id": "veth-audit",
+                        "interface_name": "eth1",
+                        "ipv4_address": "172.31.0.9",
+                        "generation": 2
+                    }
+                ]
             }))
             .expect("network record");
         let payload = docker_inspect_payload(&record, false);
@@ -23638,6 +23887,14 @@ volumes:
             "api"
         );
         assert_eq!(payload["NetworkSettings"]["SandboxKey"], "/run/netns/api");
+        assert_eq!(
+            payload["NetworkSettings"]["Networks"]["audit-net"]["EndpointID"],
+            "veth-audit"
+        );
+        assert_eq!(
+            payload["NetworkSettings"]["Networks"]["audit-net"]["IPAddress"],
+            "172.31.0.9"
+        );
     }
 
     #[test]

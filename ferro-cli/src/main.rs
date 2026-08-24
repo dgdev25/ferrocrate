@@ -7119,21 +7119,21 @@ fn parse_volume_mounts(
     let mut out = Vec::new();
     for entry in volumes {
         let parts = entry.split(':').collect::<Vec<_>>();
-        if parts.len() < 2 {
-            return Err("run: volume must be source:target[:ro]".to_string());
-        }
-        let read_only = parts.len() >= 3 && parts[2] == "ro";
-        let source = parts[0];
-        let target = parts[1];
+        let (source, target, read_only) = match parts.as_slice() {
+            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false),
+            [source, target] => ((*source).to_string(), *target, false),
+            [source, target, "ro"] => ((*source).to_string(), *target, true),
+            _ => return Err("run: volume must be source:target[:ro]".to_string()),
+        };
 
         let source_path = if source.starts_with('/') {
-            source.to_string()
+            source
         } else {
-            let record = match volume_store.get(source).map_err(|err| err.to_string())? {
+            let record = match volume_store.get(&source).map_err(|err| err.to_string())? {
                 Some(record) => record,
                 None => {
                     let plan = volume_store
-                        .prepare_create(source, "local", BTreeMap::new())
+                        .prepare_create(&source, "local", BTreeMap::new())
                         .map_err(|err| err.to_string())?;
                     let permit = authorization
                         .authorize_volume_create_plan(origin, &plan)
@@ -7153,6 +7153,20 @@ fn parse_volume_mounts(
         });
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn anonymous_volume_name() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    format!(
+        "{:x}",
+        Sha256::digest(format!("ferrocrate-anonymous-volume:{timestamp}:{sequence}"))
+    )
 }
 
 fn parse_publish(
@@ -18318,7 +18332,7 @@ mod tests {
         parse_docker_filters, parse_docker_image_search_query, parse_docker_kill_signal,
         parse_docker_limit_query, parse_docker_network_create_spec, parse_docker_stop_timeout,
         parse_driver_opts, parse_env_entries, parse_key_values, parse_publish,
-        parse_restart_policy, parse_tmpfs_mounts, percent_encode_path_component,
+        parse_restart_policy, parse_tmpfs_mounts, parse_volume_mounts, percent_encode_path_component,
         read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
         split_path_query, structured_desktop_error, top_level_command_name,
@@ -21526,6 +21540,32 @@ volumes:
     fn rejects_invalid_tmpfs_mount() {
         let err = parse_tmpfs_mounts(&[":size=64m".to_string()]).expect_err("invalid");
         assert!(err.contains("tmpfs"));
+    }
+
+    #[test]
+    fn anonymous_volume_target_creates_a_64_hex_volume() {
+        let runtime = configured_cli_runtime("disabled");
+        let volume_store = LocalVolumeStore::open(runtime.path().join("volumes"))
+            .expect("volume store");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current()
+            .expect("CLI request origin");
+        let authorization = test_surface_authorization(runtime.path());
+
+        let mounts = parse_volume_mounts(
+            &volume_store,
+            &["/data".to_string()],
+            &origin,
+            &authorization,
+        )
+        .expect("anonymous target volume");
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target, std::path::Path::new("data"));
+        let volumes = volume_store.list().expect("list created volume");
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].name.len(), 64);
+        assert!(volumes[0].name.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(mounts[0].source, volumes[0].path);
     }
 
     #[test]

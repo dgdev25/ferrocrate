@@ -173,19 +173,19 @@ export function RuntimeLoadingState() {
   );
 }
 
-export function failurePresentation(error) {
+export function failurePresentation(error, messages = {}) {
   const detail = String(error || "No technical detail was returned.");
   const normalized = detail.toLowerCase();
   if (isDaemonUnavailable(normalized)) {
-    return { kind: "daemon", message: "Ferrocrate isn't running", detail };
+    return { kind: "daemon", message: messages.daemon || "Ferrocrate isn't running", detail };
   }
   if (/(entitlement|license required|not licensed|not entitled)/.test(normalized)) {
-    return { kind: "license", message: "Your current plan doesn't include this action.", detail };
+    return { kind: "license", message: messages.license || "Your current plan doesn't include this action.", detail };
   }
   if (/(?:ferrocrate[^\n]*(?:command not found|no such file)|spawn[^\n]*enoent|executable[^\n]*not found)/.test(normalized)) {
     return { kind: "binary", message: "Ferrocrate isn't installed", detail };
   }
-  return { kind: "generic", message: "Something went wrong", detail };
+  return { kind: "generic", message: messages.generic || "Something went wrong", detail };
 }
 
 export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing, onDoctor }) {

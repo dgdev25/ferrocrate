@@ -9,19 +9,20 @@ export type ImageRow = {
 
 export function formatImageSize(bytes: number | string | null | undefined): string;
 export function formatImageCreated(value: number | string | null | undefined): string;
-export function pullFailurePresentation(error: unknown): { kind: "daemon" | "license" | "generic"; message: string; detail: string };
+export function pullFailurePresentation(error: unknown): { kind: "daemon" | "license" | "binary" | "generic"; message: string; detail: string };
 export function ImagePagePullAction(props: { hasImages: boolean; disabled?: boolean; onOpen?: () => void }): ReactElement | null;
 export function ImageEmptyState(props: { hasImages: boolean; disabled?: boolean; onOpen?: () => void }): ReactElement | null;
 export function PullImageDialog(props: {
   open: boolean;
   imageTarget: string;
   progress?: string;
-  failure?: { kind: "daemon" | "license" | "generic"; message: string; detail: string } | null;
+  failure?: { kind: "daemon" | "license" | "binary" | "generic"; message: string; detail: string } | null;
   busy?: boolean;
   onCancel?: () => void;
   onImageTargetChange?: (event: ChangeEvent<HTMLInputElement>) => void;
   onPull?: () => void;
   onStart?: () => void;
   onReviewLicensing?: () => void;
+  onDoctor?: () => void;
 }): ReactElement | null;
 export function parseImageRows(output: string): ImageRow[];

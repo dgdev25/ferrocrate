@@ -1,7 +1,7 @@
 export function buildStepText(text: string): string;
 export function formatBuildDuration(durationMs: number | null): string;
 export function buildFailurePresentation(error: unknown): {
-  kind: "daemon" | "license" | "generic";
+  kind: "daemon" | "license" | "binary" | "generic";
   message: string;
   detail: string;
 };
@@ -34,6 +34,7 @@ export function BuildHistoryList(props: {
   onNewBuild?: () => void;
   onStart?: () => void;
   onReviewLicensing?: (detail: string) => void;
+  onDoctor?: () => void;
 }): import("react").ReactElement;
 
 export function BuildLicensingDialog(props: {

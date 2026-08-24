@@ -10,7 +10,11 @@ const RESOURCE_TABS = [
   ["networks", "globe", "Networks"],
 ];
 
-function tabButton(section, icon, label, activeSection, onSelect, count) {
+export function showGlobalRunAction(activeSection) {
+  return activeSection === "containers";
+}
+
+function tabButton(section, icon, label, activeSection, onSelect, count, iconOnly = false) {
   const active = activeSection === section;
   return createElement("button", {
     key: section,
@@ -20,7 +24,7 @@ function tabButton(section, icon, label, activeSection, onSelect, count) {
     "aria-label": label,
   },
   createElement(Icon, { name: icon, size: 16, className: "tab-icon" }),
-  createElement("span", null, label),
+  createElement("span", { className: iconOnly ? "visually-hidden" : undefined }, label),
   count == null ? null : createElement("span", { className: "tab-count" }, count));
 }
 
@@ -31,6 +35,6 @@ export function DesktopTabBar({ activeSection, counts, doctorIssues = 0, onSelec
     )),
     createElement("span", { className: "tab-spacer", "aria-hidden": true }),
     tabButton("doctor", "pulse", "Doctor", activeSection, onSelect, null),
-    tabButton("settings", "gear", "Settings", activeSection, onSelect, null),
+    tabButton("settings", "gear", "Settings", activeSection, onSelect, null, true),
   );
 }

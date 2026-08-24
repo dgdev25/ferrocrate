@@ -23,6 +23,8 @@ test("desktop tabs follow the binding order with counts and right-aligned system
   assert.match(markup, /class="desktop-tabs"/);
   assert.match(markup, /class="tab-spacer"/);
   assert.match(markup, /aria-label="Settings"/);
+  assert.doesNotMatch(markup, /<span>Settings<\/span>/);
+  assert.match(markup, /<span class="visually-hidden">Settings<\/span>/);
   assert.match(markup, /aria-current="page"/);
   assert.equal((markup.match(/class="tab-count"/g) || []).length, 6);
   assert.doesNotMatch(markup, /sidebar|☀|☾|⚙|▶|🩺/u);
@@ -40,4 +42,11 @@ test("desktop tabs report every selection through one navigation callback", () =
     if (child?.type === "button") child.props.onClick();
   }
   assert.deepEqual(selected, ["containers", "images", "builds", "compose", "volumes", "networks", "doctor", "settings"]);
+});
+
+test("the title-bar Run action belongs only to the Containers page", () => {
+  assert.equal(desktopChrome.showGlobalRunAction("containers"), true);
+  for (const section of ["images", "builds", "compose", "volumes", "networks", "doctor", "settings"]) {
+    assert.equal(desktopChrome.showGlobalRunAction(section), false);
+  }
 });

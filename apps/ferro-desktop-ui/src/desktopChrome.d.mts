@@ -8,3 +8,4 @@ export function DesktopTabBar(props: {
   doctorIssues?: number;
   onSelect: (section: AppSection) => void;
 }): ReactElement;
+export function showGlobalRunAction(activeSection: AppSection): boolean;

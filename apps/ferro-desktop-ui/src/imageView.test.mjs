@@ -31,6 +31,11 @@ test("pull failures give people a recovery path while retaining the technical de
     message: "Your current plan doesn't include image pulls.",
     detail: "missing entitlement for image pull",
   });
+  assert.deepEqual(imageView.pullFailurePresentation("spawn ferrocrate ENOENT"), {
+    kind: "binary",
+    message: "Ferrocrate isn't installed",
+    detail: "spawn ferrocrate ENOENT",
+  });
 });
 
 test("rendered pull dialog exposes progress and accessible recovery actions", () => {
@@ -75,6 +80,15 @@ test("rendered pull dialog exposes progress and accessible recovery actions", ()
   assert.match(unknown, /We couldn&#x27;t pull this image\./);
   assert.doesNotMatch(unknown, />Start<\/button>/);
   assert.doesNotMatch(unknown, /Review licensing/);
+
+  const missing = renderToStaticMarkup(createElement(imageView.PullImageDialog, {
+    open: true,
+    imageTarget: "alpine:latest",
+    failure: imageView.pullFailurePresentation("spawn ferrocrate ENOENT"),
+    onImageTargetChange: () => {},
+    onDoctor: () => {},
+  }));
+  assert.match(missing, /Open Doctor/);
 });
 
 test("rendered image page states have exactly one primary pull CTA", () => {

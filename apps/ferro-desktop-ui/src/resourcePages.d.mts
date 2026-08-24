@@ -29,7 +29,7 @@ export function ResourceEmptyState(props: {
   disabled?: boolean;
   onAction?: MouseEventHandler<HTMLButtonElement>;
 }): ReactElement | null;
-export function failurePresentation(error: unknown): {
+export function failurePresentation(error: unknown, messages?: Partial<Record<"daemon" | "license" | "generic", string>>): {
   kind: "daemon" | "license" | "binary" | "generic";
   message: string;
   detail: string;

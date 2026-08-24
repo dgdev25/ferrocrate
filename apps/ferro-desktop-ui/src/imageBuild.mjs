@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { failurePresentation } from "./resourcePages.mjs";
 
 export function buildStepText(text) {
   const trimmed = text.trim();
@@ -19,15 +20,10 @@ export function formatBuildDuration(durationMs) {
 }
 
 export function buildFailurePresentation(error) {
-  const detail = String(error || "No technical detail was returned.");
-  const normalized = detail.toLowerCase();
-  if (/(daemon|connection refused|not running|no such file)/.test(normalized)) {
-    return { kind: "daemon", message: "Ferrocrate isn't running", detail };
-  }
-  if (/(entitlement|license required|not licensed|not entitled)/.test(normalized)) {
-    return { kind: "license", message: "Your current plan doesn't include image builds.", detail };
-  }
-  return { kind: "generic", message: "We couldn't build this image.", detail };
+  return failurePresentation(error, {
+    license: "Your current plan doesn't include image builds.",
+    generic: "We couldn't build this image.",
+  });
 }
 
 export function appendBuildProgress(history, frame) {
@@ -40,7 +36,7 @@ export function buildInvokeArgs(context, tag, buildId) {
   return { context, tag, buildId };
 }
 
-export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onReviewLicensing }) {
+export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onReviewLicensing, onDoctor }) {
   if (!builds.length) {
     return createElement("section", { className: "panel table-panel build-history-panel", "aria-label": "Builds" },
       createElement("div", { className: "empty-state" },
@@ -79,6 +75,7 @@ export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onRevi
                 createElement("strong", null, failure.message),
                 failure.kind === "daemon" ? createElement("button", { className: "btn btn-secondary", onClick: onStart, disabled }, "Start") : null,
                 failure.kind === "license" ? createElement("button", { className: "btn btn-secondary", onClick: () => onReviewLicensing?.(failure.detail) }, "Review licensing") : null,
+                failure.kind === "binary" ? createElement("button", { className: "btn btn-secondary", onClick: onDoctor }, "Open Doctor") : null,
                 createElement("details", null,
                   createElement("summary", null, "Technical details"),
                   createElement("pre", null, failure.detail),

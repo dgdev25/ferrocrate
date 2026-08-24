@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { failurePresentation } from "./resourcePages.mjs";
 
 export function formatImageSize(bytes) {
   const value = Number(bytes);
@@ -27,15 +28,10 @@ export function formatImageCreated(value) {
 }
 
 export function pullFailurePresentation(error) {
-  const detail = String(error || "No technical detail was returned.");
-  const normalized = detail.toLowerCase();
-  if (/(daemon|connection refused|not running|no such file)/.test(normalized)) {
-    return { kind: "daemon", message: "Ferrocrate isn't running", detail };
-  }
-  if (/(entitlement|license required|not licensed|not entitled)/.test(normalized)) {
-    return { kind: "license", message: "Your current plan doesn't include image pulls.", detail };
-  }
-  return { kind: "generic", message: "We couldn't pull this image.", detail };
+  return failurePresentation(error, {
+    license: "Your current plan doesn't include image pulls.",
+    generic: "We couldn't pull this image.",
+  });
 }
 
 export function ImagePagePullAction({ hasImages, disabled, onOpen }) {
@@ -63,12 +59,14 @@ export function PullImageDialog({
   onPull,
   onStart,
   onReviewLicensing,
+  onDoctor,
 }) {
   if (!open) return null;
   const failureContent = failure ? createElement("section", { className: "pull-failure detail-span", role: "alert" },
     createElement("strong", null, failure.message),
     failure.kind === "daemon" ? createElement("button", { className: "btn btn-secondary", onClick: onStart, disabled: busy }, "Start") : null,
     failure.kind === "license" ? createElement("button", { className: "btn btn-secondary", onClick: onReviewLicensing }, "Review licensing") : null,
+    failure.kind === "binary" ? createElement("button", { className: "btn btn-secondary", onClick: onDoctor }, "Open Doctor") : null,
     createElement("details", null,
       createElement("summary", null, "Technical details"),
       createElement("pre", null, failure.detail),

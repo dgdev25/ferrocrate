@@ -24,13 +24,14 @@ import type {
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
-import { DesktopTabBar } from "./desktopChrome.mjs";
+import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
+import { DoctorPage, SettingsPage } from "./systemPages.mjs";
 import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
@@ -169,6 +170,8 @@ function App(): JSX.Element {
   const [sessionTokenInput, setSessionTokenInput] = useState("");
   const [installerResult, setInstallerResult] = useState<InstallerRunSummary | null>(null);
   const [doctorResult, setDoctorResult] = useState<DoctorSummary | null>(null);
+  const [doctorDialogOpen, setDoctorDialogOpen] = useState(false);
+  const [settingsDialog, setSettingsDialog] = useState<"account" | "install" | null>(null);
 
   const [doctorFix, setDoctorFix] = useState(true);
   const [doctorBootstrap, setDoctorBootstrap] = useState(false);
@@ -301,6 +304,8 @@ function App(): JSX.Element {
         setResourceDialog(null);
         setResourceDialogError(null);
         setLicensingDialogOpen(false);
+        setDoctorDialogOpen(false);
+        setSettingsDialog(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1002,6 +1007,7 @@ function App(): JSX.Element {
         confirm: doctorConfirm,
       });
       setDoctorResult(result);
+      setDoctorDialogOpen(false);
       await refresh();
     } catch (err) {
       setError(String(err));
@@ -1114,9 +1120,9 @@ function App(): JSX.Element {
           <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
         </div>
         <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
-        <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>
+        {showGlobalRunAction(activeSection) ? <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>
           <Icon name="play" size={16} /> Run container
-        </button>
+        </button> : null}
       </header>
 
       <DesktopTabBar
@@ -1180,6 +1186,8 @@ function App(): JSX.Element {
               ) : activeSection === "compose" ? (
                 composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
+                null
+              ) : activeSection === "doctor" || activeSection === "settings" ? (
                 null
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
@@ -1378,6 +1386,7 @@ function App(): JSX.Element {
                 onNewBuild={() => setBuildImageDialogOpen(true)}
                 onStart={() => void startFerrocrate()}
                 onReviewLicensing={(detail) => { setBuildLicensingDetail(detail); setBuildLicensingDialogOpen(true); }}
+                onDoctor={() => setActiveSection("doctor")}
               />
             ) : null}
 
@@ -1455,9 +1464,9 @@ function App(): JSX.Element {
               )
             ) : null}
 
-            {activeSection === "doctor" ? <div className="section-grid"><section className="panel section-panel full-span"><div className="panel-heading"><div><p className="eyebrow">Diagnostics</p><h2>System doctor</h2></div>{doctorResult ? <span className={`count-badge ${doctorResult.ok ? "ok" : "bad"}`}>{doctorResult.ok ? "Healthy" : "Needs attention"}</span> : null}</div><div className="check-row"><label><input type="checkbox" checked={doctorFix} onChange={(event) => setDoctorFix(event.target.checked)} />Fix</label><label><input type="checkbox" checked={doctorBootstrap} onChange={(event) => setDoctorBootstrap(event.target.checked)} />Bootstrap</label><label><input type="checkbox" checked={doctorDryRun} onChange={(event) => setDoctorDryRun(event.target.checked)} />Dry-run</label><label><input type="checkbox" checked={doctorConfirm} onChange={(event) => setDoctorConfirm(event.target.checked)} />Confirm (--yes)</label></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void runDoctor()} disabled={runtimeBusy}>Run doctor</button></div><pre className="data-output">{doctorResult ? JSON.stringify(doctorResult.raw, null, 2) : EMPTY}</pre></section><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Optional VM</p><h2>Runtime controls</h2></div></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")} disabled={runtimeBusy}>Start VM</button><button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")} disabled={runtimeBusy}>Stop VM</button></div><pre className="data-output">{snapshot?.runtime.stdout || EMPTY}</pre>{snapshot?.runtime.stderr ? <p className="muted">{snapshot.runtime.stderr}</p> : null}</section></div> : null}
+            {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
-            {activeSection === "settings" ? <div className="section-grid"><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Paid services</p><h2>Authentication</h2></div></div><p className="muted">Configure issuance endpoints and a short-lived paid session token.</p><div className="form-stack"><input value={releaseBaseUrl} onChange={(event) => setReleaseBaseUrl(event.target.value)} placeholder="release base URL" /><input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} placeholder="token endpoint" /><input value={issuanceEndpoint} onChange={(event) => setIssuanceEndpoint(event.target.value)} placeholder="session issuance endpoint" /></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>Save backend config</button></div><div className="form-stack"><input value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="customer id" /><input value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="optional access token" /></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>Acquire session token</button></div><div className="field-row"><input value={sessionTokenInput} onChange={(event) => setSessionTokenInput(event.target.value)} placeholder="paste session JWT" /></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void saveSessionToken()}>Save token</button><button className="btn btn-danger" onClick={() => void clearSessionToken()}>Clear token</button><button className="btn btn-ghost" onClick={() => void refreshAuthState()} disabled={authLoading}>{authLoading ? "Refreshing…" : "Refresh auth"}</button></div><pre className="data-output">{`token_present=${sessionSummary?.token_present ? "yes" : "no"}\nsubject=${sessionSummary?.subject ?? "-"}\nplan=${sessionSummary?.plan ?? "-"}\nexpires_at=${formatUnix(sessionSummary?.expires_at ?? null)}\nexpired=${sessionSummary?.expired == null ? "-" : sessionSummary.expired ? "yes" : "no"}`}</pre><pre className="data-output">{`entitlement_status=${authState?.entitlement?.status ?? "-"}\nentitlement_plan=${authState?.entitlement?.plan ?? "-"}\nentitlement_expires=${formatUnix(authState?.entitlement?.expires_at ?? null)}\nentitlement_message=${authState?.entitlement?.message ?? "-"}`}</pre></section><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Provisioning</p><h2>Install + bootstrap</h2></div></div><p className="muted">The paid install path uses the saved backend config and session token.</p><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>Dry-run install</button><button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>Run full install</button></div><pre className="data-output">{installerResult ? JSON.stringify(installerResult, null, 2) : EMPTY}</pre></section></div> : null}
+            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 
             {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : "did not complete"}</span>{lastAction.stderr || !lastAction.ok ? <details><summary>Technical details</summary><pre>{`${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}`}</pre></details> : null}</section> : null}
           </div>
@@ -1472,6 +1481,36 @@ function App(): JSX.Element {
         <span>engine <b>native</b> — VM optional</span>
         <div className="status-right"><span>CPU <b>—</b></span><span>MEM <b>—</b></span><span>v0.1.0</span></div>
       </footer>
+
+      {doctorDialogOpen ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="doctor-dialog-title">
+          <div className="drawer-header"><div><p className="eyebrow">Guided diagnostics</p><h2 id="doctor-dialog-title">Run Doctor</h2></div><button className="btn btn-secondary" onClick={() => setDoctorDialogOpen(false)}>Cancel</button></div>
+          <div className="dialog-content"><p className="muted">Choose how Ferrocrate should check this installation.</p><div className="dialog-options">
+            <label><input type="checkbox" checked={doctorFix} onChange={(event) => setDoctorFix(event.target.checked)} />Apply safe fixes</label>
+            <label><input type="checkbox" checked={doctorBootstrap} onChange={(event) => setDoctorBootstrap(event.target.checked)} />Prepare missing components</label>
+            <label><input type="checkbox" checked={doctorDryRun} onChange={(event) => setDoctorDryRun(event.target.checked)} />Preview changes only</label>
+            <label><input type="checkbox" checked={doctorConfirm} onChange={(event) => setDoctorConfirm(event.target.checked)} />Allow changes that need confirmation</label>
+          </div></div>
+          <div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runDoctor()} disabled={runtimeBusy}><Icon name="pulse" size={16} />{runtimeBusy ? "Checking…" : "Run Doctor"}</button></div>
+        </section></div>
+      ) : null}
+
+      {settingsDialog === "account" ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
+          <div className="drawer-header"><div><p className="eyebrow">Account connection</p><h2 id="account-dialog-title">Account and plan</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
+          <div className="dialog-content form-stack"><label><span>Release service URL</span><input value={releaseBaseUrl} onChange={(event) => setReleaseBaseUrl(event.target.value)} placeholder="https://releases.example.com" /></label><label><span>Token service URL</span><input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} placeholder="https://accounts.example.com/token" /></label><label><span>Session service URL</span><input value={issuanceEndpoint} onChange={(event) => setIssuanceEndpoint(event.target.value)} placeholder="https://accounts.example.com/session" /></label><button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>Save service connection</button><label><span>Customer ID</span><input value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="Customer ID" /></label><label><span>Access token (optional)</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="Access token" /></label><button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>Connect account</button><label><span>Session token</span><input type="password" value={sessionTokenInput} onChange={(event) => setSessionTokenInput(event.target.value)} placeholder="Paste session token" /></label></div>
+          <div className="account-summary"><strong>{sessionSummary?.token_present ? "Account connected" : "No account connected"}</strong><span>{sessionSummary?.plan ? `Plan: ${sessionSummary.plan}` : "Plan information unavailable"}</span><span>{sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : "No active session expiry"}</span><details><summary>Plan diagnostics</summary><pre>{JSON.stringify(authState?.entitlement ?? {}, null, 2)}</pre></details></div>
+          <div className="panel-actions dialog-actions"><button className="btn btn-danger" onClick={() => void clearSessionToken()}>Disconnect</button><button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>{authLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-primary" onClick={() => void saveSessionToken()} disabled={!sessionTokenInput.trim()}>Save session</button></div>
+        </section></div>
+      ) : null}
+
+      {settingsDialog === "install" ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title">
+          <div className="drawer-header"><div><p className="eyebrow">Local setup</p><h2 id="install-dialog-title">Install and bootstrap</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
+          <div className="dialog-content"><p>Prepare the local Ferrocrate stack with the saved account connection.</p>{installerResult ? <details><summary>Last install details</summary><pre>{JSON.stringify(installerResult, null, 2)}</pre></details> : <p className="muted">No install has run in this session.</p>}</div>
+          <div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>Preview install</button><button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>Run full install</button></div>
+        </section></div>
+      ) : null}
 
       {runDialogOpen ? (
         <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>{runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
@@ -1494,7 +1533,7 @@ function App(): JSX.Element {
       />
 
       {pullImageDialogOpen ? (
-        <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} />
+        <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
 
       {buildImageDialogOpen ? (

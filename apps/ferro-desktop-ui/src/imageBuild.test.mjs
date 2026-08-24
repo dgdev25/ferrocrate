@@ -82,6 +82,20 @@ test("failed builds explain known daemon failures and keep the original detail d
   assert.match(markup, /daemon connection refused/);
 });
 
+test("missing build binary routes to Doctor through the centralized failure vocabulary", () => {
+  assert.deepEqual(imageBuild.buildFailurePresentation("spawn ferrocrate ENOENT"), {
+    kind: "binary",
+    message: "Ferrocrate isn't installed",
+    detail: "spawn ferrocrate ENOENT",
+  });
+  const markup = renderToStaticMarkup(createElement(imageBuild.BuildHistoryList, {
+    builds: [{ id: "build-missing", image: "local/demo", status: "failed", durationMs: 2, progress: [], error: "spawn ferrocrate ENOENT" }],
+    onNewBuild: () => {},
+    onDoctor: () => {},
+  }));
+  assert.match(markup, /Open Doctor/);
+});
+
 test("build progress frames update only the history row with the matching build ID", () => {
   assert.equal(typeof imageBuild.appendBuildProgress, "function");
   const history = [{

@@ -2352,6 +2352,25 @@ fn is_log_follow_command(cmd: &[String]) -> bool {
             .any(|argument| argument == "--follow" || argument == "-f")
 }
 
+fn is_interactive_exec_command(cmd: &[String]) -> bool {
+    if !command_targets_ferrocrate(cmd) || cmd.get(1).is_none_or(|subcommand| subcommand != "exec")
+    {
+        return false;
+    }
+    let arguments = &cmd[2..];
+    let interactive = arguments.iter().any(|argument| {
+        argument == "--interactive"
+            || argument == "-i"
+            || (argument.starts_with('-') && !argument.starts_with("--") && argument.contains('i'))
+    });
+    let tty = arguments.iter().any(|argument| {
+        argument == "--tty"
+            || argument == "-t"
+            || (argument.starts_with('-') && !argument.starts_with("--") && argument.contains('t'))
+    });
+    interactive && tty
+}
+
 #[cfg(target_os = "macos")]
 fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
     let state_path = default_vm_state_path();
@@ -2492,12 +2511,13 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
-        gather_phase0_check, is_log_follow_command, load_channel_manifest, load_forward_entries,
-        load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
-        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
-        save_vm_state, should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr,
-        vm_state_running, write_follow_frame, Commands, ExecMode, ExecRequest, FollowChannel,
-        FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        load_channel_manifest, load_forward_entries, load_vm_state, parse_exec_mode,
+        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
+        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, write_follow_frame, Commands,
+        ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
+        VmCommands, VmConfig, VmState,
     };
     use std::io::{BufReader, Cursor};
     use std::path::PathBuf;
@@ -2549,6 +2569,35 @@ mod tests {
             "ferrocrate".to_string(),
             "ps".to_string(),
             "--follow".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn interactive_proxy_only_accepts_ferrocrate_exec_with_stdin_and_tty() {
+        assert!(is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "-i".to_string(),
+            "-t".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "-it".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(!is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(!is_interactive_exec_command(&[
+            "sh".to_string(),
+            "-i".to_string(),
         ]));
     }
 

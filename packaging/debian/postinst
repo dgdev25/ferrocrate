@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+case "${1:-configure}" in
+  configure|abort-upgrade|abort-remove|abort-deconfigure)
+    if [ -x /usr/sbin/apparmor_parser ] &&
+       [ -r /sys/module/apparmor/parameters/enabled ] &&
+       [ "$(tr -d '[:space:]' </sys/module/apparmor/parameters/enabled)" = Y ]; then
+      /usr/sbin/apparmor_parser -r /etc/apparmor.d/usr.local.bin.ferrocrate
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

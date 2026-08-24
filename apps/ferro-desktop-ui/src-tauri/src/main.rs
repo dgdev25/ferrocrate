@@ -26,6 +26,7 @@ static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
 struct TerminalProcess {
     child: Child,
     stdin: ChildStdin,
+    exec_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,11 +164,9 @@ fn terminal_exec_command(
     workdir: Option<&str>,
 ) -> Vec<String> {
     let mut command = vec![
-        "exec".to_string(),
-        "--interactive".to_string(),
-        "--".to_string(),
-        "ferrocrate".to_string(),
-        "exec".to_string(),
+        "terminal-proxy".to_string(),
+        "--container".to_string(),
+        target.to_string(),
     ];
     for value in env {
         command.push("--env".to_string());
@@ -181,19 +180,42 @@ fn terminal_exec_command(
         command.push("--workdir".to_string());
         command.push(workdir.to_string());
     }
-    command.extend([
-        "--interactive".to_string(),
-        "--tty".to_string(),
-        target.to_string(),
-        shell.to_string(),
-    ]);
+    command.extend(["--".to_string(), shell.to_string()]);
     command
+}
+
+fn terminal_resize_command(exec_id: &str, columns: u16, rows: u16) -> Vec<String> {
+    vec![
+        "terminal-resize".to_string(),
+        "--exec-id".to_string(),
+        exec_id.to_string(),
+        "--columns".to_string(),
+        columns.to_string(),
+        "--rows".to_string(),
+        rows.to_string(),
+    ]
 }
 
 #[derive(Clone, Serialize)]
 struct TerminalOutput {
     data: Vec<u8>,
     stderr: bool,
+}
+
+fn parse_terminal_exec_id(line: &str) -> Result<String, String> {
+    const PREFIX: &str = "FERROCRATE_EXEC_ID=";
+    let trimmed = line.trim();
+    let Some(exec_id) = trimmed.strip_prefix(PREFIX) else {
+        return Err(if trimmed.is_empty() {
+            "terminal proxy closed before the daemon exec was allocated".to_string()
+        } else {
+            trimmed.to_string()
+        });
+    };
+    if exec_id.is_empty() {
+        return Err("terminal proxy returned an empty exec id".to_string());
+    }
+    Ok(exec_id.to_string())
 }
 
 fn emit_terminal_output<R: Read>(mut reader: R, app: tauri::AppHandle, stderr: bool) {
@@ -275,11 +297,28 @@ fn start_terminal(
         .stderr
         .take()
         .ok_or_else(|| "exec terminal stderr missing".to_string())?;
+    let mut stderr = BufReader::new(stderr);
+    let mut handshake = String::new();
+    stderr
+        .read_line(&mut handshake)
+        .map_err(|err| format!("failed to read terminal proxy handshake: {err}"))?;
+    let exec_id = match parse_terminal_exec_id(&handshake) {
+        Ok(exec_id) => exec_id,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to start exec terminal: {err}"));
+        }
+    };
     let stdout_app = app.clone();
     thread::spawn(move || emit_terminal_output(stdout, stdout_app, false));
     let stderr_app = app.clone();
     thread::spawn(move || emit_terminal_output(stderr, stderr_app, true));
-    *current = Some(TerminalProcess { child, stdin });
+    *current = Some(TerminalProcess {
+        child,
+        stdin,
+        exec_id,
+    });
     drop(current);
 
     thread::spawn(move || loop {
@@ -329,6 +368,35 @@ fn write_terminal(data: Vec<u8>) -> Result<(), String> {
         .write_all(&data)
         .and_then(|_| process.stdin.flush())
         .map_err(|err| format!("failed to write terminal input: {err}"))
+}
+
+#[tauri::command]
+fn resize_terminal(columns: u16, rows: u16) -> Result<(), String> {
+    if columns == 0 || rows == 0 {
+        return Err("terminal dimensions must be non-zero".to_string());
+    }
+    let exec_id = TERMINAL_PROCESS
+        .lock()
+        .map_err(|_| "terminal state is unavailable".to_string())?
+        .as_ref()
+        .map(|process| process.exec_id.clone())
+        .ok_or_else(|| "no exec terminal is active".to_string())?;
+    let output = Command::new("ferro-desktop")
+        .args(terminal_resize_command(&exec_id, columns, rows))
+        .output()
+        .map_err(|err| format!("failed to resize exec terminal: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if message.is_empty() {
+        format!(
+            "failed to resize exec terminal: status {}",
+            output.status.code().unwrap_or(-1)
+        )
+    } else {
+        message
+    })
 }
 
 #[tauri::command]
@@ -979,6 +1047,7 @@ fn main() {
             stop_log_follow,
             start_terminal,
             write_terminal,
+            resize_terminal,
             close_terminal,
             get_paid_auth_state,
             save_paid_backend_config,
@@ -994,7 +1063,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_channel, log_follow_command, terminal_exec_command, LogBuffer};
+    use super::{
+        log_channel, log_follow_command, parse_terminal_exec_id, terminal_exec_command,
+        terminal_resize_command, LogBuffer,
+    };
 
     #[test]
     fn log_follow_uses_the_desktop_exec_bridge() {
@@ -1037,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_exec_uses_interactive_bridge_and_exec_options() {
+    fn terminal_exec_uses_typed_daemon_proxy_and_exec_options() {
         assert_eq!(
             terminal_exec_command(
                 "web",
@@ -1047,21 +1119,45 @@ mod tests {
                 Some("/workspace"),
             ),
             vec![
-                "exec",
-                "--interactive",
-                "--",
-                "ferrocrate",
-                "exec",
+                "terminal-proxy",
+                "--container",
+                "web",
                 "--env",
                 "TERM=xterm-256color",
                 "--user",
                 "1000:1000",
                 "--workdir",
                 "/workspace",
-                "--interactive",
-                "--tty",
-                "web",
+                "--",
                 "sh",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_exec_id_requires_proxy_handshake_prefix() {
+        assert_eq!(
+            parse_terminal_exec_id("FERROCRATE_EXEC_ID=exec-123\n").expect("exec id"),
+            "exec-123"
+        );
+        assert!(parse_terminal_exec_id("error: daemon unavailable\n")
+            .expect_err("missing handshake")
+            .contains("daemon unavailable"));
+        assert!(parse_terminal_exec_id("FERROCRATE_EXEC_ID=\n").is_err());
+    }
+
+    #[test]
+    fn terminal_resize_uses_typed_daemon_proxy() {
+        assert_eq!(
+            terminal_resize_command("exec/123", 100, 40),
+            vec![
+                "terminal-resize",
+                "--exec-id",
+                "exec/123",
+                "--columns",
+                "100",
+                "--rows",
+                "40",
             ]
         );
     }

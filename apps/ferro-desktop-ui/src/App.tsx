@@ -11,6 +11,7 @@ import type {
   InstallerRunSummary,
   PaidAuthState,
 } from "./types";
+import { applyTerminalResize, DEFAULT_TERMINAL_ENV } from "./terminalResize.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
@@ -47,7 +48,7 @@ function App(): JSX.Element {
   const terminalActiveRef = useRef(false);
   const [terminalActive, setTerminalActive] = useState(false);
   const [terminalShell, setTerminalShell] = useState("sh");
-  const [terminalEnv, setTerminalEnv] = useState("TERM=xterm-256color");
+  const [terminalEnv, setTerminalEnv] = useState(DEFAULT_TERMINAL_ENV);
   const [terminalUser, setTerminalUser] = useState("");
   const [terminalWorkdir, setTerminalWorkdir] = useState("");
 
@@ -100,9 +101,15 @@ function App(): JSX.Element {
 
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return;
-      const columns = Math.max(20, Math.floor(entry.contentRect.width / 8.4));
-      const rows = Math.max(6, Math.floor(entry.contentRect.height / 17));
-      terminal.resize(columns, rows);
+      applyTerminalResize(
+        entry.contentRect.width,
+        entry.contentRect.height,
+        terminalActiveRef.current,
+        (columns, rows) => terminal.resize(columns, rows),
+        (columns, rows) => {
+          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+        },
+      );
     });
     observer.observe(host);
     return () => {

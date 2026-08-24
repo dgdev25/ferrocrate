@@ -48,6 +48,12 @@ export function containerContentState(totalCount, visibleCount, query) {
   return "table";
 }
 
+export function filterNamedResources(rows, query, getName = (row) => row.name) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter((row) => String(getName(row)).toLowerCase().includes(needle));
+}
+
 export function nextResourceDialog(current, command) {
   if (command === "open-volume") return "volume";
   if (command === "open-network") return "network";

@@ -37,6 +37,7 @@ import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
   containerContentState,
+  filterNamedResources,
   FirstRunState,
   LicensingDialog,
   ResourceCreateDialog,
@@ -1096,6 +1097,9 @@ function App(): JSX.Element {
   ), [containerRows, containerStatusFilter, globalSearch]);
   const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
+  const visibleImages = useMemo(() => filterNamedResources(imageRows, globalSearch, (image) => image.reference), [imageRows, globalSearch]);
+  const visibleVolumes = useMemo(() => filterNamedResources(volumes, globalSearch), [volumes, globalSearch]);
+  const visibleNetworks = useMemo(() => filterNamedResources(networks, globalSearch), [networks, globalSearch]);
   const containerImageReferences = useMemo(() => containerRows.map((row) => row.image), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const resourceUsage = resourceTotals(containerRows);
@@ -1148,7 +1152,7 @@ function App(): JSX.Element {
             ref={globalSearchRef}
             value={globalSearch}
             onChange={(event) => setGlobalSearch(event.target.value)}
-            placeholder="Search containers, images, volumes…"
+            placeholder="Filter containers, images, volumes, networks…"
             aria-label="Global search"
           />
           <kbd>⌘K</kbd>
@@ -1395,7 +1399,7 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel image-table-panel" aria-label="Images">
                   <div className="table-toolbar">
-                    <span className="count-badge">{imageCount}</span>
+                    <span className="count-badge">{visibleImages.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More image actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1407,7 +1411,7 @@ function App(): JSX.Element {
                   <div className="table-scroll">
                     <table>
                       <thead><tr><th>Repository</th><th>Size</th><th>Created</th><th>In use</th><th aria-label="Actions" /></tr></thead>
-                      <tbody>{imageRows.map((image) => (
+                      <tbody>{visibleImages.map((image) => (
                         <tr key={image.id}>
                           <td className="container-name mono" title={image.fullReference}>{image.reference}</td>
                           <td className="muted">{image.size}</td>
@@ -1441,7 +1445,7 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Volumes">
                   <div className="table-toolbar">
-                    <span className="count-badge">{volumes.length}</span>
+                    <span className="count-badge">{visibleVolumes.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More volume actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1451,7 +1455,7 @@ function App(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th>Usage</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {volumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
+                    {visibleVolumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1465,14 +1469,14 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
                   <div className="table-toolbar">
-                    <span className="count-badge">{networks.length}</span>
+                    <span className="count-badge">{visibleNetworks.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More network actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu"><button onClick={() => void refreshNetworks()} disabled={runtimeBusy || networksLoading}>{networksLoading ? "Refreshing…" : "Refresh networks"}</button></div>
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th><th>Containers</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {networks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
+                    {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )

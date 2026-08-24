@@ -588,6 +588,15 @@ record_command engine-info client info
 # Offline image and broad container lifecycle prerequisites. These calls are
 # deliberately unconditional: one failed command must not suppress later rows.
 if [[ "$builder_mode" == 1 ]]; then
+  # The recorded BuildKit probe is expected to reject before producing an
+  # image. Seed the shared lifecycle fixture through the supported reference
+  # path so later, unrelated rows remain independently meaningful.
+  bootstrap_token="$process_token_base-buildkit-classic-bootstrap"
+  if ! run_bounded_owned "$command_timeout" 5 "$bootstrap_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker build --tag "$image" "$context_dir" >/dev/null 2>&1; then
+    harness_error "classic fixture bootstrap failed before BuildKit qualification"
+  fi
   record_docker_buildkit=1
   expected_daemon_error_message="BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder"
   record_expected_daemon_error image-build image build --tag "$image" "$context_dir"

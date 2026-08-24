@@ -181,6 +181,14 @@ fn desktop_socket_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn daemon_health_response_ok(response: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
+}
+
+#[cfg(target_os = "linux")]
 fn ping_daemon(socket: &std::path::Path) -> Result<(), String> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket)
@@ -195,7 +203,7 @@ fn ping_daemon(socket: &std::path::Path) -> Result<(), String> {
     stream
         .read_to_string(&mut response)
         .map_err(|error| error.to_string())?;
-    if response.starts_with("HTTP/1.1 200") && response.ends_with("OK") {
+    if daemon_health_response_ok(&response) {
         Ok(())
     } else {
         Err("Ferrocrate API health check returned an unexpected response".to_string())
@@ -2789,6 +2797,20 @@ mod tests {
         ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction, NetworkInspectRecord,
         NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction, VolumeListResponse,
     };
+
+    #[cfg(target_os = "linux")]
+    use super::daemon_health_response_ok;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn daemon_health_accepts_the_real_newline_terminated_ping_body() {
+        assert!(daemon_health_response_ok(
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nOK\n"
+        ));
+        assert!(!daemon_health_response_ok(
+            "HTTP/1.1 500 Internal Server Error\r\n\r\nOK\n"
+        ));
+    }
 
     #[test]
     fn image_build_uses_selected_context_through_desktop_bridge() {

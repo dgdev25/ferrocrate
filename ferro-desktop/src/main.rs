@@ -618,6 +618,14 @@ fn ferrocrate_daemon_command(socket: &Path) -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn daemon_health_response_ok(response: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
+}
+
+#[cfg(target_os = "linux")]
 fn daemon_is_healthy(socket: &Path) -> bool {
     use std::os::unix::net::UnixStream;
     let Ok(mut stream) = UnixStream::connect(socket) else {
@@ -631,9 +639,7 @@ fn daemon_is_healthy(socket: &Path) -> bool {
         return false;
     }
     let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok()
-        && response.starts_with("HTTP/1.1 200")
-        && response.ends_with("OK")
+    stream.read_to_string(&mut response).is_ok() && daemon_health_response_ok(&response)
 }
 
 #[cfg(target_os = "linux")]
@@ -3573,11 +3579,11 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
-        copy_interactive_input, create_terminal_exec, exec_mode_from_env,
-        ferrocrate_daemon_command, ferrocrate_socket_candidates, gather_phase0_check,
-        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
-        load_forward_entries, load_vm_state, network_proxy_request, open_terminal_exec,
-        parse_exec_mode, read_exec_request, registry_login_request,
+        copy_interactive_input, create_terminal_exec, daemon_health_response_ok,
+        exec_mode_from_env, ferrocrate_daemon_command, ferrocrate_socket_candidates,
+        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
+        open_terminal_exec, parse_exec_mode, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         resize_terminal_exec, run_request, save_forward_entries, save_vm_state,
         select_terminal_socket, should_route_to_macos_guest, terminal_exec_create_path,
@@ -3920,6 +3926,12 @@ mod tests {
                 "--docker-compat".to_string(),
             ]
         );
+        assert!(daemon_health_response_ok(
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nOK\n"
+        ));
+        assert!(!daemon_health_response_ok(
+            "HTTP/1.1 500 Internal Server Error\r\n\r\nOK\n"
+        ));
     }
 
     #[test]

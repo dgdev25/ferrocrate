@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_core::witness::{
     verify_stream, DisclosureClass, DurableIntent, FaultPoint, FlushBoundary, Invocation,
     JournalConfig, JournalError, JournalFaults, JournalMode, ObservationDigest, ObservationHandle,

@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#![cfg(target_os = "linux")]
+
 use ed25519_dalek::{Signer, SigningKey};
 use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,

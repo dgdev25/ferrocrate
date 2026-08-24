@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Security tests for FerroCrate
 //!
 //! Tests for seccomp, capabilities, and auth file security.

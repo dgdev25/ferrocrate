@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ed25519_dalek::SigningKey;
 use ferro_core::witness::{
     decode_record, encode_record, Checkpoint, CheckpointKind, CheckpointVerifier, FaultPoint,

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_core::authorization::gate::{
     AuthorizationGate, AuthorizedRequest, CanonicalRequest, Denial,
 };

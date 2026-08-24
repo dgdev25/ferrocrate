@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#![cfg(target_os = "linux")]
+
 use ferro_core::mount_cleanup::cleanup_container_mount;
 use ferro_core::rootfs::construct_rootfs;
 use ferro_core::rootfs_prep::prepare_container_rootfs;

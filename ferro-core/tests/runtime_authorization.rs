@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_core::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
 use ferro_core::container_store::ContainerRecord;
 use ferro_core::container_store::CreationProvenance;

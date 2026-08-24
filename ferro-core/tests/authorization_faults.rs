@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_core::authorization::inventory::MUTATION_INVENTORY;
 use ferro_core::authorization::{
     gate::AuthorizationGate, policy::PolicyStore, Action, RequestOrigin, ResourceKind,

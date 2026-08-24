@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+#![cfg(target_os = "linux")]
+
 #[path = "../../tests/support/qualification_fixture.rs"]
 mod qualification_fixture;
 

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_core::witness::{
     decode_record, encode_record, hash_record, verify_stream, DisclosureClass, Invocation,
     PrincipalSummary, ReasonCode, RecordBytes, ResourceSummary, RuleSummary, StreamTrust,

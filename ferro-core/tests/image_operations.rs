@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use ferro_core::authorization::RequestOrigin;

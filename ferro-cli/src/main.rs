@@ -13417,6 +13417,43 @@ struct DockerCreateSpec {
 }
 
 #[cfg(target_os = "linux")]
+struct DockerStartRunInputs {
+    path_binds: Vec<String>,
+    volume_binds: Vec<String>,
+    annotations: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
+    // Docker's Binds mixes host-path binds (absolute source) with named
+    // volumes. Keep each handle_run argument explicit here: these adjacent
+    // string slices are otherwise easy to transpose without a type error.
+    let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
+        .binds
+        .iter()
+        .cloned()
+        .partition(|entry| entry.starts_with('/'));
+    volume_binds.extend(spec.image_volumes.iter().cloned());
+
+    let mut annotations = spec
+        .log_options
+        .iter()
+        .map(|(key, value)| format!("io.ferrocrate.log.{key}={value}"))
+        .collect::<Vec<_>>();
+    annotations.sort();
+    annotations.push(format!(
+        "io.ferrocrate.log.driver={}",
+        spec.log_driver
+    ));
+
+    DockerStartRunInputs {
+        path_binds,
+        volume_binds,
+        annotations,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn default_log_driver() -> String {
     "json-file".to_string()
 }
@@ -15729,24 +15766,7 @@ fn handle_docker_compat_connection(
                     "FERROCRATE_RUN_TTY",
                     spec.tty.then_some("1"),
                 );
-                // Docker's Binds mixes host-path binds (absolute source)
-                // with named volumes; named volumes resolve through the
-                // volume store, never as literal paths.
-                let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
-                    .binds
-                    .iter()
-                    .cloned()
-                    .partition(|entry| entry.starts_with('/'));
-                volume_binds.extend(spec.image_volumes.iter().cloned());
-                let log_annotations = spec
-                    .log_options
-                    .iter()
-                    .map(|(key, value)| format!("io.ferrocrate.log.{key}={value}"))
-                    .chain(std::iter::once(format!(
-                        "io.ferrocrate.log.driver={}",
-                        spec.log_driver
-                    )))
-                    .collect::<Vec<_>>();
+                let run_inputs = docker_start_run_inputs(&spec);
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -15756,14 +15776,14 @@ fn handle_docker_compat_connection(
                     &spec.cmd,
                     &spec.network_mode,
                     &network_backend,
-                    &path_binds,
-                    &log_annotations,
-                    &volume_binds,
+                    &run_inputs.path_binds,
+                    &[],
+                    &run_inputs.volume_binds,
                     false,
                     false,
                     &spec.env,
                     &spec.labels,
-                    &[],
+                    &run_inputs.annotations,
                     &[],
                     None,
                     spec.workdir.as_deref(),

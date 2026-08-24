@@ -4845,8 +4845,28 @@ fn handle_run(
     let mounts = parse_bind_mounts(bind_mounts)?;
     let volume_mounts =
         parse_volume_mounts(volume_store, volumes, &origin, &surface_authorization)?;
+    let explicit_targets = mounts
+        .iter()
+        .chain(volume_mounts.iter())
+        .map(|mount| mount.target.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let image_reference = resolve_reference(store, &effective_image)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("run: image config is unavailable for {effective_image}"))?;
+    let (image_config, _) = docker_image_metadata(runtime_dir, store, &image_reference)?;
+    let image_volume_entries = image_config_volume_targets(&image_config)
+        .into_iter()
+        .filter(|target| !explicit_targets.contains(target.trim_start_matches('/')))
+        .collect::<Vec<_>>();
+    let image_volume_mounts = parse_volume_mounts(
+        volume_store,
+        &image_volume_entries,
+        &origin,
+        &surface_authorization,
+    )?;
     let mut mounts = mounts;
     mounts.extend(volume_mounts);
+    mounts.extend(image_volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
     let env = parse_env_entries(env)?;
     // Resolve ai_runtime config: caller-supplied takes precedence over ferrofile.toml.
@@ -8034,6 +8054,21 @@ fn docker_image_metadata(
         .map_err(|error| format!("docker: read image config: {error}"))?)
         .map_err(|error| format!("docker: invalid image config: {error}"))?;
     Ok((config, manifest))
+}
+
+fn image_config_volume_targets(config: &serde_json::Value) -> Vec<String> {
+    let mut targets = config
+        .get("config")
+        .and_then(|value| value.get("Volumes"))
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|volumes| volumes.keys())
+        .filter(|target| target.starts_with('/'))
+        .cloned()
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
 fn docker_image_list_entry(
@@ -18394,6 +18429,7 @@ mod tests {
         parse_docker_log_time_bound, rfc3339_nanos,
         docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
+        image_config_volume_targets,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
         docker_pending_inspect_payload, docker_pending_matches_filters,
         docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
@@ -21652,6 +21688,20 @@ volumes:
             Some(&"true".to_string())
         );
         assert_eq!(mounts[0].source, volumes[0].path);
+    }
+
+    #[test]
+    fn image_config_volume_targets_are_sorted_and_deduplicated() {
+        let config = serde_json::json!({
+            "config": {
+                "Volumes": {"/var/lib/app": {}, "/data": {}, "relative": {}}
+            }
+        });
+
+        assert_eq!(
+            image_config_volume_targets(&config),
+            vec!["/data".to_string(), "/var/lib/app".to_string()]
+        );
     }
 
     #[test]

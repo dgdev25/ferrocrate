@@ -3,6 +3,23 @@
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("ai")
+        && args.get(1).map(String::as_str) == Some("orchestrate")
+    {
+        let entitlement = std::env::var_os("FERROCRATE_ENTITLEMENT_FILE");
+        let public_key = std::env::var_os("FERROCRATE_ENTITLEMENT_PUBKEY");
+        if entitlement.is_none() || public_key.is_none() {
+            eprintln!("ai orchestrate requires paid entitlement");
+            std::process::exit(1);
+        }
+        if std::env::var_os("FERROCRATE_AI_DEGRADE").is_some() {
+            println!("ai orchestrate: degraded mode enabled");
+            return;
+        }
+        eprintln!("ai orchestrate is unavailable on this platform without degraded mode");
+        std::process::exit(78);
+    }
     eprintln!("ferro-cli requires a Linux runtime; this target is compile-only");
     std::process::exit(78);
 }

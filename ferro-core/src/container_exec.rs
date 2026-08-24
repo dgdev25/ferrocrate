@@ -303,9 +303,7 @@ pub fn build_nsenter_args_with_options(
         args.extend(["--wd".to_string(), workdir.to_string()]);
     }
     if let Some(user) = user.filter(|value| !value.is_empty()) {
-        let (uid, gid) = user
-            .split_once(':')
-            .map_or((user, None), |(uid, gid)| (uid, Some(gid)));
+        let (uid, gid) = user.split_once(':').map_or((user, None), |(uid, gid)| (uid, Some(gid)));
         if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(ContainerExecError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -861,9 +859,7 @@ mod tests {
         .expect("args should build");
 
         #[cfg(target_env = "musl")]
-        let expected = vec![
-            "-t", "1234", "-m", "-u", "-i", "-n", "-p", "/bin/sh", "-c", "echo hi",
-        ];
+        let expected = vec!["-t", "1234", "-m", "-u", "-i", "-n", "-p", "/bin/sh", "-c", "echo hi"];
         #[cfg(not(target_env = "musl"))]
         let expected = vec!["-t", "1234", "-a", "/bin/sh", "-c", "echo hi"];
         assert_eq!(args, expected);
@@ -882,41 +878,11 @@ mod tests {
 
         #[cfg(target_env = "musl")]
         let expected = vec![
-            "-t",
-            "1234",
-            "-m",
-            "-u",
-            "-i",
-            "-n",
-            "-p",
-            "-w",
-            "/workspace",
-            "-S",
-            "1001",
-            "-G",
-            "1002",
-            "/usr/bin/env",
-            "COLOR=blue",
-            "/bin/sh",
-            "-c",
-            "id",
+            "-t", "1234", "-m", "-u", "-i", "-n", "-p", "-w", "/workspace", "-S", "1001", "-G", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
         ];
         #[cfg(not(target_env = "musl"))]
         let expected = vec![
-            "-t",
-            "1234",
-            "-a",
-            "--wd",
-            "/workspace",
-            "--setuid",
-            "1001",
-            "--setgid",
-            "1002",
-            "/usr/bin/env",
-            "COLOR=blue",
-            "/bin/sh",
-            "-c",
-            "id",
+            "-t", "1234", "-a", "--wd", "/workspace", "--setuid", "1001", "--setgid", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
         ];
         assert_eq!(args, expected);
     }

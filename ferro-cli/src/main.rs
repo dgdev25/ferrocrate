@@ -1739,7 +1739,7 @@ fn doctor_apparmor_userns_check(
             line.split_whitespace().next() == Some(FERROCRATE_APPARMOR_PROFILE_NAME)
         })
     });
-    let ok = profile_installed && profile_loaded.unwrap_or(true);
+    let ok = profile_installed && profile_loaded.unwrap_or(false);
     let message = if !profile_installed {
         "kernel.apparmor_restrict_unprivileged_userns=1 and the FerroCrate AppArmor profile is absent"
             .to_string()
@@ -1752,7 +1752,7 @@ fn doctor_apparmor_userns_check(
                 "kernel.apparmor_restrict_unprivileged_userns=1 and profile {FERROCRATE_APPARMOR_PROFILE_NAME} is installed but not loaded"
             ),
             None => format!(
-                "AppArmor unprivileged-userns restriction is active; profile {FERROCRATE_APPARMOR_PROFILE_NAME} is installed (kernel profile set is unreadable)"
+                "AppArmor unprivileged-userns restriction is active; profile {FERROCRATE_APPARMOR_PROFILE_NAME} is installed but its load state is unreadable"
             ),
         }
     };
@@ -21108,10 +21108,28 @@ volumes:
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn doctor_accepts_installed_profile_when_kernel_profile_set_is_unreadable() {
+    fn doctor_rejects_installed_profile_when_kernel_profile_set_is_unreadable() {
         let check = super::doctor_apparmor_userns_check(Some("1"), true, None);
-        assert!(check.ok, "{}", check.message);
-        assert!(check.message.contains("installed"));
+        assert!(!check.ok, "{}", check.message);
+        assert!(check.message.contains("load state is unreadable"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_rejects_installed_but_unloaded_ferrocrate_profile() {
+        let check = super::doctor_apparmor_userns_check(
+            Some("1"),
+            true,
+            Some("other-profile (enforce)\n"),
+        );
+        assert!(!check.ok, "{}", check.message);
+        assert!(check.message.contains("installed but not loaded"));
+        assert_eq!(
+            check.hint.as_deref(),
+            Some(
+                "install or reinstall the FerroCrate Debian package, then run `sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.ferrocrate`"
+            )
+        );
     }
 
     #[cfg(target_os = "linux")]

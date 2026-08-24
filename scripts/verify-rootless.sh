@@ -128,9 +128,9 @@ else
 fi
 
 # Bridge-mode workloads create the user+network namespace first and then use
-# bubblewrap for the rootfs/mount boundary. A host can permit the standalone
-# mount probe above while denying that nested combination, so report it
-# separately instead of letting Compose fail after container state is created.
+# bubblewrap for the rootfs/mount boundary. This generic helper probe is not
+# executed in FerroCrate's AppArmor domain, so its result is reported separately
+# from the package profile state below.
 user=$(id -un)
 user_id=$(id -u)
 group_id=$(id -g)
@@ -222,10 +222,11 @@ else
   echo "rootless.kernel=unknown version=${kernel_version}"
 fi
 
-# AppArmor state: an enabled module with the unprivileged-userns restriction
-# denies bridge-mode rootless workloads unless a profile admits bubblewrap.
-# Report the module, the sysctl, and (when restricted) whether an apparmor
-# parser is available to install a host profile.
+# AppArmor state: when the unprivileged-userns restriction is enabled, an
+# unprofiled generic bubblewrap probe can be denied even if FerroCrate's
+# package profile is loaded.
+# Report the module, the sysctl, and (when restricted) the package profile's
+# installation and kernel-loaded state.
 apparmor_enabled="no"
 if [[ -r "$apparmor_enabled_path" ]]; then
   apparmor_enabled="$(tr -d '[:space:]' <"$apparmor_enabled_path")"

@@ -41,7 +41,11 @@ fn provision_busybox_rootfs(rootfs: &std::path::Path) {
     {
         let lib = rootfs.join("lib");
         std::fs::create_dir_all(&lib).unwrap();
-        std::fs::copy("/lib/ld-musl-x86_64.so.1", lib.join("ld-musl-x86_64.so.1")).unwrap();
+        std::fs::copy(
+            "/lib/ld-musl-x86_64.so.1",
+            lib.join("ld-musl-x86_64.so.1"),
+        )
+        .unwrap();
     }
 }
 
@@ -708,7 +712,9 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
             store.put(&record).unwrap();
             drop(store);
             if action == "restart" {
-                provision_busybox_rootfs(&root.path().join("containers").join(id).join("rootfs"));
+                provision_busybox_rootfs(
+                    &root.path().join("containers").join(id).join("rootfs"),
+                );
             }
         }
         let runtime =
@@ -860,7 +866,9 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             store.put(&record).unwrap();
             drop(store);
             if action == "restart" {
-                provision_busybox_rootfs(&root.path().join("containers").join(id).join("rootfs"));
+                provision_busybox_rootfs(
+                    &root.path().join("containers").join(id).join("rootfs"),
+                );
             }
         }
         let runtime =

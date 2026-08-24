@@ -6,6 +6,7 @@ import { createWebBridgeRuntime, installWebBridgeRuntime } from "./webBridgeRunt
 
 const nativeTauriAvailable = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const webRuntime = nativeTauriAvailable ? null : installWebBridgeRuntime(window, createWebBridgeRuntime());
+export const dialogAvailable = nativeTauriAvailable || Boolean(webRuntime?.capabilities.dialog);
 
 export function invoke<T>(
   command: string,

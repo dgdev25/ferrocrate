@@ -147,3 +147,14 @@ test("web bridge invoke accepts a longer per-command timeout", async () => {
     { ok: true },
   );
 });
+
+test("web bridge reports that native host path dialogs are unavailable", async () => {
+  const runtime = createWebBridgeRuntime({ token: "secret-token", target: {} });
+
+  assert.equal(typeof runtime.capabilities, "object");
+  assert.equal(runtime.capabilities.dialog, false);
+  await assert.rejects(
+    runtime.open({ directory: true }),
+    /native file and directory dialogs are unavailable in web mode/i,
+  );
+});

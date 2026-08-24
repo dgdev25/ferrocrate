@@ -19,8 +19,9 @@ export function extractWebBridgeToken(target = globalThis) {
 export function createWebBridgeRuntime(options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
   const eventSourceFactory = options.eventSourceFactory ?? ((url) => new globalThis.EventSource(url));
-  const promptImpl = options.promptImpl ?? globalThis.prompt?.bind(globalThis);
   const target = options.target ?? globalThis;
+  const dialogOpenImpl = options.dialogOpenImpl ?? target.__TAURI__?.dialog?.open;
+  const dialogAvailable = typeof dialogOpenImpl === "function";
   const token = options.token ?? extractWebBridgeToken(target);
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
   let eventSource;
@@ -36,6 +37,8 @@ export function createWebBridgeRuntime(options = {}) {
   }
 
   return {
+    capabilities: { dialog: dialogAvailable },
+
     async invoke(command, args = {}, invokeOptions = {}) {
       if (!fetchImpl) throw new Error("web bridge fetch is unavailable");
       const timeoutMs = invokeOptions.timeoutMs ?? defaultTimeoutMs;
@@ -95,9 +98,10 @@ export function createWebBridgeRuntime(options = {}) {
     },
 
     async open(options = {}) {
-      if (!promptImpl) throw new Error("browser path selection is unavailable");
-      const kind = options.directory ? "directory" : "file";
-      return promptImpl(`Enter the ${kind} path visible to Ferrocrate:`, "") || null;
+      if (!dialogAvailable) {
+        throw new Error("Native file and directory dialogs are unavailable in web mode.");
+      }
+      return dialogOpenImpl(options);
     },
   };
 }

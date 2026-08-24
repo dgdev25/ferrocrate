@@ -1,4 +1,4 @@
-import { invoke, listen, open } from "./desktopRuntime";
+import { dialogAvailable, invoke, listen, open } from "./desktopRuntime";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +35,8 @@ import {
   applyRuntimeSurfaceTransition,
   containerContentState,
   FirstRunState,
+  HostPathField,
+  hostPathError,
   LicensingDialog,
   ResourceCreateDialog,
   ResourceEmptyState,
@@ -401,6 +403,22 @@ function App(): JSX.Element {
       setComposeFile(selected);
       setError(null);
       await readComposeSnapshot(selected);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function loadComposeHostPath(): Promise<void> {
+    const file = composeFile.trim();
+    const validationError = hostPathError(file, "file");
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setComposeFile(file);
+    setError(null);
+    try {
+      await readComposeSnapshot(file);
     } catch (err) {
       setError(String(err));
     }
@@ -1451,7 +1469,9 @@ function App(): JSX.Element {
             {activeSection === "compose" ? (
               composePage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Compose">
-                  <ResourceEmptyState section="compose" disabled={runtimeBusy || composeLoading} onAction={() => void chooseComposeFile()} />
+                  {dialogAvailable
+                    ? <ResourceEmptyState section="compose" disabled={runtimeBusy || composeLoading} onAction={() => void chooseComposeFile()} />
+                    : <HostPathField label="Compose file" kind="file" value={composeFile} dialogAvailable={false} busy={runtimeBusy || composeLoading} submitLabel={composeLoading ? "Loading…" : "Load Compose file"} onChange={(event) => { setComposeFile(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} />}
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Compose services">
@@ -1550,7 +1570,7 @@ function App(): JSX.Element {
       ) : null}
 
       {buildImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Build context directory</span><div className="field-row"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button></div></label><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Start build</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><HostPathField label="Build context directory" kind="directory" value={buildContext} dialogAvailable={dialogAvailable} busy={runtimeBusy} onChange={(event) => setBuildContext(event.target.value)} onChoose={() => void chooseBuildContext()} /><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || Boolean(hostPathError(buildContext, "directory")) || !buildTag.trim()}>Start build</button></div></section></div>
       ) : null}
 
       <BuildLicensingDialog

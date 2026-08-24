@@ -35,6 +35,38 @@ test("each resource empty state renders an icon, one sentence, and one action", 
   }
 });
 
+test("web mode renders a validated daemon-host path fallback when dialogs are unavailable", () => {
+  assert.equal(typeof resourcePages.HostPathField, "function");
+  assert.equal(resourcePages.hostPathError("relative/compose.yml", "file"), "Enter an absolute file path on the daemon host.");
+  assert.equal(resourcePages.hostPathError("/srv/app/compose.yml", "file"), null);
+  assert.equal(resourcePages.hostPathError("C:\\work\\app", "directory"), null);
+
+  const invalid = renderToStaticMarkup(createElement(resourcePages.HostPathField, {
+    label: "Compose file",
+    kind: "file",
+    value: "relative/compose.yml",
+    dialogAvailable: false,
+    submitLabel: "Load Compose file",
+    onChange: () => {},
+  }));
+  assert.match(invalid, /absolute file path on the daemon host/);
+  assert.match(invalid, /aria-invalid="true"/);
+  assert.match(invalid, /Load Compose file/);
+  assert.match(invalid, /disabled=""/);
+  assert.doesNotMatch(invalid, /Choose file/);
+
+  const valid = renderToStaticMarkup(createElement(resourcePages.HostPathField, {
+    label: "Build context directory",
+    kind: "directory",
+    value: "/srv/app",
+    dialogAvailable: false,
+    onChange: () => {},
+  }));
+  assert.match(valid, /value="\/srv\/app"/);
+  assert.doesNotMatch(valid, /aria-invalid="true"/);
+  assert.doesNotMatch(valid, /Choose directory/);
+});
+
 test("resource page state keeps empty and populated controls mutually exclusive while a loaded Compose project stays populated", () => {
   assert.equal(typeof resourcePages.resourcePageState, "function");
   assert.deepEqual(resourcePages.resourcePageState("volumes", 0), {

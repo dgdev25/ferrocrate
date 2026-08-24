@@ -25,6 +25,12 @@ export function parseContainerRows(output) {
         status,
         health: String(record.health_status || "none").toLowerCase(),
         ports: formatContainerPorts(record.ports),
+        composeProject: record.labels?.["com.docker.compose.project"] || null,
+        composeService: record.labels?.["com.docker.compose.service"] || null,
+        startedAt: Number(record.started_at_unix || record.created_at_unix || 0),
+        cpu: Number.isFinite(Number(record.cpu_percent))
+          ? `${Number(record.cpu_percent).toFixed(1)}%`
+          : "—",
       };
     });
   } catch {
@@ -42,7 +48,51 @@ export function filterContainers(rows, query) {
 
 export function statusTone(row) {
   if (row.health === "unhealthy") return "unhealthy";
-  return row.state === "running" ? "running" : "stopped";
+  if (row.state === "running" && row.health !== "none" && row.health !== "healthy") return "degraded";
+  return row.state === "running" ? "running" : "exited";
+}
+
+export function statusLabel(row) {
+  const tone = statusTone(row);
+  if (tone === "unhealthy") return "Unhealthy";
+  if (tone === "degraded") return "Degraded";
+  return row.status;
+}
+
+export function filterContainersByStatus(rows, filter) {
+  if (filter === "all") return rows;
+  return rows.filter((row) => statusTone(row) === filter);
+}
+
+export function groupContainers(rows) {
+  const projects = new Map();
+  const standalone = [];
+  for (const row of rows) {
+    if (!row.composeProject) {
+      standalone.push(row);
+      continue;
+    }
+    const project = projects.get(row.composeProject) || [];
+    project.push(row);
+    projects.set(row.composeProject, project);
+  }
+  const groups = [...projects.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, projectRows]) => ({
+      name,
+      compose: true,
+      rows: projectRows,
+      running: projectRows.filter((row) => row.state === "running").length,
+    }));
+  if (standalone.length) {
+    groups.push({
+      name: "Standalone",
+      compose: false,
+      rows: standalone,
+      running: standalone.filter((row) => row.state === "running").length,
+    });
+  }
+  return groups;
 }
 
 export function shellKeyboardCommand(event) {

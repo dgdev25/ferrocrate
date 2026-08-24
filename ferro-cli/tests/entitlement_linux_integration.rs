@@ -45,9 +45,14 @@ mod linux_tests {
 
     #[test]
     fn ai_orchestrate_requires_entitlement_on_linux() {
-        let (mut cmd, _runtime_dir, _image_store) = cmd_with_isolated_state();
+        let (mut cmd, runtime_dir, _image_store) = cmd_with_isolated_state();
         let output = cmd
             .args(["ai", "orchestrate", "--task", "linux-entitlement-gate"])
+            .env(
+                "FERROCRATE_ENTITLEMENT_FILE",
+                runtime_dir.path().join("missing-entitlement.lic"),
+            )
+            .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
             .env("FERROCRATE_AI_DEGRADE", "1")
             .output()
             .expect("run ferro-cli");

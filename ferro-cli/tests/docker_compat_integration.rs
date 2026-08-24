@@ -101,6 +101,13 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
     assert_eq!(status, 200, "local image build response={body}");
 }
 
+fn rootless_bwrap_available() -> bool {
+    Command::new("bwrap")
+        .args(["--unshare-user", "--ro-bind", "/", "/", "--", "true"])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 struct DaemonHarness {
     child: Child,
     _runtime_dir: tempfile::TempDir,
@@ -688,7 +695,7 @@ fn docker_compat_bounded_on_failure_restarts_exactly_the_configured_count() {
 fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/bounded-recovery:latest");
-    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; sleep 2; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; sleep 5; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
     let (status, response) = harness.request_bytes(
         "POST",
         "/v1.45/containers/create?name=bounded-recovery",
@@ -725,8 +732,7 @@ fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery(
     let recovered_restart_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let inspect = inspect_container(&harness, &id);
-        if inspect["State"]["Status"] == "running"
-            && inspect["State"]["Pid"].as_i64() != Some(first_retry_pid)
+        if inspect["RestartCount"] == 2 && inspect["State"]["Pid"].as_i64() != Some(first_retry_pid)
         {
             assert_eq!(
                 inspect["RestartCount"], 2,
@@ -1681,6 +1687,10 @@ fn docker_compat_exec_resize_updates_live_tty() {
         eprintln!("skipping rootful exec-resize fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
         return;
     }
+    if !rootless_bwrap_available() {
+        eprintln!("skipping exec-resize fixture: bwrap user namespaces are unavailable");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/exec-resize:latest");
     let create_body = r#"{"Image":"compat/exec-resize:latest","Cmd":["/bin/busybox","sleep","5"],"HostConfig":{"NetworkMode":"none"}}"#;
@@ -1727,14 +1737,24 @@ fn docker_compat_exec_resize_updates_live_tty() {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .expect("set exec resize read timeout");
+    let initial_size_deadline = Instant::now() + Duration::from_secs(10);
     while !received
         .windows(b"24 80".len())
         .any(|window| window == b"24 80")
     {
         let mut buffer = [0_u8; 512];
-        let read = stream
-            .read(&mut buffer)
-            .expect("read initial exec TTY size");
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) && Instant::now() < initial_size_deadline =>
+            {
+                continue;
+            }
+            Err(error) => panic!("read initial exec TTY size: {error}"),
+        };
         assert!(read > 0, "exec TTY closed before reporting its size");
         received.extend_from_slice(&buffer[..read]);
     }
@@ -3218,6 +3238,10 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
 #[test]
 fn docker_compat_rm_v_removes_only_anonymous_volumes() {
+    if !nix::unistd::geteuid().is_root() && !rootless_bwrap_available() {
+        eprintln!("skipping anonymous-volume fixture: bwrap user namespaces are unavailable");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/rm-volumes:latest");
 

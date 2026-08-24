@@ -19,6 +19,18 @@ export type DesktopSnapshot = {
   images: CommandResult;
 };
 
+export type ContainerStatsSample = {
+  id: string;
+  available: boolean;
+  cpu_percent: number | null;
+  memory_usage: number | null;
+  memory_limit: number | null;
+};
+
+export type ContainerStatsResponse = {
+  samples: ContainerStatsSample[];
+};
+
 export type DesktopAction =
   | "vm_start"
   | "vm_stop"

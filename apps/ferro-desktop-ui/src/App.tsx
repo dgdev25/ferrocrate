@@ -9,6 +9,7 @@ import type {
   ComposeServiceSummary,
   ComposeSnapshot,
   ContainerDetailSummary,
+  ContainerStatsResponse,
   DesktopAction,
   DesktopSnapshot,
   DoctorSummary,
@@ -61,12 +62,17 @@ import {
   daemonIsAvailable,
   daemonStatusPresentation,
   containerRemoveAvailability,
+  containerStatsUnavailableMessage,
   filterContainers,
   filterContainersByStatus,
+  formatBytes,
   groupContainers,
+  mergeContainerStats,
+  parseContainerStats,
   parseContainerRows,
   resourceTotals,
   shellKeyboardCommand,
+  shouldPollContainerStats,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
@@ -99,6 +105,7 @@ function commandMessage(result: CommandResult, fallback: string): string {
 
 function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [containerStats, setContainerStats] = useState<ContainerStatsResponse | null>(null);
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -1137,10 +1144,56 @@ function App(): JSX.Element {
     URL.revokeObjectURL(url);
   }
 
-  const containerRows = useMemo(
+  const snapshotContainerRows = useMemo(
     () => parseContainerRows(snapshot?.containers.stdout ?? ""),
     [snapshot?.containers.stdout],
   );
+  const containerRows = useMemo(
+    () => containerStats == null ? snapshotContainerRows : mergeContainerStats(snapshotContainerRows, parseContainerStats(containerStats)),
+    [containerStats, snapshotContainerRows],
+  );
+  const runningContainerIds = snapshotContainerRows.filter((row) => row.state === "running").map((row) => row.id);
+  const runningContainerKey = runningContainerIds.join("\u0000");
+
+  useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = () => {
+      if (!disposed && shouldPollContainerStats(activeSection, document.visibilityState)) {
+        timer = setTimeout(() => void poll(), 2000);
+      }
+    };
+    const poll = async () => {
+      if (disposed || inFlight || !shouldPollContainerStats(activeSection, document.visibilityState)) return;
+      inFlight = true;
+      try {
+        const response = await invoke<ContainerStatsResponse>("get_container_stats", { ids: runningContainerIds });
+        if (!disposed) setContainerStats(response);
+      } catch {
+        if (!disposed) {
+          setContainerStats({ samples: runningContainerIds.map((id) => ({ id, available: false, cpu_percent: null, memory_usage: null, memory_limit: null })) });
+        }
+      } finally {
+        inFlight = false;
+        schedule();
+      }
+    };
+    const onVisibilityChange = () => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      if (shouldPollContainerStats(activeSection, document.visibilityState)) void poll();
+    };
+
+    if (shouldPollContainerStats(activeSection, document.visibilityState)) void poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [activeSection, runningContainerKey]);
   const visibleContainers = useMemo(() => filterContainersByStatus(
     filterContainers(containerRows, globalSearch),
     containerStatusFilter,
@@ -1154,6 +1207,7 @@ function App(): JSX.Element {
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const resourceUsage = resourceTotals(containerRows);
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
+  const liveStatsUnavailable = containerRows.some((row) => row.state === "running" && row.statsAvailable === false);
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
   const daemonPresentation = daemonStatusPresentation(snapshot?.daemon);
@@ -1321,6 +1375,7 @@ function App(): JSX.Element {
                       </div>
                     </details>
                   </div>
+                  {liveStatsUnavailable ? <p className="muted" role="status">{containerStatsUnavailableMessage()}</p> : null}
                   <div className="mobile-target">
                     <input value={containerTarget} onChange={(event) => setContainerTarget(event.target.value)} placeholder="Container name or ID" />
                     <button className="btn btn-secondary" onClick={() => void inspectContainer()} disabled={runtimeBusy || !containerTarget.trim()}>Open</button>
@@ -1431,7 +1486,7 @@ function App(): JSX.Element {
                   <div className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
                     {containerDetail ? (
                       <>
-                        <div className="stat-cards"><div><span>Memory limit</span><strong>{containerDetail.resources.memory || "Unlimited"}</strong></div><div><span>CPU quota</span><strong>{containerDetail.resources.cpu_quota || "Unlimited"}</strong></div><div><span>CPU period</span><strong>{containerDetail.resources.cpu_period || "Default"}</strong></div></div>
+                        {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}
                         <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
                         <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
                       </>

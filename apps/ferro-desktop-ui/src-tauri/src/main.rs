@@ -494,6 +494,7 @@ fn stop_desktop_daemon() {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct NativeContainerStats {
     memory_current: Option<u64>,
+    memory_max: Option<u64>,
     cpu_usage_usec: Option<u64>,
 }
 
@@ -502,10 +503,18 @@ struct NativeStatsOutput {
     stats: NativeContainerStats,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ContainerResourceUsage {
+#[derive(Debug, Clone, Serialize)]
+struct ContainerStatsSample {
+    id: String,
+    available: bool,
     memory_usage: Option<u64>,
+    memory_limit: Option<u64>,
     cpu_percent: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerStatsResponse {
+    samples: Vec<ContainerStatsSample>,
 }
 
 fn container_stats_command(target: &str) -> Vec<String> {
@@ -521,61 +530,48 @@ fn read_container_stats(target: &str) -> Option<NativeContainerStats> {
         .map(|output| output.stats)
 }
 
-fn collect_container_resource_usage(ids: &[String]) -> BTreeMap<String, ContainerResourceUsage> {
-    let first = ids
-        .iter()
-        .filter_map(|id| {
-            read_container_stats(id).map(|stats| (id.clone(), (Instant::now(), stats)))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if first.is_empty() {
-        return BTreeMap::new();
-    }
-    thread::sleep(Duration::from_millis(100));
+fn aggregate_container_stats(
+    ids: &[String],
+    first: &BTreeMap<String, NativeContainerStats>,
+    second: &BTreeMap<String, NativeContainerStats>,
+    elapsed_usec: f64,
+) -> Vec<ContainerStatsSample> {
     ids.iter()
-        .filter_map(|id| {
-            let (started, previous) = first.get(id)?;
-            let current = read_container_stats(id)?;
-            let elapsed_usec = started.elapsed().as_micros() as f64;
-            let cpu_percent = previous
-                .cpu_usage_usec
-                .zip(current.cpu_usage_usec)
+        .map(|id| {
+            let pair = first.get(id).zip(second.get(id));
+            let cpu_percent = pair
+                .as_ref()
+                .and_then(|(previous, current)| previous.cpu_usage_usec.zip(current.cpu_usage_usec))
                 .filter(|_| elapsed_usec > 0.0)
                 .map(|(before, after)| after.saturating_sub(before) as f64 / elapsed_usec * 100.0);
-            Some((
-                id.clone(),
-                ContainerResourceUsage {
-                    memory_usage: current.memory_current,
-                    cpu_percent,
-                },
-            ))
+            ContainerStatsSample {
+                id: id.clone(),
+                available: pair.is_some(),
+                memory_usage: pair
+                    .as_ref()
+                    .and_then(|(_, current)| current.memory_current),
+                memory_limit: pair.as_ref().and_then(|(_, current)| current.memory_max),
+                cpu_percent,
+            }
         })
         .collect()
 }
 
-fn attach_container_resource_usage(
-    stdout: &str,
-    usage: &BTreeMap<String, ContainerResourceUsage>,
-) -> Result<String, serde_json::Error> {
-    let mut records = parse_nullable_json_list::<JsonValue>(stdout)?;
-    for record in &mut records {
-        let Some(id) = record.get("id").and_then(JsonValue::as_str) else {
-            continue;
-        };
-        let Some(stats) = usage.get(id) else {
-            continue;
-        };
-        let Some(object) = record.as_object_mut() else {
-            continue;
-        };
-        if let Some(memory) = stats.memory_usage {
-            object.insert("memory_usage".to_string(), JsonValue::from(memory));
-        }
-        if let Some(cpu) = stats.cpu_percent.and_then(serde_json::Number::from_f64) {
-            object.insert("cpu_percent".to_string(), JsonValue::Number(cpu));
-        }
+fn collect_container_stats(ids: &[String]) -> Vec<ContainerStatsSample> {
+    let first = ids
+        .iter()
+        .filter_map(|id| read_container_stats(id).map(|stats| (id.clone(), stats)))
+        .collect::<BTreeMap<_, _>>();
+    if first.is_empty() {
+        return aggregate_container_stats(ids, &first, &BTreeMap::new(), 0.0);
     }
-    serde_json::to_string(&records)
+    let started = Instant::now();
+    thread::sleep(Duration::from_millis(100));
+    let second = ids
+        .iter()
+        .filter_map(|id| read_container_stats(id).map(|stats| (id.clone(), stats)))
+        .collect::<BTreeMap<_, _>>();
+    aggregate_container_stats(ids, &first, &second, started.elapsed().as_micros() as f64)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2345,26 +2341,6 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
         &ferrocrate_proxy_command(&["containers", "--all", "--format", "json"]),
     );
     normalize_nullable_list_output(&mut containers);
-    if containers.ok {
-        if let Ok(records) = parse_nullable_json_list::<JsonValue>(&containers.stdout) {
-            let running_ids = records
-                .iter()
-                .filter(|record| {
-                    record.get("status").and_then(JsonValue::as_str) == Some("running")
-                })
-                .filter_map(|record| {
-                    record
-                        .get("id")
-                        .and_then(JsonValue::as_str)
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>();
-            let usage = collect_container_resource_usage(&running_ids);
-            if let Ok(enriched) = attach_container_resource_usage(&containers.stdout, &usage) {
-                containers.stdout = enriched;
-            }
-        }
-    }
     let mut images = run_owned_command(
         "ferro-desktop",
         &ferrocrate_proxy_command(&["images", "--format", "json"]),
@@ -2376,6 +2352,13 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
         runtime,
         containers,
         images,
+    }
+}
+
+#[tauri::command]
+fn get_container_stats(ids: Vec<String>) -> ContainerStatsResponse {
+    ContainerStatsResponse {
+        samples: collect_container_stats(&ids),
     }
 }
 
@@ -3057,6 +3040,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
+            get_container_stats,
             get_volumes,
             get_networks,
             get_container_detail,
@@ -3102,7 +3086,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        actionable_error, attach_container_resource_usage, build_bridge_command, command_failure,
+        actionable_error, aggregate_container_stats, build_bridge_command, command_failure,
         compose_bridge_command, compose_service_rows, container_detail_from_json,
         container_inspect_command, container_update_command, doctor_command,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
@@ -3110,10 +3094,44 @@ mod tests {
         parse_terminal_exec_id, parse_web_mode, registry_login_command, registry_logout_command,
         run_container_bridge_command, terminal_exec_command, terminal_resize_command,
         volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
-        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
-        ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction, NetworkInspectRecord,
-        NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction, VolumeListResponse,
+        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, JsonValue, LogBuffer,
+        NativeContainerStats, NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig,
+        NetworkListRecord, VolumeAction, VolumeListResponse,
     };
+
+    #[test]
+    fn container_stats_aggregate_usage_limit_and_unavailable_samples() {
+        let first = BTreeMap::from([(
+            "demo".to_string(),
+            NativeContainerStats {
+                memory_current: Some(64),
+                memory_max: Some(256),
+                cpu_usage_usec: Some(1_000),
+            },
+        )]);
+        let second = BTreeMap::from([(
+            "demo".to_string(),
+            NativeContainerStats {
+                memory_current: Some(96),
+                memory_max: Some(256),
+                cpu_usage_usec: Some(1_250),
+            },
+        )]);
+        let samples = aggregate_container_stats(
+            &["demo".to_string(), "missing".to_string()],
+            &first,
+            &second,
+            1_000.0,
+        );
+
+        assert_eq!(samples[0].id, "demo");
+        assert!(samples[0].available);
+        assert_eq!(samples[0].memory_usage, Some(96));
+        assert_eq!(samples[0].memory_limit, Some(256));
+        assert_eq!(samples[0].cpu_percent, Some(25.0));
+        assert_eq!(samples[1].id, "missing");
+        assert!(!samples[1].available);
+    }
 
     #[cfg(target_os = "linux")]
     use super::{
@@ -3427,27 +3445,6 @@ mod tests {
             doctor_command(true, true, false, true),
             vec!["doctor", "--json", "--fix", "--bootstrap", "--confirm"]
         );
-    }
-
-    #[test]
-    fn container_snapshot_includes_live_cpu_and_memory_usage() {
-        let usage = BTreeMap::from([(
-            "demo".to_string(),
-            ContainerResourceUsage {
-                memory_usage: Some(67_108_864),
-                cpu_percent: Some(12.5),
-            },
-        )]);
-        let output = attach_container_resource_usage(
-            r#"[{"id":"demo","status":"running"},{"id":"stopped","status":"exited"}]"#,
-            &usage,
-        )
-        .expect("enriched container JSON");
-        let records: Vec<JsonValue> = serde_json::from_str(&output).expect("container JSON");
-
-        assert_eq!(records[0]["memory_usage"], 67_108_864);
-        assert_eq!(records[0]["cpu_percent"], 12.5);
-        assert!(records[1].get("memory_usage").is_none());
     }
 
     #[test]

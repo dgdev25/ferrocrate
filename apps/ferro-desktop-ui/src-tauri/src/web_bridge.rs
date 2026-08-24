@@ -275,6 +275,11 @@ struct TargetArgs {
 }
 
 #[derive(Deserialize)]
+struct ContainerStatsArgs {
+    ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct TerminalArgs {
     target: String,
     shell: String,
@@ -422,6 +427,10 @@ fn dispatch_command(command: &str, args: Value, events: WebEventHub) -> Result<V
         "get_desktop_snapshot" => {
             let _: EmptyArgs = decode(args)?;
             encode(get_desktop_snapshot())
+        }
+        "get_container_stats" => {
+            let args: ContainerStatsArgs = decode(args)?;
+            encode(get_container_stats(args.ids))
         }
         "get_volumes" => {
             let _: EmptyArgs = decode(args)?;
@@ -743,7 +752,7 @@ mod tests {
                 },
                 "data" => json!([65]),
                 "columns" | "rows" | "memory" | "cpuQuota" | "cpuPeriod" => json!(1),
-                "env" | "environment" | "command" | "ports" | "volumes" => json!([]),
+                "env" | "environment" | "command" | "ports" | "volumes" | "ids" => json!([]),
                 "fix" | "bootstrap" | "dry_run" | "confirm" | "pullIfMissing" => json!(false),
                 "user" | "workdir" | "name" | "subnet" | "issuance_endpoint" | "access_token" => {
                     Value::Null
@@ -764,6 +773,7 @@ mod tests {
             | "close_terminal"
             | "get_paid_auth_state"
             | "clear_paid_session" => decode::<EmptyArgs>(args).map(drop),
+            "get_container_stats" => decode::<ContainerStatsArgs>(args).map(drop),
             "get_container_detail" | "start_log_follow" => decode::<TargetArgs>(args).map(drop),
             "get_compose_snapshot" => decode::<ComposeArgs>(args).map(drop),
             "build_image" => decode::<BuildImageArgs>(args).map(drop),
@@ -953,7 +963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_boots_and_dispatches_three_desktop_commands() {
+    async fn bridge_boots_and_dispatches_desktop_commands() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -981,6 +991,15 @@ mod tests {
         assert!(snapshot.status().is_success());
         let snapshot: Value = snapshot.json().await.expect("snapshot json");
         assert!(snapshot.get("runtime").is_some());
+
+        let stats = authorized(client.post(endpoint("get_container_stats")))
+            .json(&json!({ "ids": [] }))
+            .send()
+            .await
+            .expect("stats request");
+        assert!(stats.status().is_success());
+        let stats: Value = stats.json().await.expect("stats json");
+        assert_eq!(stats["samples"], json!([]));
 
         let action = authorized(client.post(endpoint("run_desktop_action")))
             .json(&json!({ "action": "pull_image", "target": null }))

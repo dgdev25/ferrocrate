@@ -16105,11 +16105,15 @@ fn handle_docker_compat_connection(
             ("POST", "/volumes/prune") => {
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_volume_filters(&filters)?;
+                let containers = runtime.list().map_err(|error| error.to_string())?;
                 let records = volume_store
                     .list()
                     .map_err(|error| error.to_string())?
                     .into_iter()
                     .filter(|record| docker_volume_matches_filters(record, &filters))
+                    .filter(|record| {
+                        docker_volume_mount_usage(&record.path, &containers).is_empty()
+                    })
                     .collect::<Vec<_>>();
                 let mut deleted = Vec::new();
                 for record in records {
@@ -16146,18 +16150,22 @@ fn handle_docker_compat_connection(
             ("GET", "/volumes") => {
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_volume_filters(&filters)?;
+                let containers = runtime.list().map_err(|error| error.to_string())?;
                 let volumes = volume_store
                     .list()
                     .map_err(|error| error.to_string())?
                     .into_iter()
                     .filter(|record| docker_volume_matches_filters(record, &filters))
                     .map(|record| {
+                        let mounts = docker_volume_mount_usage(&record.path, &containers);
                         serde_json::json!({
                             "Name": record.name,
                             "Driver": record.driver,
                             "Mountpoint": record.path,
                             "CreatedAt": record.created_at_unix.to_string(),
                             "Status": serde_json::Value::Null,
+                            "UsageData": {"RefCount": mounts.len(), "Size": 0},
+                            "FerrocrateMounts": mounts,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -17590,6 +17598,33 @@ fn docker_bind_mount_summary(source: &str, destination: &str, read_only: bool) -
 }
 
 #[cfg(target_os = "linux")]
+fn docker_volume_mount_usage(
+    mountpoint: &str,
+    containers: &[ferro_core::container_store::ContainerRecord],
+) -> Vec<serde_json::Value> {
+    containers
+        .iter()
+        .flat_map(|container| {
+            container.mounts.iter().filter_map(move |mount| {
+                if mount.source != mountpoint {
+                    return None;
+                }
+                let name = container
+                    .name
+                    .as_deref()
+                    .unwrap_or(container.id.as_str());
+                Some(serde_json::json!({
+                    "ContainerId": container.id,
+                    "ContainerName": name,
+                    "Destination": format!("/{}", mount.target.trim_start_matches('/')),
+                    "RW": !mount.read_only,
+                }))
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn docker_container_mount_summaries(
     record: &ferro_core::container_store::ContainerRecord,
 ) -> Vec<serde_json::Value> {
@@ -18927,6 +18962,7 @@ mod tests {
         docker_pending_inspect_payload, docker_pending_matches_filters,
         docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
+        docker_volume_mount_usage,
         effective_readonly, ensure_context_routing_available, extract_docker_build_context,
         handle_build, handle_containers, handle_context, handle_events, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
@@ -18957,6 +18993,66 @@ mod tests {
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
     use ferro_core::image_store::LocalImageStore;
+
+    #[test]
+    fn volume_mount_usage_reports_container_destination_and_access_mode() {
+        let read_write: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "container-1",
+                "name": "api",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["/bin/true"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running",
+                "mounts": [{
+                    "source": "/runtime/volumes/data/_data",
+                    "target": "var/lib/data",
+                    "read_only": false
+                }]
+            }))
+            .expect("decode read-write container");
+        let read_only: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "container-2",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["/bin/true"],
+                "created_at_unix": 2,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "exited",
+                "mounts": [{
+                    "source": "/runtime/volumes/data/_data",
+                    "target": "backup",
+                    "read_only": true
+                }]
+            }))
+            .expect("decode read-only container");
+
+        assert_eq!(
+            docker_volume_mount_usage(
+                "/runtime/volumes/data/_data",
+                &[read_write, read_only]
+            ),
+            vec![
+                serde_json::json!({
+                    "ContainerId": "container-1",
+                    "ContainerName": "api",
+                    "Destination": "/var/lib/data",
+                    "RW": true
+                }),
+                serde_json::json!({
+                    "ContainerId": "container-2",
+                    "ContainerName": "container-2",
+                    "Destination": "/backup",
+                    "RW": false
+                })
+            ]
+        );
+    }
 
     fn test_surface_authorization(path: &std::path::Path) -> SurfaceAuthorization {
         ContainerRuntime::new(path)

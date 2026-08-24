@@ -336,6 +336,19 @@ impl DaemonHarness {
 fn docker_compat_routes_support_version_prefix() {
     let harness = DaemonHarness::spawn();
 
+    let ping = harness.request_bytes_raw("GET", "/_ping", "text/plain", &[]);
+    let ping_headers = String::from_utf8_lossy(&ping);
+    let ping_headers = ping_headers
+        .split_once("\r\n\r\n")
+        .expect("ping response headers")
+        .0;
+    assert!(
+        ping_headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("API-Version: 1.45")),
+        "Docker API negotiation header missing: {ping_headers}"
+    );
+
     let routes = [
         "/_ping",
         "/version",

@@ -2962,6 +2962,9 @@ impl ContainerRuntime {
         } else {
             fs::create_dir_all(&rootfs_dir)?;
         }
+        if let Some(workdir) = resolved_workdir.as_deref() {
+            ensure_rootfs_workdir(&rootfs_dir, workdir)?;
+        }
         let baseline_excluded = mounts
             .iter()
             .map(|mount| rootfs_dir.join(&mount.target))
@@ -4407,6 +4410,23 @@ impl ContainerRuntime {
         let manager = CgroupV2Manager::new(&self.cgroup_root);
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.replace_limits(&group, &to_cgroup(Some(&limits))?)?;
+        if matches!(record.status.as_str(), "running" | "paused" | "restarting") {
+            if let Err(error) = manager.add_pid(&group, record.pid) {
+                let rollback = to_cgroup(previous.as_ref()).and_then(|old| {
+                    manager
+                        .replace_limits(&group, &old)
+                        .map_err(RuntimeError::from)
+                });
+                if let Err(rollback_error) = rollback {
+                    log::error!(
+                        "container resource-limit rollback failed after cgroup attachment: container_id={} error={}",
+                        id,
+                        rollback_error
+                    );
+                }
+                return Err(RuntimeError::Cgroup(error));
+            }
+        }
 
         record.resource_limits = Some(limits);
         if let Some(restart_policy) = restart_policy {
@@ -6270,6 +6290,7 @@ fn build_bwrap_command(
     cmd: &[String],
     mounts: &[BindMount],
     tmpfs_mounts: &[TmpfsMount],
+    workdir: Option<&str>,
     readonly_rootfs: bool,
     disable_userns: bool,
 ) -> Result<Command, RuntimeError> {
@@ -6294,7 +6315,7 @@ fn build_bwrap_command(
         .arg("--dev")
         .arg("/dev")
         .arg("--chdir")
-        .arg("/")
+        .arg(container_workdir_for_launcher(workdir))
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
@@ -6415,8 +6436,15 @@ fn build_command(
                     "shared rootless networking requires a trusted nsenter executable".into(),
                 )
             })?;
-            let bwrap =
-                build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?;
+            let bwrap = build_bwrap_command(
+                rootfs,
+                cmd,
+                mounts,
+                tmpfs_mounts,
+                workdir,
+                readonly_rootfs,
+                false,
+            )?;
             let mut shared_cmd = Command::new(nsenter);
             shared_cmd.arg("-t").arg(pid.to_string()).args([
                 "-U",
@@ -6510,8 +6538,15 @@ fn build_command(
             unshare_cmd.arg(setpriv).args(["--no-new-privs", "--"]);
         }
         if let Some(rootfs) = rootfs_dir.filter(|_| !running_as_root) {
-            let inner =
-                build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?;
+            let inner = build_bwrap_command(
+                rootfs,
+                cmd,
+                mounts,
+                tmpfs_mounts,
+                workdir,
+                readonly_rootfs,
+                false,
+            )?;
             unshare_cmd.arg(inner.get_program());
             unshare_cmd.args(inner.get_args());
         } else {
@@ -6533,7 +6568,15 @@ fn build_command(
             chroot_cmd.args(&cmd[1..]);
             chroot_cmd
         } else if command_available("bwrap") {
-            build_bwrap_command(rootfs, cmd, mounts, tmpfs_mounts, readonly_rootfs, false)?
+            build_bwrap_command(
+                rootfs,
+                cmd,
+                mounts,
+                tmpfs_mounts,
+                workdir,
+                readonly_rootfs,
+                false,
+            )?
         } else {
             return Err(RuntimeError::InvalidCommand(
                 "rootfs execution requires root (chroot) or bubblewrap (bwrap)".to_string(),
@@ -6575,7 +6618,9 @@ fn build_command(
         command.env(key, value);
     }
 
-    if let Some(dir) = workdir.filter(|_| !direct_container_setup && !rootfs_chroot_launcher) {
+    if let Some(dir) = workdir.filter(|_| {
+        rootfs_dir.is_none() && !direct_container_setup && !rootfs_chroot_launcher
+    }) {
         command.current_dir(dir);
     }
 
@@ -6836,6 +6881,17 @@ fn container_workdir_for_launcher(workdir: Option<&str>) -> String {
         Some(dir) if dir.starts_with('/') => dir.to_string(),
         Some(dir) => format!("/{dir}"),
     }
+}
+
+fn ensure_rootfs_workdir(rootfs: &Path, workdir: &str) -> Result<(), RuntimeError> {
+    let normalized = container_workdir_for_launcher(Some(workdir));
+    let relative = normalized
+        .strip_prefix('/')
+        .expect("container workdir is always absolute");
+    if !relative.is_empty() {
+        let _directory = open_mount_target_beneath(rootfs, Path::new(relative))?;
+    }
+    Ok(())
 }
 
 fn apply_runtime_identity(user_spec: &str) -> io::Result<()> {
@@ -14530,6 +14586,47 @@ mod tests {
     }
 
     #[test]
+    fn live_update_moves_previously_unlimited_process_into_new_cgroup() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("cgroup");
+        std::fs::create_dir_all(&root).expect("cgroup root");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids")
+            .expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "")
+            .expect("subtree control");
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root) };
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("live-update", "running");
+        record.pid = std::process::id();
+        record.process_start_time = super::process_start_time_for_pid(record.pid);
+        record.network_name = None;
+        record.namespace_owned = false;
+        runtime.store.put(&record).expect("seed running record");
+
+        runtime
+            .update_resource_limits(
+                &record.id,
+                crate::container_store::ResourceLimitRecord {
+                    memory_max: Some(64 * 1024 * 1024),
+                    cpu_quota: None,
+                    cpu_period: None,
+                    pids_max: Some(64),
+                },
+            )
+            .expect("live resource update");
+
+        let group = root.join("ferrocrate").join(&record.id);
+        assert_eq!(
+            std::fs::read_to_string(group.join("cgroup.procs")).expect("cgroup membership"),
+            record.pid.to_string()
+        );
+        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT") };
+    }
+
+    #[test]
     fn configured_cgroup_root_honors_explicit_override() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let override_root = tempfile::tempdir().expect("cgroup root");
@@ -16141,6 +16238,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 read_only: true,
             }],
             &[],
+            None,
             true,
             false,
         )
@@ -16156,6 +16254,46 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .windows(2)
             .any(|window| window == ["--remount-ro", "/"]));
         assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
+    }
+
+    #[test]
+    fn rootless_workdir_is_resolved_inside_the_container_rootfs() {
+        if nix::unistd::Uid::effective().is_root() || !super::command_available("bwrap") {
+            return;
+        }
+        let command = super::build_command(
+            &["/bin/true".into()],
+            &[],
+            Some(Path::new("/")),
+            false,
+            &[],
+            Some("/data"),
+            None,
+            None,
+            false,
+            None,
+            &[],
+            &[],
+            false,
+        )
+        .expect("rootless command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--chdir", "/data"]));
+        assert_eq!(command.get_current_dir(), None);
+    }
+
+    #[test]
+    fn missing_image_workdir_is_created_inside_the_rootfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        super::ensure_rootfs_workdir(temp.path(), "/var/lib/app")
+            .expect("prepare image workdir");
+        assert!(temp.path().join("var/lib/app").is_dir());
+        assert!(super::ensure_rootfs_workdir(temp.path(), "/safe/../escape").is_err());
     }
 
     #[test]

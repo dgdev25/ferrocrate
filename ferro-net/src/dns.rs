@@ -3,8 +3,11 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
+
+static RESOLVER_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsConfig {
@@ -40,20 +43,27 @@ pub fn write_resolv_conf(path: &Path, config: &DnsConfig) -> Result<(), DnsError
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("resolv.conf"),
-        std::process::id()
-    ));
     let contents = render_resolv_conf(config);
-    let result = (|| {
+    let (temp, mut file) = loop {
+        let sequence = RESOLVER_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{}.{}.{sequence}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("resolv.conf"),
+            std::process::id()
+        ));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o644);
-        let mut file = options.open(&temp)?;
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let result = (|| {
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
@@ -74,6 +84,7 @@ pub fn write_resolv_conf(path: &Path, config: &DnsConfig) -> Result<(), DnsError
 #[cfg(test)]
 mod tests {
     use super::{render_resolv_conf, write_resolv_conf, DnsConfig};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn renders_resolv_conf() {
@@ -103,5 +114,45 @@ mod tests {
             render_resolv_conf(&config)
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_resolver_publications_own_distinct_staging_files() {
+        let directory = tempfile::tempdir().expect("resolver directory");
+        let path = directory.path().join("resolv.conf");
+        let config = DnsConfig {
+            servers: vec!["10.0.2.3".into()],
+            search: vec!["ferro.local".into()],
+        };
+        let barrier = Arc::new(Barrier::new(16));
+        let writers = (0..16)
+            .map(|_| {
+                let path = path.clone();
+                let config = config.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_resolv_conf(&path, &config)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer
+                .join()
+                .expect("resolver writer thread")
+                .expect("concurrent resolver publication");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("published resolver"),
+            "nameserver 10.0.2.3\nsearch ferro.local\n"
+        );
+        assert!(std::fs::read_dir(directory.path())
+            .expect("resolver directory entries")
+            .all(|entry| !entry
+                .expect("resolver directory entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
     }
 }

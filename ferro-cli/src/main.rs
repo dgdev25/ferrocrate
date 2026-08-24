@@ -1362,6 +1362,12 @@ pub fn main() {
         }
     }
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Daemon { .. }) {
+        if let Err(error) = ferro_core::cgroups::validate_explicit_delegated_daemon() {
+            eprintln!("error: delegated cgroup daemon validation failed: {error}");
+            process::exit(1);
+        }
+    }
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
     if let Err(err) = dispatch(cli.command) {
@@ -14250,10 +14256,20 @@ fn handle_docker_compat_connection(
                     http_response(200, body.as_bytes(), "application/x-ndjson")
                 }
             }
-            ("GET", "/_ping") => http_response(200, "OK\n".as_bytes(), "text/plain"),
+            ("GET", "/_ping") => http_response_with_headers(
+                200,
+                "OK\n".as_bytes(),
+                "text/plain",
+                &[("API-Version", DOCKER_API_VERSION)],
+            ),
             // Docker's client pings with HEAD first and only falls back to
             // GET on failure; answer both.
-            ("HEAD", "/_ping") => http_response(200, &[], "text/plain"),
+            ("HEAD", "/_ping") => http_response_with_headers(
+                200,
+                &[],
+                "text/plain",
+                &[("API-Version", DOCKER_API_VERSION)],
+            ),
             ("POST", "/auth") => {
                 let payload: serde_json::Value = serde_json::from_slice(&request.body)
                     .map_err(|error| format!("docker: invalid auth request: {error}"))?;
@@ -17050,9 +17066,12 @@ fn docker_image_search_results(
 }
 
 #[cfg(target_os = "linux")]
+const DOCKER_API_VERSION: &str = "1.45";
+
+#[cfg(target_os = "linux")]
 fn docker_version_payload() -> serde_json::Value {
     serde_json::json!({
-        "Version": env!("CARGO_PKG_VERSION"), "ApiVersion": "1.45", "MinAPIVersion": "1.24",
+        "Version": env!("CARGO_PKG_VERSION"), "ApiVersion": DOCKER_API_VERSION, "MinAPIVersion": "1.24",
         "GitCommit": "unknown", "Os": std::env::consts::OS, "Arch": std::env::consts::ARCH,
     })
 }

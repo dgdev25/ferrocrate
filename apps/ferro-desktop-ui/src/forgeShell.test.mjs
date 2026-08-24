@@ -55,7 +55,7 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       image: "nginx:1.27-alpine",
       state: "running",
       status: "Running",
-      health: "healthy",
+      health: "none",
       ports: "8080→80/tcp",
       composeProject: "storefront",
       composeService: "web",
@@ -72,7 +72,7 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       name: "worker",
       image: "worker:latest",
       state: "exited",
-      status: "Exited (137)",
+      status: "Exited",
       health: "none",
       ports: "—",
       composeProject: null,
@@ -210,7 +210,7 @@ test("formatContainerPorts joins mappings and supplies an em dash when absent", 
 test("filterContainers searches names, images, status, and ports case-insensitively", () => {
   const rows = parseContainerRows(records);
   assert.deepEqual(filterContainers(rows, "NGINX").map((row) => row.id), ["abc123"]);
-  assert.deepEqual(filterContainers(rows, "137").map((row) => row.id), ["def456"]);
+  assert.deepEqual(filterContainers(rows, "worker").map((row) => row.id), ["def456"]);
   assert.deepEqual(filterContainers(rows, "8080").map((row) => row.id), ["abc123"]);
 });
 
@@ -222,6 +222,17 @@ test("statusTone distinguishes running, unhealthy, and stopped rows", () => {
   assert.equal(statusLabel({ state: "running", health: "starting", status: "Running" }), "Degraded");
   assert.equal(statusLabel({ state: "running", health: "unhealthy", status: "Running" }), "Unhealthy");
   assert.equal(statusLabel({ state: "exited", health: "none", status: "Exited (3)" }), "Exited (3)");
+});
+
+test("Docker status text retains exit codes and health state", () => {
+  const [exited, unhealthy, starting] = parseContainerRows(JSON.stringify([
+    { Id: "exit", Names: ["/exit"], State: "exited", Status: "Exited (137) 3 hours ago" },
+    { Id: "bad", Names: ["/bad"], State: "running", Status: "Up 1 minute (unhealthy)" },
+    { Id: "warm", Names: ["/warm"], State: "running", Status: "Up 1 second (starting)" },
+  ]));
+  assert.equal(exited.status, "Exited (137)");
+  assert.equal(statusLabel(unhealthy), "Unhealthy");
+  assert.equal(statusLabel(starting), "Degraded");
 });
 
 test("status filters use the binding All, Running, Degraded, Unhealthy, and Exited vocabulary", () => {

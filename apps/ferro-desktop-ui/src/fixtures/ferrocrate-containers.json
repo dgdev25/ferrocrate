@@ -14,7 +14,7 @@
     "NetworkSettings": {"Networks": {"bridge": {"NetworkID": "bridge"}}},
     "Ports": [{"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"}],
     "State": "running",
-    "Status": "Up 2 minutes (healthy)"
+    "Status": "running"
   },
   {
     "Command": "run-worker",
@@ -28,6 +28,6 @@
     "NetworkSettings": {"Networks": {}},
     "Ports": [],
     "State": "exited",
-    "Status": "Exited (137) 3 hours ago"
+    "Status": "exited"
   }
 ]

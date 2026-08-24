@@ -12,11 +12,11 @@ const imageRecords = await readFile(join(dirname(fileURLToPath(import.meta.url))
 
 test("image rows format byte sizes and Unix creation times for the table", () => {
   assert.deepEqual(imageView.parseImageRows(imageRecords), [{
-    id: "sha256:abc",
+    id: "sha256:d529dd0c6e5597ac7e4a3e2dea65c3fcc6173f4cae713c409265c1dd9914a11b",
     reference: "alpine:latest",
     fullReference: "registry-1.docker.io/library/alpine:latest",
-    size: "1.5 MB",
-    created: "2023-11-14 22:13 UTC",
+    size: "3.7 MB",
+    created: "2026-08-24 23:39 UTC",
   }]);
 });
 

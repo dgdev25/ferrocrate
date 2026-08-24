@@ -2124,12 +2124,9 @@ fn docker_compat_exec_resize_updates_live_tty() {
         received.extend_from_slice(&buffer[..read]);
     }
 
-    assert_eq!(
-        harness
-            .request("DELETE", "/v1.45/containers/exec-resize?force=true")
-            .0,
-        204
-    );
+    let (status, body) =
+        harness.request("DELETE", "/v1.45/containers/exec-resize?force=true");
+    assert_eq!(status, 204, "exec resize cleanup response={body}");
 }
 
 #[test]

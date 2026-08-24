@@ -1990,6 +1990,30 @@ impl ContainerRuntime {
         Ok(())
     }
 
+    /// Refresh terminal process state for a live daemon without performing
+    /// boot recovery. Each publication re-reads and validates the process
+    /// identity inside the store transaction, and an active lifecycle
+    /// reservation is left to its owning request.
+    pub fn refresh_daemon_state(&self) -> Result<(), RuntimeError> {
+        for record in self.store.list()? {
+            if !matches!(record.status.as_str(), "running" | "paused")
+                || pid_identity_matches(&record)
+            {
+                continue;
+            }
+            match self.store.update_exit_for_process(
+                &record.id,
+                record.pid,
+                record.process_start_time,
+                -1,
+            ) {
+                Ok(_) | Err(ContainerStoreError::MutationConflict) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn watch_surviving_workload(&self, record: ContainerRecord) {
         let store = self.store.clone_db();
         let runtime_dir = self.runtime_dir.clone();
@@ -3505,18 +3529,14 @@ impl ContainerRuntime {
         cmd: &[String],
         options: &ExecOptions,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_with_options_authorized(proof, intent, id, cmd, options);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3606,18 +3626,14 @@ impl ContainerRuntime {
         id: &str,
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, None, true, None);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3629,18 +3645,14 @@ impl ContainerRuntime {
         cmd: &[String],
         timeout: Option<Duration>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, timeout, false, None);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3655,18 +3667,14 @@ impl ContainerRuntime {
         input: &[u8],
         tty: bool,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, None, tty, Some(input));
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3683,19 +3691,15 @@ impl ContainerRuntime {
         tty_ready: &mut dyn FnMut(&Path) -> io::Result<()>,
         output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result =
             self.exec_streaming_authorized(proof, intent, id, cmd, input, tty, tty_ready, output);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -5517,6 +5521,46 @@ impl ContainerRuntime {
         }
         Err(RuntimeError::InvalidState(
             "container mutation reservation remained contended after bounded retries".to_string(),
+        ))
+    }
+
+    /// Authorize an exec process without reserving the container record.
+    /// Exec does not change lifecycle state, and a long-lived attached exec
+    /// must not block stop, kill, or delete from publishing their own kernel
+    /// effects. The fresh re-read still rejects a stale authorization binding.
+    fn authorize_exec(
+        &self,
+        id: &str,
+    ) -> Result<crate::authorization::runtime::MutationPermit, RuntimeError> {
+        const MAX_REVALIDATION_RETRIES: usize = 64;
+        for attempt in 0..MAX_REVALIDATION_RETRIES {
+            let record = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            let permit = self.authorization.authorize(Action::ContainerExec, &record)?;
+            self.phase_hook.reached(
+                runtime_action_name(Action::ContainerExec),
+                LifecyclePhasePoint::DecisionDurable,
+            )?;
+            let current = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            match self.authorization.revalidate(&permit, &current) {
+                Ok(()) => return Ok(permit),
+                Err(MediationError::Stale) if attempt + 1 < MAX_REVALIDATION_RETRIES => {
+                    self.authorization.complete(permit, false)?;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    self.authorization.complete(permit, false)?;
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(RuntimeError::InvalidState(
+            "container exec authorization remained stale after bounded retries".to_string(),
         ))
     }
 
@@ -15955,6 +15999,32 @@ mod tests {
             managed_cleanup_provenance: None,
             managed_host_veth: None,
         }
+    }
+
+    #[test]
+    fn exec_authorization_does_not_reserve_the_container_lifecycle_record() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        runtime
+            .store
+            .put(&fixture_container_record("concurrent-exec", "running"))
+            .expect("store container");
+
+        let permit = runtime
+            .authorize_exec("concurrent-exec")
+            .expect("authorize exec");
+        assert!(
+            runtime
+                .inspect("concurrent-exec")
+                .expect("inspect")
+                .pending_mutation
+                .is_none(),
+            "an attached exec must not block stop, kill, or remove"
+        );
+        runtime
+            .authorization
+            .complete(permit, false)
+            .expect("close authorization decision");
     }
 
     #[test]

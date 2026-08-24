@@ -12086,7 +12086,9 @@ fn handle_rm(
     if force {
         let record = runtime.inspect(&resolved).map_err(|err| err.to_string())?;
         if record.status == "running" || record.status == "paused" {
-            runtime.kill(&resolved).map_err(|err| err.to_string())?;
+            runtime
+                .kill(&resolved)
+                .map_err(|err| format!("rm: force kill failed: {err}"))?;
         }
     }
     let anonymous_volumes = if volumes {
@@ -12095,7 +12097,11 @@ fn handle_rm(
     } else {
         Vec::new()
     };
-    retry_transient_cas(|| runtime.remove(&resolved).map_err(|err| err.to_string()))?;
+    retry_transient_cas(|| {
+        runtime
+            .remove(&resolved)
+            .map_err(|err| format!("rm: container removal failed: {err}"))
+    })?;
     let origin = runtime
         .request_origin()
         .ok_or_else(|| "rm: authenticated request origin unavailable".to_string())?;
@@ -16816,8 +16822,12 @@ fn run_daemon(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     let runtime_dir = Arc::new(runtime_dir);
-    ContainerRuntime::new(runtime_dir.as_ref())
-        .and_then(|runtime| runtime.reconcile_daemon_boot())
+    let runtime = Arc::new(
+        ContainerRuntime::new(runtime_dir.as_ref())
+            .map_err(|error| format!("daemon runtime initialization: {error}"))?,
+    );
+    runtime
+        .reconcile_daemon_boot()
         .map_err(|error| format!("daemon boot reconciliation: {error}"))?;
     let store = Arc::new(
         LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?,
@@ -16827,7 +16837,7 @@ fn run_daemon(
     );
     let state = Arc::new(DockerCompatState::new(runtime_dir.as_ref())?);
     if let Some(addr) = metrics_addr {
-        start_metrics_server(runtime_dir.clone(), store.clone(), addr)?;
+        start_metrics_server(runtime.clone(), store.clone(), addr)?;
     }
     engine_owner.publish_daemon_owner(socket_path)?;
 
@@ -16835,6 +16845,7 @@ fn run_daemon(
         match stream {
             Ok(stream) => {
                 let runtime_dir = runtime_dir.clone();
+                let runtime = runtime.clone();
                 let store = store.clone();
                 let volume_store = volume_store.clone();
                 let state = state.clone();
@@ -16842,6 +16853,7 @@ fn run_daemon(
                     if let Err(error) = handle_docker_compat_connection(
                         stream,
                         runtime_dir,
+                        runtime,
                         store,
                         volume_store,
                         state,
@@ -16863,7 +16875,7 @@ fn run_daemon(
 
 #[cfg(target_os = "linux")]
 fn start_metrics_server(
-    runtime_dir: Arc<PathBuf>,
+    runtime: Arc<ContainerRuntime>,
     store: Arc<LocalImageStore>,
     addr: &str,
 ) -> Result<(), String> {
@@ -16884,7 +16896,7 @@ fn start_metrics_server(
                 let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
                 continue;
             }
-            let body = build_metrics(&runtime_dir, &store, started_at);
+            let body = build_metrics(&runtime, &store, started_at);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -16897,11 +16909,8 @@ fn start_metrics_server(
 }
 
 #[cfg(target_os = "linux")]
-fn build_metrics(runtime_dir: &Path, store: &LocalImageStore, started_at: Instant) -> String {
-    let containers = match ContainerRuntime::new(runtime_dir) {
-        Ok(runtime) => runtime.list().unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+fn build_metrics(runtime: &ContainerRuntime, store: &LocalImageStore, started_at: Instant) -> String {
+    let containers = runtime.list().unwrap_or_default();
     let images = store.list_references().unwrap_or_default();
     let running = containers.iter().filter(|c| c.status == "running").count();
     let exited = containers.iter().filter(|c| c.status == "exited").count();
@@ -16940,9 +16949,19 @@ type DockerEventRequest = (String, String, HashMap<String, String>, Vec<u8>);
 type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>, Vec<u8>);
 
 #[cfg(target_os = "linux")]
+fn daemon_request_scope(
+    runtime: &ContainerRuntime,
+    origin: RequestOrigin,
+) -> Result<ContainerRuntime, ferro_core::runtime::RuntimeError> {
+    runtime.refresh_daemon_state()?;
+    Ok(runtime.request_scoped(origin))
+}
+
+#[cfg(target_os = "linux")]
 fn handle_docker_compat_connection(
     mut stream: UnixStream,
     runtime_dir: Arc<PathBuf>,
+    daemon_runtime: Arc<ContainerRuntime>,
     store: Arc<LocalImageStore>,
     volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
@@ -16964,9 +16983,8 @@ fn handle_docker_compat_connection(
             .map(|peer| peer.request_origin())
             .map_err(|error| format!("docker peer authentication failed: {error}"))
         })?;
-        let runtime = ContainerRuntime::new(&runtime_dir)
-            .map_err(|err| err.to_string())?
-            .with_request_origin(origin.clone());
+        let runtime = daemon_request_scope(&daemon_runtime, origin.clone())
+            .map_err(|error| error.to_string())?;
         let surface_authorization = runtime
             .surface_authorization()
             .map_err(|error| error.to_string())?;
@@ -18166,7 +18184,7 @@ fn handle_docker_compat_connection(
                     // commands. Re-open the runtime in the worker so the
                     // request thread can finish without borrowing request
                     // state or the authenticated socket.
-                    let runtime_dir = runtime_dir.clone();
+                    let daemon_runtime = daemon_runtime.clone();
                     let request_origin = runtime.request_origin();
                     let state_for_worker = state.clone();
                     let exec_id = id.to_string();
@@ -18181,15 +18199,17 @@ fn handle_docker_compat_connection(
                     let worker = std::thread::Builder::new()
                         .name(format!("ferro-exec-{exec_id}"))
                         .spawn(move || {
-                            let result = ContainerRuntime::new(&runtime_dir)
-                                .map(|runtime| {
-                                    if let Some(origin) = request_origin {
-                                        runtime.with_request_origin(origin)
-                                    } else {
-                                        runtime
-                                    }
+                            let result = request_origin
+                                .map(|origin| daemon_request_scope(&daemon_runtime, origin))
+                                .ok_or_else(|| {
+                                    ferro_core::runtime::RuntimeError::Authorization(
+                                        "detached exec request origin unavailable".to_string(),
+                                    )
                                 })
-                                .and_then(|runtime| runtime.exec_with_options(&container, &command, &options));
+                                .and_then(|runtime| runtime)
+                                .and_then(|runtime| {
+                                    runtime.exec_with_options(&container, &command, &options)
+                                });
                             if let Ok(mut execs) = state_for_worker.execs.lock() {
                                 if let Some(exec) = execs.get_mut(&exec_id) {
                                     exec.running = false;
@@ -19369,14 +19389,9 @@ fn handle_docker_compat_connection(
         } else {
             None
         };
-        let runtime = ContainerRuntime::new(&runtime_dir)
-            .map(|runtime| {
-                if let Some(origin) = request_origin {
-                    runtime.with_request_origin(origin)
-                } else {
-                    runtime
-                }
-            })
+        let runtime = request_origin
+            .map(|origin| daemon_request_scope(&daemon_runtime, origin))
+            .ok_or_else(|| "docker: exec request origin unavailable".to_string())?
             .map_err(|error| error.to_string())?;
         let result = if spec.env.is_empty() && spec.user.is_none() && spec.working_dir.is_none() {
             runtime.exec_streaming(
@@ -19428,11 +19443,10 @@ fn handle_docker_compat_connection(
         return Ok(());
     }
     if let Some((id, tail, tty, stdout_requested, stderr_requested)) = log_follow {
-        let follow_runtime =
-            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        let follow_runtime = daemon_runtime.as_ref();
         stream_docker_logs(
             &mut stream,
-            &follow_runtime,
+            follow_runtime,
             &id,
             tail.as_deref(),
             tty,
@@ -19442,14 +19456,11 @@ fn handle_docker_compat_connection(
         return Ok(());
     }
     if let Some(id) = stats_follow {
-        let follow_runtime =
-            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
-        stream_docker_stats(&mut stream, &follow_runtime, &id)?;
+        stream_docker_stats(&mut stream, daemon_runtime.as_ref(), &id)?;
         return Ok(());
     }
     if let Some((id, condition, timeout)) = wait_follow {
-        let follow_runtime =
-            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        let follow_runtime = daemon_runtime.as_ref();
         if condition == "next-exit" {
             // A created container has not produced its next exit yet: block
             // through the pre-start window before waiting for the exit.
@@ -19467,7 +19478,7 @@ fn handle_docker_compat_connection(
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        let wait_result = wait_for_container_exit_with_timeout(&follow_runtime, &id, timeout);
+        let wait_result = wait_for_container_exit_with_timeout(follow_runtime, &id, timeout);
         // The exit code must be observed after the wait completes; the
         // pre-wait record still carries the previous lifecycle's code.
         let body = match wait_result {
@@ -19501,11 +19512,10 @@ fn handle_docker_compat_connection(
         detach_keys,
     )) = attach_hijack
     {
-        let follow_runtime =
-            ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
+        let follow_runtime = daemon_runtime.as_ref();
         stream_docker_attach(
             &mut stream,
-            &follow_runtime,
+            follow_runtime,
             &id,
             logs_requested,
             stream_requested,
@@ -23344,6 +23354,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observed, Some([77; 16]));
+    }
+
+    #[test]
+    fn daemon_request_scope_does_not_reconcile_an_active_container_mutation() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("daemon runtime");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "in-flight-delete",
+                "pid": 0,
+                "image": "example.invalid/test:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running"
+            }))
+            .expect("record");
+        store.put(&record).expect("store record");
+
+        // Seed the precise durable shape visible after lifecycle reservation.
+        // Reopening ContainerRuntime here would run compatibility recovery and
+        // clear it; a daemon request scope must be a non-reconciling view of
+        // the already initialized engine owner.
+        let database = rusqlite::Connection::open(temp.path().join("containers.db"))
+            .expect("open raw database");
+        let mut reserved = record.clone();
+        reserved.pending_mutation = Some(ferro_core::container_store::MutationReservation {
+            operation_id: [41; 16],
+            generation: 1,
+            expected_status: "running".to_string(),
+            action: "container.delete".to_string(),
+        });
+        database
+            .execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                rusqlite::params![
+                    reserved.id,
+                    serde_json::to_vec(&reserved).expect("encode reservation")
+                ],
+            )
+            .expect("seed reservation");
+        drop(database);
+
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let request = super::daemon_request_scope(&runtime, origin).expect("request scope");
+        assert_eq!(
+            request
+                .inspect("in-flight-delete")
+                .expect("inspect")
+                .pending_mutation,
+            reserved.pending_mutation,
+            "ordinary daemon requests must not run boot recovery"
+        );
     }
 
     #[test]

@@ -47,6 +47,7 @@ import {
   snapshotFailureDetail,
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
+import { runtimeActionAvailability } from "./runtimeActions.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -465,11 +466,14 @@ function App(): JSX.Element {
     };
   }, []);
 
-  function beginRuntimeAction(allowWhileStreaming = false): boolean {
-    if (
-      runtimeActionRef.current
-      || ((logFollowRef.current || terminalActiveRef.current) && !allowWhileStreaming)
-    ) {
+  function beginRuntimeAction(): boolean {
+    const availability = runtimeActionAvailability({
+      actionBusy: runtimeActionRef.current,
+      logsFollowing: logFollowRef.current,
+      terminalActive: terminalActiveRef.current,
+    });
+    if (!availability.allowed) {
+      setError(availability.reason);
       return false;
     }
     runtimeActionRef.current = true;
@@ -593,7 +597,7 @@ function App(): JSX.Element {
   }
 
   async function stopLogFollow(): Promise<void> {
-    if (!logFollowRef.current || !beginRuntimeAction(true)) return;
+    if (!logFollowRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("stop_log_follow");
       logFollowRef.current = false;
@@ -644,7 +648,7 @@ function App(): JSX.Element {
   }
 
   async function closeTerminal(): Promise<void> {
-    if (!terminalActiveRef.current || !beginRuntimeAction(true)) return;
+    if (!terminalActiveRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("close_terminal");
       terminalActiveRef.current = false;
@@ -1041,7 +1045,7 @@ function App(): JSX.Element {
       : visibleOutput;
   }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
 
-  const runtimeBusy = runtimeActionBusy || logsFollowing || terminalActive;
+  const runtimeBusy = runtimeActionBusy;
 
   async function copyLogs(): Promise<void> {
     try {
@@ -1309,7 +1313,7 @@ function App(): JSX.Element {
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
                       <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
-                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy || logsFollowing}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
                       <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
                       <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
                       <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
@@ -1326,7 +1330,7 @@ function App(): JSX.Element {
                     </div>
                     <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
                     <div className="detail-foot">
-                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || !containerTarget.trim()}>Open shell</button>
+                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || !containerTarget.trim()}>Open shell</button>
                       <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
                       <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
                     </div>

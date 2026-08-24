@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
 use std::thread;
@@ -21,6 +21,12 @@ const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
 static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
+
+struct TerminalProcess {
+    child: Child,
+    stdin: ChildStdin,
+}
 
 #[derive(Debug, Serialize)]
 struct CommandResult {
@@ -147,6 +153,200 @@ fn log_follow_command(target: &str) -> Vec<String> {
         "--follow".to_string(),
         target.to_string(),
     ]
+}
+
+fn terminal_exec_command(
+    target: &str,
+    shell: &str,
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Vec<String> {
+    let mut command = vec![
+        "exec".to_string(),
+        "--interactive".to_string(),
+        "--".to_string(),
+        "ferrocrate".to_string(),
+        "exec".to_string(),
+    ];
+    for value in env {
+        command.push("--env".to_string());
+        command.push(value.clone());
+    }
+    if let Some(user) = user.filter(|value| !value.trim().is_empty()) {
+        command.push("--user".to_string());
+        command.push(user.to_string());
+    }
+    if let Some(workdir) = workdir.filter(|value| !value.trim().is_empty()) {
+        command.push("--workdir".to_string());
+        command.push(workdir.to_string());
+    }
+    command.extend([
+        "--interactive".to_string(),
+        "--tty".to_string(),
+        target.to_string(),
+        shell.to_string(),
+    ]);
+    command
+}
+
+#[derive(Clone, Serialize)]
+struct TerminalOutput {
+    data: Vec<u8>,
+    stderr: bool,
+}
+
+fn emit_terminal_output<R: Read>(mut reader: R, app: tauri::AppHandle, stderr: bool) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let _ = app.emit("terminal-error", err.to_string());
+                return;
+            }
+        };
+        let _ = app.emit(
+            "terminal-output",
+            TerminalOutput {
+                data: buffer[..bytes].to_vec(),
+                stderr,
+            },
+        );
+    }
+}
+
+#[tauri::command]
+fn start_terminal(
+    app: tauri::AppHandle,
+    target: String,
+    shell: String,
+    env: Vec<String>,
+    user: Option<String>,
+    workdir: Option<String>,
+) -> Result<(), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("target container is required".to_string());
+    }
+    let shell = shell.trim();
+    if shell.is_empty() {
+        return Err("shell command is required".to_string());
+    }
+
+    let mut current = TERMINAL_PROCESS
+        .lock()
+        .map_err(|_| "terminal state is unavailable".to_string())?;
+    if let Some(process) = current.as_mut() {
+        if process
+            .child
+            .try_wait()
+            .map_err(|err| format!("failed to inspect terminal process: {err}"))?
+            .is_none()
+        {
+            return Err("an exec terminal is already active".to_string());
+        }
+    }
+    *current = None;
+
+    let mut child = Command::new("ferro-desktop")
+        .args(terminal_exec_command(
+            target,
+            shell,
+            &env,
+            user.as_deref(),
+            workdir.as_deref(),
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start exec terminal: {err}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "exec terminal stdin missing".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "exec terminal stdout missing".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "exec terminal stderr missing".to_string())?;
+    let stdout_app = app.clone();
+    thread::spawn(move || emit_terminal_output(stdout, stdout_app, false));
+    let stderr_app = app.clone();
+    thread::spawn(move || emit_terminal_output(stderr, stderr_app, true));
+    *current = Some(TerminalProcess { child, stdin });
+    drop(current);
+
+    thread::spawn(move || loop {
+        let status = {
+            let mut process = match TERMINAL_PROCESS.lock() {
+                Ok(process) => process,
+                Err(_) => return,
+            };
+            let Some(terminal) = process.as_mut() else {
+                return;
+            };
+            match terminal.child.try_wait() {
+                Ok(Some(status)) => {
+                    *process = None;
+                    Some(status)
+                }
+                Ok(None) => None,
+                Err(err) => {
+                    let _ = app.emit("terminal-error", err.to_string());
+                    *process = None;
+                    return;
+                }
+            }
+        };
+        if let Some(status) = status {
+            let _ = app.emit("terminal-ended", status.success());
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn write_terminal(data: Vec<u8>) -> Result<(), String> {
+    if data.len() > 64 * 1024 {
+        return Err("terminal input exceeds 64 KiB".to_string());
+    }
+    let mut current = TERMINAL_PROCESS
+        .lock()
+        .map_err(|_| "terminal state is unavailable".to_string())?;
+    let process = current
+        .as_mut()
+        .ok_or_else(|| "no exec terminal is active".to_string())?;
+    process
+        .stdin
+        .write_all(&data)
+        .and_then(|_| process.stdin.flush())
+        .map_err(|err| format!("failed to write terminal input: {err}"))
+}
+
+#[tauri::command]
+fn close_terminal() -> Result<(), String> {
+    let mut current = TERMINAL_PROCESS
+        .lock()
+        .map_err(|_| "terminal state is unavailable".to_string())?;
+    if let Some(mut process) = current.take() {
+        process
+            .child
+            .kill()
+            .map_err(|err| format!("failed to detach exec terminal: {err}"))?;
+        process
+            .child
+            .wait()
+            .map_err(|err| format!("failed to reap exec terminal: {err}"))?;
+    }
+    Ok(())
 }
 
 struct LogBuffer {
@@ -777,6 +977,9 @@ fn main() {
             run_desktop_action,
             start_log_follow,
             stop_log_follow,
+            start_terminal,
+            write_terminal,
+            close_terminal,
             get_paid_auth_state,
             save_paid_backend_config,
             set_paid_session_token,
@@ -791,7 +994,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_channel, log_follow_command, LogBuffer};
+    use super::{log_channel, log_follow_command, terminal_exec_command, LogBuffer};
 
     #[test]
     fn log_follow_uses_the_desktop_exec_bridge() {
@@ -831,5 +1034,35 @@ mod tests {
         assert!(sender.try_send("second\n".to_string()).is_err());
         assert_eq!(receiver.recv().expect("first entry"), "first\n");
         sender.send("second\n".to_string()).expect("capacity freed");
+    }
+
+    #[test]
+    fn terminal_exec_uses_interactive_bridge_and_exec_options() {
+        assert_eq!(
+            terminal_exec_command(
+                "web",
+                "sh",
+                &["TERM=xterm-256color".to_string()],
+                Some("1000:1000"),
+                Some("/workspace"),
+            ),
+            vec![
+                "exec",
+                "--interactive",
+                "--",
+                "ferrocrate",
+                "exec",
+                "--env",
+                "TERM=xterm-256color",
+                "--user",
+                "1000:1000",
+                "--workdir",
+                "/workspace",
+                "--interactive",
+                "--tty",
+                "web",
+                "sh",
+            ]
+        );
     }
 }

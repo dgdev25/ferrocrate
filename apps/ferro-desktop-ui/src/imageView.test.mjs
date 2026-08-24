@@ -8,15 +8,22 @@ import * as imageView from "./imageView.mjs";
 test("image rows format byte sizes and Unix creation times for the table", () => {
   assert.deepEqual(imageView.parseImageRows(JSON.stringify([{
     Id: "sha256:abc",
-    RepoTags: ["docker.io/library/alpine:latest"],
+    RepoTags: ["registry-1.docker.io/library/alpine:latest"],
     Size: 1572864,
     Created: 1700000000,
   }])), [{
     id: "sha256:abc",
-    reference: "docker.io/library/alpine:latest",
+    reference: "alpine:latest",
+    fullReference: "registry-1.docker.io/library/alpine:latest",
     size: "1.5 MB",
     created: "2023-11-14 22:13 UTC",
   }]);
+});
+
+test("image usage includes stopped container references and normalized registry names", () => {
+  const row = imageView.parseImageRows('[{"RepoTags":["registry-1.docker.io/library/alpine:latest"]}]')[0];
+  assert.equal(imageView.imageIsUsed(row, ["alpine:latest"]), true);
+  assert.equal(imageView.imageIsUsed(row, ["other:latest"]), false);
 });
 
 test("pull failures give people a recovery path while retaining the technical detail", () => {

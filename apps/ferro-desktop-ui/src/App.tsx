@@ -29,7 +29,7 @@ import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
 import { clearErrorsForNavigation, errorForSection, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
-import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
+import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import { DoctorPage, SettingsPage } from "./systemPages.mjs";
@@ -89,7 +89,7 @@ type BuildHistoryEntry = {
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
-  return new Date(value * 1000).toLocaleString();
+  return formatImageCreated(value);
 }
 
 function commandMessage(result: CommandResult, fallback: string): string {
@@ -1096,7 +1096,7 @@ function App(): JSX.Element {
   ), [containerRows, containerStatusFilter, globalSearch]);
   const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
-  const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
+  const containerImageReferences = useMemo(() => containerRows.map((row) => row.image), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const resourceUsage = resourceTotals(containerRows);
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
@@ -1409,11 +1409,11 @@ function App(): JSX.Element {
                       <thead><tr><th>Repository</th><th>Size</th><th>Created</th><th>In use</th><th aria-label="Actions" /></tr></thead>
                       <tbody>{imageRows.map((image) => (
                         <tr key={image.id}>
-                          <td className="container-name mono">{image.reference}</td>
+                          <td className="container-name mono" title={image.fullReference}>{image.reference}</td>
                           <td className="muted">{image.size}</td>
                           <td className="muted">{image.created}</td>
-                          <td>{imagesInUse.has(image.reference) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
-                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
+                          <td>{imageIsUsed(image, containerImageReferences) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
+                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.fullReference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
                         </tr>
                       ))}</tbody>
                     </table>

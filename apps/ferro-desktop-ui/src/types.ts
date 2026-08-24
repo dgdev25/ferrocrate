@@ -38,6 +38,19 @@ export type VolumeSummary = {
   mounts: VolumeMountUsage[];
 };
 
+export type ComposeAction = "up" | "down" | "stop" | "start";
+
+export type ComposeServiceSummary = {
+  name: string;
+  status: string;
+  container_id: string | null;
+};
+
+export type ComposeSnapshot = {
+  config: string;
+  services: ComposeServiceSummary[];
+};
+
 export type PaidBackendConfig = {
   release_base_url: string;
   token_endpoint: string;

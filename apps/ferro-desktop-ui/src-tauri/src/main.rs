@@ -1304,6 +1304,7 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
             get_volumes,

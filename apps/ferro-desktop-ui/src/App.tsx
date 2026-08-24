@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
+  ComposeAction,
+  ComposeServiceSummary,
+  ComposeSnapshot,
   DesktopAction,
   DesktopSnapshot,
   DoctorSummary,
@@ -13,6 +17,7 @@ import type {
   VolumeAction,
   VolumeSummary,
 } from "./types";
+import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -61,6 +66,9 @@ function App(): JSX.Element {
   const [volumes, setVolumes] = useState<VolumeSummary[]>([]);
   const [volumeName, setVolumeName] = useState("");
   const [volumesLoading, setVolumesLoading] = useState(false);
+  const [composeFile, setComposeFile] = useState("");
+  const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
+  const [composeLoading, setComposeLoading] = useState(false);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -216,6 +224,31 @@ function App(): JSX.Element {
     }
   }
 
+  async function readComposeSnapshot(file: string): Promise<void> {
+    setComposeLoading(true);
+    try {
+      setComposeSnapshot(await invoke<ComposeSnapshot>("get_compose_snapshot", { file }));
+    } finally {
+      setComposeLoading(false);
+    }
+  }
+
+  async function chooseComposeFile(): Promise<void> {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Compose files", extensions: ["yml", "yaml"] }],
+      });
+      if (typeof selected !== "string") return;
+      setComposeFile(selected);
+      setError(null);
+      await readComposeSnapshot(selected);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   useEffect(() => {
     void refresh();
     void refreshAuthState();
@@ -291,14 +324,14 @@ function App(): JSX.Element {
     }
   }
 
-  async function startLogFollow(): Promise<void> {
+  async function startLogFollow(target = containerTarget): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
     setLogOutput("");
     setLogsPaused(false);
     setPausedLogOutput("");
     try {
-      await invoke("start_log_follow", { target: containerTarget });
+      await invoke("start_log_follow", { target });
       logFollowRef.current = true;
       setLogsFollowing(true);
     } catch (err) {
@@ -395,6 +428,48 @@ function App(): JSX.Element {
     } finally {
       finishRuntimeAction();
     }
+  }
+
+  async function validateCompose(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Compose Config");
+    try {
+      await readComposeSnapshot(composeFile);
+      setLastAction({ ok: true, code: 0, stdout: "Compose configuration is valid.", stderr: "" });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runComposeAction(action: ComposeAction, label: string): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_compose_action", {
+        file: composeFile,
+        action,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      await Promise.all([readComposeSnapshot(composeFile), refresh(), refreshVolumes()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function showComposeLogs(service: ComposeServiceSummary): Promise<void> {
+    const target = composeLogTarget(service);
+    setContainerTarget(target);
+    await startLogFollow(target);
   }
 
   async function saveBackendConfig(): Promise<void> {
@@ -873,6 +948,70 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
               ))}
             </div>
           )}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Compose</h2>
+          <p className="muted">Choose a Compose YAML file, validate it, and manage the project services.</p>
+          <div className="field-row compose-file-row">
+            <input
+              value={composeFile}
+              onChange={(event) => {
+                setComposeFile(event.target.value);
+                setComposeSnapshot(null);
+              }}
+              placeholder="compose.yml"
+              aria-label="Compose file path"
+            />
+            <button className="btn btn-secondary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>
+              Choose File
+            </button>
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-secondary" onClick={() => void validateCompose()} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              {composeLoading ? "Validating..." : "Validate Config"}
+            </button>
+            <button className="btn btn-primary" onClick={() => void runComposeAction("up", "Compose Up")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Up
+            </button>
+            <button className="btn btn-secondary" onClick={() => void runComposeAction("start", "Compose Start")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Start
+            </button>
+            <button className="btn btn-secondary" onClick={() => void runComposeAction("stop", "Compose Stop")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Stop
+            </button>
+            <button className="btn btn-danger" onClick={() => void runComposeAction("down", "Compose Down")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Down
+            </button>
+          </div>
+          {composeSnapshot?.services.length ? (
+            <div className="resource-list compose-services">
+              {composeSnapshot.services.map((service) => (
+                <div className="resource-row" key={service.name}>
+                  <div>
+                    <strong>{service.name}</strong>
+                    <p className={`service-status ${composeStatusClass(service.status)}`}>
+                      {service.status.replaceAll("_", " ")}
+                    </p>
+                    {service.container_id ? <p className="muted">{service.container_id}</p> : null}
+                  </div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void showComposeLogs(service)}
+                    disabled={runtimeBusy || service.status === "not_created"}
+                  >
+                    Follow Logs
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Validate a Compose file to load its services.</p>
+          )}
+          <details className="compose-config" open={false}>
+            <summary>Validated configuration</summary>
+            <pre>{composeSnapshot?.config || EMPTY}</pre>
+          </details>
         </article>
 
         <article className="panel">

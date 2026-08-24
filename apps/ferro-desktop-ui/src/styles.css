@@ -124,6 +124,46 @@ body {
   color: var(--text-muted);
 }
 
+.compose-file-row {
+  gap: 0.5rem;
+}
+
+.compose-file-row .btn {
+  flex: 0 0 auto;
+}
+
+.compose-services {
+  margin-top: 0.75rem;
+}
+
+.service-status {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.status-running {
+  color: var(--aurora-teal);
+}
+
+.status-paused {
+  color: var(--aurora-cyan);
+}
+
+.status-stopped {
+  color: var(--text-muted);
+}
+
+.compose-config {
+  margin-top: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.compose-config summary {
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}
+
 .btn {
   border-radius: var(--radius-md);
   padding: 0.5rem 0.9rem;

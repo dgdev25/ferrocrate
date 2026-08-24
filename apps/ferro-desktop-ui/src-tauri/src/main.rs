@@ -116,6 +116,15 @@ enum VolumeAction {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+enum NetworkAction {
+    List,
+    Inspect,
+    Create,
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum ComposeAction {
     Config,
     Up,
@@ -274,6 +283,139 @@ struct VolumeListResponse {
     volumes: Vec<VolumeSummary>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NetworkIpamConfig {
+    subnet: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NetworkIpam {
+    #[serde(default)]
+    config: Vec<NetworkIpamConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NetworkListRecord {
+    name: String,
+    driver: String,
+    #[serde(default)]
+    ipam: NetworkIpam,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NetworkInspectContainer {
+    name: String,
+    #[serde(default)]
+    ipv4_address: String,
+    #[serde(default)]
+    ipv6_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NetworkInspectRecord {
+    #[serde(default)]
+    containers: BTreeMap<String, NetworkInspectContainer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerPortRecord {
+    host_port: u16,
+    container_port: u16,
+    protocol: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerNetworkRecord {
+    id: String,
+    name: Option<String>,
+    #[serde(default)]
+    ports: Vec<ContainerPortRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct NetworkContainerSummary {
+    container_id: String,
+    name: String,
+    ipv4_address: String,
+    ipv6_address: String,
+    ports: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NetworkSummary {
+    name: String,
+    driver: String,
+    subnets: Vec<String>,
+    containers: Vec<NetworkContainerSummary>,
+}
+
+fn network_summaries(
+    mut networks: Vec<NetworkListRecord>,
+    inspections: &BTreeMap<String, NetworkInspectRecord>,
+    containers: &[ContainerNetworkRecord],
+) -> Vec<NetworkSummary> {
+    networks.sort_by(|left, right| left.name.cmp(&right.name));
+    networks
+        .into_iter()
+        .map(|network| {
+            let mut attachments = inspections
+                .get(&network.name)
+                .into_iter()
+                .flat_map(|inspection| inspection.containers.iter())
+                .map(|(container_id, attachment)| {
+                    let container = containers.iter().find(|row| row.id == *container_id);
+                    let name = attachment
+                        .name
+                        .trim_start_matches('/')
+                        .to_string();
+                    NetworkContainerSummary {
+                        container_id: container_id.clone(),
+                        name: if name.is_empty() {
+                            container
+                                .and_then(|row| row.name.clone())
+                                .unwrap_or_else(|| container_id.clone())
+                        } else {
+                            name
+                        },
+                        ipv4_address: attachment.ipv4_address.clone(),
+                        ipv6_address: attachment.ipv6_address.clone(),
+                        ports: container
+                            .map(|row| {
+                                row.ports
+                                    .iter()
+                                    .map(|port| {
+                                        format!(
+                                            "0.0.0.0:{}→{}/{}",
+                                            port.host_port, port.container_port, port.protocol
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            attachments.sort_by(|left, right| left.name.cmp(&right.name));
+            NetworkSummary {
+                name: network.name,
+                driver: network.driver,
+                subnets: network
+                    .ipam
+                    .config
+                    .into_iter()
+                    .filter_map(|config| config.subnet)
+                    .collect(),
+                containers: attachments,
+            }
+        })
+        .collect()
+}
+
 fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Vec<String>, String> {
     let mut command = vec!["volume-proxy".to_string()];
     match action {
@@ -295,6 +437,37 @@ fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Ve
     Ok(command)
 }
 
+fn network_proxy_command(
+    action: NetworkAction,
+    target: Option<&str>,
+    subnet: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut command = vec!["network-proxy".to_string()];
+    match action {
+        NetworkAction::List => command.push("list".to_string()),
+        NetworkAction::Inspect | NetworkAction::Create | NetworkAction::Remove => {
+            let target = target
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "network name is required".to_string())?;
+            command.push(match action {
+                NetworkAction::Inspect => "inspect",
+                NetworkAction::Create => "create",
+                NetworkAction::Remove => "remove",
+                NetworkAction::List => unreachable!(),
+            }.to_string());
+            command.push(target.to_string());
+            if matches!(action, NetworkAction::Create) {
+                if let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) {
+                    command.push("--subnet".to_string());
+                    command.push(subnet.to_string());
+                }
+            }
+        }
+    }
+    Ok(command)
+}
+
 fn execute_volume_proxy(
     action: VolumeAction,
     target: Option<&str>,
@@ -310,6 +483,15 @@ fn execute_volume_proxy(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+fn execute_network_proxy(
+    action: NetworkAction,
+    target: Option<&str>,
+    subnet: Option<&str>,
+) -> Result<CommandResult, String> {
+    let args = network_proxy_command(action, target, subnet)?;
+    Ok(run_owned_command("ferro-desktop", &args))
 }
 
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
@@ -1045,6 +1227,35 @@ fn get_volumes() -> Result<Vec<VolumeSummary>, String> {
         .map_err(|error| format!("volume proxy returned invalid JSON: {error}"))
 }
 
+#[tauri::command]
+fn get_networks() -> Result<Vec<NetworkSummary>, String> {
+    let list_result = execute_network_proxy(NetworkAction::List, None, None)?;
+    if !list_result.ok {
+        return Err(command_failure("network list", &list_result));
+    }
+    let networks = serde_json::from_str::<Vec<NetworkListRecord>>(&list_result.stdout)
+        .map_err(|error| format!("network proxy returned invalid JSON: {error}"))?;
+    let mut inspections = BTreeMap::new();
+    for network in &networks {
+        let result = execute_network_proxy(NetworkAction::Inspect, Some(&network.name), None)?;
+        if !result.ok {
+            return Err(command_failure("network inspect", &result));
+        }
+        inspections.insert(
+            network.name.clone(),
+            serde_json::from_str::<NetworkInspectRecord>(&result.stdout)
+                .map_err(|error| format!("network inspect returned invalid JSON: {error}"))?,
+        );
+    }
+    let containers_result = run_owned_command("ferro-desktop", &compose_container_list_command());
+    if !containers_result.ok {
+        return Err(command_failure("container port list", &containers_result));
+    }
+    let containers = serde_json::from_str::<Vec<ContainerNetworkRecord>>(&containers_result.stdout)
+        .map_err(|error| format!("container port list returned invalid JSON: {error}"))?;
+    Ok(network_summaries(networks, &inspections, &containers))
+}
+
 fn command_failure(label: &str, result: &CommandResult) -> String {
     if result.stderr.trim().is_empty() {
         format!("{label} failed with status {}", result.code)
@@ -1166,6 +1377,18 @@ fn run_volume_action(
         return Err("list is a read-only snapshot action".to_string());
     }
     execute_volume_proxy(action, target.as_deref())
+}
+
+#[tauri::command]
+fn run_network_action(
+    action: NetworkAction,
+    target: Option<String>,
+    subnet: Option<String>,
+) -> Result<CommandResult, String> {
+    if matches!(action, NetworkAction::List | NetworkAction::Inspect) {
+        return Err("list is a read-only snapshot action".to_string());
+    }
+    execute_network_proxy(action, target.as_deref(), subnet.as_deref())
 }
 
 #[tauri::command]
@@ -1406,11 +1629,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
             get_volumes,
+            get_networks,
             get_compose_snapshot,
             build_image,
             run_desktop_action,
             run_compose_action,
             run_volume_action,
+            run_network_action,
             start_log_follow,
             stop_log_follow,
             start_terminal,
@@ -1431,10 +1656,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         build_bridge_command, compose_bridge_command, compose_service_rows, log_channel,
         log_follow_command, parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
-        volume_proxy_command, ComposeAction, ComposeContainerRecord, LogBuffer, VolumeAction,
+        network_proxy_command, network_summaries, volume_proxy_command, ComposeAction,
+        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, LogBuffer,
+        NetworkAction, NetworkInspectContainer, NetworkInspectRecord, NetworkIpam,
+        NetworkIpamConfig, NetworkListRecord, VolumeAction,
     };
 
     #[test]
@@ -1626,5 +1856,71 @@ mod tests {
             vec!["volume-proxy", "prune"]
         );
         assert!(volume_proxy_command(VolumeAction::Create, Some("  ")).is_err());
+    }
+
+    #[test]
+    fn network_actions_use_typed_desktop_proxy_commands() {
+        assert_eq!(
+            network_proxy_command(NetworkAction::List, None, None).expect("list command"),
+            vec!["network-proxy", "list"]
+        );
+        assert_eq!(
+            network_proxy_command(NetworkAction::Create, Some("frontend"), Some("172.30.0.0/16"))
+                .expect("create command"),
+            vec![
+                "network-proxy",
+                "create",
+                "frontend",
+                "--subnet",
+                "172.30.0.0/16",
+            ]
+        );
+        assert_eq!(
+            network_proxy_command(NetworkAction::Remove, Some("frontend"), None)
+                .expect("remove command"),
+            vec!["network-proxy", "remove", "frontend"]
+        );
+        assert!(network_proxy_command(NetworkAction::Create, Some(" "), None).is_err());
+    }
+
+    #[test]
+    fn network_projection_includes_addresses_and_container_ports() {
+        let list = vec![NetworkListRecord {
+            name: "frontend".to_string(),
+            driver: "bridge".to_string(),
+            ipam: NetworkIpam {
+                config: vec![NetworkIpamConfig {
+                    subnet: Some("172.30.0.0/16".to_string()),
+                }],
+            },
+        }];
+        let inspections = BTreeMap::from([(
+            "frontend".to_string(),
+            NetworkInspectRecord {
+                containers: BTreeMap::from([(
+                    "container-1".to_string(),
+                    NetworkInspectContainer {
+                        name: "/web".to_string(),
+                        ipv4_address: "172.30.0.2".to_string(),
+                        ipv6_address: String::new(),
+                    },
+                )]),
+            },
+        )]);
+        let containers = vec![ContainerNetworkRecord {
+            id: "container-1".to_string(),
+            name: Some("web".to_string()),
+            ports: vec![ContainerPortRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+        }];
+
+        let rows = network_summaries(list, &inspections, &containers);
+        assert_eq!(rows[0].subnets, vec!["172.30.0.0/16"]);
+        assert_eq!(rows[0].containers[0].name, "web");
+        assert_eq!(rows[0].containers[0].ipv4_address, "172.30.0.2");
+        assert_eq!(rows[0].containers[0].ports, vec!["0.0.0.0:8080→80/tcp"]);
     }
 }

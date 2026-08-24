@@ -312,10 +312,11 @@ struct ComposeActionArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct BuildImageArgs {
     context: String,
     tag: String,
+    #[serde(alias = "buildId")]
     build_id: String,
 }
 
@@ -333,22 +334,26 @@ struct NetworkActionArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct ContainerResourcesArgs {
     target: String,
     memory: Option<u64>,
+    #[serde(alias = "cpuQuota")]
     cpu_quota: Option<u64>,
+    #[serde(alias = "cpuPeriod")]
     cpu_period: Option<u64>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct NewContainerArgs {
     image: String,
     name: Option<String>,
     environment: Vec<String>,
     memory: Option<u64>,
+    #[serde(alias = "cpuQuota")]
     cpu_quota: Option<u64>,
+    #[serde(alias = "cpuPeriod")]
     cpu_period: Option<u64>,
 }
 
@@ -365,10 +370,13 @@ struct RegistryLoginArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct PaidConfigArgs {
+    #[serde(alias = "releaseBaseUrl")]
     release_base_url: String,
+    #[serde(alias = "tokenEndpoint")]
     token_endpoint: String,
+    #[serde(alias = "issuanceEndpoint")]
     issuance_endpoint: Option<String>,
 }
 
@@ -378,24 +386,28 @@ struct SessionTokenArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct AcquireSessionArgs {
+    #[serde(alias = "customerId")]
     customer_id: String,
+    #[serde(alias = "accessToken")]
     access_token: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct InstallArgs {
     confirm: bool,
+    #[serde(alias = "dryRun")]
     dry_run: bool,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 struct DoctorArgs {
     fix: bool,
     bootstrap: bool,
+    #[serde(alias = "dryRun")]
     dry_run: bool,
     confirm: bool,
 }
@@ -562,7 +574,11 @@ mod tests {
     use super::*;
 
     fn skip_space(source: &str, mut cursor: usize) -> usize {
-        while source.as_bytes().get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        while source
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
             cursor += 1;
         }
         cursor
@@ -664,7 +680,8 @@ mod tests {
             let invoke_start = search_from + offset;
             let mut cursor = skip_space(source, invoke_start + "invoke".len());
             if bytes.get(cursor) == Some(&b'<') {
-                cursor = skip_balanced(source, cursor, b'<', b'>').expect("balanced invoke generic");
+                cursor =
+                    skip_balanced(source, cursor, b'<', b'>').expect("balanced invoke generic");
                 cursor = skip_space(source, cursor);
             }
             if bytes.get(cursor) != Some(&b'(') {
@@ -719,8 +736,9 @@ mod tests {
                 "columns" | "rows" | "memory" | "cpuQuota" | "cpuPeriod" => json!(1),
                 "env" | "environment" => json!([]),
                 "fix" | "bootstrap" | "dry_run" | "confirm" => json!(false),
-                "user" | "workdir" | "name" | "subnet" | "issuance_endpoint"
-                | "access_token" => Value::Null,
+                "user" | "workdir" | "name" | "subnet" | "issuance_endpoint" | "access_token" => {
+                    Value::Null
+                }
                 _ => json!("test-value"),
             };
             payload.insert(key.clone(), value);
@@ -730,10 +748,13 @@ mod tests {
 
     fn assert_bridge_args_decode(command: &str, args: Value) -> Result<(), String> {
         match command {
-            "get_desktop_snapshot" | "get_volumes" | "get_networks" | "stop_log_follow"
-            | "close_terminal" | "get_paid_auth_state" | "clear_paid_session" => {
-                decode::<EmptyArgs>(args).map(drop)
-            }
+            "get_desktop_snapshot"
+            | "get_volumes"
+            | "get_networks"
+            | "stop_log_follow"
+            | "close_terminal"
+            | "get_paid_auth_state"
+            | "clear_paid_session" => decode::<EmptyArgs>(args).map(drop),
             "get_container_detail" | "start_log_follow" => decode::<TargetArgs>(args).map(drop),
             "get_compose_snapshot" => decode::<ComposeArgs>(args).map(drop),
             "build_image" => decode::<BuildImageArgs>(args).map(drop),
@@ -769,6 +790,54 @@ mod tests {
             assert_bridge_args_decode(&command, payload.clone()).unwrap_or_else(|error| {
                 panic!("{command} payload with keys {keys:?} did not decode: {error}; {payload}")
             });
+        }
+    }
+
+    #[test]
+    fn multiword_bridge_arguments_accept_native_snake_and_browser_camel_case() {
+        let cases = [
+            (
+                "build_image",
+                json!({ "context": ".", "tag": "test", "build_id": "one" }),
+                json!({ "context": ".", "tag": "test", "buildId": "one" }),
+            ),
+            (
+                "update_container_resources",
+                json!({ "target": "one", "memory": 1, "cpu_quota": 2, "cpu_period": 3 }),
+                json!({ "target": "one", "memory": 1, "cpuQuota": 2, "cpuPeriod": 3 }),
+            ),
+            (
+                "run_new_container",
+                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpu_quota": 2, "cpu_period": 3 }),
+                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpuQuota": 2, "cpuPeriod": 3 }),
+            ),
+            (
+                "save_paid_backend_config",
+                json!({ "release_base_url": "one", "token_endpoint": "two", "issuance_endpoint": null }),
+                json!({ "releaseBaseUrl": "one", "tokenEndpoint": "two", "issuanceEndpoint": null }),
+            ),
+            (
+                "acquire_paid_session",
+                json!({ "customer_id": "one", "access_token": null }),
+                json!({ "customerId": "one", "accessToken": null }),
+            ),
+            (
+                "run_paid_full_stack_install",
+                json!({ "confirm": false, "dry_run": true }),
+                json!({ "confirm": false, "dryRun": true }),
+            ),
+            (
+                "run_doctor_action",
+                json!({ "fix": false, "bootstrap": false, "dry_run": true, "confirm": false }),
+                json!({ "fix": false, "bootstrap": false, "dryRun": true, "confirm": false }),
+            ),
+        ];
+
+        for (command, snake_case, camel_case) in cases {
+            assert_bridge_args_decode(command, snake_case)
+                .unwrap_or_else(|error| panic!("{command} rejected snake_case: {error}"));
+            assert_bridge_args_decode(command, camel_case)
+                .unwrap_or_else(|error| panic!("{command} rejected camelCase: {error}"));
         }
     }
 
@@ -899,6 +968,44 @@ mod tests {
         assert_eq!(terminal.status(), reqwest::StatusCode::BAD_REQUEST);
         let terminal: Value = terminal.json().await.expect("terminal error json");
         assert_eq!(terminal["error"], "target container is required");
+
+        bridge.shutdown().await;
+        fs::remove_dir_all(dist).ok();
+    }
+
+    #[tokio::test]
+    async fn bridge_doctor_accepts_snake_case_and_returns_summary() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dist = std::env::temp_dir().join(format!("ferro-web-bridge-doctor-{suffix}"));
+        fs::create_dir_all(&dist).expect("create dist");
+        fs::write(dist.join("index.html"), "<main>Ferrocrate</main>").expect("write index");
+
+        let bridge = spawn_web_bridge("127.0.0.1:0".parse().unwrap(), dist.clone())
+            .await
+            .expect("start bridge");
+        let response = Client::new()
+            .post(format!(
+                "http://{}/__tauri/run_doctor_action",
+                bridge.addr()
+            ))
+            .header("host", bridge.addr().to_string())
+            .bearer_auth(bridge.token())
+            .json(&json!({
+                "fix": false,
+                "bootstrap": false,
+                "dry_run": true,
+                "confirm": false
+            }))
+            .send()
+            .await
+            .expect("doctor request");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let summary: DoctorSummary = response.json().await.expect("DoctorSummary response");
+        assert!(summary.raw.is_object());
 
         bridge.shutdown().await;
         fs::remove_dir_all(dist).ok();

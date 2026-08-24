@@ -295,7 +295,7 @@ struct EntitlementSummary {
     message: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DoctorSummary {
     ok: bool,
     raw: JsonValue,

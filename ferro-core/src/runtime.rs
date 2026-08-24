@@ -27,12 +27,22 @@ pub struct ExecOptions {
     pub working_dir: Option<String>,
     pub tty: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedNetworkEndpointConfig {
+    pub network_name: String,
+    pub generation: u64,
+    pub bridge_name: String,
+    pub ipv4_subnet: String,
+    pub ipv4_gateway: String,
+    pub ipv6_gateway_cidr: Option<String>,
+}
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
     ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
-    LifecyclePhase, MutationReservation, NetworkOwnershipRecord, PortMappingRecord,
-    ResourceLimitRecord, RestartPolicy,
+    LifecyclePhase, MutationReservation, NetworkEndpointRecord, NetworkOwnershipRecord,
+    PortMappingRecord, ResourceLimitRecord, RestartPolicy,
 };
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
@@ -2271,7 +2281,10 @@ impl ContainerRuntime {
         let mut recoveries = Vec::new();
         for record in records.iter().filter(|record| {
             matches!(record.status.as_str(), "running" | "paused")
-                && record.network_name.as_deref() == Some("bridge")
+                && record
+                    .effective_network_endpoints()
+                    .iter()
+                    .any(|endpoint| endpoint.ownership.is_some())
         }) {
             recoveries.push((
                 record.id.clone(),
@@ -2303,11 +2316,29 @@ impl ContainerRuntime {
         records: &[ContainerRecord],
         reconciled_networks: &mut BTreeSet<String>,
     ) -> Result<(), RuntimeError> {
-        if record.network_name.as_deref() != Some("bridge") {
+        let endpoints = record.effective_network_endpoints();
+        for endpoint in &endpoints {
+            if let Some(ownership) = endpoint.ownership.as_ref() {
+                if endpoint.namespace_identity != ownership.namespace_identity {
+                    return Err(RuntimeError::Network(format!(
+                        "endpoint {} namespace identity does not match its ownership record",
+                        endpoint.endpoint_id
+                    )));
+                }
+                verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            }
+        }
+        if record.network_backend.is_none() && record.network_ownership.is_none() {
+            if record.network_name.as_deref() == Some("bridge") {
+                classify_legacy_network_record(record.network_name.as_deref(), false)?;
+            }
             return Ok(());
         }
         if record.network_backend.is_none() || record.network_ownership.is_none() {
-            classify_legacy_network_record(record.network_name.as_deref(), false)?;
+            return Err(RuntimeError::Network(format!(
+                "container {} has partial primary network ownership",
+                record.id
+            )));
         }
         let ownership = record.network_ownership.as_ref().ok_or_else(|| {
             RuntimeError::Network(format!(
@@ -3245,7 +3276,7 @@ impl ContainerRuntime {
             health
         };
 
-        let record = ContainerRecord {
+        let mut record = ContainerRecord {
             id: container_id.clone(),
             name: name.map(|val| val.to_string()),
             pid: child_id,
@@ -3318,6 +3349,7 @@ impl ContainerRuntime {
                 action: "container.run".into(),
             }),
         };
+        record.network_endpoints = record.effective_network_endpoints();
 
         rollback.persist_network()?;
         let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
@@ -4282,6 +4314,295 @@ impl ContainerRuntime {
         self.mediate_existing(Action::ContainerStart, id, |runtime, proof, intent| {
             runtime.restart_authorized(proof, intent, id, Duration::ZERO, false, true, false)
         })
+    }
+
+    pub fn connect_network(
+        &self,
+        id: &str,
+        config: NamedNetworkEndpointConfig,
+    ) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
+            runtime.connect_network_authorized(proof, intent, id, &config)
+        })
+    }
+
+    pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
+            runtime.disconnect_network_authorized(proof, intent, id, network_name)
+        })
+    }
+
+    fn connect_network_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        config: &NamedNetworkEndpointConfig,
+    ) -> Result<(), RuntimeError> {
+        if !nix::unistd::Uid::effective().is_root() {
+            return Err(RuntimeError::Network(
+                "connecting a named bridge endpoint requires root".into(),
+            ));
+        }
+        ferro_net::validate::validate_interface_name(&config.bridge_name)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if !matches!(record.status.as_str(), "running" | "paused") {
+            return Err(RuntimeError::InvalidState(
+                "network connect requires a running or paused container".into(),
+            ));
+        }
+        let netns_name = record.netns.as_deref().ok_or_else(|| {
+            RuntimeError::Network("container has no durable network namespace".into())
+        })?;
+        let namespace_identity = record.namespace_identity.ok_or_else(|| {
+            RuntimeError::Network("container network namespace has no durable identity".into())
+        })?;
+        verify_endpoint_namespace_identity(netns_name, namespace_identity)?;
+        let mut endpoints = record.effective_network_endpoints();
+        if endpoints
+            .iter()
+            .any(|endpoint| endpoint.network_name == config.network_name)
+        {
+            return Err(RuntimeError::InvalidState(format!(
+                "container is already connected to network {}",
+                config.network_name
+            )));
+        }
+        let bridge_ifindex = interface_ifindex(&config.bridge_name).map_err(|error| {
+            RuntimeError::Network(format!(
+                "named network bridge {} is unavailable: {error}",
+                config.bridge_name
+            ))
+        })?;
+        let occupied = self
+            .store
+            .list()?
+            .into_iter()
+            .flat_map(|candidate| candidate.effective_network_endpoints())
+            .filter(|endpoint| endpoint.network_name == config.network_name)
+            .filter_map(|endpoint| endpoint.ipv4_address)
+            .collect::<BTreeSet<_>>();
+        let ipv4 = allocate_named_endpoint_ipv4(
+            id,
+            &config.network_name,
+            &config.ipv4_subnet,
+            &config.ipv4_gateway,
+            &occupied,
+        )?;
+        let prefix = config
+            .ipv4_subnet
+            .split_once('/')
+            .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+            .ok_or_else(|| {
+                RuntimeError::Network(format!("invalid network subnet {}", config.ipv4_subnet))
+            })?;
+        let interface_name = next_endpoint_interface(
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.interface_name.as_str()),
+        );
+        let host_interface = named_endpoint_host_interface(id, &config.network_name);
+        if Path::new("/sys/class/net").join(&host_interface).exists() {
+            return Err(RuntimeError::Network(format!(
+                "endpoint interface {host_interface} already exists without a matching durable record"
+            )));
+        }
+        let peer_interface = format!("c{}", &host_interface[1..]);
+        let veth_config = veth::VethConfig {
+            pair: veth::VethPair {
+                host: host_interface.clone(),
+                container: peer_interface.clone(),
+            },
+            mtu: configured_veth_mtu()?,
+            host_addr: None,
+            container_addr: None,
+        };
+        run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config)?)?;
+        let attach_result = (|| {
+            let host_ifindex = interface_ifindex(&host_interface)?;
+            run_cmd(&bridge::build_ip_link_set_master_cmd(
+                &host_interface,
+                &config.bridge_name,
+            )?)?;
+            run_cmd(&veth::build_ip_link_set_up_cmd(&host_interface)?)?;
+            run_cmd(&netns::build_ip_link_set_netns_cmd(
+                &peer_interface,
+                netns_name,
+            )?)?;
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &["ip", "link", "set", &peer_interface, "name", &interface_name],
+            ))?;
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "addr",
+                    "add",
+                    &format!("{ipv4}/{prefix}"),
+                    "dev",
+                    &interface_name,
+                ],
+            ))?;
+            let ipv6_address = if let Some(cidr) = config.ipv6_gateway_cidr.as_deref() {
+                let (gateway, prefix) = cidr.split_once('/').ok_or_else(|| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let gateway = gateway.parse::<Ipv6Addr>().map_err(|_| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let prefix = prefix.parse::<u8>().map_err(|_| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let address = allocate_container_ipv6(
+                    &format!("{id}\0{}", config.network_name),
+                    &gateway,
+                    prefix,
+                );
+                run_cmd(&ip_netns_exec(
+                    netns_name,
+                    &[
+                        "ip",
+                        "-6",
+                        "addr",
+                        "add",
+                        &format!("{address}/{prefix}"),
+                        "dev",
+                        &interface_name,
+                    ],
+                ))?;
+                Some(address)
+            } else {
+                None
+            };
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &["ip", "link", "set", &interface_name, "up"],
+            ))?;
+            Ok::<_, RuntimeError>((host_ifindex, ipv6_address))
+        })();
+        let (host_ifindex, ipv6_address) = match attach_result {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = run_cmd_allow_missing(&[
+                    "ip".into(),
+                    "link".into(),
+                    "delete".into(),
+                    host_interface.clone(),
+                ]);
+                return Err(error);
+            }
+        };
+        let ownership = NetworkOwnershipRecord {
+            schema_version: 3,
+            owner_id: id.to_string(),
+            network_id: Some(config.network_name.clone()),
+            host_interface: host_interface.clone(),
+            host_ifindex: Some(host_ifindex),
+            namespace_identity: Some(namespace_identity),
+            managed_interface: None,
+            managed_ifindex: None,
+            loopback_ifindex: None,
+            bridge_ifindex: Some(bridge_ifindex),
+            source_cidr: Some(config.ipv4_subnet.clone()),
+            bridge: Some(config.bridge_name.clone()),
+            firewall_id: None,
+            firewall_marker: None,
+            firewall_expected_state: None,
+            ebpf_pin_path: None,
+            external_ipv4: None,
+            next_hop_mac: None,
+            snat_port_start: None,
+            snat_port_end: None,
+            object_sha256: None,
+            object_abi: None,
+            ebpf_filters: Vec::new(),
+            ebpf_pins: Vec::new(),
+        };
+        endpoints.push(NetworkEndpointRecord {
+            network_name: config.network_name.clone(),
+            endpoint_id: host_interface.clone(),
+            interface_name,
+            ipv4_address: Some(ipv4),
+            ipv6_address,
+            generation: config.generation,
+            namespace_identity: Some(namespace_identity),
+            network_backend: None,
+            ownership: Some(ownership),
+        });
+        record.network_endpoints = endpoints;
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        if let Err(error) = self.store.put_for_mutation(&record, operation_id) {
+            let _ = run_cmd_allow_missing(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                host_interface,
+            ]);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn disconnect_network_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        network_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if !matches!(record.status.as_str(), "running" | "paused") {
+            return Err(RuntimeError::InvalidState(
+                "network disconnect requires a running or paused container".into(),
+            ));
+        }
+        let endpoint = record
+            .effective_network_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.network_name == network_name)
+            .ok_or_else(|| {
+                RuntimeError::InvalidState(format!(
+                    "container is not connected to network {network_name}"
+                ))
+            })?;
+        let ownership = endpoint.ownership.as_ref().ok_or_else(|| {
+            RuntimeError::Network(format!(
+                "network endpoint {network_name} has no durable kernel ownership"
+            ))
+        })?;
+        verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+        run_cmd(&[
+            "ip".into(),
+            "link".into(),
+            "delete".into(),
+            ownership.host_interface.clone(),
+        ])?;
+        take_network_endpoint(&mut record, network_name).ok_or_else(|| {
+            RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
+        })?;
+        project_primary_network_fields(&mut record);
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or_else(|| {
+                RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
+            })?;
+        self.store
+            .put_for_mutation(&record, operation_id)
+            .map_err(RuntimeError::PostEffectPersistence)
     }
 
     fn start_from_reconciliation(&self, id: &str) -> Result<(), RuntimeError> {
@@ -10330,6 +10651,47 @@ fn cleanup_network(
         }
         return Ok(());
     }
+    if !record.network_endpoints.is_empty() {
+        let primary_host = record
+            .network_ownership
+            .as_ref()
+            .map(|ownership| ownership.host_interface.as_str());
+        for endpoint in &record.network_endpoints {
+            let Some(ownership) = endpoint.ownership.as_ref() else {
+                continue;
+            };
+            if primary_host == Some(ownership.host_interface.as_str()) {
+                continue;
+            }
+            verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            run_cmd_allow_missing(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                ownership.host_interface.clone(),
+            ])?;
+        }
+        if record.network_backend.is_none() {
+            if let Some(ownership) = record.network_ownership.as_ref() {
+                verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+                run_cmd_allow_missing(&[
+                    "ip".into(),
+                    "link".into(),
+                    "delete".into(),
+                    ownership.host_interface.clone(),
+                ])?;
+            }
+            if record.namespace_owned {
+                if let (Some(netns_name), Some(expected)) =
+                    (record.netns.as_deref(), record.namespace_identity)
+                {
+                    verify_endpoint_namespace_identity(netns_name, expected)?;
+                    run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                }
+            }
+            return Ok(());
+        }
+    }
     if record.network_backend.is_none() && record.network_ownership.is_none() {
         let proven = legacy_firewall_rules_proven(record)?;
         match classify_legacy_network_record(record.network_name.as_deref(), proven)? {
@@ -11832,6 +12194,51 @@ fn next_endpoint_interface<'a>(used: impl IntoIterator<Item = &'a str>) -> Strin
         .map(|index| format!("eth{index}"))
         .find(|candidate| !used.contains(candidate.as_str()))
         .unwrap_or_else(|| "eth255".to_string())
+}
+
+fn take_network_endpoint(
+    record: &mut ContainerRecord,
+    network_name: &str,
+) -> Option<NetworkEndpointRecord> {
+    if record.network_endpoints.is_empty() {
+        record.network_endpoints = record.effective_network_endpoints();
+    }
+    let index = record
+        .network_endpoints
+        .iter()
+        .position(|endpoint| endpoint.network_name == network_name)?;
+    Some(record.network_endpoints.remove(index))
+}
+
+fn project_primary_network_fields(record: &mut ContainerRecord) {
+    let Some(primary) = record.network_endpoints.first() else {
+        record.network_name = None;
+        record.ip_address = None;
+        record.ipv6_address = None;
+        record.network_backend = None;
+        record.network_ownership = None;
+        return;
+    };
+    record.network_name = Some(primary.network_name.clone());
+    record.ip_address = primary.ipv4_address.clone();
+    record.ipv6_address = primary.ipv6_address.clone();
+    record.network_backend = primary.network_backend.clone();
+    record.network_ownership = primary.ownership.clone();
+}
+
+fn verify_endpoint_namespace_identity(
+    netns_name: &str,
+    expected: KernelObjectIdentityRecord,
+) -> Result<(), RuntimeError> {
+    let path = netns::netns_path(netns_name);
+    let observed = kernel_path_identity(&path)?;
+    if observed != expected {
+        return Err(RuntimeError::Network(format!(
+            "container network namespace identity changed: expected {}:{}, found {}:{}",
+            expected.device, expected.inode, observed.device, observed.inode
+        )));
+    }
+    Ok(())
 }
 
 fn associated_network_name(associated: Option<&str>, network_mode: &str) -> Option<String> {
@@ -13414,7 +13821,8 @@ mod tests {
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
-        now_unix, ContainerRecord, MutationReservation, PortMappingRecord, RestartPolicy,
+        now_unix, ContainerRecord, MutationReservation, NetworkEndpointRecord, PortMappingRecord,
+        RestartPolicy,
     };
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
@@ -16670,6 +17078,37 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert_ne!(host_a, host_b);
         assert!(host_a.len() <= 15);
         assert_eq!(super::next_endpoint_interface(["eth0", "eth1"]), "eth2");
+    }
+
+    #[test]
+    fn disconnect_selection_removes_exactly_the_requested_endpoint() {
+        let mut record = ContainerRecord::authorization_candidate(
+            "container-a".into(),
+            "example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+        );
+        record.network_endpoints = ["frontend", "backend"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, network_name)| NetworkEndpointRecord {
+                network_name: network_name.into(),
+                endpoint_id: format!("veth-{network_name}"),
+                interface_name: format!("eth{index}"),
+                ipv4_address: Some(format!("172.{}.0.2", 30 + index)),
+                ipv6_address: None,
+                generation: 1,
+                namespace_identity: None,
+                network_backend: None,
+                ownership: None,
+            })
+            .collect();
+
+        let removed = super::take_network_endpoint(&mut record, "frontend")
+            .expect("frontend endpoint");
+
+        assert_eq!(removed.network_name, "frontend");
+        assert_eq!(record.network_endpoints.len(), 1);
+        assert_eq!(record.network_endpoints[0].network_name, "backend");
     }
 
     #[test]

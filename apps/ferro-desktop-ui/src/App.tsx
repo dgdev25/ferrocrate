@@ -58,6 +58,7 @@ import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   daemonIsAvailable,
   daemonStatusPresentation,
+  containerRemoveAvailability,
   filterContainers,
   filterContainersByStatus,
   groupContainers,
@@ -1275,6 +1276,7 @@ function App(): JSX.Element {
                             {group.rows.map((row) => {
                               const tone = statusTone(row);
                               const selected = selectedRow?.id === row.id;
+                              const remove = containerRemoveAvailability(row);
                               return (
                                 <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
                                   <td><div className="container-name">{row.composeService || row.name}</div>{row.composeService ? <div className="container-runtime-name mono">{row.name}</div> : null}</td>
@@ -1291,7 +1293,7 @@ function App(): JSX.Element {
                                         <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}><Icon name={row.state === "running" ? "stop" : "play"} size={16} />{row.state === "running" ? "Stop container" : "Start container"}</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}><Icon name="terminal" size={16} />Follow logs</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); void inspectContainer(row.id); }}><Icon name="terminal" size={16} />Open terminal</button>
-                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)}><Icon name="trash" size={16} />Remove container</button>
+                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)} disabled={!remove.allowed} title={remove.reason || undefined}><Icon name="trash" size={16} />{remove.allowed ? "Remove container" : "Stop before removing"}</button>
                                       </div>
                                     </details>
                                   </td>

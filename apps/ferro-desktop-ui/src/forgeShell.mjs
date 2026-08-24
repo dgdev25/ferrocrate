@@ -155,3 +155,9 @@ export function daemonStatusPresentation(status) {
   };
   return { label: labels[state] || labels.stopped, tone: state, title: titles[state] || titles.stopped };
 }
+
+export function containerRemoveAvailability(row) {
+  return row?.state === "running"
+    ? { allowed: false, reason: "Stop this container before removing it." }
+    : { allowed: true, reason: null };
+}

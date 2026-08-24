@@ -33,5 +33,7 @@ export function groupContainers(rows: ContainerRow[]): ContainerGroup[];
 export function statusTone(row: Pick<ContainerRow, "state" | "health">): ContainerTone;
 export function statusLabel(row: Pick<ContainerRow, "state" | "health" | "status">): string;
 export function shellKeyboardCommand(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey">): "close-dialog" | "focus-search" | null;
-export function daemonIsAvailable(snapshot: { containers?: { ok?: boolean }; images?: { ok?: boolean } } | null): boolean;
+export function daemonIsAvailable(snapshot: { daemon?: { state: string }; containers?: { ok?: boolean }; images?: { ok?: boolean } } | null): boolean;
+export function daemonStatusPresentation(status?: { state: string; reason?: string | null; socket_path?: string }): { label: string; tone: string; title: string };
+export function containerRemoveAvailability(row: { state: string }): { allowed: boolean; reason: string | null };
 export function resourceTotals(rows: Array<Pick<ContainerRow, "cpuPercent" | "memoryUsage">>): { cpu: string | null; memory: string | null };

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   daemonIsAvailable,
   daemonStatusPresentation,
+  containerRemoveAvailability,
   filterContainers,
   filterContainersByStatus,
   formatContainerPorts,
@@ -82,6 +83,11 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       memoryUsage: null,
     },
   ]);
+});
+
+test("running containers explain why removal is unavailable", () => {
+  assert.deepEqual(containerRemoveAvailability({ state: "running" }), { allowed: false, reason: "Stop this container before removing it." });
+  assert.deepEqual(containerRemoveAvailability({ state: "exited" }), { allowed: true, reason: null });
 });
 
 test("resourceTotals aggregates available live samples and hides absent metrics", () => {

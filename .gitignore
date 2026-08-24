@@ -12,4 +12,5 @@ tmp/ferro-scenario/
 apps/ferro-desktop-ui/node_modules/
 apps/ferro-desktop-ui/dist/
 apps/ferro-desktop-ui/src-tauri/target/
+apps/ferro-desktop-ui/src-tauri/gen/
 docs/assets/.claude-flow/

@@ -3,7 +3,7 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -114,6 +114,108 @@ enum VolumeAction {
     Prune,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ComposeAction {
+    Config,
+    Up,
+    Down,
+    Stop,
+    Start,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeConfigProjection {
+    services: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeContainerRecord {
+    id: String,
+    name: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ComposeServiceSummary {
+    name: String,
+    status: String,
+    container_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComposeSnapshot {
+    config: String,
+    services: Vec<ComposeServiceSummary>,
+}
+
+fn compose_bridge_command(file: &str, action: ComposeAction) -> Result<Vec<String>, String> {
+    let file = file.trim();
+    if file.is_empty() {
+        return Err("compose file is required".to_string());
+    }
+    let mut args = vec![
+        "exec".to_string(),
+        "--".to_string(),
+        "ferrocrate".to_string(),
+        "compose".to_string(),
+        "--file".to_string(),
+        file.to_string(),
+        match action {
+            ComposeAction::Config => "config",
+            ComposeAction::Up => "up",
+            ComposeAction::Down => "down",
+            ComposeAction::Stop => "stop",
+            ComposeAction::Start => "start",
+        }
+        .to_string(),
+    ];
+    if matches!(action, ComposeAction::Up) {
+        args.push("--detach".to_string());
+    }
+    Ok(args)
+}
+
+fn compose_container_list_command() -> Vec<String> {
+    [
+        "exec",
+        "--",
+        "ferrocrate",
+        "containers",
+        "--all",
+        "--format",
+        "json",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn compose_service_rows(
+    mut services: Vec<String>,
+    containers: &[ComposeContainerRecord],
+) -> Vec<ComposeServiceSummary> {
+    services.sort();
+    services
+        .into_iter()
+        .map(|name| {
+            let replica_prefix = format!("{name}-");
+            let container = containers.iter().find(|container| {
+                container.name.as_deref().is_some_and(|container_name| {
+                    container_name == name || container_name.starts_with(&replica_prefix)
+                })
+            });
+            ComposeServiceSummary {
+                name,
+                status: container
+                    .map(|container| container.status.clone())
+                    .unwrap_or_else(|| "not_created".to_string()),
+                container_id: container.map(|container| container.id.clone()),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all(deserialize = "PascalCase", serialize = "snake_case"))]
 struct VolumeMountUsage {
@@ -183,6 +285,23 @@ fn execute_volume_proxy(
 }
 
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
+    match Command::new(binary).args(args).output() {
+        Ok(output) => CommandResult {
+            ok: output.status.success(),
+            code: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        },
+        Err(err) => CommandResult {
+            ok: false,
+            code: 127,
+            stdout: String::new(),
+            stderr: format!("failed to run `{binary}`: {err}"),
+        },
+    }
+}
+
+fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
     match Command::new(binary).args(args).output() {
         Ok(output) => CommandResult {
             ok: output.status.success(),
@@ -898,6 +1017,48 @@ fn get_volumes() -> Result<Vec<VolumeSummary>, String> {
         .map_err(|error| format!("volume proxy returned invalid JSON: {error}"))
 }
 
+fn command_failure(label: &str, result: &CommandResult) -> String {
+    if result.stderr.trim().is_empty() {
+        format!("{label} failed with status {}", result.code)
+    } else {
+        result.stderr.trim().to_string()
+    }
+}
+
+#[tauri::command]
+fn get_compose_snapshot(file: String) -> Result<ComposeSnapshot, String> {
+    let config_result = run_owned_command(
+        "ferro-desktop",
+        &compose_bridge_command(&file, ComposeAction::Config)?,
+    );
+    if !config_result.ok {
+        return Err(command_failure("compose config", &config_result));
+    }
+    let config = serde_yaml::from_str::<ComposeConfigProjection>(&config_result.stdout)
+        .map_err(|error| format!("compose config returned invalid YAML: {error}"))?;
+    let containers_result = run_owned_command("ferro-desktop", &compose_container_list_command());
+    if !containers_result.ok {
+        return Err(command_failure("container status", &containers_result));
+    }
+    let containers = serde_json::from_str::<Vec<ComposeContainerRecord>>(&containers_result.stdout)
+        .map_err(|error| format!("container status returned invalid JSON: {error}"))?;
+    Ok(ComposeSnapshot {
+        config: config_result.stdout,
+        services: compose_service_rows(config.services.into_keys().collect(), &containers),
+    })
+}
+
+#[tauri::command]
+fn run_compose_action(file: String, action: ComposeAction) -> Result<CommandResult, String> {
+    if matches!(action, ComposeAction::Config) {
+        return Err("use the compose snapshot command to validate config".to_string());
+    }
+    Ok(run_owned_command(
+        "ferro-desktop",
+        &compose_bridge_command(&file, action)?,
+    ))
+}
+
 #[tauri::command]
 fn run_volume_action(
     action: VolumeAction,
@@ -1146,7 +1307,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
             get_volumes,
+            get_compose_snapshot,
             run_desktop_action,
+            run_compose_action,
             run_volume_action,
             start_log_follow,
             stop_log_follow,
@@ -1169,9 +1332,67 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        log_channel, log_follow_command, parse_terminal_exec_id, terminal_exec_command,
-        terminal_resize_command, volume_proxy_command, LogBuffer, VolumeAction,
+        compose_bridge_command, compose_service_rows, log_channel, log_follow_command,
+        parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
+        volume_proxy_command, ComposeAction, ComposeContainerRecord, LogBuffer, VolumeAction,
     };
+
+    #[test]
+    fn compose_actions_use_the_desktop_exec_bridge() {
+        assert_eq!(
+            compose_bridge_command("/tmp/real app/compose.yml", ComposeAction::Config)
+                .expect("config command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "compose",
+                "--file",
+                "/tmp/real app/compose.yml",
+                "config",
+            ]
+        );
+        assert_eq!(
+            compose_bridge_command("/tmp/compose.yml", ComposeAction::Up).expect("up command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "compose",
+                "--file",
+                "/tmp/compose.yml",
+                "up",
+                "--detach",
+            ]
+        );
+        assert!(compose_bridge_command("  ", ComposeAction::Down).is_err());
+    }
+
+    #[test]
+    fn compose_service_rows_reflect_matching_container_state() {
+        let containers = vec![
+            ComposeContainerRecord {
+                id: "api-id".to_string(),
+                name: Some("api".to_string()),
+                status: "running".to_string(),
+            },
+            ComposeContainerRecord {
+                id: "worker-id".to_string(),
+                name: Some("worker-1".to_string()),
+                status: "exited".to_string(),
+            },
+        ];
+        let rows = compose_service_rows(
+            vec!["worker".to_string(), "db".to_string(), "api".to_string()],
+            &containers,
+        );
+        assert_eq!(rows[0].name, "api");
+        assert_eq!(rows[0].status, "running");
+        assert_eq!(rows[1].name, "db");
+        assert_eq!(rows[1].status, "not_created");
+        assert_eq!(rows[2].name, "worker");
+        assert_eq!(rows[2].container_id.as_deref(), Some("worker-id"));
+    }
 
     #[test]
     fn log_follow_uses_the_desktop_exec_bridge() {

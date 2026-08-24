@@ -14610,6 +14610,13 @@ mod tests {
             error.to_string(),
             "configured logging driver does not support reading"
         );
+        let error = runtime
+            .logs_timestamped_split(&record.id)
+            .expect_err("write-only driver must reject timestamped logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
     }
 
     #[test]

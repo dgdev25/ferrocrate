@@ -25,6 +25,7 @@ import type {
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
+import { parseImageRows } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { registryStatusText } from "./registryAuth.mjs";
 import {
@@ -59,6 +60,10 @@ function App(): JSX.Element {
   const [detailTab, setDetailTab] = useState<DetailTab>("logs");
   const [globalSearch, setGlobalSearch] = useState("");
   const [imageTarget, setImageTarget] = useState("alpine:latest");
+  const [pullImageDialogOpen, setPullImageDialogOpen] = useState(false);
+  const [buildImageDialogOpen, setBuildImageDialogOpen] = useState(false);
+  const [registryDialogOpen, setRegistryDialogOpen] = useState(false);
+  const [pullProgress, setPullProgress] = useState("");
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
   const [actionLabel, setActionLabel] = useState("");
@@ -419,6 +424,24 @@ function App(): JSX.Element {
       setLastAction(result);
       await refresh();
     } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function pullImage(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Image Pull");
+    setPullProgress("Pulling image…");
+    try {
+      const result = await invoke<CommandResult>("run_desktop_action", { action: "pull_image", target: imageTarget });
+      setLastAction(result);
+      setPullProgress(result.ok ? result.stdout || "Image pulled." : "Couldn’t pull this image.");
+      await refresh();
+    } catch (err) {
+      setPullProgress("Couldn’t pull this image.");
       setError(String(err));
     } finally {
       finishRuntimeAction();
@@ -884,16 +907,11 @@ function App(): JSX.Element {
     () => filterContainers(containerRows, globalSearch),
     [containerRows, globalSearch],
   );
+  const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
+  const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
-  const imageCount = useMemo(() => {
-    try {
-      const parsed: unknown = JSON.parse(snapshot?.images.stdout || "[]");
-      return Array.isArray(parsed) ? parsed.length : 0;
-    } catch {
-      return 0;
-    }
-  }, [snapshot?.images.stdout]);
+  const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
@@ -969,6 +987,8 @@ function App(): JSX.Element {
                   <button className="btn btn-secondary" onClick={() => void runAction("container_prune", "Container Prune")} disabled={runtimeBusy}>Prune stopped</button>
                   <button className="btn btn-primary" onClick={() => setRunDialogOpen(true)} disabled={runtimeBusy}>▶ Run container</button>
                 </>
+              ) : activeSection === "images" ? (
+                <button className="btn btn-primary" onClick={() => setPullImageDialogOpen(true)} disabled={runtimeBusy}>Pull image</button>
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
                   {loading ? "Refreshing…" : "↻ Refresh runtime"}
@@ -1084,11 +1104,36 @@ function App(): JSX.Element {
             ) : null}
 
             {activeSection === "images" ? (
-              <div className="section-grid">
-                <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Image library</p><h2>Images</h2></div><span className="count-badge">{imageCount}</span></div><div className="field-row"><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="image:tag" /></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void runAction("pull_image", "Image Pull", imageTarget)} disabled={runtimeBusy}>Pull image</button><button className="btn btn-danger" onClick={() => void runAction("remove_image", "Image Remove", imageTarget)} disabled={runtimeBusy}>Remove</button><button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune</button></div><pre className="data-output">{snapshot?.images.stdout || EMPTY}</pre>{snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}</section>
-                <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Credentials</p><h2>Registry authentication</h2></div></div><div className="form-stack"><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" aria-label="Registry server" /><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></div><p className={`registry-status ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}</p><div className="panel-actions"><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button></div></section>
-                <section className="panel section-panel full-span"><div className="panel-heading"><div><p className="eyebrow">Build pipeline</p><h2>Build image</h2></div></div><p className="muted">Choose a directory containing a Dockerfile and watch each build frame as it arrives.</p><div className="field-row build-fields"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build</button></div>{buildSteps.length ? <ol className="build-steps">{buildSteps.map((step, index) => <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}><span>{step.stream}</span><code>{buildStepText(step.text)}</code></li>)}</ol> : <p className="muted">Build progress will appear here.</p>}</section>
-              </div>
+              <section className="panel table-panel image-table-panel" aria-label="Images">
+                <div className="table-toolbar">
+                  <span className="count-badge">{imageCount}</span>
+                  <details className="image-toolbar-overflow">
+                    <summary aria-label="More image actions">•••</summary>
+                    <div className="overflow-menu">
+                      <button onClick={() => void refresh()} disabled={loading}>Refresh images</button>
+                      <button onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune unused images</button>
+                      <button onClick={() => setBuildImageDialogOpen(true)} disabled={runtimeBusy}>Build image</button>
+                      <button onClick={() => setRegistryDialogOpen(true)} disabled={runtimeBusy}>Registry access</button>
+                    </div>
+                  </details>
+                </div>
+                {imageRows.length ? (
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th>Repository</th><th>Size</th><th>Created</th><th>In use</th><th aria-label="Actions" /></tr></thead>
+                      <tbody>{imageRows.map((image) => (
+                        <tr key={image.id}>
+                          <td className="container-name mono">{image.reference}</td>
+                          <td className="muted">{image.size}</td>
+                          <td className="muted">{image.created}</td>
+                          <td>{imagesInUse.has(image.reference) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
+                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}>•••</summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}>Remove image</button></div></details></td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                ) : <div className="empty-state"><strong>There are no local images.</strong><span>Pull an image to run or build containers.</span><button className="btn btn-primary" onClick={() => setPullImageDialogOpen(true)} disabled={runtimeBusy}>Pull image</button></div>}
+              </section>
             ) : null}
 
             {activeSection === "volumes" ? <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Persistent storage</p><h2>Named volumes</h2></div><span className="count-badge">{volumes.length}</span></div><div className="field-row"><input value={volumeName} onChange={(event) => setVolumeName(event.target.value)} placeholder="named volume" /><button className="btn btn-primary" onClick={() => void runVolumeAction("create", "Volume Create", volumeName)} disabled={runtimeBusy || volumesLoading || !volumeName.trim()}>Create</button><button className="btn btn-secondary" onClick={() => void refreshVolumes()} disabled={runtimeBusy || volumesLoading}>{volumesLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-danger" onClick={() => void runVolumeAction("prune", "Volume Prune")} disabled={runtimeBusy || volumesLoading}>Prune unused</button></div><div className="resource-list">{volumes.map((volume) => <div className="resource-row" key={volume.name}><div><strong>{volume.name}</strong><p className="muted">{volume.driver} · {volume.mountpoint}</p>{volume.mounts.length ? <ul className="mount-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <p className="muted">Unused</p>}</div><button className="btn btn-danger" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}>Remove</button></div>)}</div>{volumes.length === 0 ? <div className="empty-state"><strong>No named volumes</strong><span>Create one to persist container data.</span></div> : null}</section> : null}
@@ -1115,6 +1160,18 @@ function App(): JSX.Element {
 
       {runDialogOpen ? (
         <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>Run detached</button></div></section></div>
+      ) : null}
+
+      {pullImageDialogOpen ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="pull-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Image library</p><h2 id="pull-image-dialog-title">Pull image</h2></div><button className="btn btn-secondary" onClick={() => setPullImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Image reference</span><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="alpine:latest" autoFocus /></label>{pullProgress ? <p className="pull-progress detail-span" role="status">{pullProgress}</p> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void pullImage()} disabled={runtimeBusy || !imageTarget.trim()}>{runtimeBusy ? "Pulling…" : "Pull image"}</button></div></section></div>
+      ) : null}
+
+      {buildImageDialogOpen ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">Build image</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Build context directory</span><div className="field-row"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button></div></label><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label>{buildSteps.length ? <ol className="build-steps detail-span">{buildSteps.map((step, index) => <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}><span>{step.stream}</span><code>{buildStepText(step.text)}</code></li>)}</ol> : <p className="muted detail-span">Build progress will appear here.</p>}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build image</button></div></section></div>
+      ) : null}
+
+      {registryDialogOpen ? (
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Registry server</span><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label><span>Username</span><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label><span>Password or token</span><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>
       ) : null}
     </div>
   );

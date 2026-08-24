@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyTerminalResize, DEFAULT_TERMINAL_ENV } from "./terminalResize.mjs";
+import {
+  applyRemoteTerminalResize,
+  applyTerminalResize,
+  DEFAULT_TERMINAL_ENV,
+} from "./terminalResize.mjs";
 
 test("terminal resize always updates xterm and only resizes an active daemon exec", () => {
   const local = [];
@@ -23,4 +27,11 @@ test("terminal resize enforces readable minimum dimensions", () => {
 
 test("terminal starts without an attached override by default", () => {
   assert.equal(DEFAULT_TERMINAL_ENV, "");
+});
+
+test("active terminal dimensions can be synchronized immediately after exec start", () => {
+  const remote = [];
+  applyRemoteTerminalResize(90, 18, false, (columns, rows) => remote.push([columns, rows]));
+  applyRemoteTerminalResize(90, 18, true, (columns, rows) => remote.push([columns, rows]));
+  assert.deepEqual(remote, [[90, 18]]);
 });

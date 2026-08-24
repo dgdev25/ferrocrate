@@ -11,7 +11,11 @@ import type {
   InstallerRunSummary,
   PaidAuthState,
 } from "./types";
-import { applyTerminalResize, DEFAULT_TERMINAL_ENV } from "./terminalResize.mjs";
+import {
+  applyRemoteTerminalResize,
+  applyTerminalResize,
+  DEFAULT_TERMINAL_ENV,
+} from "./terminalResize.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
@@ -323,7 +327,13 @@ function App(): JSX.Element {
       });
       terminalActiveRef.current = true;
       setTerminalActive(true);
-      terminalRef.current?.focus();
+      const terminal = terminalRef.current;
+      if (terminal) {
+        applyRemoteTerminalResize(terminal.cols, terminal.rows, true, (columns, rows) => {
+          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+        });
+        terminal.focus();
+      }
     } catch (err) {
       setError(String(err));
     } finally {

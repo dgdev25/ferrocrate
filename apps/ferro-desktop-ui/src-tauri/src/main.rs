@@ -35,6 +35,100 @@ struct CommandResult {
     code: i32,
     stdout: String,
     stderr: String,
+    message: String,
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+        if chars.next_if_eq(&'[').is_none() {
+            continue;
+        }
+        for code in chars.by_ref() {
+            if ('@'..='~').contains(&code) {
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn is_tracing_line(line: &str) -> bool {
+    const LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let level_index = if fields
+        .first()
+        .is_some_and(|field| field.contains('T') && (field.ends_with('Z') || field.contains('+')))
+    {
+        1
+    } else {
+        0
+    };
+    fields
+        .get(level_index)
+        .is_some_and(|field| LEVELS.contains(field))
+        && fields
+            .get(level_index + 1)
+            .is_some_and(|field| field.ends_with(':'))
+}
+
+fn actionable_error(stderr: &str) -> String {
+    strip_ansi(stderr)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !is_tracing_line(line))
+        .filter(|line| !line.contains("container operation(s) failed"))
+        .filter(|line| !line.contains("remote command exited with status"))
+        .map(|line| line.strip_prefix("error: ").unwrap_or(line))
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn command_result_from_output(output: std::process::Output) -> CommandResult {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    CommandResult {
+        ok: output.status.success(),
+        code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        message: actionable_error(&stderr),
+        stderr,
+    }
+}
+
+fn command_spawn_failure(binary: &str, err: impl std::fmt::Display) -> CommandResult {
+    let stderr = format!("failed to run `{binary}`: {err}");
+    CommandResult {
+        ok: false,
+        code: 127,
+        stdout: String::new(),
+        message: stderr.clone(),
+        stderr,
+    }
+}
+
+fn command_input_failure(message: &str) -> CommandResult {
+    CommandResult {
+        ok: false,
+        code: 2,
+        stdout: String::new(),
+        stderr: message.to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn ferrocrate_proxy_command(args: &[&str]) -> Vec<String> {
+    ["exec", "--", "ferrocrate"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +136,93 @@ struct DesktopSnapshot {
     runtime: CommandResult,
     containers: CommandResult,
     images: CommandResult,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct NativeContainerStats {
+    memory_current: Option<u64>,
+    cpu_usage_usec: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeStatsOutput {
+    stats: NativeContainerStats,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ContainerResourceUsage {
+    memory_usage: Option<u64>,
+    cpu_percent: Option<f64>,
+}
+
+fn container_stats_command(target: &str) -> Vec<String> {
+    ferrocrate_proxy_command(&["stats", target, "--format", "json"])
+}
+
+fn read_container_stats(target: &str) -> Option<NativeContainerStats> {
+    let result = run_owned_command("ferro-desktop", &container_stats_command(target));
+    result
+        .ok
+        .then(|| serde_json::from_str::<NativeStatsOutput>(&result.stdout).ok())
+        .flatten()
+        .map(|output| output.stats)
+}
+
+fn collect_container_resource_usage(ids: &[String]) -> BTreeMap<String, ContainerResourceUsage> {
+    let first = ids
+        .iter()
+        .filter_map(|id| {
+            read_container_stats(id).map(|stats| (id.clone(), (Instant::now(), stats)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if first.is_empty() {
+        return BTreeMap::new();
+    }
+    thread::sleep(Duration::from_millis(100));
+    ids.iter()
+        .filter_map(|id| {
+            let (started, previous) = first.get(id)?;
+            let current = read_container_stats(id)?;
+            let elapsed_usec = started.elapsed().as_micros() as f64;
+            let cpu_percent = previous
+                .cpu_usage_usec
+                .zip(current.cpu_usage_usec)
+                .filter(|_| elapsed_usec > 0.0)
+                .map(|(before, after)| after.saturating_sub(before) as f64 / elapsed_usec * 100.0);
+            Some((
+                id.clone(),
+                ContainerResourceUsage {
+                    memory_usage: current.memory_current,
+                    cpu_percent,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn attach_container_resource_usage(
+    stdout: &str,
+    usage: &BTreeMap<String, ContainerResourceUsage>,
+) -> Result<String, serde_json::Error> {
+    let mut records = serde_json::from_str::<Vec<JsonValue>>(stdout)?;
+    for record in &mut records {
+        let Some(id) = record.get("id").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let Some(stats) = usage.get(id) else {
+            continue;
+        };
+        let Some(object) = record.as_object_mut() else {
+            continue;
+        };
+        if let Some(memory) = stats.memory_usage {
+            object.insert("memory_usage".to_string(), JsonValue::from(memory));
+        }
+        if let Some(cpu) = stats.cpu_percent.and_then(serde_json::Number::from_f64) {
+            object.insert("cpu_percent".to_string(), JsonValue::Number(cpu));
+        }
+    }
+    serde_json::to_string(&records)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1008,12 +1189,7 @@ fn execute_volume_proxy(
         .args(&args)
         .output()
         .map_err(|error| format!("failed to run volume proxy: {error}"))?;
-    Ok(CommandResult {
-        ok: output.status.success(),
-        code: output.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
+    Ok(command_result_from_output(output))
 }
 
 fn execute_network_proxy(
@@ -1027,35 +1203,15 @@ fn execute_network_proxy(
 
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
     match Command::new(binary).args(args).output() {
-        Ok(output) => CommandResult {
-            ok: output.status.success(),
-            code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        },
-        Err(err) => CommandResult {
-            ok: false,
-            code: 127,
-            stdout: String::new(),
-            stderr: format!("failed to run `{binary}`: {err}"),
-        },
+        Ok(output) => command_result_from_output(output),
+        Err(err) => command_spawn_failure(binary, err),
     }
 }
 
 fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
     match Command::new(binary).args(args).output() {
-        Ok(output) => CommandResult {
-            ok: output.status.success(),
-            code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        },
-        Err(err) => CommandResult {
-            ok: false,
-            code: 127,
-            stdout: String::new(),
-            stderr: format!("failed to run `{binary}`: {err}"),
-        },
+        Ok(output) => command_result_from_output(output),
+        Err(err) => command_spawn_failure(binary, err),
     }
 }
 
@@ -1066,18 +1222,8 @@ fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> Comm
         command.env(k, v);
     }
     match command.output() {
-        Ok(output) => CommandResult {
-            ok: output.status.success(),
-            code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        },
-        Err(err) => CommandResult {
-            ok: false,
-            code: 127,
-            stdout: String::new(),
-            stderr: format!("failed to run `{binary}`: {err}"),
-        },
+        Ok(output) => command_result_from_output(output),
+        Err(err) => command_spawn_failure(binary, err),
     }
 }
 
@@ -1775,8 +1921,34 @@ fn query_entitlement_from_session(
 #[tauri::command]
 fn get_desktop_snapshot() -> DesktopSnapshot {
     let runtime = run_command("ferro-desktop", &["vm", "status", "--json"]);
-    let containers = run_command("ferrocrate", &["containers", "--all", "--format", "json"]);
-    let images = run_command("ferrocrate", &["images", "--format", "json"]);
+    let mut containers = run_owned_command(
+        "ferro-desktop",
+        &ferrocrate_proxy_command(&["containers", "--all", "--format", "json"]),
+    );
+    if containers.ok {
+        if let Ok(records) = serde_json::from_str::<Vec<JsonValue>>(&containers.stdout) {
+            let running_ids = records
+                .iter()
+                .filter(|record| {
+                    record.get("status").and_then(JsonValue::as_str) == Some("running")
+                })
+                .filter_map(|record| {
+                    record
+                        .get("id")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let usage = collect_container_resource_usage(&running_ids);
+            if let Ok(enriched) = attach_container_resource_usage(&containers.stdout, &usage) {
+                containers.stdout = enriched;
+            }
+        }
+    }
+    let images = run_owned_command(
+        "ferro-desktop",
+        &ferrocrate_proxy_command(&["images", "--format", "json"]),
+    );
 
     DesktopSnapshot {
         runtime,
@@ -1841,10 +2013,10 @@ fn get_container_detail(target: String) -> Result<ContainerDetailSummary, String
 }
 
 fn command_failure(label: &str, result: &CommandResult) -> String {
-    if result.stderr.trim().is_empty() {
+    if result.message.is_empty() {
         format!("{label} failed with status {}", result.code)
     } else {
-        result.stderr.trim().to_string()
+        result.message.clone()
     }
 }
 
@@ -1956,6 +2128,7 @@ fn build_image(
         ok: status.success(),
         code: status.code().unwrap_or(1),
         stdout: stdout_text,
+        message: actionable_error(&stderr_text),
         stderr: stderr_text,
     })
 }
@@ -2060,12 +2233,7 @@ fn login_registry(
     let output = child
         .wait_with_output()
         .map_err(|error| format!("failed to wait for registry login: {error}"))?;
-    let result = CommandResult {
-        ok: output.status.success(),
-        code: output.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    };
+    let result = command_result_from_output(output);
     if result.ok {
         set_registry_credential(&StoredRegistryCredential {
             registry,
@@ -2261,61 +2429,53 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
         DesktopAction::VmStop => run_command("ferro-desktop", &["vm", "stop"]),
         DesktopAction::PullImage => {
             if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target image is required".to_string(),
-                };
+                return command_input_failure("target image is required");
             }
-            run_command("ferrocrate", &["pull", &target])
+            run_owned_command(
+                "ferro-desktop",
+                &ferrocrate_proxy_command(&["pull", &target]),
+            )
         }
         DesktopAction::RemoveImage => {
             if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target image is required".to_string(),
-                };
+                return command_input_failure("target image is required");
             }
-            run_command("ferrocrate", &["rmi", &target])
+            run_owned_command(
+                "ferro-desktop",
+                &ferrocrate_proxy_command(&["rmi", &target]),
+            )
         }
         DesktopAction::StartContainer => {
             if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target container is required".to_string(),
-                };
+                return command_input_failure("target container is required");
             }
-            run_command("ferrocrate", &["restart", &target])
+            run_owned_command(
+                "ferro-desktop",
+                &ferrocrate_proxy_command(&["start", &target]),
+            )
         }
         DesktopAction::StopContainer => {
             if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target container is required".to_string(),
-                };
+                return command_input_failure("target container is required");
             }
-            run_command("ferrocrate", &["stop", &target])
+            run_owned_command(
+                "ferro-desktop",
+                &ferrocrate_proxy_command(&["stop", &target]),
+            )
         }
         DesktopAction::RemoveContainer => {
             if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target container is required".to_string(),
-                };
+                return command_input_failure("target container is required");
             }
-            run_command("ferrocrate", &["rm", &target])
+            run_owned_command("ferro-desktop", &ferrocrate_proxy_command(&["rm", &target]))
         }
-        DesktopAction::ContainerPrune => run_command("ferrocrate", &["container-prune"]),
-        DesktopAction::ImagePrune => run_command("ferrocrate", &["image-prune"]),
+        DesktopAction::ContainerPrune => run_owned_command(
+            "ferro-desktop",
+            &ferrocrate_proxy_command(&["container-prune"]),
+        ),
+        DesktopAction::ImagePrune => {
+            run_owned_command("ferro-desktop", &ferrocrate_proxy_command(&["image-prune"]))
+        }
     }
 }
 
@@ -2361,13 +2521,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        build_bridge_command, compose_bridge_command, compose_service_rows,
-        container_detail_from_json, container_inspect_command, container_update_command,
-        log_channel, log_follow_command, network_proxy_command, network_summaries,
-        parse_terminal_exec_id, registry_login_command, registry_logout_command,
-        run_container_bridge_command, terminal_exec_command, terminal_resize_command,
-        volume_proxy_command, BuildProgressFrame, ComposeAction, ComposeContainerRecord,
-        ContainerNetworkRecord, ContainerPortRecord, LogBuffer, NetworkAction,
+        actionable_error, attach_container_resource_usage, build_bridge_command, command_failure,
+        compose_bridge_command, compose_service_rows, container_detail_from_json,
+        container_inspect_command, container_update_command, ferrocrate_proxy_command, log_channel,
+        log_follow_command, network_proxy_command, network_summaries, parse_terminal_exec_id,
+        registry_login_command, registry_logout_command, run_container_bridge_command,
+        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
+        CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
+        ContainerPortRecord, ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction,
         NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction,
     };
 
@@ -2551,6 +2712,60 @@ mod tests {
                 "--rows",
                 "40",
             ]
+        );
+    }
+
+    #[test]
+    fn command_failure_surfaces_only_actionable_restart_error() {
+        let stderr = concat!(
+            "\x1b[2m2026-08-24T17:09:02Z\x1b[0m ",
+            "\x1b[33m WARN\x1b[0m ferro_core::runtime: pending cleanup journal ",
+            "/run/ferrocrate/containers/demo/network-cleanup-pending.json retained in quarantine\n",
+            "restart: demo: io error: Permission denied\n",
+            "\x1b[31mERROR\x1b[0m ferro_cli: restart: 1 container operation(s) failed\n",
+            "error: restart: 1 container operation(s) failed\n",
+            "Error: Invalid(\"remote command exited with status 1\")\n",
+        );
+        let result = CommandResult {
+            ok: false,
+            code: 1,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            message: actionable_error(stderr),
+        };
+
+        assert_eq!(
+            command_failure("container restart", &result),
+            "restart: demo: io error: Permission denied"
+        );
+    }
+
+    #[test]
+    fn container_snapshot_includes_live_cpu_and_memory_usage() {
+        let usage = BTreeMap::from([(
+            "demo".to_string(),
+            ContainerResourceUsage {
+                memory_usage: Some(67_108_864),
+                cpu_percent: Some(12.5),
+            },
+        )]);
+        let output = attach_container_resource_usage(
+            r#"[{"id":"demo","status":"running"},{"id":"stopped","status":"exited"}]"#,
+            &usage,
+        )
+        .expect("enriched container JSON");
+        let records: Vec<JsonValue> = serde_json::from_str(&output).expect("container JSON");
+
+        assert_eq!(records[0]["memory_usage"], 67_108_864);
+        assert_eq!(records[0]["cpu_percent"], 12.5);
+        assert!(records[1].get("memory_usage").is_none());
+    }
+
+    #[test]
+    fn stopped_container_start_runs_through_the_daemon_bridge() {
+        assert_eq!(
+            ferrocrate_proxy_command(&["start", "demo"]),
+            vec!["exec", "--", "ferrocrate", "start", "demo"]
         );
     }
 

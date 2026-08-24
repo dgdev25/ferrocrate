@@ -3,6 +3,7 @@ export type CommandResult = {
   code: number;
   stdout: string;
   stderr: string;
+  message: string;
 };
 
 export type DesktopSnapshot = {

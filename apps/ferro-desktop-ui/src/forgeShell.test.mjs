@@ -8,6 +8,7 @@ import {
   formatContainerPorts,
   groupContainers,
   parseContainerRows,
+  resourceTotals,
   shellKeyboardCommand,
   statusLabel,
   statusTone,
@@ -28,6 +29,7 @@ const records = JSON.stringify([
       "com.docker.compose.service": "web",
     },
     ports: [{ host_port: 8080, container_port: 80, protocol: "tcp" }],
+    memory_usage: 67_108_864,
   },
   {
     id: "def456",
@@ -58,6 +60,9 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       composeService: "web",
       startedAt: 1_700_000_000,
       cpu: "0.4%",
+      cpuPercent: 0.4,
+      memory: "64.0 MiB",
+      memoryUsage: 67_108_864,
     },
     {
       id: "def456",
@@ -71,8 +76,23 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       composeService: null,
       startedAt: 1_699_900_000,
       cpu: "—",
+      cpuPercent: null,
+      memory: "—",
+      memoryUsage: null,
     },
   ]);
+});
+
+test("resourceTotals aggregates available live samples and hides absent metrics", () => {
+  const rows = parseContainerRows(records);
+  assert.deepEqual(resourceTotals(rows), {
+    cpu: "0.4%",
+    memory: "64.0 MiB",
+  });
+  assert.deepEqual(resourceTotals([{ cpuPercent: null, memoryUsage: null }]), {
+    cpu: null,
+    memory: null,
+  });
 });
 
 test("parseContainerRows safely rejects non-array or malformed snapshots", () => {

@@ -239,7 +239,7 @@ fn plugin_command(
     manifest: &PluginManifest,
     args: &[String],
 ) -> Result<Command, PluginExecutionError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         // `pre_exec` cannot be used here because ferrocrate forbids unsafe
         // code. util-linux's prlimit provides an RLIMIT_AS boundary without
@@ -257,6 +257,37 @@ fn plugin_command(
             .arg("--")
             .arg(&manifest.entrypoint)
             .args(args);
+        Ok(command)
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let memory_bytes: nix::libc::rlim_t =
+            manifest.limits.memory_bytes.try_into().map_err(|_| {
+                PluginExecutionError::ResourceLimits(
+                    "plugin address-space limit exceeds the platform range".to_string(),
+                )
+            })?;
+        let mut command = Command::new(&manifest.entrypoint);
+        command.args(args);
+        // Alpine does not ship util-linux's `prlimit` by default. Apply the
+        // same per-process RLIMIT_AS boundary in the post-fork child instead.
+        // SAFETY: setrlimit is async-signal-safe, and the closure captures
+        // only a copied integer used to initialize a stack-local `rlimit`.
+        unsafe {
+            command.pre_exec(move || {
+                let limit = nix::libc::rlimit {
+                    rlim_cur: memory_bytes,
+                    rlim_max: memory_bytes,
+                };
+                if nix::libc::setrlimit(nix::libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         Ok(command)
     }
 

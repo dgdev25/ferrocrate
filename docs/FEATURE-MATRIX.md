@@ -23,7 +23,7 @@ Snapshot: 2026-08-22, `main` at `2aa9715c`.
 |---|---|---|
 | Rootful Ubuntu 26.04 x86_64 (qualified baseline) | Supported | [`host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md`](evidence/host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md) |
 | Debian 13 / Fedora 42 / Rocky 9.8 rootful network rows | Supported | same four-distro rerun witness above |
-| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: Rocky gated on `SO_PEERPIDFD` | [`host-matrix/2026-08-21-rootless-tty-four-distro-rerun-current-head-0dfe18b7.md`](evidence/host-matrix/2026-08-21-rootless-tty-four-distro-rerun-current-head-0dfe18b7.md) |
+| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: Rocky gated on `SO_PEERPIDFD`; the Ubuntu 24.04 packaged-profile rerun with `kernel.apparmor_restrict_unprivileged_userns=1` is pending | The [latest restricted-policy rerun](evidence/host-matrix/2026-08-21-rootless-tty-four-distro-rerun-current-head-0dfe18b7.md) is blocked on Ubuntu; the [historical Ubuntu qualification](evidence/host-matrix/2026-08-21-ubuntu-rootless-apparmor-qualified-current-head-665435ce.md) used a host-wide sysctl relaxation and does not qualify the shipped profile |
 | Native Windows/macOS runtimes | Unsupported (deferred) | [`verification/2026-08-21-cross-target-current-head-0d0bdf3f.md`](evidence/verification/2026-08-21-cross-target-current-head-0d0bdf3f.md) |
 
 ## Product areas
@@ -45,7 +45,7 @@ Snapshot: 2026-08-22, `main` at `2aa9715c`.
 | IPv6 address lifecycle | Supported | [`performance/2026-08-21-docker-ipv6-comparison.md`](evidence/performance/2026-08-21-docker-ipv6-comparison.md) |
 | Published IPv6 ports / global IPv6 traffic | Host-blocked: no upstream IPv6 route on any current host | [`verification/2026-08-19-rootless-ipv6-guest-boundary-current-head.md`](evidence/verification/2026-08-19-rootless-ipv6-guest-boundary-current-head.md) |
 | eBPF published ports | Experimental: opt-in (`FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1` + two host sysctls); iptables/nftables stay the supported path | [`verification/2026-08-22-ebpf-published-port-reverse-path-resolved.md`](evidence/verification/2026-08-22-ebpf-published-port-reverse-path-resolved.md) |
-| Rootless run/pull/volumes/slirp/Compose/CRI | Supported on qualified tier; hosts denying nested user namespaces fail closed with diagnostics | [`rootless/2026-08-21-context-socket-diagnostics.md`](evidence/rootless/2026-08-21-context-socket-diagnostics.md) |
+| Rootless run/pull/volumes/slirp/Compose/CRI | Supported on the qualified tier; hosts denying nested user namespaces fail closed with diagnostics. The Ubuntu 24.04+ packaged AppArmor mechanism remains outside that claim until its restricted-sysctl rerun is archived. | [`rootless/2026-08-21-context-socket-diagnostics.md`](evidence/rootless/2026-08-21-context-socket-diagnostics.md) |
 | Compose (up/down, volumes, secrets/configs, health, read-only rootfs, shared project network) | Supported on qualified tier | six-case corpus witness (volumes row above) |
 | Compose profiles/scale/watch paired measurement | Not yet measured | planned row in [`performance/benchmark-register.md`](evidence/performance/benchmark-register.md) |
 | Docker Engine API | Supported: 89 declared cases, 86 implemented, 0 partial, 3 explicitly unsupported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) (count refreshed 2026-08-22) |

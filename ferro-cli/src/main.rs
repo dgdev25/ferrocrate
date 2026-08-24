@@ -17975,6 +17975,7 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use clap::CommandFactory;
     use super::{parse_docker_update_request, DockerResourceUpdate};
     use ferro_core::image_manifest::parse_image_manifest;
     use sha2::Digest;
@@ -19111,6 +19112,19 @@ volumes:
             vec!["ferrocrate", "version"],
         ] {
             Cli::try_parse_from(args).expect("Docker-compatible native command parses");
+        }
+    }
+
+    #[test]
+    fn help_lists_native_easy_win_verbs() {
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).expect("render help");
+        let help = String::from_utf8(help).expect("help is UTF-8");
+        for verb in [
+            "cp", "save", "load", "export", "diff", "search", "create", "attach", "info", "version",
+        ] {
+            assert!(help.contains(verb), "help lists {verb}");
         }
     }
 

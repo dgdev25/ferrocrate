@@ -7149,6 +7149,7 @@ fn parse_volume_mounts(
             [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true),
             [source, target] => ((*source).to_string(), *target, false, false),
             [source, target, "ro"] => ((*source).to_string(), *target, true, false),
+            [source, target, "rw"] => ((*source).to_string(), *target, false, false),
             _ => return Err("run: volume must be source:target[:ro]".to_string()),
         };
 
@@ -21675,6 +21676,29 @@ volumes:
             Some(&"true".to_string())
         );
         assert_eq!(mounts[0].source, volumes[0].path);
+    }
+
+    #[test]
+    fn volume_mount_accepts_docker_explicit_rw_mode() {
+        let runtime = configured_cli_runtime("disabled");
+        let volume_store = LocalVolumeStore::open(runtime.path().join("volumes"))
+            .expect("volume store");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current()
+            .expect("CLI request origin");
+        let authorization = test_surface_authorization(runtime.path());
+
+        let mounts = parse_volume_mounts(
+            &volume_store,
+            &["compose_workerdata:/var/lib/worker:rw".to_string()],
+            &origin,
+            &authorization,
+        )
+        .expect("Docker's explicit writable mode is accepted");
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target, std::path::Path::new("var/lib/worker"));
+        assert!(!mounts[0].read_only);
+        assert_eq!(volume_store.list().expect("list volumes").len(), 1);
     }
 
     #[test]

@@ -1,8 +1,28 @@
 export function formatContainerPorts(ports) {
   if (!Array.isArray(ports) || ports.length === 0) return "—";
   return ports
-    .map((port) => `${port.host_port}→${port.container_port}/${port.protocol || "tcp"}`)
+    .map((port) => {
+      const host = port.PublicPort ?? port.host_port;
+      const container = port.PrivatePort ?? port.container_port;
+      const protocol = port.Type ?? port.protocol ?? "tcp";
+      return host == null ? `${container}/${protocol}` : `${host}→${container}/${protocol}`;
+    })
     .join(", ");
+}
+
+function dockerStatus(record, state) {
+  const detail = String(record.Status ?? record.status ?? "");
+  const exitCode = record.last_exit_code ?? detail.match(/Exited \((-?\d+)\)/i)?.[1];
+  if (state === "running") return "Running";
+  if (state === "exited" && exitCode != null) return `Exited (${exitCode})`;
+  return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+function dockerHealth(record) {
+  const explicit = record.health_status;
+  if (explicit) return String(explicit).toLowerCase();
+  const detail = String(record.Status ?? "");
+  return detail.match(/\((healthy|unhealthy|starting)\)/i)?.[1]?.toLowerCase() || "none";
 }
 
 export function formatBytes(value) {
@@ -23,13 +43,8 @@ export function parseContainerRows(output) {
     const records = JSON.parse(output || "[]");
     if (!Array.isArray(records)) return [];
     return records.map((record) => {
-      const state = String(record.status || "unknown").toLowerCase();
-      const exitCode = record.last_exit_code;
-      const status = state === "running"
-        ? "Running"
-        : state === "exited" && exitCode != null
-          ? `Exited (${exitCode})`
-          : state.charAt(0).toUpperCase() + state.slice(1);
+      const state = String(record.State ?? record.status ?? "unknown").toLowerCase();
+      const status = dockerStatus(record, state);
       const cpuPercent = Number.isFinite(Number(record.cpu_percent))
         ? Number(record.cpu_percent)
         : null;
@@ -37,16 +52,16 @@ export function parseContainerRows(output) {
         ? null
         : Number(record.memory_usage);
       return {
-        id: String(record.id || ""),
-        name: String(record.name || record.id || "unnamed"),
-        image: String(record.image || "—"),
+        id: String(record.Id ?? record.id ?? ""),
+        name: String(record.Names?.[0]?.replace(/^\//, "") || record.name || record.Id || record.id || "unnamed"),
+        image: String(record.Image ?? record.image ?? "—"),
         state,
         status,
-        health: String(record.health_status || "none").toLowerCase(),
-        ports: formatContainerPorts(record.ports),
-        composeProject: record.labels?.["com.docker.compose.project"] || null,
-        composeService: record.labels?.["com.docker.compose.service"] || null,
-        startedAt: Number(record.started_at_unix || record.created_at_unix || 0),
+        health: dockerHealth(record),
+        ports: formatContainerPorts(record.Ports ?? record.ports),
+        composeProject: (record.Labels ?? record.labels)?.["com.docker.compose.project"] || null,
+        composeService: (record.Labels ?? record.labels)?.["com.docker.compose.service"] || null,
+        startedAt: Number(record.Created ?? record.started_at_unix ?? record.created_at_unix ?? 0),
         cpu: cpuPercent == null ? (state === "running" ? "" : "—") : `${cpuPercent.toFixed(1)}%`,
         cpuPercent,
         memory: memoryUsage == null ? (state === "running" ? "" : "—") : formatBytes(memoryUsage),

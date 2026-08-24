@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import * as imageView from "./imageView.mjs";
 
+const imageRecords = await readFile(join(dirname(fileURLToPath(import.meta.url)), "fixtures/ferrocrate-images.json"), "utf8");
+
 test("image rows format byte sizes and Unix creation times for the table", () => {
-  assert.deepEqual(imageView.parseImageRows(JSON.stringify([{
-    Id: "sha256:abc",
-    RepoTags: ["registry-1.docker.io/library/alpine:latest"],
-    Size: 1572864,
-    Created: 1700000000,
-  }])), [{
+  assert.deepEqual(imageView.parseImageRows(imageRecords), [{
     id: "sha256:abc",
     reference: "alpine:latest",
     fullReference: "registry-1.docker.io/library/alpine:latest",

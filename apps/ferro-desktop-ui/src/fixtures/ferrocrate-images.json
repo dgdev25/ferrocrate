@@ -1,0 +1,12 @@
+[
+  {
+    "Containers": 1,
+    "Created": 1700000000,
+    "Id": "sha256:abc",
+    "RepoDigests": [],
+    "RepoTags": ["registry-1.docker.io/library/alpine:latest"],
+    "SharedSize": 0,
+    "Size": 1572864,
+    "VirtualSize": 1572864
+  }
+]

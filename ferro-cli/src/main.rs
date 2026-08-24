@@ -236,12 +236,15 @@ pub enum Commands {
         bridge_name: Option<String>,
         #[arg(long = "net-limit")]
         net_limit: Option<String>,
-        #[arg(long)]
+        #[arg(long, alias = "memory")]
         memory_max: Option<u64>,
         #[arg(long)]
         cpu_quota: Option<u64>,
         #[arg(long)]
         cpu_period: Option<u64>,
+        /// Docker CPU count, converted to a quota against the standard 100ms period.
+        #[arg(long)]
+        cpus: Option<String>,
         #[arg(long)]
         pids_max: Option<u64>,
         #[arg(long = "ai-model")]
@@ -3229,6 +3232,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 memory_max,
                 cpu_quota,
                 cpu_period,
+                cpus,
                 pids_max,
                 ai_model,
             } => {
@@ -3239,6 +3243,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let _tty_guard = ScopedEnv::set("FERROCRATE_RUN_TTY", tty.then_some("1"));
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|err| err.to_string())?;
+                let (cpu_quota, cpu_period) = docker_cpu_quota_period(
+                    cpu_quota,
+                    cpu_period,
+                    cpus.as_deref(),
+                )?;
                 let id = handle_run(
                     &runtime_dir,
                     &runtime,
@@ -5604,6 +5613,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             memory_max,
             cpu_quota,
             cpu_period,
+            cpus,
             pids_max,
             ai_model,
             cmd,
@@ -5641,7 +5651,12 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             parse_bind_mounts(bind_mounts)?;
             validate_remote_volume_entries(volumes)?;
             parse_capabilities(cap_add)?;
-            let _ = build_limits(*memory_max, *cpu_quota, *cpu_period, *pids_max)?;
+            let (cpu_quota, cpu_period) = docker_cpu_quota_period(
+                *cpu_quota,
+                *cpu_period,
+                cpus.as_deref(),
+            )?;
+            let _ = build_limits(*memory_max, cpu_quota, cpu_period, *pids_max)?;
             let health = build_health_config(
                 health_cmd.as_deref(),
                 *health_interval,
@@ -7200,6 +7215,33 @@ fn build_limits(
         cpu_max,
         pids_max,
     }))
+}
+
+/// Translate Docker's decimal CPU count into cgroup-v2's quota/period pair.
+/// Docker uses a 100ms period for the `--cpus` CLI option.
+fn docker_cpu_quota_period(
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+    cpus: Option<&str>,
+) -> Result<(Option<u64>, Option<u64>), String> {
+    let Some(cpus) = cpus else {
+        return Ok((cpu_quota, cpu_period));
+    };
+    if cpu_quota.is_some() || cpu_period.is_some() {
+        return Err("run: --cpus cannot be combined with --cpu-quota or --cpu-period".to_string());
+    }
+    let cpus = cpus
+        .parse::<f64>()
+        .map_err(|_| format!("run: invalid CPU count '{cpus}'"))?;
+    if !cpus.is_finite() || cpus <= 0.0 {
+        return Err("run: --cpus must be greater than zero".to_string());
+    }
+    let period = 100_000_u64;
+    let quota = (cpus * period as f64).round() as u64;
+    if quota == 0 {
+        return Err("run: --cpus is too small".to_string());
+    }
+    Ok((Some(quota), Some(period)))
 }
 
 #[cfg(target_os = "linux")]
@@ -19991,6 +20033,25 @@ volumes:
             Commands::Stop { containers, timeout } => {
                 assert_eq!(containers, vec!["abc123"]);
                 assert_eq!(timeout, 5);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_cpus_alias_sets_docker_quota_and_period() {
+        let cli = Cli::try_parse_from(["ferrocrate", "run", "--cpus", "1.5", "alpine:latest"])
+            .expect("Docker --cpus alias parses");
+        match cli.command {
+            Commands::Run {
+                cpu_quota,
+                cpu_period,
+                cpus,
+                ..
+            } => {
+                let limits = super::docker_cpu_quota_period(cpu_quota, cpu_period, cpus.as_deref())
+                    .expect("Docker CPU count converts to cgroup limits");
+                assert_eq!(limits, (Some(150_000), Some(100_000)));
             }
             other => panic!("unexpected command: {other:?}"),
         }

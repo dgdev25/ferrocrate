@@ -1922,7 +1922,8 @@ impl ContainerRuntime {
                 .begin_internal_container_recovery(&record.id)?;
             record.status = "exited".to_string();
             record.last_exit_code = Some(-1);
-            self.store.put(&record)?;
+            self.store
+                .put_if_generation_unreserved(&record, record.mutation_generation)?;
             self.authorization.finish_internal_recovery(
                 recovery,
                 internal_cleanup_observation(&record.id, true),
@@ -5372,10 +5373,16 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .or_else(|| intent.map(|value| *value.operation_id().as_bytes()))
+            .ok_or(ContainerStoreError::MutationConflict)?;
         if self.authorization.requires_provenance()
             && !self.authorization.provenance_matches(&record)
         {
-            self.update_reserved_status(id, "quarantined", intent)?;
+            self.update_reserved_status(id, "quarantined", operation_id)?;
             return Err(RuntimeError::InvalidState(format!(
                 "container {id} has unverifiable creation provenance and was quarantined"
             )));
@@ -5394,13 +5401,13 @@ impl ContainerRuntime {
             // Keep the durable record available for a later retry. Removing a
             // directory while one of its mountpoints is still attached leaks
             // the mount and leaves the container permanently stuck.
-            let _ = self.update_reserved_status(id, "removed-pending", intent);
+            let _ = self.update_reserved_status(id, "removed-pending", operation_id);
             return Err(error);
         }
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
-        self.update_reserved_status(id, "removed-pending", intent)?;
+        self.update_reserved_status(id, "removed-pending", operation_id)?;
         if let Ok(containers) = self.store.list() {
             if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
                 warn!("failed to update hosts file: {e}");
@@ -5435,7 +5442,7 @@ impl ContainerRuntime {
         &self,
         id: &str,
         status: &str,
-        _intent: Option<&crate::witness::DurableIntent>,
+        operation_id: [u8; 16],
     ) -> Result<(), RuntimeError> {
         // A restarted TTY workload can publish its exit while Docker's
         // force-remove path is finalizing the same lifecycle mutation. Keep
@@ -5447,23 +5454,22 @@ impl ContainerRuntime {
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
-            let Some(operation_id) = record
-                .pending_mutation
-                .as_ref()
-                .map(|reservation| reservation.operation_id)
-            else {
-                // A recovery process may have already cleared this
-                // terminal reservation while the original `run --rm`
-                // caller was finishing cleanup. Do not turn that durable
-                // terminal state into a spurious compare-and-swap failure.
-                if record.status == status
-                    || record.status == "removed"
-                    || !matches!(record.status.as_str(), "running" | "paused")
-                {
-                    return Ok(());
+            if record.pending_mutation.is_none() {
+                match self.store.re_reserve_mutation(
+                    id,
+                    operation_id,
+                    runtime_action_name(Action::ContainerDelete),
+                ) {
+                    Ok(()) => continue,
+                    Err(ContainerStoreError::MutationConflict)
+                        if attempt + 1 < MAX_STATUS_RETRIES =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                return Err(ContainerStoreError::MutationConflict.into());
-            };
+            }
             match self.store.set_status_for_mutation(id, operation_id, status) {
                 Ok(()) => return Ok(()),
                 Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_STATUS_RETRIES => {
@@ -5639,12 +5645,37 @@ impl ContainerRuntime {
             }),
             _ => None,
         };
-        if let Err(error) = self.store.mark_mutation_effect_observed(
-            id,
-            operation_id,
-            result.is_ok() || post_effect_unknown,
-            freezer_state,
-        ) {
+        let mut effect_recorded = false;
+        let mut effect_error = None;
+        for attempt in 0..256 {
+            match self.store.mark_mutation_effect_observed(
+                id,
+                operation_id,
+                result.is_ok() || post_effect_unknown,
+                freezer_state,
+            ) {
+                Ok(()) => {
+                    effect_recorded = true;
+                    break;
+                }
+                Err(ContainerStoreError::MutationConflict) if attempt < 255 => {
+                    if self.store.get(id)?.is_some_and(|record| record.pending_mutation.is_none()) {
+                        let _ = self.store.re_reserve_mutation(
+                            id,
+                            operation_id,
+                            runtime_action_name(action),
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    effect_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if !effect_recorded {
+            let error = effect_error.unwrap_or(ContainerStoreError::MutationConflict);
             log::error!(
                 "{} failed while recording effect: container_id={} operation_id={:?} error={}",
                 runtime_action_name(action),
@@ -5660,9 +5691,14 @@ impl ContainerRuntime {
         )?;
         if post_effect_unknown {
             self.authorization.complete_unknown(permit)?;
+            self.store.finish_mutation(id, operation_id)?;
             self.phase_hook.reached(
                 runtime_action_name(action),
                 LifecyclePhasePoint::TerminalDurable,
+            )?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::ReservationCleared,
             )?;
             return result;
         } else if action == Action::ContainerDelete && result.is_ok() {
@@ -13407,7 +13443,7 @@ fn update_pid_status(
     record.process_start_time = crate::container_store::process_start_time(pid);
     record.status = status.to_string();
     record.restart_count = record.restart_count.saturating_add(1);
-    db.put(&record)?;
+    db.put_if_generation_unreserved(&record, record.mutation_generation)?;
     Ok(())
 }
 
@@ -16563,6 +16599,36 @@ mod tests {
 
         let stored = runtime.store.get(&record.id).unwrap().unwrap();
         assert_eq!(stored.pending_mutation.unwrap().operation_id, operation_id);
+    }
+
+    #[test]
+    fn kill_terminal_cas_loss_does_not_orphan_following_remove() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(temp.path()).unwrap();
+        let record = fixture_container_record("post-effect-cas-loss", "exited");
+        runtime.store.put(&record).unwrap();
+
+        let error = runtime
+            .mediate_existing(Action::ContainerKill, &record.id, |_runtime, _proof, _intent| {
+                Err::<(), _>(RuntimeError::PostEffectPersistence(
+                    crate::container_store::ContainerStoreError::MutationConflict,
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::PostEffectPersistence(_)));
+        let stored = runtime.store.get(&record.id).unwrap().unwrap();
+        assert!(
+            stored.pending_mutation.is_none(),
+            "post-effect uncertainty must not orphan the mutation reservation"
+        );
+
+        runtime
+            .mediate_existing(Action::ContainerDelete, &record.id, |_runtime, _proof, _intent| {
+                Ok(())
+            })
+            .expect("a fresh remove can reserve and complete after the lost kill write");
+        assert!(runtime.store.get(&record.id).unwrap().is_none());
     }
 
     #[test]

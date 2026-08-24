@@ -165,6 +165,31 @@ impl SqliteContainerStore {
         })
     }
 
+    /// Replace a snapshot only when it is still current and no lifecycle
+    /// mutation owns the row.
+    pub(crate) fn put_if_generation_unreserved(
+        &self,
+        record: &ContainerRecord,
+        expected_generation: u64,
+    ) -> Result<(), ContainerStoreError> {
+        let payload = Self::encode(record)?;
+        self.transaction(|transaction| {
+            let current =
+                Self::get_tx(transaction, &record.id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            if current.mutation_generation != expected_generation
+                || current.pending_mutation.is_some()
+                || record.pending_mutation.is_some()
+            {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![record.id, payload],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn put_reserved_creation(
         &self,
         record: &ContainerRecord,
@@ -452,6 +477,44 @@ impl SqliteContainerStore {
         })
     }
 
+    /// Restore a reservation erased by a legacy snapshot writer while
+    /// retaining the already-durable lifecycle operation.
+    pub(crate) fn re_reserve_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        action: &str,
+    ) -> Result<(), ContainerStoreError> {
+        self.transaction(|transaction| {
+            let mut record =
+                Self::get_tx(transaction, id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            if let Some(reservation) = record.pending_mutation.as_ref() {
+                return if reservation.operation_id == operation_id {
+                    Ok(())
+                } else {
+                    Err(ContainerStoreError::MutationConflict)
+                };
+            }
+            let operation = Self::operation_tx(transaction, operation_id)?
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            if operation.container_id != id || operation.generation != record.mutation_generation {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            record.pending_mutation = Some(MutationReservation {
+                operation_id,
+                generation: record.mutation_generation,
+                expected_status: record.status.clone(),
+                action: action.to_owned(),
+            });
+            let payload = Self::encode(&record)?;
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![id, payload],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn lifecycle_operation(
         &self,
         operation_id: [u8; 16],
@@ -708,6 +771,9 @@ impl SqliteContainerStore {
             let Some(mut record) = Self::get_tx(transaction, id)? else {
                 return Ok(false);
             };
+            if record.pending_mutation.is_some() {
+                return Ok(false);
+            }
             record.health_status = status.to_string();
             record.health_failures = failures;
             record.health_checked_at_unix = Some(checked_at_unix);

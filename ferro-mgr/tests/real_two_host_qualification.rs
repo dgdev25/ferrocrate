@@ -169,7 +169,12 @@ fn run_agent(
 #[ignore]
 fn authenticated_two_namespace_wireguard_path() {
     assert_eq!(nix::unistd::geteuid().as_raw(), 0, "root is required");
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in("/run").unwrap();
+    assert!(
+        directory.path().starts_with("/run/"),
+        "qualification runtime must use tmpfs-backed /run: {}",
+        directory.path().display()
+    );
     let nonce = format!(
         "{}{}",
         std::process::id(),

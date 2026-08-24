@@ -40,6 +40,7 @@ export function parseContainerRows(output: string): ContainerRow[];
 export function parseContainerStats(response: unknown): ContainerStatsSample[];
 export function mergeContainerStats(rows: ContainerRow[], samples: ContainerStatsSample[]): ContainerRow[];
 export function shouldPollContainerStats(activeSection: string, visibilityState: DocumentVisibilityState): boolean;
+export function beginContainerStatsPoll(owner: { inFlight: boolean }, activeSection: string, visibilityState: DocumentVisibilityState): boolean;
 export function containerStatsUnavailableMessage(): string;
 export function filterContainers(rows: ContainerRow[], query: string): ContainerRow[];
 export function filterContainersByStatus(rows: ContainerRow[], filter: ContainerStatusFilter): ContainerRow[];
@@ -51,3 +52,4 @@ export function daemonIsAvailable(snapshot: { daemon?: { state: string }; contai
 export function daemonStatusPresentation(status?: { state: string; reason?: string | null; socket_path?: string }): { label: string; tone: string; title: string };
 export function containerRemoveAvailability(row: { state: string }): { allowed: boolean; reason: string | null };
 export function resourceTotals(rows: Array<Pick<ContainerRow, "cpuPercent" | "memoryUsage" | "memoryLimit">>): { cpu: string | null; memory: string | null };
+export function resourceTotalsForSurface(rows: Array<Pick<ContainerRow, "cpuPercent" | "memoryUsage" | "memoryLimit">>, activeSection: string, visibilityState: DocumentVisibilityState): { cpu: string | null; memory: string | null };

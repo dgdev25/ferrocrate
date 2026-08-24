@@ -503,6 +503,12 @@ struct NativeStatsOutput {
     stats: NativeContainerStats,
 }
 
+#[derive(Debug, Clone)]
+struct TimedNativeContainerStats {
+    sampled_at: Instant,
+    stats: NativeContainerStats,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ContainerStatsSample {
     id: String,
@@ -532,25 +538,45 @@ fn read_container_stats(target: &str) -> Option<NativeContainerStats> {
 
 fn aggregate_container_stats(
     ids: &[String],
-    first: &BTreeMap<String, NativeContainerStats>,
-    second: &BTreeMap<String, NativeContainerStats>,
-    elapsed_usec: f64,
+    first: &BTreeMap<String, TimedNativeContainerStats>,
+    second: &BTreeMap<String, TimedNativeContainerStats>,
 ) -> Vec<ContainerStatsSample> {
     ids.iter()
         .map(|id| {
             let pair = first.get(id).zip(second.get(id));
             let cpu_percent = pair
                 .as_ref()
-                .and_then(|(previous, current)| previous.cpu_usage_usec.zip(current.cpu_usage_usec))
-                .filter(|_| elapsed_usec > 0.0)
-                .map(|(before, after)| after.saturating_sub(before) as f64 / elapsed_usec * 100.0);
+                .and_then(|(previous, current)| {
+                    previous
+                        .stats
+                        .cpu_usage_usec
+                        .zip(current.stats.cpu_usage_usec)
+                })
+                .map(|(before, after)| {
+                    let elapsed_usec = pair
+                        .as_ref()
+                        .map(|(previous, current)| {
+                            current
+                                .sampled_at
+                                .saturating_duration_since(previous.sampled_at)
+                                .as_micros() as f64
+                        })
+                        .unwrap_or(0.0);
+                    (before, after, elapsed_usec)
+                })
+                .filter(|(_, _, elapsed_usec)| *elapsed_usec > 0.0)
+                .map(|(before, after, elapsed_usec)| {
+                    after.saturating_sub(before) as f64 / elapsed_usec * 100.0
+                });
             ContainerStatsSample {
                 id: id.clone(),
                 available: pair.is_some(),
                 memory_usage: pair
                     .as_ref()
-                    .and_then(|(_, current)| current.memory_current),
-                memory_limit: pair.as_ref().and_then(|(_, current)| current.memory_max),
+                    .and_then(|(_, current)| current.stats.memory_current),
+                memory_limit: pair
+                    .as_ref()
+                    .and_then(|(_, current)| current.stats.memory_max),
                 cpu_percent,
             }
         })
@@ -560,18 +586,37 @@ fn aggregate_container_stats(
 fn collect_container_stats(ids: &[String]) -> Vec<ContainerStatsSample> {
     let first = ids
         .iter()
-        .filter_map(|id| read_container_stats(id).map(|stats| (id.clone(), stats)))
+        .filter_map(|id| {
+            read_container_stats(id).map(|stats| {
+                (
+                    id.clone(),
+                    TimedNativeContainerStats {
+                        sampled_at: Instant::now(),
+                        stats,
+                    },
+                )
+            })
+        })
         .collect::<BTreeMap<_, _>>();
     if first.is_empty() {
-        return aggregate_container_stats(ids, &first, &BTreeMap::new(), 0.0);
+        return aggregate_container_stats(ids, &first, &BTreeMap::new());
     }
-    let started = Instant::now();
     thread::sleep(Duration::from_millis(100));
     let second = ids
         .iter()
-        .filter_map(|id| read_container_stats(id).map(|stats| (id.clone(), stats)))
+        .filter_map(|id| {
+            read_container_stats(id).map(|stats| {
+                (
+                    id.clone(),
+                    TimedNativeContainerStats {
+                        sampled_at: Instant::now(),
+                        stats,
+                    },
+                )
+            })
+        })
         .collect::<BTreeMap<_, _>>();
-    aggregate_container_stats(ids, &first, &second, started.elapsed().as_micros() as f64)
+    aggregate_container_stats(ids, &first, &second)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -3096,32 +3141,57 @@ mod tests {
         volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
         ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, JsonValue, LogBuffer,
         NativeContainerStats, NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig,
-        NetworkListRecord, VolumeAction, VolumeListResponse,
+        NetworkListRecord, TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
 
     #[test]
     fn container_stats_aggregate_usage_limit_and_unavailable_samples() {
-        let first = BTreeMap::from([(
-            "demo".to_string(),
-            NativeContainerStats {
-                memory_current: Some(64),
-                memory_max: Some(256),
-                cpu_usage_usec: Some(1_000),
-            },
-        )]);
-        let second = BTreeMap::from([(
-            "demo".to_string(),
-            NativeContainerStats {
-                memory_current: Some(96),
-                memory_max: Some(256),
-                cpu_usage_usec: Some(1_250),
-            },
-        )]);
+        let base = std::time::Instant::now();
+        let stats = |memory_current, cpu_usage_usec| NativeContainerStats {
+            memory_current: Some(memory_current),
+            memory_max: Some(256),
+            cpu_usage_usec: Some(cpu_usage_usec),
+        };
+        let first = BTreeMap::from([
+            (
+                "demo".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base,
+                    stats: stats(64, 1_000),
+                },
+            ),
+            (
+                "slow".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base,
+                    stats: stats(64, 1_000),
+                },
+            ),
+        ]);
+        let second = BTreeMap::from([
+            (
+                "demo".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base + std::time::Duration::from_micros(1_000),
+                    stats: stats(96, 1_250),
+                },
+            ),
+            (
+                "slow".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base + std::time::Duration::from_micros(2_000),
+                    stats: stats(96, 1_250),
+                },
+            ),
+        ]);
         let samples = aggregate_container_stats(
-            &["demo".to_string(), "missing".to_string()],
+            &[
+                "demo".to_string(),
+                "slow".to_string(),
+                "missing".to_string(),
+            ],
             &first,
             &second,
-            1_000.0,
         );
 
         assert_eq!(samples[0].id, "demo");
@@ -3129,8 +3199,9 @@ mod tests {
         assert_eq!(samples[0].memory_usage, Some(96));
         assert_eq!(samples[0].memory_limit, Some(256));
         assert_eq!(samples[0].cpu_percent, Some(25.0));
-        assert_eq!(samples[1].id, "missing");
-        assert!(!samples[1].available);
+        assert_eq!(samples[1].cpu_percent, Some(12.5));
+        assert_eq!(samples[2].id, "missing");
+        assert!(!samples[2].available);
     }
 
     #[cfg(target_os = "linux")]

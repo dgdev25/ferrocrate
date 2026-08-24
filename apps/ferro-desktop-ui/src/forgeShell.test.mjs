@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  beginContainerStatsPoll,
   daemonIsAvailable,
   daemonStatusPresentation,
   containerStatsUnavailableMessage,
@@ -14,11 +15,27 @@ import {
   parseContainerStats,
   parseContainerRows,
   resourceTotals,
+  resourceTotalsForSurface,
   shouldPollContainerStats,
   shellKeyboardCommand,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
+
+test("container stats polling has one shared in-flight owner across effect generations", () => {
+  const owner = { inFlight: false };
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), true);
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), false);
+  owner.inFlight = false;
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), true);
+});
+
+test("footer totals are invalid outside the visible Containers surface", () => {
+  const rows = [{ cpuPercent: 4, memoryUsage: 64, memoryLimit: 128 }];
+  assert.deepEqual(resourceTotalsForSurface(rows, "containers", "visible"), { cpu: "4.0%", memory: "64 B / 128 B" });
+  assert.deepEqual(resourceTotalsForSurface(rows, "images", "visible"), { cpu: null, memory: null });
+  assert.deepEqual(resourceTotalsForSurface(rows, "containers", "hidden"), { cpu: null, memory: null });
+});
 
 const records = JSON.stringify([
   {
@@ -137,6 +154,13 @@ test("resource totals aggregate live usage and limits", () => {
   ]), { cpu: "10.0%", memory: "96 B / 512 B" });
 });
 
+test("resource totals never present a partial finite limit as the total limit", () => {
+  assert.deepEqual(resourceTotals([
+    { cpuPercent: 1, memoryUsage: 64, memoryLimit: 256 },
+    { cpuPercent: 2, memoryUsage: 32, memoryLimit: null },
+  ]), { cpu: "3.0%", memory: "96 B / Unlimited" });
+});
+
 test("running containers explain why removal is unavailable", () => {
   assert.deepEqual(containerRemoveAvailability({ state: "running" }), { allowed: false, reason: "Stop this container before removing it." });
   assert.deepEqual(containerRemoveAvailability({ state: "exited" }), { allowed: true, reason: null });
@@ -146,7 +170,7 @@ test("resourceTotals aggregates available live samples and hides absent metrics"
   const rows = parseContainerRows(records);
   assert.deepEqual(resourceTotals(rows), {
     cpu: "0.4%",
-    memory: "64.0 MiB",
+    memory: "64.0 MiB / Unlimited",
   });
   assert.deepEqual(resourceTotals([{ cpuPercent: null, memoryUsage: null }]), {
     cpu: null,

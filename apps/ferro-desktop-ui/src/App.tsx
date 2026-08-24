@@ -59,6 +59,7 @@ import {
 } from "./terminalResize.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
+  beginContainerStatsPoll,
   daemonIsAvailable,
   daemonStatusPresentation,
   containerRemoveAvailability,
@@ -70,7 +71,7 @@ import {
   mergeContainerStats,
   parseContainerStats,
   parseContainerRows,
-  resourceTotals,
+  resourceTotalsForSurface,
   shellKeyboardCommand,
   shouldPollContainerStats,
   statusLabel,
@@ -106,6 +107,7 @@ function commandMessage(result: CommandResult, fallback: string): string {
 function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [containerStats, setContainerStats] = useState<ContainerStatsResponse | null>(null);
+  const [documentVisible, setDocumentVisible] = useState(document.visibilityState === "visible");
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -135,6 +137,7 @@ function App(): JSX.Element {
   const [pausedLogOutput, setPausedLogOutput] = useState("");
   const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
   const runtimeActionRef = useRef(false);
+  const containerStatsPollOwnerRef = useRef({ inFlight: false });
   const logFollowRef = useRef(false);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
@@ -323,6 +326,12 @@ function App(): JSX.Element {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => setDocumentVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
 
   useEffect(() => {
     setSectionErrors((current) => navigationTransientState(current).sectionErrors);
@@ -1157,17 +1166,20 @@ function App(): JSX.Element {
 
   useEffect(() => {
     let disposed = false;
-    let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const visibilityState = documentVisible ? "visible" : "hidden";
 
     const schedule = () => {
-      if (!disposed && shouldPollContainerStats(activeSection, document.visibilityState)) {
+      if (!disposed && shouldPollContainerStats(activeSection, visibilityState)) {
         timer = setTimeout(() => void poll(), 2000);
       }
     };
     const poll = async () => {
-      if (disposed || inFlight || !shouldPollContainerStats(activeSection, document.visibilityState)) return;
-      inFlight = true;
+      if (disposed) return;
+      if (!beginContainerStatsPoll(containerStatsPollOwnerRef.current, activeSection, visibilityState)) {
+        schedule();
+        return;
+      }
       try {
         const response = await invoke<ContainerStatsResponse>("get_container_stats", { ids: runningContainerIds });
         if (!disposed) setContainerStats(response);
@@ -1176,24 +1188,21 @@ function App(): JSX.Element {
           setContainerStats({ samples: runningContainerIds.map((id) => ({ id, available: false, cpu_percent: null, memory_usage: null, memory_limit: null })) });
         }
       } finally {
-        inFlight = false;
+        containerStatsPollOwnerRef.current.inFlight = false;
         schedule();
       }
     };
-    const onVisibilityChange = () => {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
-      if (shouldPollContainerStats(activeSection, document.visibilityState)) void poll();
-    };
 
-    if (shouldPollContainerStats(activeSection, document.visibilityState)) void poll();
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (shouldPollContainerStats(activeSection, visibilityState)) {
+      void poll();
+    } else {
+      setContainerStats(null);
+    }
     return () => {
       disposed = true;
       if (timer) clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [activeSection, runningContainerKey]);
+  }, [activeSection, documentVisible, runningContainerKey]);
   const visibleContainers = useMemo(() => filterContainersByStatus(
     filterContainers(containerRows, globalSearch),
     containerStatusFilter,
@@ -1205,7 +1214,7 @@ function App(): JSX.Element {
   const visibleNetworks = useMemo(() => filterNamedResources(networks, globalSearch), [networks, globalSearch]);
   const containerImageReferences = useMemo(() => containerRows.map((row) => row.image), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
-  const resourceUsage = resourceTotals(containerRows);
+  const resourceUsage = resourceTotalsForSurface(containerRows, activeSection, documentVisible ? "visible" : "hidden");
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const liveStatsUnavailable = containerRows.some((row) => row.state === "running" && row.statsAvailable === false);
   const imageCount = imageRows.length;

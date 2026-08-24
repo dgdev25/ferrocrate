@@ -98,22 +98,36 @@ export function shouldPollContainerStats(activeSection, visibilityState) {
   return activeSection === "containers" && visibilityState === "visible";
 }
 
+export function beginContainerStatsPoll(owner, activeSection, visibilityState) {
+  if (owner.inFlight || !shouldPollContainerStats(activeSection, visibilityState)) return false;
+  owner.inFlight = true;
+  return true;
+}
+
 export function containerStatsUnavailableMessage() {
   return "Live resource stats unavailable for one or more running containers.";
 }
 
 export function resourceTotals(rows) {
   const cpuValues = rows.map((row) => row.cpuPercent).filter(Number.isFinite);
-  const memoryValues = rows.map((row) => row.memoryUsage).filter(Number.isFinite);
-  const memoryLimits = rows.map((row) => row.memoryLimit).filter(Number.isFinite);
+  const memoryRows = rows.filter((row) => Number.isFinite(row.memoryUsage));
+  const memoryValues = memoryRows.map((row) => row.memoryUsage);
+  const allMemoryLimitsFinite = memoryRows.length > 0 && memoryRows.every((row) => Number.isFinite(row.memoryLimit));
+  const memoryLimits = memoryRows.map((row) => row.memoryLimit).filter(Number.isFinite);
   return {
     cpu: cpuValues.length
       ? `${cpuValues.reduce((total, value) => total + value, 0).toFixed(1)}%`
       : null,
     memory: memoryValues.length
-      ? `${formatBytes(memoryValues.reduce((total, value) => total + value, 0))}${memoryLimits.length ? ` / ${formatBytes(memoryLimits.reduce((total, value) => total + value, 0))}` : ""}`
+      ? `${formatBytes(memoryValues.reduce((total, value) => total + value, 0))}${allMemoryLimitsFinite ? ` / ${formatBytes(memoryLimits.reduce((total, value) => total + value, 0))}` : " / Unlimited"}`
       : null,
   };
+}
+
+export function resourceTotalsForSurface(rows, activeSection, visibilityState) {
+  return shouldPollContainerStats(activeSection, visibilityState)
+    ? resourceTotals(rows)
+    : { cpu: null, memory: null };
 }
 
 export function filterContainers(rows, query) {

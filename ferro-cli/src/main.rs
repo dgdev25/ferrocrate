@@ -508,7 +508,13 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Remove a stopped container.
     Rm {
-        container: String,
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// Accepted for Docker compatibility; anonymous volume removal arrives with round 8.
+        #[arg(short = 'v', long)]
+        volumes: bool,
+        #[arg(required = true)]
+        containers: Vec<String>,
     },
     #[cfg(target_os = "linux")]
     /// Rename a container.
@@ -3502,7 +3508,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Kill { container, signal } => handle_kill(&runtime, &container, &signal),
             #[cfg(target_os = "linux")]
-            Commands::Rm { container } => handle_rm(&runtime, &container),
+            Commands::Rm { force, volumes, containers } => {
+                if volumes {
+                    eprintln!("rm: --volumes is accepted; anonymous volume removal is pending round 8");
+                }
+                handle_multiple_containers(&containers, "rm", |container| {
+                    handle_rm(&runtime, container, force)
+                })
+            }
             #[cfg(target_os = "linux")]
             Commands::Rename { container, name } => handle_rename(&runtime, &container, &name),
             #[cfg(target_os = "linux")]
@@ -6269,11 +6282,21 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .map(|_| ()),
-        Commands::Rm { container } => request(
-            "DELETE",
-            format!("/containers/{}", percent_encode_path_component(container)),
-        )
-        .map(|_| ()),
+        Commands::Rm { force, volumes, containers } => {
+            if *volumes {
+                eprintln!("rm: --volumes is accepted; anonymous volume removal is pending round 8");
+            }
+            handle_multiple_containers(containers, "rm", |container| {
+                request(
+                    "DELETE",
+                    format!(
+                        "/containers/{}?force={force}&v={volumes}",
+                        percent_encode_path_component(container)
+                    ),
+                )
+                .map(|_| ())
+            })
+        }
         Commands::Rename { container, name } => (|| -> Result<(), String> {
             if container.trim().is_empty() {
                 return Err("rename: container is required".to_string());
@@ -9066,11 +9089,17 @@ fn handle_kill(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_rm(runtime: &ContainerRuntime, container: &str) -> Result<(), String> {
+fn handle_rm(runtime: &ContainerRuntime, container: &str, force: bool) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    if force {
+        let record = runtime.inspect(&resolved).map_err(|err| err.to_string())?;
+        if record.status == "running" || record.status == "paused" {
+            runtime.kill(&resolved).map_err(|err| err.to_string())?;
+        }
+    }
     runtime.remove(&resolved).map_err(|err| err.to_string())?;
     println!("rm: {resolved}");
     Ok(())
@@ -19957,7 +19986,24 @@ volumes:
     fn parses_rm_command() {
         let cli = Cli::parse_from(["ferrocrate", "rm", "abc123"]);
         match cli.command {
-            Commands::Rm { container } => assert_eq!(container, "abc123"),
+            Commands::Rm { force, volumes, containers } => {
+                assert!(!force);
+                assert!(!volumes);
+                assert_eq!(containers, vec!["abc123"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rm_flags_and_multiple_containers() {
+        let cli = Cli::parse_from(["ferrocrate", "rm", "-f", "-v", "first", "second"]);
+        match cli.command {
+            Commands::Rm { force, volumes, containers } => {
+                assert!(force);
+                assert!(volumes);
+                assert_eq!(containers, vec!["first", "second"]);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -21117,7 +21163,7 @@ volumes:
         let err = handle_unpause(&runtime, "").expect_err("unpause requires container");
         assert!(err.contains("unpause: container is required"));
 
-        let err = handle_rm(&runtime, "").expect_err("rm requires container");
+        let err = handle_rm(&runtime, "", false).expect_err("rm requires container");
         assert!(err.contains("rm: container is required"));
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");

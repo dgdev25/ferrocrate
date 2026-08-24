@@ -453,10 +453,26 @@ fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary
         .into_iter()
         .flatten()
         .map(|mount| ContainerMountSummary {
-            kind: mount.get("Type").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-            source: mount.get("Source").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-            destination: mount.get("Destination").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-            access: if mount.get("RW").and_then(JsonValue::as_bool).unwrap_or(false) {
+            kind: mount
+                .get("Type")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            source: mount
+                .get("Source")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            destination: mount
+                .get("Destination")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            access: if mount
+                .get("RW")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false)
+            {
                 "rw".to_string()
             } else {
                 "ro".to_string()
@@ -467,18 +483,40 @@ fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary
         .pointer("/State/Health")
         .filter(|health| !health.is_null())
         .map(|health| ContainerHealthSummary {
-            status: health.get("Status").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-            failing_streak: health.get("FailingStreak").and_then(JsonValue::as_u64).unwrap_or_default(),
+            status: health
+                .get("Status")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            failing_streak: health
+                .get("FailingStreak")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or_default(),
             log: health
                 .get("Log")
                 .and_then(JsonValue::as_array)
                 .into_iter()
                 .flatten()
                 .map(|entry| ContainerHealthLogSummary {
-                    start: entry.get("Start").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-                    end: entry.get("End").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
-                    exit_code: entry.get("ExitCode").and_then(JsonValue::as_i64).unwrap_or_default(),
-                    output: entry.get("Output").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+                    start: entry
+                        .get("Start")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    end: entry
+                        .get("End")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    exit_code: entry
+                        .get("ExitCode")
+                        .and_then(JsonValue::as_i64)
+                        .unwrap_or_default(),
+                    output: entry
+                        .get("Output")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                 })
                 .collect(),
         });
@@ -504,11 +542,7 @@ fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary
         },
         restart_policy: ContainerRestartPolicySummary {
             name: string(&["HostConfig", "RestartPolicy", "Name"]),
-            maximum_retry_count: number(&[
-                "HostConfig",
-                "RestartPolicy",
-                "MaximumRetryCount",
-            ]),
+            maximum_retry_count: number(&["HostConfig", "RestartPolicy", "MaximumRetryCount"]),
         },
     })
 }
@@ -575,7 +609,11 @@ fn run_container_bridge_command(
     if let Some(name) = name.map(str::trim).filter(|value| !value.is_empty()) {
         command.extend(["--name".to_string(), name.to_string()]);
     }
-    for value in environment.iter().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+    for value in environment
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         if !value.contains('=') {
             return Err(format!("environment entry must use KEY=value: {value}"));
         }
@@ -615,16 +653,10 @@ fn registry_logout_command(registry: &str) -> Result<Vec<String>, String> {
     if registry.is_empty() {
         return Err("registry is required".to_string());
     }
-    Ok([
-        "exec",
-        "--",
-        "ferrocrate",
-        "logout",
-        registry,
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect())
+    Ok(["exec", "--", "ferrocrate", "logout", registry]
+        .into_iter()
+        .map(str::to_string)
+        .collect())
 }
 
 fn network_summaries(
@@ -642,10 +674,7 @@ fn network_summaries(
                 .flat_map(|inspection| inspection.containers.iter())
                 .map(|(container_id, attachment)| {
                     let container = containers.iter().find(|row| row.id == *container_id);
-                    let name = attachment
-                        .name
-                        .trim_start_matches('/')
-                        .to_string();
+                    let name = attachment.name.trim_start_matches('/').to_string();
                     NetworkContainerSummary {
                         container_id: container_id.clone(),
                         name: if name.is_empty() {
@@ -723,12 +752,15 @@ fn network_proxy_command(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "network name is required".to_string())?;
-            command.push(match action {
-                NetworkAction::Inspect => "inspect",
-                NetworkAction::Create => "create",
-                NetworkAction::Remove => "remove",
-                NetworkAction::List => unreachable!(),
-            }.to_string());
+            command.push(
+                match action {
+                    NetworkAction::Inspect => "inspect",
+                    NetworkAction::Create => "create",
+                    NetworkAction::Remove => "remove",
+                    NetworkAction::List => unreachable!(),
+                }
+                .to_string(),
+            );
             command.push(target.to_string());
             if matches!(action, NetworkAction::Create) {
                 if let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) {
@@ -1406,7 +1438,9 @@ fn get_registry_credential(registry: &str) -> Result<Option<StoredRegistryCreden
             .map(Some)
             .map_err(|err| format!("invalid registry credential in keyring: {err}")),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(err) => Err(format!("failed to read registry credential from keyring: {err}")),
+        Err(err) => Err(format!(
+            "failed to read registry credential from keyring: {err}"
+        )),
     }
 }
 
@@ -1423,7 +1457,9 @@ fn clear_registry_credential(registry: &str) -> Result<(), String> {
     let entry = registry_keyring_entry(registry)?;
     match entry.delete_credential() {
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(err) => Err(format!("failed to clear registry credential from keyring: {err}")),
+        Err(err) => Err(format!(
+            "failed to clear registry credential from keyring: {err}"
+        )),
     }
 }
 
@@ -2091,14 +2127,13 @@ mod tests {
 
     use super::{
         build_bridge_command, compose_bridge_command, compose_service_rows,
-        container_detail_from_json, container_inspect_command, container_update_command, log_channel,
-        log_follow_command, parse_terminal_exec_id, registry_login_command,
-        registry_logout_command, run_container_bridge_command,
-        terminal_exec_command, terminal_resize_command, network_proxy_command, network_summaries,
-        volume_proxy_command, ComposeAction,
-        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, LogBuffer,
-        NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
-        VolumeAction,
+        container_detail_from_json, container_inspect_command, container_update_command,
+        log_channel, log_follow_command, network_proxy_command, network_summaries,
+        parse_terminal_exec_id, registry_login_command, registry_logout_command,
+        run_container_bridge_command, terminal_exec_command, terminal_resize_command,
+        volume_proxy_command, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
+        ContainerPortRecord, LogBuffer, NetworkAction, NetworkInspectRecord, NetworkIpam,
+        NetworkIpamConfig, NetworkListRecord, VolumeAction,
     };
 
     #[test]
@@ -2299,8 +2334,12 @@ mod tests {
             vec!["network-proxy", "list"]
         );
         assert_eq!(
-            network_proxy_command(NetworkAction::Create, Some("frontend"), Some("172.30.0.0/16"))
-                .expect("create command"),
+            network_proxy_command(
+                NetworkAction::Create,
+                Some("frontend"),
+                Some("172.30.0.0/16")
+            )
+            .expect("create command"),
             vec![
                 "network-proxy",
                 "create",
@@ -2387,8 +2426,15 @@ mod tests {
             container_update_command("web", Some(134_217_728), Some(50_000), Some(100_000))
                 .expect("update command"),
             vec![
-                "container-proxy", "update", "web", "--memory", "134217728",
-                "--cpu-quota", "50000", "--cpu-period", "100000",
+                "container-proxy",
+                "update",
+                "web",
+                "--memory",
+                "134217728",
+                "--cpu-quota",
+                "50000",
+                "--cpu-period",
+                "100000",
             ]
         );
         assert_eq!(
@@ -2402,9 +2448,24 @@ mod tests {
             )
             .expect("run command"),
             vec![
-                "exec", "--", "ferrocrate", "run", "--detach", "--name", "web",
-                "--env", "MODE=dev", "--env", "TOKEN=secret", "--memory-max", "67108864",
-                "--cpu-quota", "25000", "--cpu-period", "100000", "alpine:latest",
+                "exec",
+                "--",
+                "ferrocrate",
+                "run",
+                "--detach",
+                "--name",
+                "web",
+                "--env",
+                "MODE=dev",
+                "--env",
+                "TOKEN=secret",
+                "--memory-max",
+                "67108864",
+                "--cpu-quota",
+                "25000",
+                "--cpu-period",
+                "100000",
+                "alpine:latest",
             ]
         );
     }
@@ -2424,13 +2485,7 @@ mod tests {
         );
         assert_eq!(
             registry_logout_command("registry.example.com").expect("logout command"),
-            vec![
-                "exec",
-                "--",
-                "ferrocrate",
-                "logout",
-                "registry.example.com",
-            ]
+            vec!["exec", "--", "ferrocrate", "logout", "registry.example.com",]
         );
         assert!(registry_login_command("registry.example.com", " ").is_err());
         assert!(registry_logout_command(" ").is_err());

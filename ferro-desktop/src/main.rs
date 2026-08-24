@@ -702,7 +702,9 @@ fn run_volume_proxy(
 
 fn required_network_name(name: &str) -> Result<&str, DesktopError> {
     if name.trim().is_empty() {
-        Err(DesktopError::Invalid("network name is required".to_string()))
+        Err(DesktopError::Invalid(
+            "network name is required".to_string(),
+        ))
     } else {
         Ok(name.trim())
     }
@@ -724,7 +726,11 @@ fn network_proxy_request(
         NetworkProxyCommands::Create { name, subnet } => {
             let name = required_network_name(name)?;
             let mut payload = serde_json::json!({"Name": name, "Driver": "bridge"});
-            if let Some(subnet) = subnet.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(subnet) = subnet
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 payload["IPAM"] = serde_json::json!({"Config": [{"Subnet": subnet}]});
             }
             Ok((
@@ -1249,8 +1255,12 @@ fn main() {
         } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
         Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
         Commands::NetworkProxy { socket, command } => run_network_proxy(socket.as_deref(), command),
-        Commands::ContainerProxy { socket, command } => run_container_proxy(socket.as_deref(), command),
-        Commands::RegistryProxy { socket, command } => run_registry_proxy(socket.as_deref(), command),
+        Commands::ContainerProxy { socket, command } => {
+            run_container_proxy(socket.as_deref(), command)
+        }
+        Commands::RegistryProxy { socket, command } => {
+            run_registry_proxy(socket.as_deref(), command)
+        }
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -3362,17 +3372,18 @@ fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, 
 mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
-        command_requires_desktop_entitlement, command_targets_ferrocrate, copy_interactive_input,
-        create_terminal_exec, exec_mode_from_env, gather_phase0_check, is_interactive_exec_command,
-        is_log_follow_command, load_channel_manifest, load_forward_entries, load_vm_state,
-        open_terminal_exec, parse_exec_mode, read_exec_request, render_macos_launch_agent_plist,
-        render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
-        save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
-        terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        container_proxy_request, network_proxy_request, registry_login_request,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
-        write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
-        ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
+        copy_interactive_input, create_terminal_exec, exec_mode_from_env, gather_phase0_check,
+        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
+        load_forward_entries, load_vm_state, network_proxy_request, open_terminal_exec,
+        parse_exec_mode, read_exec_request, registry_login_request,
+        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
+        resize_terminal_exec, run_request, save_forward_entries, save_vm_state,
+        select_terminal_socket, should_route_to_macos_guest, terminal_exec_create_path,
+        terminal_exec_create_payload, terminal_resize_path, upsert_forward_entry,
+        validate_daemon_addr, vm_state_running, volume_proxy_request, write_follow_frame, Cli,
+        Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
+        VmCommands, VmConfig, VmState,
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -3527,13 +3538,15 @@ mod tests {
                 br#"{"CpuPeriod":100000,"CpuQuota":50000,"Memory":134217728}"#.to_vec(),
             )
         );
-        assert!(container_proxy_request(&super::ContainerProxyCommands::Update {
-            container: " ".to_string(),
-            memory: None,
-            cpu_quota: None,
-            cpu_period: None,
-        })
-        .is_err());
+        assert!(
+            container_proxy_request(&super::ContainerProxyCommands::Update {
+                container: " ".to_string(),
+                memory: None,
+                cpu_quota: None,
+                cpu_period: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -168,6 +168,7 @@ struct DaemonStatus {
     state: String,
     socket_path: String,
     reason: Option<String>,
+    platform: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -210,17 +211,20 @@ fn daemon_status() -> DaemonStatus {
                     state: "running".to_string(),
                     socket_path: socket.display().to_string(),
                     reason: None,
+                    platform: "linux-native".to_string(),
                 },
                 Err(reason) => DaemonStatus {
                     state: "stopped".to_string(),
                     socket_path: socket.display().to_string(),
                     reason: Some(reason),
+                    platform: "linux-native".to_string(),
                 },
             },
             Err(reason) => DaemonStatus {
                 state: "failed".to_string(),
                 socket_path: String::new(),
                 reason: Some(reason),
+                platform: "linux-native".to_string(),
             },
         };
     }
@@ -229,6 +233,7 @@ fn daemon_status() -> DaemonStatus {
         state: "running".to_string(),
         socket_path: "desktop bridge".to_string(),
         reason: None,
+        platform: "desktop-vm".to_string(),
     }
 }
 

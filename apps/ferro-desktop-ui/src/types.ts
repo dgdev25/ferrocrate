@@ -11,6 +11,7 @@ export type DesktopSnapshot = {
     state: "starting" | "running" | "stopped" | "failed";
     socket_path: string;
     reason: string | null;
+    platform: "linux-native" | "desktop-vm";
   };
   runtime: CommandResult;
   containers: CommandResult;

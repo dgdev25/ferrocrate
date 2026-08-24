@@ -57,3 +57,14 @@ test("Settings is a single capability table whose forms stay behind row actions"
   for (const button of buttons(page)) button.props.onClick?.();
   assert.deepEqual(opened, ["account", "install"]);
 });
+
+test("native Linux settings show installed runtime truth and omit VM bootstrap", () => {
+  const markup = renderToStaticMarkup(createElement(systemPages.SettingsPage, {
+    authState: { session: { token_present: false } },
+    nativeLinux: true,
+    daemonStatus: { state: "running" },
+  }));
+  assert.match(markup, /Local Ferrocrate runtime/);
+  assert.match(markup, />Running</);
+  assert.doesNotMatch(markup, /Install and bootstrap|virtual machine/i);
+});

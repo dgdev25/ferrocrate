@@ -1513,7 +1513,7 @@ function App(): JSX.Element {
 
             {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
-            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
+            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} nativeLinux={snapshot?.daemon.platform === "linux-native"} daemonStatus={snapshot?.daemon} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 
             {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : "did not complete"}</span>{lastAction.stderr || !lastAction.ok ? <details><summary>Technical details</summary><pre>{`${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}`}</pre></details> : null}</section> : null}
           </div>

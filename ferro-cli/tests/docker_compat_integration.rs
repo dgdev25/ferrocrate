@@ -815,6 +815,53 @@ fn kill_pid_only_if_identity_matches(pid: i64, expected_start_time: u64) {
 }
 
 #[test]
+fn docker_compat_attach_detach_keys_leave_verified_workload_running() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(&harness, "detach-keys-live", "no");
+    let before = inspect_container(&harness, &id);
+    let pid = before["State"]["Pid"].as_i64().expect("running PID");
+    let start_time = pid_start_time(pid).expect("running PID start time");
+
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    stream
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1&detachKeys=ctrl-a%2Cctrl-b HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write detach attach handshake");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).expect("read attach headers");
+        headers.push(byte[0]);
+        assert!(headers.len() < 4096, "attach headers are unbounded");
+    }
+    assert!(
+        String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+        "attach response={}",
+        String::from_utf8_lossy(&headers)
+    );
+    stream
+        .write_all(&[0x01, 0x02])
+        .expect("send custom detach sequence");
+    let mut tail = Vec::new();
+    stream.read_to_end(&mut tail).expect("read detached attach close");
+
+    let after = inspect_container(&harness, &id);
+    assert_eq!(after["State"]["Status"], "running", "inspect={after}");
+    assert_eq!(after["State"]["Pid"].as_i64(), Some(pid), "inspect={after}");
+    assert_eq!(
+        pid_start_time(pid),
+        Some(start_time),
+        "detach must leave the recorded workload's PID identity alive"
+    );
+    kill_pid_only_if_identity_matches(pid, start_time);
+}
+
+#[test]
 fn docker_compat_daemon_restart_reattaches_and_supervises_live_workload() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");

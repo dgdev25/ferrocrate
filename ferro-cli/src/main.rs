@@ -5853,7 +5853,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ai_model,
             cmd,
         } => (|| -> Result<(), String> {
-            let detach_keys = parse_detach_keys(detach_keys)?;
+            let parsed_detach_keys = parse_detach_keys(detach_keys)?;
             let unsupported = [
                 (
                     *network_backend != "ebpf",
@@ -5992,13 +5992,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 remote_docker_hijack(
                     &endpoint,
                     &format!(
-                        "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1",
+                        "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1&detachKeys={}",
                         percent_encode_path_component(id),
-                        if *interactive { 1 } else { 0 }
+                        if *interactive { 1 } else { 0 },
+                        percent_encode_path_component(detach_keys),
                     ),
                     *interactive,
                     *tty,
-                    &detach_keys,
+                    &parsed_detach_keys,
                 )?;
             }
             if *rm {

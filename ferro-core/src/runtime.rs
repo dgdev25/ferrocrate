@@ -11764,6 +11764,76 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
     Ok(Ipv4Addr::from(octets).to_string())
 }
 
+fn allocate_named_endpoint_ipv4(
+    container_id: &str,
+    network_name: &str,
+    subnet: &str,
+    gateway: &str,
+    occupied: &BTreeSet<String>,
+) -> Result<String, RuntimeError> {
+    let (address, prefix) = subnet
+        .split_once('/')
+        .ok_or_else(|| RuntimeError::Network(format!("invalid network subnet {subnet}")))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| RuntimeError::Network(format!("invalid network subnet {subnet}")))?;
+    if prefix > 30 {
+        return Err(RuntimeError::Network(format!(
+            "network subnet {subnet} has no usable endpoint addresses"
+        )));
+    }
+    let address = u32::from(
+        address
+            .parse::<Ipv4Addr>()
+            .map_err(|_| RuntimeError::Network(format!("invalid network subnet {subnet}")))?,
+    );
+    let gateway = gateway
+        .parse::<Ipv4Addr>()
+        .map_err(|_| RuntimeError::Network(format!("invalid network gateway {gateway}")))?;
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let network = address & mask;
+    let broadcast = network | !mask;
+    if u32::from(gateway) <= network || u32::from(gateway) >= broadcast {
+        return Err(RuntimeError::Network(format!(
+            "network gateway {gateway} is outside usable subnet {subnet}"
+        )));
+    }
+    let first = network.saturating_add(1);
+    let usable = broadcast.saturating_sub(first);
+    let digest = rvf_crypto::shake256_256(
+        format!("named-endpoint\0{container_id}\0{network_name}").as_bytes(),
+    );
+    let start = u32::from_be_bytes(digest[..4].try_into().expect("digest prefix")) % usable;
+    for offset in 0..usable {
+        let candidate = Ipv4Addr::from(first + ((start + offset) % usable));
+        if candidate != gateway && !occupied.contains(&candidate.to_string()) {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err(RuntimeError::Network(format!(
+        "network {network_name} has no free IPv4 endpoint addresses"
+    )))
+}
+
+fn named_endpoint_host_interface(container_id: &str, network_name: &str) -> String {
+    let digest = rvf_crypto::shake256_256(
+        format!("named-veth\0{container_id}\0{network_name}").as_bytes(),
+    );
+    format!("v{}", hex::encode(&digest[..7]))
+}
+
+fn next_endpoint_interface<'a>(used: impl IntoIterator<Item = &'a str>) -> String {
+    let used = used.into_iter().collect::<BTreeSet<_>>();
+    (1..=255)
+        .map(|index| format!("eth{index}"))
+        .find(|candidate| !used.contains(candidate.as_str()))
+        .unwrap_or_else(|| "eth255".to_string())
+}
+
 fn associated_network_name(associated: Option<&str>, network_mode: &str) -> Option<String> {
     if let Some(name) = associated.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(name.to_string());
@@ -16550,6 +16620,56 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let network_mask = !host_mask;
         assert_eq!(gateway_u & network_mask, assigned_u & network_mask);
         assert_ne!(assigned, gateway);
+    }
+
+    #[test]
+    fn named_endpoint_plan_is_network_scoped_and_avoids_used_addresses() {
+        let occupied = ["172.30.0.91".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let first = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "frontend",
+            "172.30.0.0/24",
+            "172.30.0.1",
+            &occupied,
+        )
+        .expect("address");
+        let repeated = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "frontend",
+            "172.30.0.0/24",
+            "172.30.0.1",
+            &occupied,
+        )
+        .expect("stable address");
+        let other_network = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "backend",
+            "172.31.0.0/24",
+            "172.31.0.1",
+            &std::collections::BTreeSet::new(),
+        )
+        .expect("other address");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, "172.30.0.1");
+        assert!(!occupied.contains(&first));
+        assert!(first.starts_with("172.30.0."));
+        assert!(other_network.starts_with("172.31.0."));
+    }
+
+    #[test]
+    fn secondary_endpoint_names_are_stable_unique_and_interface_safe() {
+        let host_a = super::named_endpoint_host_interface("container-a", "frontend");
+        let host_b = super::named_endpoint_host_interface("container-a", "backend");
+        assert_eq!(
+            host_a,
+            super::named_endpoint_host_interface("container-a", "frontend")
+        );
+        assert_ne!(host_a, host_b);
+        assert!(host_a.len() <= 15);
+        assert_eq!(super::next_endpoint_interface(["eth0", "eth1"]), "eth2");
     }
 
     #[test]

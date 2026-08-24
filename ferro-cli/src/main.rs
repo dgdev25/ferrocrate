@@ -6081,7 +6081,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             if *lazy {
                 path.push_str("&lazy=1");
             }
-            request("POST", path).map(|_| println!("pull: image={}", parsed.canonical()))
+            request("POST", path).and_then(|body| print_docker_image_progress(&body))
         })(),
         Commands::Push { image } => (|| -> Result<(), String> {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
@@ -6089,7 +6089,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 "POST",
                 format!("/images/{}/push", percent_encode_path_component(&canonical)),
             )
-            .map(|_| println!("push: image={canonical}"))
+            .and_then(|body| print_docker_image_progress(&body))
         })(),
         Commands::Containers {
             format,
@@ -10486,20 +10486,58 @@ fn handle_pull_authorized(
     execute_image_pull(store, lazy, binding, proof)
 }
 
-/// Docker's image-create endpoint is a JSON stream, even when a pull has no
-/// layer progress to report. Returning a terminal status keeps socket clients
-/// from having to special-case Ferrocrate's formerly empty `{}` response.
+/// Docker image operations use newline-delimited JSON progress records.  Keep
+/// the synthetic records here until registry transfers expose byte callbacks;
+/// consumers can already render them exactly like normal layer progress.
+fn docker_image_progress(reference: &str, terminal_status: &str) -> Vec<u8> {
+    [
+        serde_json::json!({
+            "status": "Downloading",
+            "id": reference,
+            "progressDetail": { "current": 0, "total": 1 },
+        }),
+        serde_json::json!({
+            "status": "Extracting",
+            "id": reference,
+            "progressDetail": { "current": 1, "total": 1 },
+        }),
+        serde_json::json!({
+            "status": terminal_status,
+            "id": reference,
+            "progressDetail": { "current": 1, "total": 1 },
+        }),
+    ]
+    .into_iter()
+    .map(|frame| format!("{frame}\n"))
+    .collect::<String>()
+    .into_bytes()
+}
+
 fn docker_pull_status(reference: &str, lazy: bool) -> Vec<u8> {
-    let status = if lazy {
-        "Manifest fetched"
-    } else {
-        "Pull complete"
-    };
-    let body = serde_json::json!({
-        "status": status,
-        "id": reference,
-    });
-    format!("{}\n", body).into_bytes()
+    docker_image_progress(
+        reference,
+        if lazy { "Manifest fetched" } else { "Pull complete" },
+    )
+}
+
+fn print_docker_image_progress(body: &[u8]) -> Result<(), String> {
+    for line in std::str::from_utf8(body)
+        .map_err(|error| format!("docker progress is not UTF-8: {error}"))?
+        .lines()
+    {
+        let frame: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("docker progress frame is invalid JSON: {error}"))?;
+        let status = frame["status"]
+            .as_str()
+            .ok_or_else(|| "docker progress frame has no status".to_string())?;
+        let id = frame["id"].as_str().unwrap_or_default();
+        let detail = &frame["progressDetail"];
+        match (detail["current"].as_u64(), detail["total"].as_u64()) {
+            (Some(current), Some(total)) => println!("{id}: {status} {current}/{total}"),
+            _ => println!("{id}: {status}"),
+        }
+    }
+    Ok(())
 }
 
 fn execute_image_pull(
@@ -15764,10 +15802,8 @@ fn handle_docker_compat_connection(
                     &origin,
                     &request.body,
                 )?;
-                let body = serde_json::json!({
-                    "stream": format!("Loaded image: {loaded}\\n")
-                });
-                http_response(200, body.to_string().as_bytes(), "application/json")
+                let body = docker_image_progress(&loaded, "Loaded image");
+                http_response(200, &body, "application/json")
             }
             ("POST", "/plugins/pull") => docker_error_response(
                 404,
@@ -15807,7 +15843,8 @@ fn handle_docker_compat_connection(
                     .trim_end_matches("/push");
                 let reference = percent_decode_query_component(encoded)?;
                 handle_push(&store, &reference)?;
-                http_response(200, b"{}", "application/json")
+                let body = docker_image_progress(&reference, "Pushed");
+                http_response(200, &body, "application/json")
             }
             ("POST", "/images/prune") => {
                 let filters = parse_docker_filters(&query)?;
@@ -19701,18 +19738,31 @@ volumes:
     }
 
     #[test]
-    fn docker_pull_status_is_a_terminal_json_stream_record() {
+    fn docker_pull_status_is_a_progress_json_stream() {
         let body = super::docker_pull_status("alpine:latest", false);
-        let line = std::str::from_utf8(&body)
+        let frames = std::str::from_utf8(&body)
             .expect("status body utf8")
-            .trim_end();
-        let value: serde_json::Value = serde_json::from_str(line).expect("status JSON");
-        assert_eq!(value["status"], "Pull complete");
-        assert_eq!(value["id"], "alpine:latest");
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("status JSON"))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0]["status"], "Downloading");
+        assert_eq!(frames[0]["id"], "alpine:latest");
+        assert_eq!(frames[0]["progressDetail"]["current"], 0);
+        assert_eq!(frames[0]["progressDetail"]["total"], 1);
+        assert_eq!(frames[1]["status"], "Extracting");
+        assert_eq!(frames[2]["status"], "Pull complete");
         assert!(body.ends_with(b"\n"));
 
         let lazy = super::docker_pull_status("alpine:latest", true);
-        let value: serde_json::Value = serde_json::from_slice(&lazy).expect("lazy status JSON");
+        let value: serde_json::Value = serde_json::from_str(
+            std::str::from_utf8(&lazy)
+                .expect("lazy status utf8")
+                .lines()
+                .last()
+                .expect("lazy terminal frame"),
+        )
+        .expect("lazy status JSON");
         assert_eq!(value["status"], "Manifest fetched");
     }
 

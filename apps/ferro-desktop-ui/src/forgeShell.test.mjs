@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  daemonIsAvailable,
   filterContainers,
   formatContainerPorts,
   parseContainerRows,
@@ -89,4 +90,10 @@ test("shellKeyboardCommand maps Escape and the advertised search shortcut", () =
   assert.equal(shellKeyboardCommand({ key: "k", metaKey: true, ctrlKey: false }), "focus-search");
   assert.equal(shellKeyboardCommand({ key: "K", metaKey: false, ctrlKey: true }), "focus-search");
   assert.equal(shellKeyboardCommand({ key: "k", metaKey: false, ctrlKey: false }), null);
+});
+
+test("daemonIsAvailable reflects successful runtime data commands, not optional VM status", () => {
+  assert.equal(daemonIsAvailable({ containers: { ok: true }, images: { ok: true } }), true);
+  assert.equal(daemonIsAvailable({ containers: { ok: false }, images: { ok: true } }), false);
+  assert.equal(daemonIsAvailable(null), false);
 });

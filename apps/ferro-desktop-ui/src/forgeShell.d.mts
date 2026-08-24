@@ -13,3 +13,4 @@ export function parseContainerRows(output: string): ContainerRow[];
 export function filterContainers(rows: ContainerRow[], query: string): ContainerRow[];
 export function statusTone(row: Pick<ContainerRow, "state" | "health">): "running" | "unhealthy" | "stopped";
 export function shellKeyboardCommand(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey">): "close-dialog" | "focus-search" | null;
+export function daemonIsAvailable(snapshot: { containers?: { ok?: boolean }; images?: { ok?: boolean } } | null): boolean;

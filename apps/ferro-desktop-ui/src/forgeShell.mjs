@@ -50,3 +50,7 @@ export function shellKeyboardCommand(event) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") return "focus-search";
   return null;
 }
+
+export function daemonIsAvailable(snapshot) {
+  return snapshot?.containers?.ok === true && snapshot?.images?.ok === true;
+}

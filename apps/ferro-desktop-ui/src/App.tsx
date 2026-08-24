@@ -33,7 +33,7 @@ import {
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
-import { filterContainers, parseContainerRows, shellKeyboardCommand, statusTone } from "./forgeShell.mjs";
+import { daemonIsAvailable, filterContainers, parseContainerRows, shellKeyboardCommand, statusTone } from "./forgeShell.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
@@ -894,7 +894,7 @@ function App(): JSX.Element {
       return 0;
     }
   }, [snapshot?.images.stdout]);
-  const daemonRunning = snapshot?.runtime.ok === true;
+  const daemonRunning = daemonIsAvailable(snapshot);
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
     images: "Images",

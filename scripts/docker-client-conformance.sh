@@ -347,8 +347,17 @@ trap 'exit 143' TERM
 cp /bin/busybox "$context_dir/busybox" || harness_error "cannot copy /bin/busybox into build fixture"
 chmod 0755 "$context_dir/busybox" || harness_error "cannot make build fixture executable"
 printf 'offline conformance fixture\n' >"$context_dir/marker.txt" || harness_error "cannot write build fixture"
-printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
-  "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+busybox_loader="/lib/ld-musl-$(uname -m).so.1"
+if [[ -f "$busybox_loader" ]]; then
+  mkdir -p "$context_dir/lib" || harness_error "cannot create loader fixture directory"
+  cp -L -- "$busybox_loader" "$context_dir/lib/$(basename "$busybox_loader")" ||
+    harness_error "cannot copy the musl loader into the offline image fixture"
+  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY lib/ /lib/\nCOPY marker.txt /marker.txt\n' \
+    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+else
+  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
+    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 

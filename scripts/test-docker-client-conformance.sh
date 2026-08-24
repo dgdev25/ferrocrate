@@ -149,6 +149,21 @@ if [[ -n "$output" ]]; then
 fi
 
 case "$id" in
+  image-build)
+    context="${!#}"
+    loader="/lib/ld-musl-$(uname -m).so.1"
+    if [[ -f "$loader" ]]; then
+      grep -Fq 'COPY lib/ /lib/' "$context/Dockerfile" || {
+        echo "musl fixture omitted its dynamic loader" >&2
+        exit 65
+      }
+      cmp -s "$loader" "$context/lib/$(basename "$loader")" || {
+        echo "musl fixture loader differs from the host loader" >&2
+        exit 66
+      }
+    fi
+    echo "contract output for $id"
+    ;;
   cli-version)
     echo "Client: Docker Engine - Community"
     echo " Version: 99.1.0-contract"

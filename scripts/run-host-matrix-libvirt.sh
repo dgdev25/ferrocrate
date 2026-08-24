@@ -35,7 +35,7 @@ case "$row_id" in
   rocky-*) domain="ferro-rocky-01"; address="192.168.122.56" ;;
   ubuntu-20.04-*) domain="ferro-ubuntu2004-01"; address="192.168.122.247" ;;
   alpine-*) domain="ferro-alpine322-01"; address="192.168.122.128" ;;
-  aarch64-*) echo "row $row_id requires aarch64 hardware and remains a candidate" >&2; exit 77 ;;
+  aarch64-*) domain="ferro-arm-01-oracle"; address="132.145.25.108" ;;
   *) echo "no libvirt guest mapping for row: $row_id" >&2; exit 2 ;;
 esac
 

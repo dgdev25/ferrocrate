@@ -503,6 +503,29 @@ struct NativeStatsOutput {
     stats: NativeContainerStats,
 }
 
+fn parse_container_stats_json(stdout: &str) -> Result<NativeContainerStats, serde_json::Error> {
+    let value: JsonValue = serde_json::from_str(stdout)?;
+    if value.get("stats").is_some() {
+        return serde_json::from_value::<NativeStatsOutput>(value).map(|output| output.stats);
+    }
+    let nonzero = |path: &str| {
+        value
+            .pointer(path)
+            .and_then(JsonValue::as_u64)
+            .filter(|value| *value > 0)
+    };
+    Ok(NativeContainerStats {
+        memory_current: value
+            .pointer("/memory_stats/usage")
+            .and_then(JsonValue::as_u64),
+        memory_max: nonzero("/memory_stats/limit"),
+        cpu_usage_usec: value
+            .pointer("/cpu_stats/cpu_usage/total_usage")
+            .and_then(JsonValue::as_u64)
+            .map(|nanoseconds| nanoseconds / 1_000),
+    })
+}
+
 #[derive(Debug, Clone)]
 struct TimedNativeContainerStats {
     sampled_at: Instant,
@@ -531,9 +554,8 @@ fn read_container_stats(target: &str) -> Option<NativeContainerStats> {
     let result = run_owned_command("ferro-desktop", &container_stats_command(target));
     result
         .ok
-        .then(|| serde_json::from_str::<NativeStatsOutput>(&result.stdout).ok())
+        .then(|| parse_container_stats_json(&result.stdout).ok())
         .flatten()
-        .map(|output| output.stats)
 }
 
 fn aggregate_container_stats(
@@ -717,8 +739,17 @@ struct ComposeConfigProjection {
 
 #[derive(Debug, Deserialize)]
 struct ComposeContainerRecord {
+    #[serde(alias = "Id")]
     id: String,
-    name: Option<String>,
+    #[serde(
+        rename = "Names",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    names: Vec<String>,
+    #[serde(rename = "Labels", default)]
+    labels: BTreeMap<String, String>,
+    #[serde(alias = "State")]
     status: String,
 }
 
@@ -816,9 +847,11 @@ fn compose_service_rows(
         .map(|name| {
             let replica_prefix = format!("{name}-");
             let container = containers.iter().find(|container| {
-                container.name.as_deref().is_some_and(|container_name| {
-                    container_name == name || container_name.starts_with(&replica_prefix)
-                })
+                container.labels.get("com.docker.compose.service") == Some(&name)
+                    || container.names.iter().any(|container_name| {
+                        let container_name = container_name.trim_start_matches('/');
+                        container_name == name || container_name.starts_with(&replica_prefix)
+                    })
             });
             ComposeServiceSummary {
                 name,
@@ -881,7 +914,7 @@ struct NetworkIpam {
 struct NetworkListRecord {
     name: String,
     driver: String,
-    #[serde(default)]
+    #[serde(rename = "IPAM", default)]
     ipam: NetworkIpam,
 }
 
@@ -900,21 +933,42 @@ struct NetworkInspectContainer {
 struct NetworkInspectRecord {
     #[serde(default)]
     containers: BTreeMap<String, NetworkInspectContainer>,
+    #[serde(rename = "IPAM", default)]
+    ipam: NetworkIpam,
 }
 
 #[derive(Debug, Deserialize)]
 struct ContainerPortRecord {
+    #[serde(alias = "PublicPort")]
     host_port: u16,
+    #[serde(alias = "PrivatePort")]
     container_port: u16,
+    #[serde(alias = "Type")]
     protocol: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ContainerNetworkRecord {
+    #[serde(alias = "Id")]
     id: String,
-    name: Option<String>,
+    #[serde(
+        rename = "Names",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    names: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
+    #[serde(alias = "Ports")]
     ports: Vec<ContainerPortRecord>,
+}
+
+impl ContainerNetworkRecord {
+    fn name(&self) -> Option<String> {
+        self.names
+            .first()
+            .map(|name| name.trim_start_matches('/').to_string())
+            .filter(|name| !name.is_empty())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1460,6 +1514,14 @@ fn network_summaries(
     networks
         .into_iter()
         .map(|network| {
+            let ipam = if network.ipam.config.is_empty() {
+                inspections
+                    .get(&network.name)
+                    .map(|inspection| &inspection.ipam)
+                    .unwrap_or(&network.ipam)
+            } else {
+                &network.ipam
+            };
             let mut attachments = inspections
                 .get(&network.name)
                 .into_iter()
@@ -1471,7 +1533,7 @@ fn network_summaries(
                         container_id: container_id.clone(),
                         name: if name.is_empty() {
                             container
-                                .and_then(|row| row.name.clone())
+                                .and_then(ContainerNetworkRecord::name)
                                 .unwrap_or_else(|| container_id.clone())
                         } else {
                             name
@@ -1498,11 +1560,10 @@ fn network_summaries(
             NetworkSummary {
                 name: network.name,
                 driver: network.driver,
-                subnets: network
-                    .ipam
+                subnets: ipam
                     .config
-                    .into_iter()
-                    .filter_map(|config| config.subnet)
+                    .iter()
+                    .filter_map(|config| config.subnet.clone())
                     .collect(),
                 containers: attachments,
             }
@@ -3136,13 +3197,14 @@ mod tests {
         compose_bridge_command, compose_service_rows, container_detail_from_json,
         container_inspect_command, container_update_command, doctor_command,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
-        network_summaries, normalize_nullable_list_output, parse_nullable_json_list,
-        parse_terminal_exec_id, parse_web_mode, registry_login_command, registry_logout_command,
-        run_container_bridge_command, terminal_exec_command, terminal_resize_command,
-        volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
-        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, JsonValue, LogBuffer,
-        NativeContainerStats, NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig,
-        NetworkListRecord, TimedNativeContainerStats, VolumeAction, VolumeListResponse,
+        network_summaries, normalize_nullable_list_output, parse_container_stats_json,
+        parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
+        registry_logout_command, run_container_bridge_command, terminal_exec_command,
+        terminal_resize_command, volume_proxy_command, BuildProgressFrame, CommandResult,
+        ComposeAction, ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
+        JsonValue, LogBuffer, NativeContainerStats, NetworkAction, NetworkInspectRecord,
+        NetworkIpam, NetworkIpamConfig, NetworkListRecord, TimedNativeContainerStats, VolumeAction,
+        VolumeListResponse,
     };
 
     #[test]
@@ -3219,12 +3281,32 @@ mod tests {
                 stats: empty_stats,
             },
         )]);
-        let empty_samples = aggregate_container_stats(
-            &["no-cgroup".to_string()],
-            &empty_first,
-            &empty_second,
-        );
+        let empty_samples =
+            aggregate_container_stats(&["no-cgroup".to_string()], &empty_first, &empty_second);
         assert!(!empty_samples[0].available);
+    }
+
+    #[test]
+    fn delegated_docker_stats_decode_to_native_counter_units() {
+        let stats = parse_container_stats_json(
+            r#"{
+            "memory_stats":{"usage":67108864,"limit":134217728},
+            "cpu_stats":{"cpu_usage":{"total_usage":1250000}}
+        }"#,
+        )
+        .expect("Docker stats payload");
+        assert_eq!(stats.memory_current, Some(67_108_864));
+        assert_eq!(stats.memory_max, Some(134_217_728));
+        assert_eq!(stats.cpu_usage_usec, Some(1_250));
+
+        let unlimited = parse_container_stats_json(
+            r#"{
+            "memory_stats":{"usage":1,"limit":0},
+            "cpu_stats":{"cpu_usage":{"total_usage":1000}}
+        }"#,
+        )
+        .expect("Docker unlimited stats payload");
+        assert_eq!(unlimited.memory_max, None);
     }
 
     #[cfg(target_os = "linux")]
@@ -3390,18 +3472,12 @@ mod tests {
 
     #[test]
     fn compose_service_rows_reflect_matching_container_state() {
-        let containers = vec![
-            ComposeContainerRecord {
-                id: "api-id".to_string(),
-                name: Some("api".to_string()),
-                status: "running".to_string(),
-            },
-            ComposeContainerRecord {
-                id: "worker-id".to_string(),
-                name: Some("worker-1".to_string()),
-                status: "exited".to_string(),
-            },
-        ];
+        let containers: Vec<ComposeContainerRecord> = serde_json::from_str(concat!(
+            "[{\"Id\":\"api-id\",\"Names\":[\"/shop-api-1\"],\"State\":\"running\",",
+            "\"Labels\":{\"com.docker.compose.project\":\"shop\",\"com.docker.compose.service\":\"api\"}},",
+            "{\"Id\":\"worker-id\",\"Names\":[\"/worker-1\"],\"State\":\"exited\",\"Labels\":{}}]"
+        ))
+        .expect("Docker container list records");
         let rows = compose_service_rows(
             vec!["worker".to_string(), "db".to_string(), "api".to_string()],
             &containers,
@@ -3726,7 +3802,7 @@ mod tests {
         let inspections = BTreeMap::from([("frontend".to_string(), inspection)]);
         let containers = vec![ContainerNetworkRecord {
             id: "container-1".to_string(),
-            name: Some("web".to_string()),
+            names: vec!["/web".to_string()],
             ports: vec![ContainerPortRecord {
                 host_port: 8080,
                 container_port: 80,
@@ -3739,6 +3815,42 @@ mod tests {
         assert_eq!(rows[0].containers[0].name, "web");
         assert_eq!(rows[0].containers[0].ipv4_address, "172.30.0.2");
         assert_eq!(rows[0].containers[0].ports, vec!["0.0.0.0:8080→80/tcp"]);
+    }
+
+    #[test]
+    fn network_projection_uses_inspect_ipam_when_docker_list_omits_it() {
+        let list: Vec<NetworkListRecord> = serde_json::from_str(
+            r#"[{"Id":"bridge","Name":"bridge","Driver":"bridge","Scope":"local"}]"#,
+        )
+        .expect("Docker network list");
+        let inspection: NetworkInspectRecord = serde_json::from_str(
+            r#"{"Name":"bridge","Driver":"bridge","IPAM":{"Config":[{"Subnet":"10.0.0.0/24","Gateway":"10.0.0.1"}]},"Containers":{}}"#,
+        )
+        .expect("Docker network inspect");
+        let rows = network_summaries(
+            list,
+            &BTreeMap::from([("bridge".to_string(), inspection)]),
+            &[],
+        );
+        assert_eq!(rows[0].subnets, vec!["10.0.0.0/24"]);
+    }
+
+    #[test]
+    fn docker_container_list_fixture_decodes_for_compose_and_network_projections() {
+        let fixture = include_str!("../../src/fixtures/ferrocrate-containers.json");
+        let compose = parse_nullable_json_list::<ComposeContainerRecord>(fixture)
+            .expect("compose Docker list fixture");
+        let rows = compose_service_rows(vec!["web".to_string()], &compose);
+        assert_eq!(rows[0].container_id.as_deref(), Some("abc123"));
+        assert_eq!(rows[0].status, "running");
+
+        let containers = parse_nullable_json_list::<ContainerNetworkRecord>(fixture)
+            .expect("network Docker list fixture");
+        assert_eq!(containers[0].id, "abc123");
+        assert_eq!(containers[0].name().as_deref(), Some("web-frontend"));
+        assert_eq!(containers[0].ports[0].host_port, 8080);
+        assert_eq!(containers[0].ports[0].container_port, 80);
+        assert_eq!(containers[0].ports[0].protocol, "tcp");
     }
 
     #[test]

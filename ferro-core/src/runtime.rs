@@ -5210,15 +5210,16 @@ fn rootless_mount_namespace_available() -> bool {
     let Some(unshare) = crate::rootless::trusted_executable_path("unshare") else {
         return false;
     };
-    std::process::Command::new(unshare)
-        .args([
-            "--user",
-            "--mount",
-            "--fork",
-            "--propagation",
-            "unchanged",
-            "true",
-        ])
+    let mut command = std::process::Command::new(unshare);
+    command.args(["--user", "--mount", "--fork"]);
+    // Alpine's util-linux unshare rejects `--propagation unchanged` with
+    // EINVAL, although the user/mount namespace combination itself works.
+    // The propagation setting is only part of this capability probe; the
+    // actual rootless launch configures its own namespace boundaries.
+    #[cfg(not(target_env = "musl"))]
+    command.args(["--propagation", "unchanged"]);
+    command
+        .arg("true")
         .status()
         .is_ok_and(|status| status.success())
 }

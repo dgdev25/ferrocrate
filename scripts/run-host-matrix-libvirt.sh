@@ -87,7 +87,7 @@ done
 
 # Stage a real git checkout: the conformance harness resolves the source
 # commit with `git rev-parse HEAD`, which a bare archive cannot satisfy.
-git -C "$repo_root" bundle create - "$commit" | \
+git -C "$repo_root" bundle create - "$source_ref" | \
   ssh "${ssh_args[@]}" "$remote" "set -eu; sudo -n rm -rf -- '$remote_root'; cat > '${remote_root}.bundle'; git clone -q '${remote_root}.bundle' '$remote_root'; git -C '$remote_root' checkout -q '$commit'; rm -f '${remote_root}.bundle'"
 
 ssh "${ssh_args[@]}" "$remote" "set -eu; export PATH=\"\$HOME/.cargo/bin:\$PATH:/usr/sbin:/sbin\"; export CARGO_HOME=\"\$HOME/.cargo\" RUSTUP_HOME=\"\$HOME/.rustup\"; cd '$remote_root'; cargo build --locked --workspace; sudo -n env PATH=\"\$PATH\" CARGO_HOME=\"\$CARGO_HOME\" RUSTUP_HOME=\"\$RUSTUP_HOME\" FERROCRATE_REPO_ROOT='$remote_root' bash scripts/run-host-matrix-row.sh '$row_id'"

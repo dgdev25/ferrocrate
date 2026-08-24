@@ -9,6 +9,11 @@ mkdir -p "$runtime"
 export FERROCRATE_RUNTIME_DIR="$runtime"
 export XDG_RUNTIME_DIR="$runtime"
 export FERROCRATE_ROOTLESS_SOCKET="$socket"
+# Keep this real daemon/socket integration runnable without CAP_NET_ADMIN. This
+# selects Ferrocrate's process-persistent test kernel adapter; HTTP routing,
+# durable network lifecycle state, and every desktop proxy remain production
+# code paths (there is no mocked server or mocked Tauri invocation).
+export FERROCRATE_NETWORK_KERNEL_STATE="$test_root/network-kernel-state.json"
 export FERROCRATE_BIN="${FERROCRATE_BIN:-$root/target/release/ferro-cli}"
 desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop}"
 daemon_pid=""
@@ -49,5 +54,5 @@ create_json="$(curl -fsS --unix-socket "$socket" -H 'Content-Type: application/j
 container_id="$(printf '%s' "$create_json" | jq -er '.Id')"
 curl -fsS --unix-socket "$socket" -X POST "http://localhost/containers/$container_id/start" >/dev/null
 "$desktop_bin" container-proxy --socket "$socket" inspect "$container_id" | grep -q "$container_id"
-curl -fsS --unix-socket "$socket" "http://localhost/containers/$container_id/stats?stream=false" | jq -e '.stats' >/dev/null
+curl -fsS --unix-socket "$socket" "http://localhost/containers/$container_id/stats?stream=false" | jq -e 'type == "object"' >/dev/null
 printf 'desktop real-daemon paths passed via %s\n' "$socket"

@@ -23,7 +23,7 @@ import type {
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
-import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
+import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
@@ -148,6 +148,7 @@ function App(): JSX.Element {
   const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
   const buildSequenceRef = useRef(0);
   const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [showEnvironment, setShowEnvironment] = useState(false);
   const [detailMemory, setDetailMemory] = useState("");
   const [detailCpuQuota, setDetailCpuQuota] = useState("");
@@ -720,18 +721,24 @@ function App(): JSX.Element {
   }
 
   async function inspectContainer(target = containerTarget): Promise<void> {
-    if (!beginRuntimeAction()) return;
-    setError(null);
+    const selectedTarget = target.trim();
+    if (!selectedTarget || !beginRuntimeAction()) return;
+    setContainerTarget(selectedTarget);
+    setContainerDetail(null);
+    setInspectorError(null);
     try {
-      const detail = await invoke<ContainerDetailSummary>("get_container_detail", { target });
-      setContainerTarget(target);
-      setContainerDetail(detail);
+      const selection = await loadContainerSelection(selectedTarget, (selected) => (
+        invoke<ContainerDetailSummary>("get_container_detail", { target: selected })
+      ));
+      setContainerTarget(selection.target);
+      setContainerDetail(selection.detail);
+      setInspectorError(selection.error);
+      if (!selection.detail) return;
+      const detail = selection.detail;
       setShowEnvironment(false);
       setDetailMemory(String(detail.resources.memory));
       setDetailCpuQuota(String(detail.resources.cpu_quota));
       setDetailCpuPeriod(String(detail.resources.cpu_period));
-    } catch (err) {
-      setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -1295,6 +1302,7 @@ function App(): JSX.Element {
                       <button key={tab} role="tab" aria-selected={detailTab === tab} className={detailTab === tab ? "active" : ""} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>
                     ))}
                   </div>
+                  {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
                   <div className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
                     <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>

@@ -493,7 +493,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Stop a running container.
     Stop {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
@@ -3493,7 +3494,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Unpause { container } => handle_unpause(&runtime, &container),
             #[cfg(target_os = "linux")]
-            Commands::Stop { container, timeout } => handle_stop(&runtime, &container, timeout),
+            Commands::Stop { containers, timeout } => handle_multiple_containers(
+                &containers,
+                "stop",
+                |container| handle_stop(&runtime, container, timeout),
+            ),
             #[cfg(target_os = "linux")]
             Commands::Kill { container, signal } => handle_kill(&runtime, &container, &signal),
             #[cfg(target_os = "linux")]
@@ -6227,14 +6232,18 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .map(|_| ()),
-        Commands::Stop { container, timeout } => request(
-            "POST",
-            format!(
-                "/containers/{}/stop?t={timeout}",
-                percent_encode_path_component(container)
-            ),
-        )
-        .map(|_| ()),
+        Commands::Stop { containers, timeout } => handle_multiple_containers(
+            containers,
+            "stop",
+            |container| request(
+                "POST",
+                format!(
+                    "/containers/{}/stop?t={timeout}",
+                    percent_encode_path_component(container)
+                ),
+            )
+            .map(|_| ()),
+        ),
         Commands::Kill { container, signal } => request(
             "POST",
             format!(
@@ -9013,6 +9022,29 @@ fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Res
         .map_err(|err| err.to_string())?;
     println!("stop: {resolved}");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_multiple_containers(
+    containers: &[String],
+    action: &str,
+    mut operation: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    if containers.is_empty() {
+        return Err(format!("{action}: at least one container is required"));
+    }
+    let mut failures = 0usize;
+    for container in containers {
+        if let Err(error) = operation(container) {
+            failures += 1;
+            eprintln!("{action}: {container}: {error}");
+        }
+    }
+    if failures == 0 {
+        Ok(())
+    } else {
+        Err(format!("{action}: {failures} container operation(s) failed"))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -19871,9 +19903,21 @@ volumes:
     fn parses_stop_command_with_timeout() {
         let cli = Cli::parse_from(["ferrocrate", "stop", "--timeout", "5", "abc123"]);
         match cli.command {
-            Commands::Stop { container, timeout } => {
-                assert_eq!(container, "abc123");
+            Commands::Stop { containers, timeout } => {
+                assert_eq!(containers, vec!["abc123"]);
                 assert_eq!(timeout, 5);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stop_multiple_containers() {
+        let cli = Cli::parse_from(["ferrocrate", "stop", "first", "second"]);
+        match cli.command {
+            Commands::Stop { containers, timeout } => {
+                assert_eq!(containers, vec!["first", "second"]);
+                assert_eq!(timeout, 10);
             }
             other => panic!("unexpected command: {other:?}"),
         }

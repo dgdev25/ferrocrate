@@ -337,4 +337,139 @@ mod tests {
             "0 20\n"
         );
     }
+
+    #[cfg(feature = "journald")]
+    #[test]
+    fn journald_driver_emits_container_id_and_message() {
+        use super::JournaldLogDriver;
+        use std::os::unix::net::UnixDatagram;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("journal.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind journal receiver");
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("timeout");
+        let context = ContainerLogContext {
+            container_id: "journal-container".into(),
+            log_dir: temp.path().join("logs"),
+            append: false,
+        };
+        let driver = JournaldLogDriver::new(&socket_path);
+        let mut writer = driver.open(&context).expect("open");
+        writer
+            .write(&LogEntry {
+                stream: LogStream::Stdout,
+                timestamp_nanos: 42,
+                bytes: b"journal hello\n".to_vec(),
+            })
+            .expect("write");
+        writer.close().expect("close");
+
+        let mut buffer = [0_u8; 4096];
+        let count = receiver.recv(&mut buffer).expect("journal datagram");
+        let entry = String::from_utf8_lossy(&buffer[..count]);
+        assert!(entry.contains("CONTAINER_ID=journal-container"), "{entry}");
+        assert!(entry.contains("MESSAGE=journal hello"), "{entry}");
+        assert!(!driver.supports_read());
+    }
+
+    #[cfg(feature = "syslog")]
+    #[test]
+    fn syslog_driver_emits_rfc5424_container_identity() {
+        use super::SyslogLogDriver;
+        use std::os::unix::net::UnixDatagram;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("syslog.sock");
+        let receiver = UnixDatagram::bind(&socket_path).expect("bind syslog receiver");
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .expect("timeout");
+        let context = ContainerLogContext {
+            container_id: "syslog-container".into(),
+            log_dir: temp.path().join("logs"),
+            append: false,
+        };
+        let driver = SyslogLogDriver::new(&socket_path);
+        let mut writer = driver.open(&context).expect("open");
+        writer
+            .write(&LogEntry {
+                stream: LogStream::Stderr,
+                timestamp_nanos: 42,
+                bytes: b"syslog warning\n".to_vec(),
+            })
+            .expect("write");
+        writer.close().expect("close");
+
+        let mut buffer = [0_u8; 4096];
+        let count = receiver.recv(&mut buffer).expect("syslog datagram");
+        let entry = String::from_utf8_lossy(&buffer[..count]);
+        assert!(entry.starts_with("<11>1 "), "{entry}");
+        assert!(entry.contains(" ferrocrate syslog-container stderr - "), "{entry}");
+        assert!(entry.ends_with("syslog warning"), "{entry}");
+        assert!(!driver.supports_read());
+    }
+
+    #[test]
+    fn published_manifest_fixture_plugin_receives_lifecycle_and_write() {
+        use super::ExternalLogDriver;
+        use crate::plugin_contract::parse_plugin_manifest;
+        use ed25519_dalek::{Signer, SigningKey};
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::test_support::acquire_env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capture = temp.path().join("capture.jsonl");
+        let entrypoint = temp.path().join("fixture-log-driver.sh");
+        std::fs::write(
+            &entrypoint,
+            include_bytes!("../../tests/fixtures/plugins/log-driver-recorder.sh"),
+        )
+        .expect("fixture entrypoint");
+        std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o700))
+            .expect("executable fixture");
+        unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
+
+        let mut manifest = parse_plugin_manifest(include_bytes!(
+            "../../tests/fixtures/plugins/log-driver-v1.json"
+        ))
+        .expect("published manifest fixture");
+        manifest.entrypoint = entrypoint.display().to_string();
+        manifest.signature.clear();
+        let key = SigningKey::from_bytes(&[17_u8; 32]);
+        let unsigned = serde_json::to_vec(&manifest).expect("canonical manifest");
+        manifest.signature = format!(
+            "ed25519:{}",
+            hex::encode(key.sign(&unsigned).to_bytes())
+        );
+
+        let context = ContainerLogContext {
+            container_id: "plugin-container".into(),
+            log_dir: temp.path().join("logs"),
+            append: false,
+        };
+        let driver = ExternalLogDriver::new(manifest, key.verifying_key()).expect("driver");
+        let mut writer = driver.open(&context).expect("open");
+        writer
+            .write(&LogEntry {
+                stream: LogStream::Stdout,
+                timestamp_nanos: 99,
+                bytes: b"plugin hello\n".to_vec(),
+            })
+            .expect("write");
+        writer.flush().expect("flush");
+        writer.close().expect("close");
+        unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
+
+        let records = std::fs::read_to_string(capture).expect("plugin capture");
+        let operations = records
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("envelope"))
+            .map(|record| record["operation"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(operations, ["open", "write", "flush", "close"]);
+        assert!(records.contains("plugin-container"), "{records}");
+        assert!(records.contains("cGx1Z2luIGhlbGxvCg=="), "{records}");
+    }
 }

@@ -271,6 +271,19 @@ pub struct RequestOrigin {
     transport: Option<TransportPrincipal>,
 }
 
+impl RequestOrigin {
+    /// Bind an authenticated entry-point origin to a durable operation while
+    /// preserving its principal, invocation channel, and transport proof.
+    pub fn for_operation(&self, request_id: [u8; 16]) -> Self {
+        let mut scoped = self.clone();
+        scoped.request_id = Some(request_id);
+        scoped.parent_request_id = None;
+        scoped.attempt = 0;
+        scoped.fanout = None;
+        scoped
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FanoutContext {
     parent_request_id: [u8; 16],

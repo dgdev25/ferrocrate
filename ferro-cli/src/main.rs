@@ -3093,7 +3093,8 @@ where
 
 #[cfg(target_os = "linux")]
 fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result<(), String> {
-    let output = execute_emergency_command(command, runtime_dir)?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let output = execute_emergency_command(command, runtime_dir, &origin)?;
     println!("{output}");
     Ok(())
 }
@@ -3102,6 +3103,7 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
 fn execute_emergency_command(
     command: &EmergencyCommands,
     runtime_dir: &Path,
+    authenticated_origin: &RequestOrigin,
 ) -> Result<String, String> {
     let output = match command {
         EmergencyCommands::SinkServe {
@@ -3233,8 +3235,7 @@ fn execute_emergency_command(
                 action,
                 resource,
                 |operation_id, material| {
-                    let origin = RequestOrigin::cli_current_for_operation(operation_id)
-                        .map_err(|error| error.to_string())?;
+                    let origin = authenticated_origin.for_operation(operation_id);
                     let container_id = resource
                         .strip_prefix("container:")
                         .ok_or("container resource must use container:ID")?;
@@ -3304,15 +3305,255 @@ struct RemoteScanRequest {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Serialize, Deserialize)]
 struct RemoteComposeRequest {
-    file: PathBuf,
+    file_name: PathBuf,
     command: ComposeCommands,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Serialize, Deserialize)]
-struct RemoteVolumeArchive {
-    name: String,
-    path: PathBuf,
+struct RemoteBuildRequest {
+    dockerfile: Option<String>,
+    ferrofile: Option<String>,
+    tag: Option<String>,
+    compression: String,
+    image_format: String,
+    embed_model: Option<String>,
+    platform: Option<String>,
+    cache_from: Option<String>,
+    cache_to: Option<String>,
+    cache_to_download: bool,
+    build_context: Vec<String>,
+    secrets: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct PreparedRemoteBuild {
+    request: RemoteBuildRequest,
+    archive: Vec<u8>,
+    cache_to: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+fn encode_metadata_archive<T: Serialize>(metadata: &T, archive: &[u8]) -> Result<Vec<u8>, String> {
+    let metadata = serde_json::to_vec(metadata).map_err(|error| error.to_string())?;
+    let length = u32::try_from(metadata.len())
+        .map_err(|_| "remote metadata is too large".to_string())?;
+    let mut payload = Vec::with_capacity(4 + metadata.len() + archive.len());
+    payload.extend_from_slice(&length.to_be_bytes());
+    payload.extend_from_slice(&metadata);
+    payload.extend_from_slice(archive);
+    Ok(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_metadata_archive<T: for<'de> Deserialize<'de>>(
+    payload: &[u8],
+) -> Result<(T, &[u8]), String> {
+    let length = payload
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .ok_or_else(|| "remote archive metadata header is truncated".to_string())?
+        as usize;
+    let metadata_end = 4usize
+        .checked_add(length)
+        .filter(|end| *end <= payload.len())
+        .ok_or_else(|| "remote archive metadata is truncated".to_string())?;
+    let metadata = serde_json::from_slice(&payload[4..metadata_end])
+        .map_err(|error| format!("remote archive metadata is invalid: {error}"))?;
+    Ok((metadata, &payload[metadata_end..]))
+}
+
+#[cfg(target_os = "linux")]
+fn append_regular_directory(
+    archive: &mut tar::Builder<Vec<u8>>,
+    root: &Path,
+    relative: &Path,
+) -> Result<(), String> {
+    let directory = root.join(relative);
+    let mut entries = std::fs::read_dir(&directory)
+        .map_err(|error| format!("archive {}: {error}", directory.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("archive {}: {error}", directory.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
+        let child = relative.join(entry.file_name());
+        if metadata.is_dir() {
+            archive
+                .append_dir(&child, entry.path())
+                .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
+            append_regular_directory(archive, root, &child)?;
+        } else if metadata.is_file() {
+            archive
+                .append_path_with_name(entry.path(), &child)
+                .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn prepare_remote_build(
+    dockerfile: Option<&str>,
+    ferrofile: Option<&str>,
+    tag: Option<&str>,
+    compression: &str,
+    image_format: &str,
+    embed_model: Option<&str>,
+    platform: Option<&str>,
+    cache_from: Option<&str>,
+    cache_to: Option<&str>,
+    build_context: &[String],
+    secrets: &[String],
+) -> Result<PreparedRemoteBuild, String> {
+    let source = ferrofile.or(dockerfile).unwrap_or("Dockerfile");
+    let source = std::fs::canonicalize(source)
+        .map_err(|error| format!("build: resolve input {source}: {error}"))?;
+    let project = source
+        .parent()
+        .ok_or_else(|| "build: input has no project directory".to_string())?;
+    let source_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "build: input file name is not valid UTF-8".to_string())?
+        .to_string();
+    let mut archive = tar::Builder::new(Vec::new());
+    append_regular_directory(&mut archive, project, Path::new("."))?;
+
+    let mut transferred_contexts = Vec::new();
+    for (index, (name, path)) in parse_build_contexts(build_context)?.into_iter().enumerate() {
+        let staged = format!(".ferrocrate-transfer/contexts/{index}");
+        if path.is_dir() {
+            archive
+                .append_dir_all(&staged, &path)
+                .map_err(|error| format!("build: archive context {name}: {error}"))?;
+        } else if path.is_file() {
+            archive
+                .append_path_with_name(&path, &staged)
+                .map_err(|error| format!("build: archive context {name}: {error}"))?;
+        } else {
+            return Err(format!("build: context {name} is not a regular file or directory"));
+        }
+        transferred_contexts.push(format!("{name}={staged}"));
+    }
+
+    let mut transferred_secrets = Vec::new();
+    for (index, (id, path)) in parse_build_secrets(secrets)?.into_iter().enumerate() {
+        let staged = format!(".ferrocrate-transfer/secrets/{index}");
+        archive
+            .append_path_with_name(&path, &staged)
+            .map_err(|error| format!("build: archive secret {id}: {error}"))?;
+        transferred_secrets.push(format!("id={id},src={staged}"));
+    }
+
+    let transferred_model = embed_model
+        .map(|path| -> Result<String, String> {
+            let staged = ".ferrocrate-transfer/embed-model".to_string();
+            archive
+                .append_path_with_name(path, &staged)
+                .map_err(|error| format!("build: archive embed model: {error}"))?;
+            Ok(staged)
+        })
+        .transpose()?;
+    let transferred_cache_from = cache_from
+        .map(|source| -> Result<String, String> {
+            if source.starts_with("registry://") {
+                return Ok(source.to_string());
+            }
+            let staged = ".ferrocrate-transfer/cache-from".to_string();
+            archive
+                .append_path_with_name(source, &staged)
+                .map_err(|error| format!("build: archive cache-from: {error}"))?;
+            Ok(staged)
+        })
+        .transpose()?;
+    let cache_to_download = cache_to.is_some_and(|value| !value.starts_with("registry://"));
+    let transferred_cache_to = cache_to.map(|destination| {
+        if destination.starts_with("registry://") {
+            destination.to_string()
+        } else {
+            ".ferrocrate-transfer/cache-to".to_string()
+        }
+    });
+    let archive = archive
+        .into_inner()
+        .map_err(|error| format!("build: finish transfer archive: {error}"))?;
+    Ok(PreparedRemoteBuild {
+        request: RemoteBuildRequest {
+            dockerfile: dockerfile.map(|_| source_name.clone()),
+            ferrofile: ferrofile.map(|_| source_name),
+            tag: tag.map(str::to_string),
+            compression: compression.to_string(),
+            image_format: image_format.to_string(),
+            embed_model: transferred_model,
+            platform: platform.map(str::to_string),
+            cache_from: transferred_cache_from,
+            cache_to: transferred_cache_to,
+            cache_to_download,
+            build_context: transferred_contexts,
+            secrets: transferred_secrets,
+        },
+        archive,
+        cache_to: cache_to
+            .filter(|value| !value.starts_with("registry://"))
+            .map(PathBuf::from),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn apply_remote_build_response(body: &[u8], cache_to: Option<&Path>) -> Result<(), String> {
+    let mut stdout = None;
+    let mut rvf = None;
+    let mut cache = None;
+    for entry in tar::Archive::new(Cursor::new(body))
+        .entries()
+        .map_err(|error| format!("build: invalid daemon response: {error}"))?
+    {
+        let mut entry = entry.map_err(|error| format!("build: invalid daemon response: {error}"))?;
+        if !entry.header().entry_type().is_file() {
+            return Err("build: daemon response contains a non-file entry".to_string());
+        }
+        let path = entry
+            .path()
+            .map_err(|error| format!("build: invalid daemon response path: {error}"))?
+            .into_owned();
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("build: read daemon response: {error}"))?;
+        if path == Path::new("stdout.txt") {
+            stdout = Some(bytes);
+        } else if path == Path::new("cache.bin") {
+            cache = Some(bytes);
+        } else if path.components().count() == 2
+            && path.starts_with("rvf")
+            && matches!(path.components().nth(1), Some(Component::Normal(_)))
+        {
+            rvf = Some((path.file_name().expect("checked RVF name").to_owned(), bytes));
+        } else {
+            return Err(format!("build: unexpected daemon response entry {}", path.display()));
+        }
+    }
+    if let Some(bytes) = stdout {
+        print!("{}", String::from_utf8_lossy(&bytes));
+    }
+    if let Some((name, bytes)) = rvf {
+        std::fs::write(&name, bytes).map_err(|error| {
+            format!("build: write RVF output {}: {error}", name.to_string_lossy())
+        })?;
+    }
+    match (cache_to, cache) {
+        (Some(path), Some(bytes)) => std::fs::write(path, bytes)
+            .map_err(|error| format!("build: write cache output {}: {error}", path.display()))?,
+        (Some(_), None) => return Err("build: daemon response omitted cache output".to_string()),
+        (None, Some(_)) => return Err("build: daemon returned an unexpected cache output".to_string()),
+        (None, None) => {}
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3506,10 +3747,6 @@ fn connect_engine_endpoint(endpoint: &EngineEndpoint) -> Result<UnixStream, Stri
     use nix::sys::socket::{getsockopt, sockopt};
 
     let stream = connect_remote_socket(&endpoint.socket)?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
-        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
     let peer = getsockopt(&stream, sockopt::PeerCredentials)
         .map_err(|error| format!("remote context peer credentials failed: {error}"))?;
     let peer_pid = u32::try_from(peer.pid())
@@ -3591,7 +3828,12 @@ impl CommandOwnership {
         match command {
             Commands::Policy { .. }
             | Commands::Witness { .. }
-            | Commands::Rvf { .. }
+            | Commands::Rvf {
+                command:
+                    RvfCommands::Inspect { .. }
+                    | RvfCommands::Extract { .. }
+                    | RvfCommands::Launch { .. },
+            }
             | Commands::Login { .. }
             | Commands::Logout { .. }
             | Commands::Daemon { .. }
@@ -3617,6 +3859,9 @@ impl CommandOwnership {
             } => Self::LocalOnly,
             Commands::Emergency {
                 command: EmergencyCommands::Execute { .. },
+            }
+            | Commands::Rvf {
+                command: RvfCommands::Import { .. },
             }
             | Commands::Run { .. }
             | Commands::Build { .. }
@@ -3679,7 +3924,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
         return handle_ai_audit(action, summary, evidence);
     }
     if let Commands::Rvf { ref command } = command {
-        return dispatch_rvf(command);
+        if !matches!(command, RvfCommands::Import { .. }) {
+            return dispatch_rvf(command);
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -4237,10 +4484,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Compose { file, command } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|err| err.to_string())?;
+                let origin = runtime
+                    .request_origin()
+                    .ok_or_else(|| "compose: authenticated request origin unavailable".to_string())?;
                 handle_compose(
                     &runtime,
                     &image_store,
                     &volume_store,
+                    &origin,
                     file.as_deref(),
                     command,
                 )
@@ -4609,6 +4860,17 @@ fn import_rvf_image_at(
     requested_reference: Option<&str>,
     runtime_path: &Path,
 ) -> Result<(), String> {
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    import_rvf_image_at_for_origin(image, requested_reference, runtime_path, &origin)
+}
+
+#[cfg(target_os = "linux")]
+fn import_rvf_image_at_for_origin(
+    image: &Path,
+    requested_reference: Option<&str>,
+    runtime_path: &Path,
+    origin: &RequestOrigin,
+) -> Result<(), String> {
     let parsed = ferro_core::rvf_image::read_rvf_image(image)
         .map_err(|error| format!("rvf import: {error}"))?;
     if parsed.manifest.os != "linux" || parsed.manifest.arch != host_build_arch() {
@@ -4674,7 +4936,6 @@ fn import_rvf_image_at(
     let manifest_json = serde_json::to_string(&manifest)
         .map_err(|error| format!("rvf import: manifest serialization failed: {error}"))?;
     let runtime = ContainerRuntime::new(runtime_path).map_err(|error| error.to_string())?;
-    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     let authorization = runtime
         .surface_authorization()
         .map_err(|error| error.to_string())?;
@@ -4689,7 +4950,7 @@ fn import_rvf_image_at(
         )
         .map_err(|error| error.to_string())?;
     let permit = authorization
-        .authorize_image_reference_write_plan(&origin, &plan)
+        .authorize_image_reference_write_plan(origin, &plan)
         .map_err(|error| error.to_string())?;
     if let Some(parent) = layer_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("rvf import: {error}"))?;
@@ -5431,7 +5692,12 @@ fn handle_run(
         let reference =
             canonicalize_reference(&format!("{}:{}", parsed.manifest.name, parsed.manifest.tag))
                 .map_err(|error| format!("run: RVF reference is invalid: {error}"))?;
-        import_rvf_image_at(Path::new(image), Some(&reference), runtime_dir)?;
+        import_rvf_image_at_for_origin(
+            Path::new(image),
+            Some(&reference),
+            runtime_dir,
+            &origin,
+        )?;
         reference
     } else {
         image.to_string()
@@ -5625,6 +5891,66 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
         std::thread::sleep(Duration::from_secs(2));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_remote_tui(
+    request: impl FnMut() -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        loop {
+            input.clear();
+            if std::io::stdin().read_line(&mut input).is_err() {
+                break;
+            }
+            if tx.send(input.trim().to_string()).is_err() {
+                break;
+            }
+        }
+    });
+    handle_remote_tui_with_input(request, rx)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_remote_tui_with_input(
+    mut request: impl FnMut() -> Result<Vec<u8>, String>,
+    input: std::sync::mpsc::Receiver<String>,
+) -> Result<(), String> {
+    loop {
+        let body = request()?;
+        let containers: Vec<serde_json::Value> = serde_json::from_slice(&body)
+            .map_err(|error| format!("tui: daemon returned invalid container state: {error}"))?;
+        print!("\x1b[2J\x1b[H");
+        println!("FerroCrate TUI (press q + Enter to quit)");
+        println!(
+            "{:<20} {:<12} {:<20} COMMAND",
+            "CONTAINER", "STATUS", "IMAGE"
+        );
+        for record in containers {
+            let name = record["Names"]
+                .as_array()
+                .and_then(|names| names.first())
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| record["Id"].as_str().unwrap_or("-"))
+                .trim_start_matches('/');
+            println!(
+                "{:<20} {:<12} {:<20} {}",
+                name,
+                record["State"].as_str().unwrap_or("unknown"),
+                record["Image"].as_str().unwrap_or("-"),
+                record["Command"].as_str().unwrap_or("")
+            );
+        }
+        if input
+            .try_recv()
+            .is_ok_and(|message| message.eq_ignore_ascii_case("q"))
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 fn handle_ai_audit(action: &str, summary: &str, evidence: &[String]) -> Result<(), String> {
@@ -5963,6 +6289,15 @@ fn remote_docker_request_stream(
     body: Option<&[u8]>,
     content_type: Option<&str>,
 ) -> Result<(u16, Vec<u8>), String> {
+    // Finite engine operations may legitimately run for many minutes.  A wait
+    // request is intentionally open ended; all other ordinary requests retain
+    // a generous finite response deadline.  Connection establishment remains
+    // independently bounded by `connect_remote_socket`.
+    let response_timeout = remote_response_timeout(path);
+    stream
+        .set_read_timeout(response_timeout)
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
     let body = body.unwrap_or_default();
     let content_header = content_type
         .map(|value| format!("Content-Type: {value}\r\n"))
@@ -5995,6 +6330,19 @@ fn remote_docker_request_stream(
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or_else(|| "remote context returned an invalid HTTP status".to_string())?;
     Ok((status, response[header_end + 4..].to_vec()))
+}
+
+#[cfg(target_os = "linux")]
+fn remote_response_timeout(path: &str) -> Option<Duration> {
+    (!path.contains("/wait?")).then_some(Duration::from_secs(30 * 60))
+}
+
+#[cfg(target_os = "linux")]
+fn clear_established_transport_timeouts(stream: &UnixStream) -> Result<(), String> {
+    stream
+        .set_read_timeout(None)
+        .and_then(|_| stream.set_write_timeout(None))
+        .map_err(|error| format!("remote context established transport setup failed: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -6047,6 +6395,10 @@ fn remote_docker_stream_on_stream<F>(
 where
     F: FnMut(&[u8]) -> Result<(), String>,
 {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
     let body = body.unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -6102,6 +6454,9 @@ where
             String::from_utf8_lossy(&response)
         ));
     }
+    // Only the response handshake is bounded.  Once a stream is established,
+    // an idle event/log/stats stream is healthy and must not fail after 30s.
+    clear_established_transport_timeouts(reader.get_mut())?;
     if chunked {
         loop {
             let mut line = String::new();
@@ -6374,6 +6729,10 @@ fn remote_docker_hijack_on_stream(
     tty: bool,
     detach_keys: &[u8],
 ) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
     let body = body.unwrap_or_default();
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -6406,6 +6765,7 @@ fn remote_docker_hijack_on_stream(
     if status != 101 {
         return Err(format!("remote context hijack returned HTTP {status}"));
     }
+    clear_established_transport_timeouts(&stream)?;
     proxy_docker_hijacked_stream(stream, stdin_requested, tty, detach_keys).map(|_| ())
 }
 
@@ -6738,6 +7098,37 @@ fn dispatch_remote_socket(
             secret,
         } => {
             (|| -> Result<(), String> {
+                let native_route = ferrofile.is_some()
+                    || compress != "gzip"
+                    || image_format != "oci"
+                    || embed_model.is_some()
+                    || cache_from.is_some()
+                    || cache_to.is_some()
+                    || !build_context.is_empty()
+                    || !secret.is_empty();
+                if native_route {
+                    let prepared = prepare_remote_build(
+                        dockerfile.as_deref(),
+                        ferrofile.as_deref(),
+                        tag.as_deref(),
+                        compress,
+                        image_format,
+                        embed_model.as_deref(),
+                        platform.as_deref(),
+                        cache_from.as_deref(),
+                        cache_to.as_deref(),
+                        build_context,
+                        secret,
+                    )?;
+                    let cache_to = prepared.cache_to.clone();
+                    let payload = encode_metadata_archive(&prepared.request, &prepared.archive)?;
+                    let response = request_with_body(
+                        "POST",
+                        "/ferrocrate/build".to_string(),
+                        Some(payload),
+                    )?;
+                    return apply_remote_build_response(&response, cache_to.as_deref());
+                }
                 if ferrofile.is_some() {
                     return Err(
                         "remote build: --ferrofile is not representable by the Docker transport"
@@ -6867,7 +7258,7 @@ fn dispatch_remote_socket(
                 percent_encode_path_component(container)
             ),
         )
-        .and_then(|body| print_json_bytes(&body)),
+        .and_then(|body| print_remote_diff(&body)),
         Commands::Cp { source, destination } => {
             dispatch_remote_copy(&request, &request_with_body, source, destination)
         }
@@ -6877,6 +7268,14 @@ fn dispatch_remote_socket(
             container,
         } => (|| -> Result<(), String> {
             let parsed = parse_detach_keys(detach_keys)?;
+            let inspect = request(
+                "GET",
+                format!(
+                    "/containers/{}/json",
+                    percent_encode_path_component(container)
+                ),
+            )?;
+            let tty = remote_container_tty(&inspect)?;
             let path = format!(
                 "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1&detachKeys={}",
                 percent_encode_path_component(container),
@@ -6885,10 +7284,10 @@ fn dispatch_remote_socket(
             );
             match owner {
                 Some(owner) => remote_docker_hijack_endpoint(
-                    owner, &path, None, !*no_stdin, false, &parsed,
+                    owner, &path, None, !*no_stdin, tty, &parsed,
                 ),
                 None => remote_docker_hijack(
-                    endpoint, &path, !*no_stdin, false, &parsed,
+                    endpoint, &path, !*no_stdin, tty, &parsed,
                 ),
             }
         })(),
@@ -6965,7 +7364,7 @@ fn dispatch_remote_socket(
             "GET",
             format!("/images/search?term={}", percent_encode_path_component(term)),
         )
-        .and_then(|body| print_json(body, "json")),
+        .and_then(|body| print_remote_search(&body)),
         Commands::Images { format, filters, quiet } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_filters(&parsed)?;
@@ -6984,12 +7383,12 @@ fn dispatch_remote_socket(
             "GET",
             format!("/images/{}/history", percent_encode_path_component(image)),
         )
-        .and_then(|body| print_json(body, format)),
+        .and_then(|body| print_remote_history(&body, format)),
         Commands::ImageInspect { image, format } => request(
             "GET",
             format!("/images/{}/json", percent_encode_path_component(image)),
         )
-        .and_then(|body| print_json(body, format)),
+        .and_then(|body| print_remote_image_inspect(&body, format)),
         Commands::Tag { source, target } => (|| -> Result<(), String> {
             let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
             let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
@@ -7494,7 +7893,7 @@ fn dispatch_remote_socket(
                     percent_encode_path_component(&encoded)
                 )
             };
-            request("GET", path).and_then(|body| print_json(body, format))
+            request("GET", path).and_then(|body| print_remote_network_list(&body, format))
         })(),
         Commands::Network {
             command: NetworkCommands::Inspect { name, format },
@@ -7502,11 +7901,11 @@ fn dispatch_remote_socket(
             "GET",
             format!("/networks/{}", percent_encode_path_component(name)),
         )
-        .and_then(|body| print_json(body, format)),
+        .and_then(|body| print_remote_network_inspect(&body, format)),
         Commands::Volume {
             command: VolumeCommands::Ls {
                 filters,
-                quiet: _,
+                quiet,
                 format,
             },
         } => (|| -> Result<(), String> {
@@ -7521,7 +7920,7 @@ fn dispatch_remote_socket(
                     percent_encode_path_component(&encoded)
                 )
             };
-            request("GET", path).and_then(|body| print_json(body, format))
+            request("GET", path).and_then(|body| print_remote_volume_list(&body, format, *quiet))
         })(),
         Commands::Volume {
             command: VolumeCommands::Prune { filters },
@@ -7545,7 +7944,7 @@ fn dispatch_remote_socket(
             "GET",
             format!("/volumes/{}", percent_encode_path_component(name)),
         )
-        .and_then(|body| print_json(body, format)),
+        .and_then(|body| print_remote_volume_inspect(&body, format)),
         Commands::Network {
             command:
                 NetworkCommands::Create {
@@ -7643,31 +8042,34 @@ fn dispatch_remote_socket(
         )
         .map(|_| ()),
         Commands::Volume {
-            command:
-                VolumeCommands::Backup { name, path }
-                | VolumeCommands::Restore { name, path },
+            command: VolumeCommands::Backup { name, path },
         } => (|| -> Result<(), String> {
-            let path = absolute_command_path(Path::new(path))?;
-            let payload = serde_json::to_vec(&RemoteVolumeArchive {
-                name: name.clone(),
-                path,
-            })
-            .map_err(|error| format!("volume archive: encode request: {error}"))?;
-            let operation = match command {
-                Commands::Volume {
-                    command: VolumeCommands::Backup { .. },
-                } => "backup",
-                Commands::Volume {
-                    command: VolumeCommands::Restore { .. },
-                } => "restore",
-                _ => unreachable!(),
-            };
+            let archive = request_with_body(
+                "POST",
+                format!(
+                    "/ferrocrate/volume/backup?name={}",
+                    percent_encode_path_component(name)
+                ),
+                None,
+            )?;
+            std::fs::write(path, archive).map_err(|error| format!("volume backup: {error}"))?;
+            println!("volume backup: {name} -> {path}");
+            Ok(())
+        })(),
+        Commands::Volume {
+            command: VolumeCommands::Restore { name, path },
+        } => (|| -> Result<(), String> {
+            let archive = std::fs::read(path).map_err(|error| format!("volume restore: {error}"))?;
             request_with_body(
                 "POST",
-                format!("/ferrocrate/volume/{operation}"),
-                Some(payload),
-            )
-            .map(|body| print!("{}", String::from_utf8_lossy(&body)))
+                format!(
+                    "/ferrocrate/volume/restore?name={}",
+                    percent_encode_path_component(name)
+                ),
+                Some(archive),
+            )?;
+            println!("volume restore: {name} <- {path}");
+            Ok(())
         })(),
         Commands::BuildCachePrune {
             max_entries,
@@ -7687,6 +8089,18 @@ fn dispatch_remote_socket(
                 println!("build-cache prune: removed={removed} retained_max={max_entries}");
                 Ok(())
             }
+        })(),
+        Commands::Rvf {
+            command: RvfCommands::Import { image, reference },
+        } => (|| -> Result<(), String> {
+            let bytes = std::fs::read(image).map_err(|error| format!("rvf import: {error}"))?;
+            let mut path = "/ferrocrate/rvf/import".to_string();
+            if let Some(reference) = reference {
+                path.push_str("?reference=");
+                path.push_str(&percent_encode_path_component(reference));
+            }
+            request_with_body("POST", path, Some(bytes))
+                .map(|body| print!("{}", String::from_utf8_lossy(&body)))
         })(),
         Commands::Emergency {
             command:
@@ -7714,10 +8128,9 @@ fn dispatch_remote_socket(
                 })
                 .map(|body| print!("{}", String::from_utf8_lossy(&body)))
         }
-        Commands::Tui => Err(
-            "tui: interactive mode is unavailable while another process owns the engine"
-                .to_string(),
-        ),
+        Commands::Tui => handle_remote_tui(|| {
+            request("GET", "/containers/json?all=1".to_string())
+        }),
         Commands::Scan { image, scanner } => serde_json::to_vec(&RemoteScanRequest {
             image: image.clone(),
             scanner: scanner.clone(),
@@ -7732,10 +8145,23 @@ fn dispatch_remote_socket(
                 .map_err(|error| error.to_string())?
                 .canonicalize()
                 .map_err(|error| format!("compose: resolve file: {error}"))?;
-            let payload = serde_json::to_vec(&RemoteComposeRequest {
-                file,
+            let project_dir = file
+                .parent()
+                .ok_or_else(|| "compose: file has no project directory".to_string())?;
+            let file_name = file
+                .file_name()
+                .map(PathBuf::from)
+                .ok_or_else(|| "compose: file has no file name".to_string())?;
+            let mut archive = tar::Builder::new(Vec::new());
+            append_regular_directory(&mut archive, project_dir, Path::new("."))
+                .map_err(|error| format!("compose: archive project: {error}"))?;
+            let archive = archive
+                .into_inner()
+                .map_err(|error| format!("compose: finish project archive: {error}"))?;
+            let payload = encode_metadata_archive(&RemoteComposeRequest {
+                file_name,
                 command: command.clone(),
-            })
+            }, &archive)
             .map_err(|error| format!("compose: encode request: {error}"))?;
             request_with_body(
                 "POST",
@@ -7746,7 +8172,12 @@ fn dispatch_remote_socket(
         })(),
         Commands::Policy { .. }
         | Commands::Witness { .. }
-        | Commands::Rvf { .. }
+        | Commands::Rvf {
+            command:
+                RvfCommands::Inspect { .. }
+                | RvfCommands::Extract { .. }
+                | RvfCommands::Launch { .. },
+        }
         | Commands::Login { .. }
         | Commands::Logout { .. }
         | Commands::Daemon { .. }
@@ -7815,6 +8246,16 @@ fn print_remote_container_list(
         println!("{id} {image} {status} {name}");
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remote_container_tty(body: &[u8]) -> Result<bool, String> {
+    let inspect: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote attach inspect returned invalid JSON: {error}"))?;
+    inspect
+        .pointer("/Config/Tty")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "remote attach inspect response omitted Config.Tty".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -7919,6 +8360,193 @@ fn print_remote_image_list(body: &[u8], format: &str, quiet: bool) -> Result<(),
 }
 
 #[cfg(target_os = "linux")]
+fn print_remote_diff(body: &[u8]) -> Result<(), String> {
+    print!("{}", format_remote_diff_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_diff_text(body: &[u8]) -> Result<String, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote diff returned invalid JSON: {error}"))?;
+    let mut output = String::new();
+    for entry in entries {
+        let kind = match entry["Kind"].as_i64().unwrap_or_default() {
+            1 => "A",
+            2 => "D",
+            _ => "C",
+        };
+        output.push_str(&format!("{kind} {}\n", entry["Path"].as_str().unwrap_or_default()));
+    }
+    Ok(output)
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_search(body: &[u8]) -> Result<(), String> {
+    print!("{}", format_remote_search_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_search_text(body: &[u8]) -> Result<String, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote search returned invalid JSON: {error}"))?;
+    let mut output = "NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED\n".to_string();
+    for entry in entries {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            entry["Name"].as_str().unwrap_or_default(),
+            entry["Description"].as_str().unwrap_or_default(),
+            entry["StarCount"],
+            entry["Official"],
+            entry["Automated"],
+        ));
+    }
+    Ok(output)
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_history(body: &[u8], format: &str) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_history_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_history_text(body: &[u8]) -> Result<String, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote history returned invalid JSON: {error}"))?;
+    Ok(entries
+        .iter()
+        .map(|entry| format!(
+            "{} {} {}\n",
+            entry["Id"].as_str().unwrap_or("<unknown>"),
+            entry["Size"].as_u64().unwrap_or_default(),
+            entry["Created"].as_i64().unwrap_or_default(),
+        ))
+        .collect::<String>())
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_image_inspect(body: &[u8], format: &str) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_image_inspect_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_image_inspect_text(body: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote image inspect returned invalid JSON: {error}"))?;
+    Ok(format!(
+        "Id: {}\nRepoTags: {}\nCreated: {}\n",
+        value["Id"], value["RepoTags"][0], value["Created"]
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_network_list(body: &[u8], format: &str) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_network_list_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_network_list_text(body: &[u8]) -> Result<String, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote network list returned invalid JSON: {error}"))?;
+    let mut text = "NAME\tDRIVER\tSUBNET\tGATEWAY\n".to_string();
+    for entry in &entries {
+        let ipam = &entry["IPAM"]["Config"][0];
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            entry["Name"].as_str().unwrap_or_default(),
+            entry["Driver"].as_str().unwrap_or_default(),
+            ipam["Subnet"].as_str().unwrap_or_default(),
+            ipam["Gateway"].as_str().unwrap_or_default(),
+        ));
+    }
+    Ok(text)
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_network_inspect(body: &[u8], format: &str) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_network_inspect_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_network_inspect_text(body: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote network inspect returned invalid JSON: {error}"))?;
+    Ok(format!(
+        "Name: {}\nDriver: {}\nScope: {}\n",
+        value["Name"], value["Driver"], value["Scope"]
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_volume_list(body: &[u8], format: &str, quiet: bool) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote volume list returned invalid JSON: {error}"))?;
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_volume_list_text(&value, quiet));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_volume_list_text(value: &serde_json::Value, quiet: bool) -> String {
+    let volumes = value["Volumes"].as_array().cloned().unwrap_or_default();
+    let mut output = String::new();
+    if quiet {
+        for volume in volumes {
+            output.push_str(&format!("{}\n", volume["Name"].as_str().unwrap_or_default()));
+        }
+    } else if volumes.is_empty() {
+        output.push_str("volumes: no entries\n");
+    } else {
+        for volume in volumes {
+            output.push_str(&format!(
+                "{} {}\n",
+                volume["Name"].as_str().unwrap_or_default(),
+                volume["Mountpoint"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+    output
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_volume_inspect(body: &[u8], format: &str) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    print!("{}", format_remote_volume_inspect_text(body)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn format_remote_volume_inspect_text(body: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote volume inspect returned invalid JSON: {error}"))?;
+    Ok(format!(
+        "Name: {}\nDriver: {}\nMountpoint: {}\n",
+        value["Name"], value["Driver"], value["Mountpoint"]
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn print_remote_info(body: &[u8]) -> Result<(), String> {
     let body: serde_json::Value = serde_json::from_slice(body)
         .map_err(|error| format!("remote info returned invalid JSON: {error}"))?;
@@ -7957,16 +8585,6 @@ fn print_json_bytes(body: &[u8]) -> Result<(), String> {
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
     );
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn absolute_command_path(path: &Path) -> Result<PathBuf, String> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    std::env::current_dir()
-        .map(|directory| directory.join(path))
-        .map_err(|error| format!("resolve command path: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -8921,6 +9539,45 @@ fn handle_build(
     build_context: &[String],
     secrets: &[String],
 ) -> Result<(), String> {
+    let output = execute_build(
+        store,
+        origin,
+        authorization,
+        dockerfile,
+        ferrofile,
+        tag,
+        compression,
+        image_format,
+        embed_model,
+        platform,
+        cache_from,
+        cache_to,
+        build_context,
+        secrets,
+        None,
+    )?;
+    print!("{output}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_build(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    dockerfile: Option<&str>,
+    ferrofile: Option<&str>,
+    tag: Option<&str>,
+    compression: &str,
+    image_format: &str,
+    embed_model: Option<&str>,
+    platform: Option<&str>,
+    cache_from: Option<&str>,
+    cache_to: Option<&str>,
+    build_context: &[String],
+    secrets: &[String],
+    artifact_dir: Option<&Path>,
+) -> Result<String, String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
@@ -9019,7 +9676,9 @@ fn handle_build(
         let (img_name, img_tag) = split_reference(reference);
         let output_name = reference.replace(':', "-").replace('/', "_");
         let output_path_str = format!("{}.rvf", output_name);
-        let output_path = Path::new(&output_path_str);
+        let output_path = artifact_dir
+            .map(|directory| directory.join(&output_path_str))
+            .unwrap_or_else(|| PathBuf::from(&output_path_str));
 
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -9046,7 +9705,7 @@ fn handle_build(
             layer_digest: &result.layer_digest,
             runtime_dir: &runtime_dir,
             embed_model_path: embed_model.map(Path::new),
-            output_path,
+            output_path: &output_path,
         };
 
         let rvf = ferro_core::rvf_image::build_rvf_image(&params).map_err(|e| e.to_string())?;
@@ -9073,16 +9732,15 @@ fn handle_build(
             }
         }
 
-        println!(
-            "build: {} tag={} format=rvf output={} digest={} size={} segments={}",
+        return Ok(format!(
+            "build: {} tag={} format=rvf output={} digest={} size={} segments={}\n",
             source_desc,
             reference,
             rvf.output_path.display(),
             rvf.file_digest,
             rvf.file_size,
             rvf.segment_count,
-        );
-        return Ok(());
+        ));
     }
 
     if let Some(destination) = cache_to {
@@ -9104,11 +9762,10 @@ fn handle_build(
         }
     }
 
-    println!(
-        "build: {} tag={} layer_digest={} config_digest={}",
+    Ok(format!(
+        "build: {} tag={} layer_digest={} config_digest={}\n",
         source_desc, result.reference, result.layer_digest, result.config_digest
-    );
-    Ok(())
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -12001,7 +12658,8 @@ fn handle_scan(
     scanner: &str,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    let output = scan_image(store, image, scanner, authorization)?;
+    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
+    let output = scan_image(store, image, scanner, authorization, &origin)?;
     println!("{output}");
     Ok(())
 }
@@ -12012,9 +12670,9 @@ fn scan_image(
     image: &str,
     scanner: &str,
     authorization: &SurfaceAuthorization,
+    origin: &RequestOrigin,
 ) -> Result<String, String> {
-    let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    ensure_image_present(store, image, &origin, authorization)?;
+    ensure_image_present(store, image, origin, authorization)?;
     let runtime_dir = runtime_dir();
     let layer_paths = resolve_layer_paths_with_store(&runtime_dir, image, store)
         .map_err(|err| format!("scan: missing image layers: {err}"))?;
@@ -12530,6 +13188,7 @@ fn handle_compose(
     runtime: &ContainerRuntime,
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
+    authenticated_origin: &RequestOrigin,
     file: Option<&str>,
     command: ComposeCommands,
 ) -> Result<String, String> {
@@ -12586,8 +13245,7 @@ fn handle_compose(
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
-                .map_err(|error| format!("compose identity resolution failed: {error}"))?;
+            let parent_origin = authenticated_origin.clone();
             let mut parent_hasher = Sha256::new();
             parent_hasher.update(b"ferrocrate/compose-parent/v1");
             parent_hasher.update(std::process::id().to_be_bytes());
@@ -12884,6 +13542,7 @@ fn handle_compose(
                     runtime,
                     store,
                     volume_store,
+                    authenticated_origin,
                     file,
                     ComposeCommands::Up {
                         profile: profile.clone(),
@@ -12903,6 +13562,7 @@ fn handle_compose(
                     runtime,
                     store,
                     volume_store,
+                    authenticated_origin,
                     file,
                     ComposeCommands::Down { services: Vec::new() },
                 )?;
@@ -12957,8 +13617,7 @@ fn handle_compose(
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            let parent_origin = ferro_core::authorization::RequestOrigin::cli_current()
-                .map_err(|error| format!("compose identity resolution failed: {error}"))?;
+            let parent_origin = authenticated_origin.clone();
             let surface_authorization = runtime
                 .surface_authorization()
                 .map_err(|error| error.to_string())?;
@@ -15414,8 +16073,139 @@ fn handle_docker_compat_connection(
                         sink: request.sink,
                     },
                     runtime_dir.as_ref(),
+                    &origin,
                 )?;
                 http_response(200, output.as_bytes(), "text/plain")
+            }
+            ("POST", "/ferrocrate/rvf/import") => {
+                if request.body.is_empty() {
+                    return Err("rvf import: image body is required".to_string());
+                }
+                let image = tempfile::NamedTempFile::new()
+                    .map_err(|error| format!("rvf import: stage image: {error}"))?;
+                std::fs::write(image.path(), &request.body)
+                    .map_err(|error| format!("rvf import: stage image: {error}"))?;
+                import_rvf_image_at_for_origin(
+                    image.path(),
+                    query.get("reference").map(String::as_str),
+                    runtime_dir.as_ref(),
+                    &origin,
+                )?;
+                http_response(200, b"imported\n", "text/plain")
+            }
+            ("POST", "/ferrocrate/build") => {
+                let (request, archive): (RemoteBuildRequest, &[u8]) =
+                    decode_metadata_archive(&request.body)
+                        .map_err(|error| format!("build: invalid request: {error}"))?;
+                let workspace = tempfile::tempdir()
+                    .map_err(|error| format!("build: create workspace: {error}"))?;
+                extract_docker_build_context(archive, workspace.path())?;
+                let resolve = |value: &str| -> Result<String, String> {
+                    let path = Path::new(value);
+                    if path.is_absolute()
+                        || path.components().any(|component| {
+                            matches!(component, Component::ParentDir | Component::Prefix(_))
+                        })
+                    {
+                        return Err("build: transferred path must stay inside the workspace".to_string());
+                    }
+                    Ok(workspace.path().join(path).to_string_lossy().into_owned())
+                };
+                let dockerfile = request.dockerfile.as_deref().map(&resolve).transpose()?;
+                let ferrofile = request.ferrofile.as_deref().map(&resolve).transpose()?;
+                let embed_model = request.embed_model.as_deref().map(&resolve).transpose()?;
+                let cache_from = request
+                    .cache_from
+                    .as_deref()
+                    .map(|value| {
+                        if value.starts_with("registry://") {
+                            Ok(value.to_string())
+                        } else {
+                            resolve(value)
+                        }
+                    })
+                    .transpose()?;
+                let cache_to = request
+                    .cache_to
+                    .as_deref()
+                    .map(|value| {
+                        if value.starts_with("registry://") {
+                            Ok(value.to_string())
+                        } else {
+                            resolve(value)
+                        }
+                    })
+                    .transpose()?;
+                let build_context = request
+                    .build_context
+                    .iter()
+                    .map(|value| {
+                        let (name, path) = value
+                            .split_once('=')
+                            .ok_or_else(|| "build: invalid transferred context".to_string())?;
+                        Ok(format!("{name}={}", resolve(path)?))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let secrets = request
+                    .secrets
+                    .iter()
+                    .map(|value| {
+                        let (prefix, path) = value
+                            .rsplit_once("src=")
+                            .ok_or_else(|| "build: invalid transferred secret".to_string())?;
+                        Ok(format!("{prefix}src={}", resolve(path)?))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let output = execute_build(
+                    &store,
+                    &origin,
+                    &surface_authorization,
+                    dockerfile.as_deref(),
+                    ferrofile.as_deref(),
+                    request.tag.as_deref(),
+                    &request.compression,
+                    &request.image_format,
+                    embed_model.as_deref(),
+                    request.platform.as_deref(),
+                    cache_from.as_deref(),
+                    cache_to.as_deref(),
+                    &build_context,
+                    &secrets,
+                    Some(workspace.path()),
+                )?;
+                let mut response = tar::Builder::new(Vec::new());
+                let mut header = tar::Header::new_gnu();
+                header.set_path("stdout.txt").map_err(|error| error.to_string())?;
+                header.set_size(output.len() as u64);
+                header.set_cksum();
+                response
+                    .append(&header, output.as_bytes())
+                    .map_err(|error| format!("build: archive response: {error}"))?;
+                if request.image_format == "rvf" {
+                    let rvf = std::fs::read_dir(workspace.path())
+                        .map_err(|error| format!("build: inspect RVF output: {error}"))?
+                        .filter_map(Result::ok)
+                        .find(|entry| entry.path().extension().is_some_and(|value| value == "rvf"))
+                        .ok_or_else(|| "build: RVF output was not produced".to_string())?;
+                    response
+                        .append_path_with_name(
+                            rvf.path(),
+                            Path::new("rvf").join(rvf.file_name()),
+                        )
+                        .map_err(|error| format!("build: archive RVF output: {error}"))?;
+                }
+                if request.cache_to_download {
+                    let cache = cache_to
+                        .as_deref()
+                        .ok_or_else(|| "build: cache output path is missing".to_string())?;
+                    response
+                        .append_path_with_name(cache, "cache.bin")
+                        .map_err(|error| format!("build: archive cache output: {error}"))?;
+                }
+                let response = response
+                    .into_inner()
+                    .map_err(|error| format!("build: finish response: {error}"))?;
+                http_response(200, &response, "application/x-tar")
             }
             ("POST", "/ferrocrate/scan") => {
                 let request: RemoteScanRequest = serde_json::from_slice(&request.body)
@@ -15425,20 +16215,34 @@ fn handle_docker_compat_connection(
                     &request.image,
                     &request.scanner,
                     &surface_authorization,
+                    &origin,
                 )?;
                 http_response(200, output.as_bytes(), "application/json")
             }
             ("POST", "/ferrocrate/compose") => {
-                let request: RemoteComposeRequest = serde_json::from_slice(&request.body)
-                    .map_err(|error| format!("compose: invalid request: {error}"))?;
-                let file = request
-                    .file
+                let (request, archive): (RemoteComposeRequest, &[u8]) =
+                    decode_metadata_archive(&request.body)
+                        .map_err(|error| format!("compose: invalid request: {error}"))?;
+                if request.file_name.components().count() != 1
+                    || !matches!(
+                        request.file_name.components().next(),
+                        Some(Component::Normal(_))
+                    )
+                {
+                    return Err("compose: file name must be one safe path component".to_string());
+                }
+                let project = tempfile::tempdir()
+                    .map_err(|error| format!("compose: create project workspace: {error}"))?;
+                extract_docker_build_context(archive, project.path())?;
+                let file_path = project.path().join(&request.file_name);
+                let file = file_path
                     .to_str()
-                    .ok_or_else(|| "compose: file path is not valid UTF-8".to_string())?;
+                    .ok_or_else(|| "compose: staged file path is not valid UTF-8".to_string())?;
                 let output = handle_compose(
                     &runtime,
                     &store,
                     &volume_store,
+                    &origin,
                     Some(file),
                     request.command,
                 )?;
@@ -15446,33 +16250,55 @@ fn handle_docker_compat_connection(
             }
             ("POST", "/ferrocrate/volume/backup")
             | ("POST", "/ferrocrate/volume/restore") => {
-                let request: RemoteVolumeArchive = serde_json::from_slice(&request.body)
-                    .map_err(|error| format!("volume archive: invalid request: {error}"))?;
-                let operation = if path.ends_with("/backup") {
-                    VolumeCommands::Backup {
-                        name: request.name.clone(),
-                        path: request.path.to_string_lossy().into_owned(),
+                let name = query
+                    .get("name")
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| "volume archive: name is required".to_string())?;
+                if path.ends_with("/backup") {
+                    if !request.body.is_empty() {
+                        return Err("volume backup: request body must be empty".to_string());
                     }
+                    let permit = surface_authorization
+                        .authorize_named(
+                            &origin,
+                            AuthorizationAction::VolumeCreate,
+                            ResourceKind::Volume,
+                            name,
+                            1,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let archive = tempfile::NamedTempFile::new()
+                        .map_err(|error| format!("volume backup: create archive: {error}"))?;
+                    let result = volume_store
+                        .backup(name, archive.path())
+                        .map_err(|error| error.to_string())
+                        .and_then(|_| {
+                            std::fs::read(archive.path())
+                                .map_err(|error| format!("volume backup: read archive: {error}"))
+                        });
+                    permit
+                        .finish(result.is_ok())
+                        .map_err(|error| error.to_string())?;
+                    http_response(200, &result?, "application/x-tar")
                 } else {
-                    VolumeCommands::Restore {
-                        name: request.name.clone(),
-                        path: request.path.to_string_lossy().into_owned(),
+                    if request.body.is_empty() {
+                        return Err("volume restore: archive body is required".to_string());
                     }
-                };
-                handle_volume_authorized(
-                    runtime_dir.as_ref(),
-                    operation,
-                    &origin,
-                    &surface_authorization,
-                )?;
-                let output = format!(
-                    "volume {}: {} {} {}\n",
-                    if path.ends_with("/backup") { "backup" } else { "restore" },
-                    request.name,
-                    if path.ends_with("/backup") { "->" } else { "<-" },
-                    request.path.display()
-                );
-                http_response(200, output.as_bytes(), "text/plain")
+                    let archive = tempfile::NamedTempFile::new()
+                        .map_err(|error| format!("volume restore: create archive: {error}"))?;
+                    std::fs::write(archive.path(), &request.body)
+                        .map_err(|error| format!("volume restore: stage archive: {error}"))?;
+                    handle_volume_authorized(
+                        runtime_dir.as_ref(),
+                        VolumeCommands::Restore {
+                            name: name.clone(),
+                            path: archive.path().to_string_lossy().into_owned(),
+                        },
+                        &origin,
+                        &surface_authorization,
+                    )?;
+                    http_response(200, &[], "text/plain")
+                }
             }
             ("GET", "/events") => {
                 let follow = query
@@ -20527,11 +21353,136 @@ mod tests {
     }
 
     #[test]
+    fn owned_stream_endpoint_rejects_peer_process_replacement() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let socket = runtime.path().join("replacement-stream.sock");
+        let listener = UnixListener::bind(&socket).expect("bind replacement socket");
+        let endpoint = EngineEndpoint {
+            socket,
+            pid: std::process::id().saturating_add(1),
+            uid: nix::unistd::geteuid().as_raw(),
+        };
+        let error = super::remote_docker_stream_request_endpoint(
+            &endpoint,
+            "GET",
+            "/events?follow=1",
+            None,
+            |_| Ok(()),
+        )
+        .expect_err("replacement stream peer must be rejected");
+        assert!(error.contains("peer identity mismatch"), "{error}");
+        drop(listener);
+    }
+
+    #[test]
+    fn owned_hijack_endpoint_rejects_peer_process_replacement() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let socket = runtime.path().join("replacement-hijack.sock");
+        let listener = UnixListener::bind(&socket).expect("bind replacement socket");
+        let endpoint = EngineEndpoint {
+            socket,
+            pid: std::process::id().saturating_add(1),
+            uid: nix::unistd::geteuid().as_raw(),
+        };
+        let error = super::remote_docker_hijack_endpoint(
+            &endpoint,
+            "/containers/demo/attach",
+            None,
+            false,
+            false,
+            &[],
+        )
+        .expect_err("replacement hijack peer must be rejected");
+        assert!(error.contains("peer identity mismatch"), "{error}");
+        drop(listener);
+    }
+
+    #[test]
+    fn delegated_attach_uses_inspected_tty_mode() {
+        assert!(super::remote_container_tty(br#"{"Config":{"Tty":true}}"#)
+            .expect("TTY inspect"));
+        assert!(!super::remote_container_tty(br#"{"Config":{"Tty":false}}"#)
+            .expect("non-TTY inspect"));
+        assert!(super::remote_container_tty(br#"{"Config":{}}"#).is_err());
+    }
+
+    #[test]
+    fn transport_deadlines_are_phased_for_long_requests_and_established_streams() {
+        assert_eq!(
+            super::remote_response_timeout("/build"),
+            Some(Duration::from_secs(30 * 60))
+        );
+        assert_eq!(
+            super::remote_response_timeout("/containers/demo/wait?condition=not-running"),
+            None
+        );
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("transport pair");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+            .expect("set handshake deadlines");
+        super::clear_established_transport_timeouts(&stream)
+            .expect("clear established stream deadlines");
+        assert_eq!(stream.read_timeout().expect("read timeout"), None);
+        assert_eq!(stream.write_timeout().expect("write timeout"), None);
+    }
+
+    #[test]
+    fn delegated_text_presenters_preserve_native_cli_shapes_and_quiet() {
+        assert_eq!(
+            super::format_remote_diff_text(br#"[{"Path":"/tmp/new","Kind":1}]"#)
+                .expect("diff text"),
+            "A /tmp/new\n"
+        );
+        assert!(super::format_remote_search_text(
+            br#"[{"Name":"demo","Description":"fixture","StarCount":2,"Official":false,"Automated":true}]"#
+        )
+        .expect("search text")
+        .starts_with("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED\n"));
+        assert_eq!(
+            super::format_remote_history_text(
+                br#"[{"Id":"sha256:abc","Size":7,"Created":11}]"#
+            )
+            .expect("history text"),
+            "sha256:abc 7 11\n"
+        );
+        assert!(super::format_remote_image_inspect_text(
+            br#"{"Id":"sha256:abc","RepoTags":["demo:latest"],"Created":"now"}"#
+        )
+        .expect("image inspect text")
+        .starts_with("Id: \"sha256:abc\"\nRepoTags: \"demo:latest\"\n"));
+        assert!(super::format_remote_network_list_text(
+            br#"[{"Name":"mesh","Driver":"bridge","IPAM":{"Config":[{"Subnet":"10.2.0.0/24","Gateway":"10.2.0.1"}]}}]"#
+        )
+        .expect("network list text")
+        .contains("mesh\tbridge\t10.2.0.0/24\t10.2.0.1\n"));
+        assert!(super::format_remote_network_inspect_text(
+            br#"{"Name":"mesh","Driver":"bridge","Scope":"local"}"#
+        )
+        .expect("network inspect text")
+        .starts_with("Name: \"mesh\"\nDriver: \"bridge\"\n"));
+        let volumes = serde_json::json!({
+            "Volumes": [{"Name": "data", "Mountpoint": "/runtime/volumes/data/_data"}]
+        });
+        assert_eq!(super::format_remote_volume_list_text(&volumes, true), "data\n");
+        assert_eq!(
+            super::format_remote_volume_list_text(&volumes, false),
+            "data /runtime/volumes/data/_data\n"
+        );
+        assert!(super::format_remote_volume_inspect_text(
+            br#"{"Name":"data","Driver":"local","Mountpoint":"/runtime/volumes/data/_data"}"#
+        )
+        .expect("volume inspect text")
+        .starts_with("Name: \"data\"\nDriver: \"local\"\n"));
+    }
+
+    #[test]
     fn command_ownership_classification_covers_local_and_engine_state() {
         for args in [
             vec!["ferrocrate", "config", "get", "detachKeys"],
             vec!["ferrocrate", "doctor"],
             vec!["ferrocrate", "entitlement", "status"],
+            vec!["ferrocrate", "rvf", "inspect", "fixture.rvf"],
         ] {
             let command = Cli::try_parse_from(args).expect("parse local command").command;
             assert_eq!(CommandOwnership::for_command(&command), CommandOwnership::LocalOnly);
@@ -20540,6 +21491,8 @@ mod tests {
             vec!["ferrocrate", "create", "busybox"],
             vec!["ferrocrate", "info"],
             vec!["ferrocrate", "compose", "ps"],
+            vec!["ferrocrate", "rvf", "import", "fixture.rvf"],
+            vec!["ferrocrate", "tui"],
         ] {
             let command = Cli::try_parse_from(args).expect("parse engine command").command;
             assert_eq!(CommandOwnership::for_command(&command), CommandOwnership::Engine);
@@ -20612,6 +21565,7 @@ mod tests {
         std::fs::write(&compose_file, "services: {}\n").expect("write compose file");
         let compose_socket = temp.path().join("compose.sock");
         let compose_listener = UnixListener::bind(&compose_socket).expect("bind compose socket");
+        let forbidden = compose_file.display().to_string();
         let compose_worker = std::thread::spawn(move || {
             let (mut stream, _) = compose_listener.accept().expect("accept compose request");
             let mut request = Vec::new();
@@ -20619,6 +21573,8 @@ mod tests {
             let request = String::from_utf8_lossy(&request);
             assert!(request.contains("POST /ferrocrate/compose"));
             assert!(request.contains("\"command\":\"config\""));
+            assert!(!request.contains(&forbidden), "daemon request exposed client path");
+            assert!(request.contains("services: {}"), "compose content was not transferred");
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nservices: {}\n",
@@ -20638,6 +21594,232 @@ mod tests {
             .expect("compose must be claimed")
             .expect("compose should route");
         compose_worker.join().expect("compose route worker");
+    }
+
+    #[test]
+    fn volume_archive_delegation_transfers_bytes_without_daemon_path_access() {
+        let temp = tempfile::tempdir().expect("volume archive fixture");
+        let output = temp.path().join("backup.tar");
+        let socket = temp.path().join("backup.sock");
+        let listener = UnixListener::bind(&socket).expect("bind backup socket");
+        let forbidden = output.display().to_string();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept backup request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read backup request");
+            assert!(String::from_utf8_lossy(&request).contains("POST /ferrocrate/volume/backup"));
+            assert!(
+                !String::from_utf8_lossy(&request).contains(&forbidden),
+                "daemon request exposed the client output path"
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\narchive-bytes",
+                )
+                .expect("respond with archive");
+        });
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "volume",
+            "backup",
+            "data",
+            output.to_str().expect("output path"),
+        ])
+        .expect("parse volume backup")
+        .command;
+        super::dispatch_remote_socket(&command, &socket, None)
+            .expect("backup must be claimed")
+            .expect("backup should route");
+        worker.join().expect("backup worker");
+        assert_eq!(std::fs::read(&output).expect("client backup"), b"archive-bytes");
+
+        let input = temp.path().join("restore.tar");
+        std::fs::write(&input, b"restore-bytes").expect("restore fixture");
+        let socket = temp.path().join("restore.sock");
+        let listener = UnixListener::bind(&socket).expect("bind restore socket");
+        let forbidden = input.display().to_string();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept restore request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read restore request");
+            assert!(String::from_utf8_lossy(&request).contains("POST /ferrocrate/volume/restore"));
+            assert!(!String::from_utf8_lossy(&request).contains(&forbidden));
+            assert!(request.ends_with(b"restore-bytes"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("respond to restore");
+        });
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "volume",
+            "restore",
+            "data",
+            input.to_str().expect("input path"),
+        ])
+        .expect("parse volume restore")
+        .command;
+        super::dispatch_remote_socket(&command, &socket, None)
+            .expect("restore must be claimed")
+            .expect("restore should route");
+        worker.join().expect("restore worker");
+    }
+
+    #[test]
+    fn rvf_import_delegates_before_any_local_image_store_access() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let previous_runtime = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let temp = tempfile::tempdir().expect("rvf route fixture");
+        let image = temp.path().join("fixture.rvf");
+        std::fs::write(&image, b"rvf-transfer").expect("rvf fixture");
+        let socket = temp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind daemon socket");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let mut daemon = EngineLockGuard::try_acquire(temp.path())
+            .expect("daemon lock")
+            .expect("unowned runtime");
+        daemon.publish_daemon_owner(&socket).expect("publish owner");
+        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).expect("read RVF request");
+                if request.is_empty() {
+                    continue;
+                }
+                assert!(String::from_utf8_lossy(&request).contains("POST /ferrocrate/rvf/import"));
+                assert!(request.ends_with(b"rvf-transfer"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nimported\n",
+                    )
+                    .expect("respond to RVF import");
+                break;
+            }
+        });
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "rvf",
+            "import",
+            image.to_str().expect("RVF path"),
+            "--reference",
+            "local/delegated:latest",
+        ])
+        .expect("parse RVF import")
+        .command;
+        let result = super::dispatch(command);
+        worker.join().expect("RVF route worker");
+        match previous_runtime {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+        }
+        result.expect("RVF import should delegate");
+    }
+
+    #[test]
+    fn native_build_options_use_authenticated_daemon_build_route() {
+        let temp = tempfile::tempdir().expect("native build fixture");
+        let ferrofile = temp.path().join("Ferrofile");
+        std::fs::write(&ferrofile, "image = \"scratch\"\n").expect("write Ferrofile");
+        let model = temp.path().join("model.bin");
+        std::fs::write(&model, b"model-bytes").expect("write model");
+        let secret = temp.path().join("token.txt");
+        std::fs::write(&secret, b"secret-bytes").expect("write secret");
+        let context = temp.path().join("aux-context");
+        std::fs::create_dir(&context).expect("create named context");
+        std::fs::write(context.join("fixture.txt"), b"context-bytes").expect("write context");
+        let cache_from = temp.path().join("cache-from.bin");
+        std::fs::write(&cache_from, b"cache-input").expect("write cache input");
+        let cache_to = temp.path().join("cache-to.bin");
+        let socket = temp.path().join("build.sock");
+        let listener = UnixListener::bind(&socket).expect("bind build socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept build request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read build request");
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.contains("POST /ferrocrate/build"));
+            assert!(request_text.contains("Ferrofile"));
+            for transferred in ["model-bytes", "secret-bytes", "context-bytes", "cache-input"] {
+                assert!(request_text.contains(transferred), "missing {transferred}");
+            }
+            let output = b"build: complete\n";
+            let mut archive = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_path("stdout.txt").expect("response path");
+            header.set_size(output.len() as u64);
+            header.set_cksum();
+            archive.append(&header, &output[..]).expect("response output");
+            let cache = b"cache-output";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("cache.bin").expect("cache response path");
+            header.set_size(cache.len() as u64);
+            header.set_cksum();
+            archive.append(&header, &cache[..]).expect("response cache");
+            let archive = archive.into_inner().expect("finish response archive");
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                archive.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .and_then(|_| stream.write_all(&archive))
+                .expect("respond to build");
+        });
+        let command = Cli::try_parse_from(vec![
+            "ferrocrate".to_string(),
+            "build".to_string(),
+            "--ferrofile".to_string(),
+            ferrofile.to_string_lossy().into_owned(),
+            "--compress".to_string(),
+            "zstd".to_string(),
+            "--image-format".to_string(),
+            "rvf".to_string(),
+            "--embed-model".to_string(),
+            model.to_string_lossy().into_owned(),
+            "--platform".to_string(),
+            format!("linux/{}", super::host_build_arch()),
+            "--cache-from".to_string(),
+            cache_from.to_string_lossy().into_owned(),
+            "--cache-to".to_string(),
+            cache_to.to_string_lossy().into_owned(),
+            "--build-context".to_string(),
+            format!("aux={}", context.display()),
+            "--secret".to_string(),
+            format!("id=token,src={}", secret.display()),
+        ])
+        .expect("parse native build")
+        .command;
+        super::dispatch_remote_socket(&command, &socket, None)
+            .expect("build must be claimed")
+            .expect("native build should route");
+        worker.join().expect("build worker");
+        assert_eq!(
+            std::fs::read(cache_to).expect("downloaded cache"),
+            b"cache-output"
+        );
+    }
+
+    #[test]
+    fn remote_tui_reads_snapshots_from_daemon_transport() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send("q".to_string()).expect("queue TUI exit");
+        let calls = std::cell::Cell::new(0usize);
+        super::handle_remote_tui_with_input(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(br#"[{"Id":"abc","Image":"busybox","State":"running","Names":["/demo"],"Command":"sleep"}]"#.to_vec())
+            },
+            receiver,
+        )
+        .expect("remote TUI snapshot");
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

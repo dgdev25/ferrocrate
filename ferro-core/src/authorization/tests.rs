@@ -1,7 +1,17 @@
 use super::{
     Action, AuthorizationMode, PolicyDocument, ReasonCode, RequestContext, RequestFacts,
-    ResolvedPrincipal, Resource, ResourceKind, Role,
+    RequestOrigin, ResolvedPrincipal, Resource, ResourceKind, Role,
 };
+
+#[test]
+fn operation_origin_preserves_authenticated_caller_attribution() {
+    let origin = RequestOrigin::cli_current().expect("caller origin");
+    let operation = [0x5a; 16];
+    let scoped = origin.for_operation(operation);
+    assert_eq!(scoped.principal(), origin.principal());
+    assert_eq!(scoped.invocation(), origin.invocation());
+    assert_eq!(scoped.request_id(), Some(operation));
+}
 
 #[test]
 fn service_mode_rejects_missing_digest_and_cross_service_contradictions() {

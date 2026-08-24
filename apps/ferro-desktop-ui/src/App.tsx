@@ -24,7 +24,7 @@ import type {
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
-import { buildStepText } from "./imageBuild.mjs";
+import { BuildHistoryList } from "./imageBuild.mjs";
 import { ImageEmptyState, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
@@ -39,11 +39,19 @@ import { daemonIsAvailable, filterContainers, parseContainerRows, shellKeyboardC
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
-type AppSection = "containers" | "images" | "volumes" | "compose" | "networks" | "doctor" | "settings";
+type AppSection = "containers" | "images" | "builds" | "volumes" | "compose" | "networks" | "doctor" | "settings";
 type DetailTab = "logs" | "terminal" | "inspect" | "stats";
 type LogBatch = { text: string; truncated: boolean };
 type TerminalOutput = { data: number[]; stderr: boolean };
 type PullFailure = ReturnType<typeof pullFailurePresentation>;
+type BuildHistoryEntry = {
+  id: string;
+  image: string;
+  status: "building" | "succeeded" | "failed";
+  durationMs: number | null;
+  progress: BuildProgressFrame[];
+  error?: string;
+};
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
@@ -98,7 +106,8 @@ function App(): JSX.Element {
   const [composeLoading, setComposeLoading] = useState(false);
   const [buildContext, setBuildContext] = useState("");
   const [buildTag, setBuildTag] = useState("local/build:latest");
-  const [buildSteps, setBuildSteps] = useState<BuildProgressFrame[]>([]);
+  const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
+  const activeBuildIdRef = useRef<string | null>(null);
   const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
   const [showEnvironment, setShowEnvironment] = useState(false);
   const [detailMemory, setDetailMemory] = useState("");
@@ -145,7 +154,11 @@ function App(): JSX.Element {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<BuildProgressFrame>("image-build-progress", (event) => {
-      setBuildSteps((steps) => [...steps, event.payload]);
+      const buildId = activeBuildIdRef.current;
+      if (!buildId) return;
+      setBuildHistory((history) => history.map((build) => build.id === buildId
+        ? { ...build, progress: [...build.progress, event.payload] }
+        : build));
     }).then((stop) => {
       if (disposed) stop(); else unlisten = stop;
     });
@@ -800,20 +813,43 @@ function App(): JSX.Element {
 
   async function buildImage(): Promise<void> {
     if (!beginRuntimeAction()) return;
+    const buildId = `build-${Date.now()}`;
+    const startedAt = Date.now();
+    const context = buildContext.trim();
+    const tag = buildTag.trim();
     setError(null);
     setActionLabel("Image Build");
-    setBuildSteps([]);
+    setBuildImageDialogOpen(false);
+    activeBuildIdRef.current = buildId;
+    setBuildHistory((history) => [{
+      id: buildId,
+      image: tag,
+      status: "building",
+      durationMs: null,
+      progress: [],
+    }, ...history]);
     try {
       const result = await invoke<CommandResult>("build_image", {
-        context: buildContext,
-        tag: buildTag,
+        context,
+        tag,
       });
       setLastAction(result);
-      if (!result.ok) setError(result.stderr || `Image build failed with status ${result.code}`);
+      setBuildHistory((history) => history.map((build) => build.id === buildId ? {
+        ...build,
+        status: result.ok ? "succeeded" : "failed",
+        durationMs: Date.now() - startedAt,
+        error: result.ok ? undefined : result.stderr || `The build command ended unsuccessfully (status ${result.code}).`,
+      } : build));
       await refresh();
     } catch (err) {
-      setError(String(err));
+      setBuildHistory((history) => history.map((build) => build.id === buildId ? {
+        ...build,
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        error: String(err),
+      } : build));
     } finally {
+      activeBuildIdRef.current = null;
       finishRuntimeAction();
     }
   }
@@ -954,6 +990,7 @@ function App(): JSX.Element {
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
     images: "Images",
+    builds: "Builds",
     volumes: "Volumes",
     compose: "Compose",
     networks: "Networks",
@@ -992,6 +1029,7 @@ function App(): JSX.Element {
           {([
             ["containers", "▣", "Containers", containerRows.length],
             ["images", "▧", "Images", imageCount],
+            ["builds", "⌁", "Builds", buildHistory.length],
             ["volumes", "▤", "Volumes", volumes.length],
             ["compose", "◇", "Compose", composeSnapshot?.services.length ?? 0],
             ["networks", "◎", "Networks", networks.length],
@@ -1028,6 +1066,8 @@ function App(): JSX.Element {
                 </>
               ) : activeSection === "images" ? (
                 <ImagePagePullAction hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />
+              ) : activeSection === "builds" ? (
+                null
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
                   {loading ? "Refreshing…" : "↻ Refresh runtime"}
@@ -1151,7 +1191,6 @@ function App(): JSX.Element {
                     <div className="overflow-menu">
                       <button onClick={() => void refresh()} disabled={loading}>Refresh images</button>
                       <button onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune unused images</button>
-                      <button onClick={() => setBuildImageDialogOpen(true)} disabled={runtimeBusy}>Build image</button>
                     </div>
                   </details>
                 </div>
@@ -1172,6 +1211,16 @@ function App(): JSX.Element {
                   </div>
                 ) : <ImageEmptyState hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />}
               </section>
+            ) : null}
+
+            {activeSection === "builds" ? (
+              <BuildHistoryList
+                builds={buildHistory}
+                disabled={runtimeBusy}
+                onNewBuild={() => setBuildImageDialogOpen(true)}
+                onStart={() => void startFerrocrate()}
+                onReviewLicensing={() => setActiveSection("settings")}
+              />
             ) : null}
 
             {activeSection === "volumes" ? <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Persistent storage</p><h2>Named volumes</h2></div><span className="count-badge">{volumes.length}</span></div><div className="field-row"><input value={volumeName} onChange={(event) => setVolumeName(event.target.value)} placeholder="named volume" /><button className="btn btn-primary" onClick={() => void runVolumeAction("create", "Volume Create", volumeName)} disabled={runtimeBusy || volumesLoading || !volumeName.trim()}>Create</button><button className="btn btn-secondary" onClick={() => void refreshVolumes()} disabled={runtimeBusy || volumesLoading}>{volumesLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-danger" onClick={() => void runVolumeAction("prune", "Volume Prune")} disabled={runtimeBusy || volumesLoading}>Prune unused</button></div><div className="resource-list">{volumes.map((volume) => <div className="resource-row" key={volume.name}><div><strong>{volume.name}</strong><p className="muted">{volume.driver} · {volume.mountpoint}</p>{volume.mounts.length ? <ul className="mount-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <p className="muted">Unused</p>}</div><button className="btn btn-danger" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}>Remove</button></div>)}</div>{volumes.length === 0 ? <div className="empty-state"><strong>No named volumes</strong><span>Create one to persist container data.</span></div> : null}</section> : null}
@@ -1205,7 +1254,7 @@ function App(): JSX.Element {
       ) : null}
 
       {buildImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">Build image</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Build context directory</span><div className="field-row"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button></div></label><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label>{buildSteps.length ? <ol className="build-steps detail-span">{buildSteps.map((step, index) => <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}><span>{step.stream}</span><code>{buildStepText(step.text)}</code></li>)}</ol> : <p className="muted detail-span">Build progress will appear here.</p>}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build image</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Build context directory</span><div className="field-row"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button></div></label><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Start build</button></div></section></div>
       ) : null}
 
       {registryDialogOpen ? (

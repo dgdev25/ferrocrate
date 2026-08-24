@@ -83,6 +83,15 @@ button:disabled { cursor: not-allowed; opacity: .5; transform: none !important; 
 .panel { border: 1px solid var(--ink-border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
 .table-panel { flex: 1.4; min-width: 420px; overflow: hidden; display: flex; flex-direction: column; }
 .image-table-panel { min-height: 360px; }
+.build-history-panel { min-height: 300px; }
+.build-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 99px; font-size: 11px; font-weight: 650; }
+.build-status-building { color: var(--brand); background: var(--brand-light); }
+.build-status-succeeded { color: var(--ok); background: var(--ok-bg); }
+.build-status-failed { color: var(--error); background: var(--error-bg); }
+.build-progress { max-width: 420px; margin: 5px 0 0; overflow: hidden; color: var(--ink-muted); font: 11.5px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.build-failure { margin-top: 6px; color: var(--ink-muted); font-size: 11px; }
+.build-failure summary { cursor: pointer; }
+.build-failure pre { max-width: 420px; margin-top: 6px; }
 .table-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ink-border); }
 .image-toolbar-overflow, .row-menu { position: relative; }
 .image-toolbar-overflow summary, .row-menu summary { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--ink-border); border-radius: var(--radius-sm); color: var(--ink-muted); background: var(--surface); cursor: pointer; list-style: none; }

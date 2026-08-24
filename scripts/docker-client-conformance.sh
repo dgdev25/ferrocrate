@@ -7,8 +7,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/process-tree-ownership.sh"
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/debug/ferro-cli}"
 fixture="$repo_root/tests/fixtures/real-app/compose.yml"
-output="$repo_root/docs/compatibility/parity-scoreboard.md"
-execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+if [[ "${DOCKER_BUILDKIT:-}" == 1 ]]; then
+  output="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.md"
+  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.tsv"
+else
+  output="$repo_root/docs/compatibility/parity-scoreboard.md"
+  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+fi
 command_timeout="${FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS:-240}"
 daemon_timeout="${FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS:-20}"
 
@@ -20,8 +25,8 @@ Run genuine Docker and Compose clients against an isolated FerroCrate daemon,
 record every declared invocation, and atomically generate a Markdown scoreboard.
 
 Options:
-  --output <path>  Markdown scoreboard (default: docs/compatibility/parity-scoreboard.md)
-  --log <path>     Tab-separated execution log (default: docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv)
+  --output <path>  Markdown scoreboard (defaults are mode-specific)
+  --log <path>     Tab-separated execution log (defaults are mode-specific)
   -h, --help       Show this help
 
 Required environment:

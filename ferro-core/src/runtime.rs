@@ -3215,6 +3215,7 @@ impl ContainerRuntime {
             },
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: restart_policy.clone(),
             restart_count: 0,
             user_stopped: false,
@@ -12397,8 +12398,9 @@ fn update_health(
     status: &str,
     failures: u32,
     checked_at_unix: u64,
+    health_log: Vec<crate::container_store::HealthLogEntry>,
 ) -> Result<bool, ContainerStoreError> {
-    db.update_health(id, status, failures, checked_at_unix)
+    db.update_health(id, status, failures, checked_at_unix, health_log)
 }
 
 fn run_health_checks(
@@ -12432,6 +12434,7 @@ fn run_health_checks(
             return; // Container removed, exit
         }
 
+        let started_at = now_unix();
         let result = if config.timeout_secs > 0 {
             exec_in_container_with_timeout(
                 pid,
@@ -12442,6 +12445,30 @@ fn run_health_checks(
             exec_in_container(pid, &config.cmd)
         };
         let now = now_unix();
+        let (exit_code, output) = match &result {
+            Ok(exec) => (exec.exit_code, format!("{}{}", exec.stdout, exec.stderr)),
+            Err(error) => (-1, error.to_string()),
+        };
+        let output = if output.len() > 1024 {
+            String::from_utf8_lossy(&output.as_bytes()[..1024]).into_owned()
+        } else {
+            output
+        };
+        let mut health_log = store
+            .get(&id)
+            .ok()
+            .flatten()
+            .map(|record| record.health_log)
+            .unwrap_or_default();
+        health_log.push(crate::container_store::HealthLogEntry {
+            start_unix: started_at,
+            end_unix: now,
+            exit_code,
+            output,
+        });
+        if health_log.len() > 5 {
+            health_log.drain(..health_log.len() - 5);
+        }
         match result {
             Ok(exec) if exec.exit_code == 0 => {
                 failures = 0;
@@ -12450,7 +12477,7 @@ fn run_health_checks(
                     .ok()
                     .flatten()
                     .is_some_and(|record| record.health_status != "healthy");
-                if let Err(e) = update_health(&store, &id, "healthy", failures, now) {
+                if let Err(e) = update_health(&store, &id, "healthy", failures, now, health_log) {
                     warn!("failed to update health for {id}: {e}");
                 } else if changed {
                     if let Some(record) = store.get(&id).ok().flatten() {
@@ -12476,7 +12503,7 @@ fn run_health_checks(
                     .ok()
                     .flatten()
                     .is_some_and(|record| record.health_status != status);
-                match update_health(&store, &id, status, failures, now) {
+                match update_health(&store, &id, status, failures, now, health_log) {
                     Ok(true) => {
                         if changed && status == "unhealthy" {
                             if let Some(record) = store.get(&id).ok().flatten() {
@@ -14152,6 +14179,7 @@ mod tests {
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,
@@ -14218,6 +14246,7 @@ mod tests {
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,
@@ -14774,6 +14803,7 @@ mod tests {
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,
@@ -16145,6 +16175,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             health_status: "none".to_string(),
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,

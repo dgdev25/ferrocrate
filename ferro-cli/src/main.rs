@@ -17290,7 +17290,12 @@ fn docker_inspect_payload(
         serde_json::json!({
             "Status": record.health_status.clone(),
             "FailingStreak": record.health_failures,
-            "Log": [],
+            "Log": record.health_log.iter().map(|entry| serde_json::json!({
+                "Start": docker_timestamp(entry.start_unix),
+                "End": docker_timestamp(entry.end_unix),
+                "ExitCode": entry.exit_code,
+                "Output": entry.output,
+            })).collect::<Vec<_>>(),
         })
     });
     let mut payload = serde_json::json!({
@@ -22685,6 +22690,34 @@ volumes:
 
         let payload = docker_inspect_payload(&record, false);
         assert_eq!(payload["Config"]["Tty"], true);
+    }
+
+    #[test]
+    fn docker_inspect_projects_health_probe_log_and_failing_streak() {
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "health-inspect",
+                "pid": 4242,
+                "image": "alpine:3.20",
+                "command": ["sleep", "60"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "health": {"cmd": ["false"], "interval_secs": 1, "timeout_secs": 1, "retries": 2, "start_period_secs": 0},
+                "health_status": "unhealthy",
+                "health_failures": 2,
+                "health_log": [{"start_unix": 10, "end_unix": 11, "exit_code": 1, "output": "not ready"}]
+            }))
+            .expect("health record");
+
+        let payload = docker_inspect_payload(&record, false);
+        assert_eq!(payload["State"]["Health"]["Status"], "unhealthy");
+        assert_eq!(payload["State"]["Health"]["FailingStreak"], 2);
+        assert_eq!(payload["State"]["Health"]["Log"][0]["Start"], "1970-01-01T00:00:10.000000000Z");
+        assert_eq!(payload["State"]["Health"]["Log"][0]["End"], "1970-01-01T00:00:11.000000000Z");
+        assert_eq!(payload["State"]["Health"]["Log"][0]["ExitCode"], 1);
+        assert_eq!(payload["State"]["Health"]["Log"][0]["Output"], "not ready");
     }
 
     #[test]

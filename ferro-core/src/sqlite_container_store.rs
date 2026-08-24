@@ -702,6 +702,7 @@ impl SqliteContainerStore {
         status: &str,
         failures: u32,
         checked_at_unix: u64,
+        health_log: Vec<crate::container_store::HealthLogEntry>,
     ) -> Result<bool, ContainerStoreError> {
         self.transaction(|transaction| {
             let Some(mut record) = Self::get_tx(transaction, id)? else {
@@ -710,6 +711,7 @@ impl SqliteContainerStore {
             record.health_status = status.to_string();
             record.health_failures = failures;
             record.health_checked_at_unix = Some(checked_at_unix);
+            record.health_log = health_log;
             let payload = Self::encode(&record)?;
             transaction.execute(
                 "UPDATE containers SET payload=?2 WHERE id=?1",

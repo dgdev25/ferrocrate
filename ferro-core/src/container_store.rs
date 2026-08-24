@@ -116,6 +116,9 @@ pub struct ContainerRecord {
     pub health_failures: u32,
     #[serde(default)]
     pub health_checked_at_unix: Option<u64>,
+    /// The five most recent health probe results, oldest first.
+    #[serde(default)]
+    pub health_log: Vec<HealthLogEntry>,
     #[serde(default)]
     pub restart_policy: RestartPolicy,
     #[serde(default)]
@@ -246,6 +249,7 @@ impl ContainerRecord {
             health_status: "none".into(),
             health_failures: 0,
             health_checked_at_unix: None,
+            health_log: Vec::new(),
             restart_policy: RestartPolicy::No,
             restart_count: 0,
             user_stopped: false,
@@ -389,6 +393,14 @@ pub struct HealthConfig {
     pub timeout_secs: u64,
     pub retries: u32,
     pub start_period_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthLogEntry {
+    pub start_unix: u64,
+    pub end_unix: u64,
+    pub exit_code: i32,
+    pub output: String,
 }
 
 #[derive(Debug, Error)]

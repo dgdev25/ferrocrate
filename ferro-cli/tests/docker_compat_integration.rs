@@ -2693,6 +2693,15 @@ fn docker_compat_healthcheck_reaches_healthy_and_reports_streak() {
         inspect["State"]["Health"]["FailingStreak"], 0,
         "inspect={inspect}"
     );
+    let health_log = inspect["State"]["Health"]["Log"]
+        .as_array()
+        .expect("health log is an array");
+    assert!(!health_log.is_empty(), "inspect={inspect}");
+    let probe = &health_log[0];
+    assert!(probe["Start"].is_string(), "inspect={inspect}");
+    assert!(probe["End"].is_string(), "inspect={inspect}");
+    assert_eq!(probe["ExitCode"], 0, "inspect={inspect}");
+    assert!(probe["Output"].is_string(), "inspect={inspect}");
     assert!(
         inspect["Config"]["Healthcheck"].is_object(),
         "inspect={inspect}"

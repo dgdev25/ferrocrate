@@ -300,6 +300,8 @@ pub enum Commands {
     },
     /// List stored images.
     Images {
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
         #[arg(long = "filter")]
@@ -409,6 +411,10 @@ pub enum Commands {
     #[command(alias = "ps")]
     /// List containers.
     Containers {
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+        #[arg(long = "no-trunc")]
+        no_trunc: bool,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
         #[arg(long)]
@@ -988,6 +994,8 @@ pub enum VolumeCommands {
     },
     /// List volumes.
     Ls {
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
@@ -3318,7 +3326,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 max_entries,
                 format,
             } => handle_build_cache_prune(&runtime_dir, max_entries, &format),
-            Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
+            Commands::Images { format, filters, quiet } => handle_images(&image_store, &format, &filters, quiet),
             Commands::Search { term } => {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
@@ -3409,6 +3417,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Containers {
                 format,
+                quiet,
+                no_trunc: _,
                 all,
                 limit,
                 since,
@@ -3422,6 +3432,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 since.as_deref(),
                 before.as_deref(),
                 &filters,
+                quiet,
             ),
             #[cfg(target_os = "linux")]
             Commands::Export { output, container } => {
@@ -3686,7 +3697,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
 
         match command {
-            Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
+            Commands::Images { format, filters, quiet } => handle_images(&image_store, &format, &filters, quiet),
             Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image)
             }),
@@ -5851,7 +5862,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Commands::SystemDf { format } => {
             request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
         }
-        Commands::Images { format, filters } => (|| -> Result<(), String> {
+        Commands::Images { format, filters, quiet: _ } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_filters(&parsed)?;
             let path = if parsed.is_empty() {
@@ -5952,6 +5963,8 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         })(),
         Commands::Containers {
             format,
+            quiet: _,
+            no_trunc: _,
             all,
             limit,
             since,
@@ -6363,7 +6376,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         )
         .and_then(|body| print_json(body, format)),
         Commands::Volume {
-            command: VolumeCommands::Ls { filters },
+            command: VolumeCommands::Ls { filters, quiet: _ },
         } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_volume_filters(&parsed)?;
@@ -7899,6 +7912,7 @@ fn handle_images(
     store: &LocalImageStore,
     format: &str,
     filter_values: &[String],
+    quiet: bool,
 ) -> Result<(), String> {
     let filters = parse_cli_filters(filter_values)?;
     validate_docker_image_filters(&filters)?;
@@ -7914,6 +7928,10 @@ fn handle_images(
     if format == "json" {
         let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
         println!("{json}");
+        return Ok(());
+    }
+    if quiet {
+        for record in records { println!("{}", record.digest); }
         return Ok(());
     }
     if records.is_empty() {
@@ -8754,6 +8772,7 @@ fn handle_containers(
     since: Option<&str>,
     before: Option<&str>,
     filter_values: &[String],
+    quiet: bool,
 ) -> Result<(), String> {
     let filters = parse_cli_filters(filter_values)?;
     validate_docker_container_filters(&filters)?;
@@ -8775,6 +8794,10 @@ fn handle_containers(
     if format == "json" {
         let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
         println!("{json}");
+        return Ok(());
+    }
+    if quiet {
+        for record in records { println!("{}", record.id); }
         return Ok(());
     }
     if records.is_empty() {
@@ -9228,7 +9251,7 @@ fn handle_volume_authorized(
                 .map_err(|err| err.to_string())?;
             println!("volume restore: {name} <- {path}");
         }
-        VolumeCommands::Ls { filters } => {
+        VolumeCommands::Ls { filters, quiet } => {
             let filters = parse_cli_filters(&filters)?;
             validate_docker_volume_filters(&filters)?;
             let records = store
@@ -9237,7 +9260,9 @@ fn handle_volume_authorized(
                 .into_iter()
                 .filter(|record| docker_volume_matches_filters(record, &filters))
                 .collect::<Vec<_>>();
-            if records.is_empty() {
+            if quiet {
+                for record in records { println!("{}", record.name); }
+            } else if records.is_empty() {
                 println!("volumes: no entries");
             } else {
                 for record in records {
@@ -18714,8 +18739,9 @@ volumes:
         ]);
         match filtered_ls.command {
             Commands::Volume { command } => match command {
-                VolumeCommands::Ls { filters } => {
+                VolumeCommands::Ls { filters, quiet } => {
                     assert_eq!(filters, vec!["name=data", "driver=local"]);
+                    assert!(!quiet);
                 }
                 _ => panic!("unexpected volume command"),
             },
@@ -19172,9 +19198,10 @@ volumes:
             "since=100",
         ]);
         match cli.command {
-            Commands::Images { format, filters } => {
+            Commands::Images { format, filters, quiet } => {
                 assert_eq!(format, "text");
                 assert_eq!(filters, vec!["reference=alpine*", "since=100"]);
+                assert!(!quiet);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -20136,7 +20163,7 @@ volumes:
         let ls = Cli::parse_from(["ferrocrate", "volume", "ls"]);
         match ls.command {
             Commands::Volume { command } => {
-                assert!(matches!(command, VolumeCommands::Ls { filters } if filters.is_empty()))
+                assert!(matches!(command, VolumeCommands::Ls { filters, quiet } if filters.is_empty() && !quiet))
             }
             _ => panic!("unexpected command"),
         }
@@ -20448,7 +20475,7 @@ volumes:
         .expect("restore volume");
         handle_volume(
             &runtime_dir,
-            VolumeCommands::Ls { filters: vec![] },
+            VolumeCommands::Ls { filters: vec![], quiet: false },
             &authorization,
         )
         .expect("ls volumes");
@@ -21609,7 +21636,7 @@ volumes:
     fn images_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        handle_images(&store, "text", &[]).expect("images handler should succeed");
+        handle_images(&store, "text", &[], false).expect("images handler should succeed");
     }
 
     #[test]
@@ -23890,7 +23917,7 @@ volumes:
     fn containers_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        handle_containers(&runtime, "text", false, None, None, None, &[])
+        handle_containers(&runtime, "text", false, None, None, None, &[], false)
             .expect("containers handler should succeed");
     }
 

@@ -1526,6 +1526,8 @@ pub enum RuntimeError {
     NetworkValidation(#[from] ferro_net::ValidationError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
+    #[error("configured logging driver does not support reading")]
+    LogReadUnsupported,
     #[error("command is required to run container")]
     MissingCommand,
     #[error("invalid command: {0}")]
@@ -3833,6 +3835,13 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if record
+            .annotations
+            .get("io.ferrocrate.log.driver")
+            .is_some_and(|driver| !driver.is_empty() && driver != "json-file")
+        {
+            return Err(RuntimeError::LogReadUnsupported);
+        }
         let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
         let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))

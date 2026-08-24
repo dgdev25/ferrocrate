@@ -48,7 +48,10 @@ pub trait LogDriver: Send + Sync {
     fn read(&self, _context: &ContainerLogContext) -> io::Result<LogReadback> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("configured logging driver {} does not support reading", self.name()),
+            format!(
+                "configured logging driver {} does not support reading",
+                self.name()
+            ),
         ))
     }
 }
@@ -107,7 +110,10 @@ struct JsonFileLogWriter {
 impl ContainerLogWriter for JsonFileLogWriter {
     fn write(&mut self, entry: &LogEntry) -> io::Result<()> {
         if self.closed {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "log writer is closed"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "log writer is closed",
+            ));
         }
         match entry.stream {
             LogStream::Stdout => self.stdout.write(entry),
@@ -142,7 +148,13 @@ impl JsonFileStream {
         let log = open_log_file(&path, append)?;
         let journal = open_log_file(&journal_path(&path), append)?;
         let offset = log.metadata()?.len();
-        Ok(Self { path, log, journal, offset, rotation })
+        Ok(Self {
+            path,
+            log,
+            journal,
+            offset,
+            rotation,
+        })
     }
 
     fn write(&mut self, entry: &LogEntry) -> io::Result<()> {
@@ -239,9 +251,7 @@ fn read_rotated(path: &Path) -> io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ContainerLogContext, JsonFileLogDriver, LogDriver, LogEntry, LogStream,
-    };
+    use super::{ContainerLogContext, JsonFileLogDriver, LogDriver, LogEntry, LogStream};
 
     #[test]
     fn json_file_driver_runs_container_lifecycle_and_reads_streams() {
@@ -318,7 +328,10 @@ mod tests {
             std::fs::read_to_string(temp.path().join("stdout.log.1.ts")).unwrap(),
             "0 10\n"
         );
-        assert_eq!(std::fs::read(temp.path().join("stdout.log")).unwrap(), b"two\n");
+        assert_eq!(
+            std::fs::read(temp.path().join("stdout.log")).unwrap(),
+            b"two\n"
+        );
         assert_eq!(
             std::fs::read_to_string(temp.path().join("stdout.log.ts")).unwrap(),
             "0 20\n"

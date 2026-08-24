@@ -105,6 +105,80 @@ enum DesktopAction {
     ImagePrune,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VolumeAction {
+    List,
+    Create,
+    Remove,
+    Prune,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct VolumeMountUsage {
+    container_id: String,
+    container_name: String,
+    destination: String,
+    #[serde(rename = "RW")]
+    read_write: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct VolumeSummary {
+    name: String,
+    driver: String,
+    mountpoint: String,
+    created_at: String,
+    #[serde(rename = "FerrocrateMounts", default)]
+    mounts: Vec<VolumeMountUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct VolumeListResponse {
+    volumes: Vec<VolumeSummary>,
+}
+
+fn volume_proxy_command(
+    action: VolumeAction,
+    target: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut command = vec!["volume-proxy".to_string()];
+    match action {
+        VolumeAction::List => command.push("list".to_string()),
+        VolumeAction::Prune => command.push("prune".to_string()),
+        VolumeAction::Create | VolumeAction::Remove => {
+            let target = target
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "volume name is required".to_string())?;
+            command.push(match action {
+                VolumeAction::Create => "create".to_string(),
+                VolumeAction::Remove => "remove".to_string(),
+                _ => unreachable!(),
+            });
+            command.push(target.to_string());
+        }
+    }
+    Ok(command)
+}
+
+fn execute_volume_proxy(action: VolumeAction, target: Option<&str>) -> Result<CommandResult, String> {
+    let args = volume_proxy_command(action, target)?;
+    let output = Command::new("ferro-desktop")
+        .args(&args)
+        .output()
+        .map_err(|error| format!("failed to run volume proxy: {error}"))?;
+    Ok(CommandResult {
+        ok: output.status.success(),
+        code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
     match Command::new(binary).args(args).output() {
         Ok(output) => CommandResult {
@@ -807,6 +881,29 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
 }
 
 #[tauri::command]
+fn get_volumes() -> Result<Vec<VolumeSummary>, String> {
+    let result = execute_volume_proxy(VolumeAction::List, None)?;
+    if !result.ok {
+        return Err(if result.stderr.trim().is_empty() {
+            format!("volume list failed with status {}", result.code)
+        } else {
+            result.stderr.trim().to_string()
+        });
+    }
+    serde_json::from_str::<VolumeListResponse>(&result.stdout)
+        .map(|response| response.volumes)
+        .map_err(|error| format!("volume proxy returned invalid JSON: {error}"))
+}
+
+#[tauri::command]
+fn run_volume_action(action: VolumeAction, target: Option<String>) -> Result<CommandResult, String> {
+    if matches!(action, VolumeAction::List) {
+        return Err("list is a read-only snapshot action".to_string());
+    }
+    execute_volume_proxy(action, target.as_deref())
+}
+
+#[tauri::command]
 fn get_paid_auth_state() -> Result<PaidAuthState, String> {
     let config = read_paid_backend_config()?;
     let token = get_session_token()?;
@@ -1042,7 +1139,9 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
+            get_volumes,
             run_desktop_action,
+            run_volume_action,
             start_log_follow,
             stop_log_follow,
             start_terminal,
@@ -1065,7 +1164,7 @@ fn main() {
 mod tests {
     use super::{
         log_channel, log_follow_command, parse_terminal_exec_id, terminal_exec_command,
-        terminal_resize_command, LogBuffer,
+        terminal_resize_command, volume_proxy_command, LogBuffer, VolumeAction,
     };
 
     #[test]
@@ -1160,5 +1259,26 @@ mod tests {
                 "40",
             ]
         );
+    }
+
+    #[test]
+    fn volume_actions_use_typed_desktop_proxy_commands() {
+        assert_eq!(
+            volume_proxy_command(VolumeAction::List, None).expect("list command"),
+            vec!["volume-proxy", "list"]
+        );
+        assert_eq!(
+            volume_proxy_command(VolumeAction::Create, Some("data")).expect("create command"),
+            vec!["volume-proxy", "create", "data"]
+        );
+        assert_eq!(
+            volume_proxy_command(VolumeAction::Remove, Some("data")).expect("remove command"),
+            vec!["volume-proxy", "remove", "data"]
+        );
+        assert_eq!(
+            volume_proxy_command(VolumeAction::Prune, None).expect("prune command"),
+            vec!["volume-proxy", "prune"]
+        );
+        assert!(volume_proxy_command(VolumeAction::Create, Some("  ")).is_err());
     }
 }

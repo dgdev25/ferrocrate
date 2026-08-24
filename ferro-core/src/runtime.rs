@@ -4406,7 +4406,7 @@ impl ContainerRuntime {
                 .map(|endpoint| endpoint.interface_name.as_str()),
         );
         let host_interface = named_endpoint_host_interface(id, &config.network_name);
-        if Path::new("/sys/class/net").join(&host_interface).exists() {
+        if interface_ifindex_optional(&host_interface)?.is_some() {
             return Err(RuntimeError::Network(format!(
                 "endpoint interface {host_interface} already exists without a matching durable record"
             )));
@@ -8563,9 +8563,7 @@ fn setup_network(
         cidr: bridge_config.cidr.clone(),
         ipv6_cidr: bridge_config.ipv6_cidr.clone(),
     };
-    let bridge_existed = Path::new("/sys/class/net")
-        .join(&bridge_config.name)
-        .exists();
+    let bridge_existed = interface_ifindex_optional(&bridge_config.name)?.is_some();
     match bridge::create_bridge(&bridge_exec_config) {
         Ok(()) => {
             if !bridge_existed {
@@ -9861,12 +9859,32 @@ fn ebpf_external_route() -> Result<EbpfExternalRoute, RuntimeError> {
 }
 
 fn interface_ifindex(interface: &str) -> Result<u32, RuntimeError> {
+    interface_ifindex_optional(interface)?.ok_or_else(|| {
+        RuntimeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound))
+    })
+}
+
+fn interface_ifindex_optional(interface: &str) -> Result<Option<u32>, RuntimeError> {
     ferro_net::validate::validate_interface_name(interface)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
-    fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))?
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| RuntimeError::Network(format!("invalid ifindex for {interface}")))
+    let interface = std::ffi::CString::new(interface)
+        .map_err(|_| RuntimeError::Network("interface name contains NUL".into()))?;
+    // sysfs can remain bound to the parent network namespace inside a user
+    // namespace. if_nametoindex(3) asks the current namespace through the
+    // kernel API and therefore binds identity to the namespace we mutate.
+    let ifindex = unsafe { nix::libc::if_nametoindex(interface.as_ptr()) };
+    if ifindex == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error
+            .raw_os_error()
+            .is_some_and(|code| code == nix::libc::ENODEV || code == nix::libc::ENXIO)
+        {
+            Ok(None)
+        } else {
+            Err(RuntimeError::Io(error))
+        };
+    }
+    Ok(Some(ifindex))
 }
 
 fn netns_interface_mac(netns_name: &str, interface: &str) -> Result<[u8; 6], RuntimeError> {
@@ -10297,17 +10315,20 @@ fn verify_container_kernel_ownership(
     let expected_host_ifindex = ownership.host_ifindex.ok_or_else(|| {
         RuntimeError::Network("network ownership has no host-veth ifindex".to_string())
     })?;
-    let host_path = Path::new("/sys/class/net").join(&ownership.host_interface);
-    if host_path.exists() {
-        if interface_ifindex(&ownership.host_interface)? != expected_host_ifindex {
+    match interface_ifindex_optional(&ownership.host_interface)? {
+        Some(observed) => {
+            if observed != expected_host_ifindex {
+                return Err(RuntimeError::Network(
+                    "owned host veth was replaced".to_string(),
+                ));
+            }
+        }
+        None if require_present => {
             return Err(RuntimeError::Network(
-                "owned host veth was replaced".to_string(),
+                "owned host veth is missing".to_string(),
             ));
         }
-    } else if require_present {
-        return Err(RuntimeError::Network(
-            "owned host veth is missing".to_string(),
-        ));
+        None => {}
     }
 
     let expected_namespace = ownership.namespace_identity.ok_or_else(|| {
@@ -10355,29 +10376,33 @@ fn verify_container_kernel_ownership(
     }
 
     if let (Some(bridge), Some(expected)) = (&ownership.bridge, ownership.bridge_ifindex) {
-        let path = Path::new("/sys/class/net").join(bridge);
-        if path.exists() && interface_ifindex(bridge)? != expected {
-            return Err(RuntimeError::Network(
-                "owned bridge was replaced".to_string(),
-            ));
-        }
-        if require_present && !path.exists() {
-            return Err(RuntimeError::Network("owned bridge is missing".to_string()));
+        match interface_ifindex_optional(bridge)? {
+            Some(observed) if observed != expected => {
+                return Err(RuntimeError::Network(
+                    "owned bridge was replaced".to_string(),
+                ));
+            }
+            None if require_present => {
+                return Err(RuntimeError::Network("owned bridge is missing".to_string()));
+            }
+            _ => {}
         }
     }
     if let (Some(interface), Some(expected)) =
         (&ownership.managed_interface, ownership.managed_ifindex)
     {
-        let path = Path::new("/sys/class/net").join(interface);
-        if path.exists() && interface_ifindex(interface)? != expected {
-            return Err(RuntimeError::Network(
-                "managed network interface was replaced".to_string(),
-            ));
-        }
-        if require_present && !path.exists() {
-            return Err(RuntimeError::Network(
-                "managed network interface is missing".to_string(),
-            ));
+        match interface_ifindex_optional(interface)? {
+            Some(observed) if observed != expected => {
+                return Err(RuntimeError::Network(
+                    "managed network interface was replaced".to_string(),
+                ));
+            }
+            None if require_present => {
+                return Err(RuntimeError::Network(
+                    "managed network interface is missing".to_string(),
+                ));
+            }
+            _ => {}
         }
     }
     Ok(true)

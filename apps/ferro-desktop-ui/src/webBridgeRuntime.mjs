@@ -1,14 +1,35 @@
+const TOKEN_STORAGE_KEY = "ferrocrate.webBridgeToken";
+
+export function extractWebBridgeToken(target = globalThis) {
+  const hash = target.location?.hash ?? "";
+  const hashParams = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+  const hashToken = hashParams.get("token");
+  if (hashToken) {
+    target.sessionStorage?.setItem(TOKEN_STORAGE_KEY, hashToken);
+    hashParams.delete("token");
+    const remainingHash = hashParams.toString();
+    const cleanUrl = `${target.location.pathname}${target.location.search}${remainingHash ? `#${remainingHash}` : ""}`;
+    target.history?.replaceState(null, "", cleanUrl);
+    return hashToken;
+  }
+  return target.sessionStorage?.getItem(TOKEN_STORAGE_KEY) ?? null;
+}
+
 export function createWebBridgeRuntime(options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
   const eventSourceFactory = options.eventSourceFactory ?? ((url) => new globalThis.EventSource(url));
   const promptImpl = options.promptImpl ?? globalThis.prompt?.bind(globalThis);
+  const token = options.token ?? extractWebBridgeToken(options.target ?? globalThis);
 
   return {
     async invoke(command, args = {}) {
       if (!fetchImpl) throw new Error("web bridge fetch is unavailable");
       const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify(args ?? {}),
       });
       const payload = await response.json();
@@ -26,7 +47,8 @@ export function createWebBridgeRuntime(options = {}) {
           : event === "image-build-progress"
             ? "build_image"
             : event;
-      const source = eventSourceFactory(`/__tauri/stream/${encodeURIComponent(streamCommand)}`);
+      const streamUrl = `/__tauri/stream/${encodeURIComponent(streamCommand)}`;
+      const source = eventSourceFactory(token ? `${streamUrl}?token=${encodeURIComponent(token)}` : streamUrl);
       source.onmessage = (message) => {
         const envelope = JSON.parse(message.data);
         if (envelope.event === event) handler({ event, payload: envelope.payload });

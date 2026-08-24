@@ -7,5 +7,6 @@ export type WebBridgeRuntime = {
   open(options?: { directory?: boolean; multiple?: boolean }): Promise<string | string[] | null>;
 };
 
+export function extractWebBridgeToken(target?: typeof globalThis): string | null;
 export function createWebBridgeRuntime(options?: Record<string, unknown>): WebBridgeRuntime;
 export function installWebBridgeRuntime(target: Window & typeof globalThis, runtime?: WebBridgeRuntime): WebBridgeRuntime;

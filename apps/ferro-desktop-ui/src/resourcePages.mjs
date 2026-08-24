@@ -89,9 +89,16 @@ export function runtimeSurfaceState(snapshot, activeSection) {
   return shouldShowFirstRun(snapshot, activeSection) ? "first-run" : "resource";
 }
 
-export function snapshotFailureDetail(snapshot) {
+export function snapshotFailureDetail(snapshot, activeSection) {
   if (!snapshot || shouldShowFirstRun(snapshot, "containers")) return null;
-  const failed = [snapshot.containers, snapshot.images].find((command) => command?.ok === false);
+  const commands = activeSection === "containers"
+    ? [snapshot.containers]
+    : activeSection === "images"
+      ? [snapshot.images]
+      : activeSection == null
+        ? [snapshot.containers, snapshot.images]
+        : [];
+  const failed = commands.find((command) => command?.ok === false);
   return failed?.stderr?.trim() || (failed ? `A runtime command did not complete successfully (status ${failed.code ?? "unknown"}).` : null);
 }
 

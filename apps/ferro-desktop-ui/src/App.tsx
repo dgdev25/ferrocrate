@@ -27,6 +27,7 @@ import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./c
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
+import { clearErrorsForNavigation, errorForSection, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
@@ -100,7 +101,7 @@ function App(): JSX.Element {
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [sectionErrors, setSectionErrors] = useState<Partial<Record<AppSection, string>>>({});
   const [licensingDialogOpen, setLicensingDialogOpen] = useState(false);
   const [licensingDetail, setLicensingDetail] = useState("");
   const [theme, setTheme] = useState<ThemeMode>("dark");
@@ -190,6 +191,11 @@ function App(): JSX.Element {
   const [doctorBootstrap, setDoctorBootstrap] = useState(false);
   const [doctorDryRun, setDoctorDryRun] = useState(true);
   const [doctorConfirm, setDoctorConfirm] = useState(false);
+
+  const error = errorForSection(sectionErrors, activeSection);
+  function setError(next: unknown): void {
+    setSectionErrors((current) => setSectionError(current, activeSection, next));
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem(THEME_KEY);
@@ -300,6 +306,10 @@ function App(): JSX.Element {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    setSectionErrors((current) => clearErrorsForNavigation(current));
+  }, [activeSection]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1103,7 +1113,7 @@ function App(): JSX.Element {
   const networkPage = resourcePageState("networks", networks.length);
   const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
   const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
-  const surfaceError = error ?? snapshotFailureDetail(snapshot);
+  const surfaceError = error ?? snapshotFailureDetail(snapshot, activeSection);
   const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",

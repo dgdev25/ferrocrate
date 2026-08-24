@@ -99,7 +99,7 @@ can be developed and unit-tested there.
 | Platform | Status |
 |---|---|
 | Ubuntu 26.04 / 24.04, Debian 12, Fedora 42, Rocky 9 (x86_64, rootful) | Qualified with dated evidence per distro |
-| Rootless mode | Partial: existing Ubuntu qualification used a host-policy relaxation; the Debian package now ships the Ubuntu 24.04+ AppArmor userns profile, whose restricted-sysctl host rerun is pending; Rocky is gated on `SO_PEERPIDFD` |
+| Rootless mode | Partial: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified with the restriction active; Rocky is gated on `SO_PEERPIDFD` |
 | Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |
 | macOS (Sonoma, Tahoe) | Builds and full test suite green — development platform, not a container host |
 | Ubuntu 20.04 (HWE 5.15), Alpine/musl | Qualification in progress; stock 20.04 kernel 5.4 is below the enforced 5.10 minimum |

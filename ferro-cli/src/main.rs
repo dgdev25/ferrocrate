@@ -11750,6 +11750,28 @@ fn handle_compose(
                     Some(&effective_compose_network),
                 ) {
                     failures.push(format!("{} run failed: {error}", prepared.instance));
+                } else if let Err(error) = connect_compose_secondary_networks(
+                    runtime,
+                    &runtime_dir(),
+                    service,
+                    &prepared.name,
+                    &default_network,
+                    &prepared.instance,
+                    &parent_origin,
+                    &surface_authorization,
+                ) {
+                    let rollback = resolve_container_id(runtime, &prepared.instance)
+                        .and_then(|id| {
+                            runtime.kill(&id).map_err(|failure| failure.to_string())?;
+                            runtime.remove(&id).map_err(|failure| failure.to_string())
+                        })
+                        .err()
+                        .map(|failure| format!("; rollback failed: {failure}"))
+                        .unwrap_or_default();
+                    failures.push(format!(
+                        "{} network attachment failed: {error}{rollback}",
+                        prepared.instance
+                    ));
                 } else if let Some(logical) = logical_network {
                     if let Ok(records) = runtime.list() {
                         if let Some(record) = records.into_iter().find(|record| {
@@ -12411,6 +12433,18 @@ fn compose_service_network(
     name: &str,
     default_network: &str,
 ) -> Result<String, String> {
+    compose_service_networks(service, name, default_network)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("compose: service {name} has no network attachment"))
+}
+
+#[cfg(target_os = "linux")]
+fn compose_service_networks(
+    service: &ComposeService,
+    name: &str,
+    default_network: &str,
+) -> Result<Vec<String>, String> {
     if service.network_mode.is_some()
         && service
             .networks
@@ -12433,33 +12467,88 @@ fn compose_service_network(
                     "compose: service {name} has an invalid container network target"
                 ));
             }
-            return Ok(format!("container:{target}"));
+            return Ok(vec![format!("container:{target}")]);
         }
         return match mode {
-            "bridge" | "host" | "none" => Ok(mode.to_string()),
+            "bridge" | "host" | "none" => Ok(vec![mode.to_string()]),
             other => Err(format!(
                 "compose: unsupported network_mode {other} for service {name}"
             )),
         };
     }
     let Some(networks) = service.networks.as_ref() else {
-        return Ok(default_network.to_string());
+        return Ok(vec![default_network.to_string()]);
     };
     if networks.is_empty() {
-        return Ok(default_network.to_string());
+        return Ok(vec![default_network.to_string()]);
     }
-    if networks.len() > 1 {
-        return Err(format!(
-            "compose: service {name} declares multiple networks; one durable attachment is supported"
-        ));
+    let mut resolved = Vec::with_capacity(networks.len());
+    for network in networks {
+        let network = network.trim();
+        let network = if network.is_empty() || network == "default" {
+            default_network.to_string()
+        } else {
+            validate_network_name(network)?;
+            network.to_string()
+        };
+        if !resolved.contains(&network) {
+            resolved.push(network);
+        }
     }
-    let network = networks[0].trim();
-    if network.is_empty() || network == "default" {
-        Ok(default_network.to_string())
-    } else {
-        validate_network_name(network)?;
-        Ok(network.to_string())
+    Ok(resolved)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn connect_compose_secondary_networks(
+    runtime: &ContainerRuntime,
+    runtime_dir: &Path,
+    service: &ComposeService,
+    service_name: &str,
+    default_network: &str,
+    instance: &str,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    let networks = compose_service_networks(service, service_name, default_network)?;
+    if networks.len() <= 1 {
+        return Ok(());
     }
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(
+            "compose: multiple network attachments require rootful bridge networking".to_string(),
+        );
+    }
+    let id = resolve_container_id(runtime, instance)?;
+    for network in networks.into_iter().skip(1) {
+        let config = docker_named_endpoint_config(runtime_dir, &network)?;
+        let permit = authorization
+            .authorize_named(
+                origin,
+                AuthorizationAction::NetworkAttach,
+                ResourceKind::Network,
+                &config.network_name,
+                config.generation,
+            )
+            .map_err(|error| error.to_string())?;
+        match runtime.connect_network(&id, config) {
+            Ok(()) => permit.finish(true).map_err(|error| error.to_string())?,
+            Err(error) => {
+                if matches!(
+                    error,
+                    ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                ) {
+                    permit
+                        .finish_unknown()
+                        .map_err(|finish| finish.to_string())?;
+                } else {
+                    permit.finish(false).map_err(|finish| finish.to_string())?;
+                }
+                return Err(error.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -20740,9 +20829,16 @@ volumes:
         let multiple: ferro_compose::Service =
             serde_json::from_value(serde_json::json!({"networks": ["app-net", "metrics-net"]}))
                 .expect("multiple network service");
-        let error = super::compose_service_network(&multiple, "api", "bridge")
-            .expect_err("multiple attachments are bounded");
-        assert!(error.contains("multiple networks"));
+        assert_eq!(
+            super::compose_service_networks(&multiple, "api", "bridge")
+                .expect("multiple attachments"),
+            vec!["app-net", "metrics-net"]
+        );
+        assert_eq!(
+            super::compose_service_network(&multiple, "api", "bridge")
+                .expect("primary attachment"),
+            "app-net"
+        );
 
         let shared: ferro_compose::Service = serde_json::from_value(serde_json::json!({
             "network_mode": "container:db"

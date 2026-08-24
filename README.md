@@ -95,7 +95,7 @@ can be developed and unit-tested there.
 | Platform | Status |
 |---|---|
 | Ubuntu 26.04 / 24.04, Debian 12, Fedora 42, Rocky 9 (x86_64, rootful) | Qualified with dated evidence per distro |
-| Rootless mode | Qualified on Ubuntu; Rocky gated on `SO_PEERPIDFD`; Ubuntu 24.04+ needs a userns sysctl until the AppArmor profile ships |
+| Rootless mode | Qualified on Ubuntu; Rocky gated on `SO_PEERPIDFD`; the Debian package installs and loads the Ubuntu 24.04+ AppArmor userns profile |
 | Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |
 | macOS (Sonoma, Tahoe) | Builds and full test suite green — development platform, not a container host |
 | Ubuntu 20.04 (HWE 5.15), Alpine/musl | Qualification in progress; stock 20.04 kernel 5.4 is below the enforced 5.10 minimum |

@@ -19,7 +19,6 @@ export type DesktopAction =
   | "start_container"
   | "stop_container"
   | "remove_container"
-  | "container_logs"
   | "image_prune";
 
 export type PaidBackendConfig = {

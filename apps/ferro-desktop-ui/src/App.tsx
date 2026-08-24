@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState } from "react";
 import type {
   CommandResult,
@@ -29,6 +30,11 @@ function App(): JSX.Element {
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
   const [actionLabel, setActionLabel] = useState("");
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logFilter, setLogFilter] = useState("");
+  const [logsFollowing, setLogsFollowing] = useState(false);
+  const [logsPaused, setLogsPaused] = useState(false);
+  const [pausedLogCount, setPausedLogCount] = useState(0);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -94,11 +100,80 @@ function App(): JSX.Element {
     void refreshAuthState();
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlistenLine: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+    let unlistenEnded: (() => void) | undefined;
+
+    void (async () => {
+      const stopLine = await listen<string>("container-log-line", (event) => {
+        setLogLines((lines) => [...lines, event.payload]);
+      });
+      const stopError = await listen<string>("container-log-error", (event) => {
+        setError(event.payload);
+      });
+      const stopEnded = await listen<boolean>("container-log-ended", (event) => {
+        setLogsFollowing(false);
+        setLogsPaused(false);
+        if (!event.payload) setError("Container log stream ended unexpectedly");
+      });
+      if (disposed) {
+        stopLine();
+        stopError();
+        stopEnded();
+        return;
+      }
+      unlistenLine = stopLine;
+      unlistenError = stopError;
+      unlistenEnded = stopEnded;
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenLine?.();
+      unlistenError?.();
+      unlistenEnded?.();
+    };
+  }, []);
+
   async function runAction(action: DesktopAction, label: string, target?: string): Promise<void> {
     setActionLabel(label);
     const result = await invoke<CommandResult>("run_desktop_action", { action, target });
     setLastAction(result);
     await refresh();
+  }
+
+  async function startLogFollow(): Promise<void> {
+    setError(null);
+    setLogLines([]);
+    setLogsPaused(false);
+    setPausedLogCount(0);
+    try {
+      await invoke("start_log_follow", { target: containerTarget });
+      setLogsFollowing(true);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function stopLogFollow(): Promise<void> {
+    try {
+      await invoke("stop_log_follow");
+      setLogsFollowing(false);
+      setLogsPaused(false);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  function toggleLogPause(): void {
+    if (logsPaused) {
+      setLogsPaused(false);
+      return;
+    }
+    setPausedLogCount(logLines.length);
+    setLogsPaused(true);
   }
 
   async function saveBackendConfig(): Promise<void> {
@@ -182,6 +257,29 @@ function App(): JSX.Element {
   }
 
   const sessionSummary = useMemo(() => authState?.session, [authState]);
+  const visibleLogText = useMemo(() => {
+    const visibleLines = logsPaused ? logLines.slice(0, pausedLogCount) : logLines;
+    const filter = logFilter.trim();
+    return (filter ? visibleLines.filter((line) => line.includes(filter)) : visibleLines).join("");
+  }, [logFilter, logLines, logsPaused, pausedLogCount]);
+
+  async function copyLogs(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(visibleLogText);
+    } catch (err) {
+      setError(`Failed to copy logs: ${String(err)}`);
+    }
+  }
+
+  function exportLogs(): void {
+    const file = new Blob([visibleLogText], { type: "text/plain" });
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${containerTarget.trim() || "container"}-logs.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <main className="app-shell">
@@ -360,7 +458,7 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           {snapshot?.runtime.stderr ? <p className="muted">{snapshot.runtime.stderr}</p> : null}
         </article>
 
-        <article className="panel">
+        <article className="panel panel-wide">
           <h2>Containers</h2>
           <div className="field-row">
             <input
@@ -373,28 +471,54 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("start_container", "Container Start", containerTarget)}
+              disabled={logsFollowing}
             >
               Start
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("stop_container", "Container Stop", containerTarget)}
+              disabled={logsFollowing}
             >
               Stop
             </button>
             <button
               className="btn btn-secondary"
-              onClick={() => void runAction("container_logs", "Container Logs", containerTarget)}
+              onClick={() => void startLogFollow()}
+              disabled={logsFollowing}
             >
-              Logs
+              {logsFollowing ? "Following Logs" : "Follow Logs"}
             </button>
             <button
               className="btn btn-danger"
               onClick={() => void runAction("remove_container", "Container Remove", containerTarget)}
+              disabled={logsFollowing}
             >
               Remove
             </button>
           </div>
+          <div className="field-row">
+            <input
+              value={logFilter}
+              onChange={(event) => setLogFilter(event.target.value)}
+              placeholder="filter streamed logs"
+            />
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}>
+              {logsPaused ? "Resume Logs" : "Pause Logs"}
+            </button>
+            <button className="btn btn-secondary" onClick={() => void copyLogs()} disabled={!visibleLogText}>
+              Copy Logs
+            </button>
+            <button className="btn btn-secondary" onClick={exportLogs} disabled={!visibleLogText}>
+              Export Logs
+            </button>
+            <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing}>
+              Stop Following
+            </button>
+          </div>
+          <pre>{visibleLogText || (logsFollowing ? "Waiting for log lines..." : EMPTY)}</pre>
           <pre>{snapshot?.containers.stdout || EMPTY}</pre>
           {snapshot?.containers.stderr ? <p className="muted">{snapshot.containers.stderr}</p> : null}
         </article>

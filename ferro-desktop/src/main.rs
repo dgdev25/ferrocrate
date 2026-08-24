@@ -10,6 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -48,6 +49,8 @@ enum Commands {
         wsl: bool,
         #[arg(long)]
         wsl_distro: Option<String>,
+        #[arg(long, default_value_t = false)]
+        follow: bool,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -216,6 +219,8 @@ struct ExecRequest {
     cmd: Vec<String>,
     use_wsl: bool,
     wsl_distro: Option<String>,
+    #[serde(default)]
+    follow: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -485,8 +490,9 @@ fn main() {
             pipe_name,
             wsl,
             wsl_distro,
+            follow,
             cmd,
-        } => run_client_exec(&addr, pipe_name.as_deref(), cmd, wsl, wsl_distro),
+        } => run_client_exec(&addr, pipe_name.as_deref(), cmd, wsl, wsl_distro, follow),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -558,9 +564,80 @@ fn handle_client(
     default_wsl_distro: Option<&str>,
 ) -> Result<(), DesktopError> {
     let request = read_exec_request(stream)?;
+    if request.follow {
+        return proxy_follow_request(stream, request, default_wsl_distro);
+    }
     let response = process_exec_request(request, default_wsl_distro)?;
     let payload = serde_json::to_string(&response)? + "\n";
     stream.write_all(payload.as_bytes())?;
+    Ok(())
+}
+
+fn proxy_follow_request(
+    stream: &mut TcpStream,
+    mut request: ExecRequest,
+    default_wsl_distro: Option<&str>,
+) -> Result<(), DesktopError> {
+    if !is_log_follow_command(&request.cmd) {
+        return Err(DesktopError::Invalid(
+            "follow requests must invoke ferrocrate logs --follow".to_string(),
+        ));
+    }
+    if request.wsl_distro.is_none() {
+        request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
+    }
+
+    let mut child = run_follow_request(&request)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("follow command stdout missing".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("follow command stderr missing".to_string()))?;
+    let child = Arc::new(Mutex::new(child));
+    let stdout_stream = stream.try_clone()?;
+    let stdout_child = Arc::clone(&child);
+    let stdout_worker = thread::spawn(move || {
+        let result = std::io::copy(&mut BufReader::new(stdout), &mut &stdout_stream);
+        if result.is_err() {
+            if let Ok(mut child) = stdout_child.lock() {
+                let _ = child.kill();
+            }
+        }
+        result
+    });
+    let stderr_stream = stream.try_clone()?;
+    let stderr_child = Arc::clone(&child);
+    let stderr_worker = thread::spawn(move || {
+        let result = std::io::copy(&mut BufReader::new(stderr), &mut &stderr_stream);
+        if result.is_err() {
+            if let Ok(mut child) = stderr_child.lock() {
+                let _ = child.kill();
+            }
+        }
+        result
+    });
+
+    let status = loop {
+        let status = child
+            .lock()
+            .map_err(|_| DesktopError::Invalid("follow command state is unavailable".to_string()))?
+            .try_wait()?;
+        if let Some(status) = status {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let _ = stdout_worker.join();
+    let _ = stderr_worker.join();
+    if !status.success() {
+        return Err(DesktopError::Invalid(format!(
+            "follow command exited with status {}",
+            status.code().unwrap_or(-1)
+        )));
+    }
     Ok(())
 }
 
@@ -611,6 +688,7 @@ fn run_client_exec(
     cmd: Vec<String>,
     wsl: bool,
     wsl_distro: Option<String>,
+    follow: bool,
 ) -> Result<(), DesktopError> {
     if cmd.is_empty() {
         return Err(DesktopError::Invalid("command is required".to_string()));
@@ -619,13 +697,24 @@ fn run_client_exec(
         cmd,
         use_wsl: wsl,
         wsl_distro,
+        follow,
     };
     if let Some(pipe_name) = pipe_name {
+        if follow {
+            return Err(DesktopError::Invalid(
+                "--follow is unsupported with --pipe-name".to_string(),
+            ));
+        }
         return run_client_exec_pipe(pipe_name, request);
     }
     let mut stream = TcpStream::connect(addr)?;
     let payload = serde_json::to_string(&request)? + "\n";
     stream.write_all(payload.as_bytes())?;
+
+    if follow {
+        std::io::copy(&mut stream, &mut std::io::stdout())?;
+        return Ok(());
+    }
 
     let mut response_raw = String::new();
     stream.read_to_string(&mut response_raw)?;
@@ -2061,6 +2150,29 @@ fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopErr
     Ok(command.output()?)
 }
 
+fn run_follow_request(request: &ExecRequest) -> Result<std::process::Child, DesktopError> {
+    if request.use_wsl {
+        return run_wsl_follow_command(request);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if should_route_to_macos_guest(&request.cmd, exec_mode_from_env()) {
+            return run_macos_guest_follow_command(request);
+        }
+    }
+    let (program, args) = request
+        .cmd
+        .split_first()
+        .ok_or_else(|| DesktopError::Invalid("command is required".to_string()))?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.env("FERROCRATE_DESKTOP_FORWARD", "0");
+    Ok(command.spawn()?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ExecMode {
@@ -2113,6 +2225,14 @@ fn command_targets_ferrocrate(cmd: &[String]) -> bool {
     )
 }
 
+fn is_log_follow_command(cmd: &[String]) -> bool {
+    command_targets_ferrocrate(cmd)
+        && cmd.get(1).is_some_and(|subcommand| subcommand == "logs")
+        && cmd[2..]
+            .iter()
+            .any(|argument| argument == "--follow" || argument == "-f")
+}
+
 #[cfg(target_os = "macos")]
 fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
     let state_path = default_vm_state_path();
@@ -2130,6 +2250,28 @@ fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output
     }
     let mut cmd = build_guest_ssh_command(request, &state)?;
     cmd.output().map_err(DesktopError::Io)
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_guest_follow_command(
+    request: &ExecRequest,
+) -> Result<std::process::Child, DesktopError> {
+    let state_path = default_vm_state_path();
+    let state = load_vm_state(&state_path).map_err(|err| {
+        DesktopError::Invalid(format!(
+            "cannot route to guest runtime: failed to load vm state {}: {err}",
+            state_path.display()
+        ))
+    })?;
+    if !vm_state_running(&state) {
+        return Err(DesktopError::Invalid(format!(
+            "cannot route to guest runtime: vm is not running (state={})",
+            state.status
+        )));
+    }
+    let mut cmd = build_guest_ssh_command(request, &state)?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.spawn().map_err(DesktopError::Io)
 }
 
 #[allow(dead_code)]
@@ -2205,16 +2347,38 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
     }
 }
 
+fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, DesktopError> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("wsl.exe");
+        if let Some(distro) = request.wsl_distro.as_deref() {
+            cmd.args(["--distribution", distro]);
+        }
+        cmd.arg("--");
+        cmd.args(&request.cmd);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        return Ok(cmd.spawn()?);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        Err(DesktopError::Invalid(
+            "WSL execution is only available on Windows hosts".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
-        gather_phase0_check, load_channel_manifest, load_forward_entries, load_vm_state,
-        parse_exec_mode, render_macos_launch_agent_plist, render_windows_service_script,
-        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, Commands, ExecMode,
-        ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        gather_phase0_check, is_log_follow_command, load_channel_manifest, load_forward_entries,
+        load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
+        render_windows_service_script, run_request, save_forward_entries, save_vm_state,
+        should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
+        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig,
+        VmState,
     };
     use std::path::PathBuf;
 
@@ -2230,6 +2394,7 @@ mod tests {
             cmd: vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
         };
         let out = run_request(&req).expect("run command");
         assert!(out.status.success());
@@ -2241,9 +2406,30 @@ mod tests {
             cmd: vec![],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
         };
         let err = run_request(&req).expect_err("should fail");
         assert!(err.to_string().contains("command is required"));
+    }
+
+    #[test]
+    fn follow_proxy_only_accepts_ferrocrate_logs_with_follow_flag() {
+        assert!(is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "logs".to_string(),
+            "--follow".to_string(),
+            "web".to_string(),
+        ]));
+        assert!(!is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "logs".to_string(),
+            "web".to_string(),
+        ]));
+        assert!(!is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "ps".to_string(),
+            "--follow".to_string(),
+        ]));
     }
 
     #[test]

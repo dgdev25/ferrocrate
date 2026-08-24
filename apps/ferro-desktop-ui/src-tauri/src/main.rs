@@ -4,12 +4,17 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::Emitter;
 
 const KEYRING_SERVICE: &str = "ferrocrate-desktop-ui";
 const KEYRING_ACCOUNT: &str = "paid_session_token";
+static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 #[derive(Debug, Serialize)]
 struct CommandResult {
@@ -84,7 +89,6 @@ enum DesktopAction {
     StartContainer,
     StopContainer,
     RemoveContainer,
-    ContainerLogs,
     ImagePrune,
 }
 
@@ -125,6 +129,125 @@ fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> Comm
             stderr: format!("failed to run `{binary}`: {err}"),
         },
     }
+}
+
+fn log_follow_command(target: &str) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "--follow".to_string(),
+        "--".to_string(),
+        "ferrocrate".to_string(),
+        "logs".to_string(),
+        "--follow".to_string(),
+        target.to_string(),
+    ]
+}
+
+fn emit_log_lines<R: std::io::Read>(reader: R, app: tauri::AppHandle, event: &str) {
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let _ = app.emit(event, line.clone());
+                line.clear();
+            }
+            Err(err) => {
+                let _ = app.emit("container-log-error", err.to_string());
+                break;
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("target container is required".to_string());
+    }
+
+    let mut current = LOG_FOLLOW_PROCESS
+        .lock()
+        .map_err(|_| "log follow state is unavailable".to_string())?;
+    if let Some(child) = current.as_mut() {
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to inspect log follow process: {err}"))?
+            .is_none()
+        {
+            return Err("a container log stream is already active".to_string());
+        }
+    }
+    *current = None;
+
+    let mut child = Command::new("ferro-desktop")
+        .args(log_follow_command(target))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start container log stream: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "container log stream stdout missing".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "container log stream stderr missing".to_string())?;
+    let stdout_app = app.clone();
+    thread::spawn(move || emit_log_lines(stdout, stdout_app, "container-log-line"));
+    let stderr_app = app.clone();
+    thread::spawn(move || emit_log_lines(stderr, stderr_app, "container-log-error"));
+    *current = Some(child);
+    drop(current);
+
+    thread::spawn(move || loop {
+        let status = {
+            let mut process = match LOG_FOLLOW_PROCESS.lock() {
+                Ok(process) => process,
+                Err(_) => return,
+            };
+            let Some(child) = process.as_mut() else {
+                return;
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *process = None;
+                    Some(status)
+                }
+                Ok(None) => None,
+                Err(err) => {
+                    let _ = app.emit("container-log-error", err.to_string());
+                    *process = None;
+                    return;
+                }
+            }
+        };
+        if let Some(status) = status {
+            let _ = app.emit("container-log-ended", status.success());
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_log_follow() -> Result<(), String> {
+    let mut current = LOG_FOLLOW_PROCESS
+        .lock()
+        .map_err(|_| "log follow state is unavailable".to_string())?;
+    if let Some(mut child) = current.take() {
+        child
+            .kill()
+            .map_err(|err| format!("failed to stop container log stream: {err}"))?;
+        child
+            .wait()
+            .map_err(|err| format!("failed to reap container log stream: {err}"))?;
+    }
+    Ok(())
 }
 
 fn now_unix() -> u64 {
@@ -518,17 +641,6 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
             }
             run_command("ferrocrate", &["rm", &target])
         }
-        DesktopAction::ContainerLogs => {
-            if target.is_empty() {
-                return CommandResult {
-                    ok: false,
-                    code: 2,
-                    stdout: String::new(),
-                    stderr: "target container is required".to_string(),
-                };
-            }
-            run_command("ferrocrate", &["logs", &target])
-        }
         DesktopAction::ImagePrune => run_command("ferrocrate", &["image-prune"]),
     }
 }
@@ -538,6 +650,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
             run_desktop_action,
+            start_log_follow,
+            stop_log_follow,
             get_paid_auth_state,
             save_paid_backend_config,
             set_paid_session_token,
@@ -548,4 +662,25 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_follow_command;
+
+    #[test]
+    fn log_follow_uses_the_desktop_exec_bridge() {
+        assert_eq!(
+            log_follow_command("web"),
+            vec![
+                "exec",
+                "--follow",
+                "--",
+                "ferrocrate",
+                "logs",
+                "--follow",
+                "web",
+            ]
+        );
+    }
 }

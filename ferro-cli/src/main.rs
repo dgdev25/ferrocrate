@@ -5823,6 +5823,7 @@ fn attach_local_container(
                 true,
                 &[],
                 &worker_detach_keys,
+                !stdin_requested,
             );
             trace_attached_run_phase(trace_started, "stream_loop", stream_started.elapsed());
             result
@@ -16411,6 +16412,7 @@ fn handle_docker_compat_connection(
             stderr_requested,
             &initial_stdin,
             &detach_keys,
+            false,
         )?;
         return Ok(());
     }
@@ -18679,6 +18681,7 @@ fn stream_docker_attach(
     stderr_requested: bool,
     initial_stdin: &[u8],
     detach_keys: &[u8],
+    fast_local_exit: bool,
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -18769,8 +18772,13 @@ fn stream_docker_attach(
     let mut emitted_stdout = initial_stdout.len();
     let mut emitted_stderr = initial_stderr.len();
     let mut input = [0_u8; 16 * 1024];
-    let mut input_closed = false;
+    // A non-interactive local run has no producer for the socket's input
+    // half. Do not pay the daemon-compatible 250 ms read timeout before each
+    // lifecycle observation on that path.
+    let mut input_closed = fast_local_exit && !stdin_requested;
     let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
+    let local_stream_started = Instant::now();
+    let mut terminal_log_lengths = None;
     loop {
         if !input_closed {
             match stream.read(&mut input) {
@@ -18845,10 +18853,44 @@ fn stream_docker_attach(
             current.status.as_str(),
             "created" | "running" | "restarting" | "paused"
         ) {
-            return Ok(());
+            if !fast_local_exit
+                || local_attach_logs_drained(
+                    &mut terminal_log_lengths,
+                    (stdout.len(), stderr.len()),
+                )
+            {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        terminal_log_lengths = None;
+        let interval = if fast_local_exit {
+            local_attach_poll_interval(local_stream_started.elapsed())
+        } else {
+            Duration::from_millis(250)
+        };
+        std::thread::sleep(interval);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn local_attach_poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < Duration::from_millis(100) {
+        Duration::from_millis(5)
+    } else {
+        Duration::from_millis(250)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_attach_logs_drained(
+    previous: &mut Option<(usize, usize)>,
+    current: (usize, usize),
+) -> bool {
+    let drained = *previous == Some(current);
+    *previous = Some(current);
+    drained
 }
 
 #[cfg(target_os = "linux")]
@@ -18964,6 +19006,35 @@ mod tests {
             ),
             "ferrocrate-attached-run phase=stream_loop elapsed_us=250125 total_us=275832"
         );
+    }
+
+    #[test]
+    fn local_attach_polling_is_eager_only_for_short_lived_workloads() {
+        assert_eq!(
+            super::local_attach_poll_interval(Duration::from_millis(99)),
+            Duration::from_millis(5)
+        );
+        assert_eq!(
+            super::local_attach_poll_interval(Duration::from_millis(100)),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn local_attach_requires_stable_terminal_log_lengths_before_close() {
+        let mut previous = None;
+        assert!(!super::local_attach_logs_drained(
+            &mut previous,
+            (10_000, 0)
+        ));
+        assert!(!super::local_attach_logs_drained(
+            &mut previous,
+            (10_001, 0)
+        ));
+        assert!(super::local_attach_logs_drained(
+            &mut previous,
+            (10_001, 0)
+        ));
     }
 
     #[test]

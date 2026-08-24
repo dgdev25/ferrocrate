@@ -76,7 +76,7 @@ echo "pull: busybox:1.36"
 timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
   "${cli}" pull busybox:1.36 >/dev/null
 
-run_output="$(timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" "${cli}" run \
+run_output="$(timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" "${cli}" run --detach \
   --name "ferro-rootless-publish-${host_port}" \
   --network bridge --network-backend iptables \
   --publish "${host_port}:8080/tcp" busybox:1.36 \

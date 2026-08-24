@@ -104,6 +104,13 @@ enum Commands {
         #[command(subcommand)]
         command: ContainerProxyCommands,
     },
+    #[command(hide = true)]
+    RegistryProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: RegistryProxyCommands,
+    },
     Doctor {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -171,6 +178,16 @@ enum ContainerProxyCommands {
         cpu_quota: Option<u64>,
         #[arg(long)]
         cpu_period: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RegistryProxyCommands {
+    Login {
+        #[arg(long)]
+        registry: String,
+        #[arg(long)]
+        username: String,
     },
 }
 
@@ -814,6 +831,71 @@ fn run_container_proxy(
     Ok(())
 }
 
+fn registry_login_request(
+    registry: &str,
+    username: &str,
+    password: &str,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    let registry = registry.trim();
+    let username = username.trim();
+    if registry.is_empty() {
+        return Err(DesktopError::Invalid("registry is required".to_string()));
+    }
+    if username.is_empty() || password.is_empty() {
+        return Err(DesktopError::Invalid(
+            "registry username and password are required".to_string(),
+        ));
+    }
+    Ok((
+        "POST",
+        "/auth".to_string(),
+        serde_json::to_vec(&serde_json::json!({
+            "serveraddress": registry,
+            "username": username,
+            "password": password,
+        }))?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_registry_proxy(
+    socket: Option<&str>,
+    command: RegistryProxyCommands,
+) -> Result<(), DesktopError> {
+    let RegistryProxyCommands::Login { registry, username } = command;
+    let mut password = String::new();
+    std::io::stdin()
+        .take((MAX_REQUEST_BYTES + 1) as u64)
+        .read_to_string(&mut password)?;
+    if password.len() > MAX_REQUEST_BYTES {
+        return Err(DesktopError::Invalid(
+            "registry password input is too large".to_string(),
+        ));
+    }
+    let password = password.trim_end_matches(['\r', '\n']);
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = registry_login_request(&registry, &username, password)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_registry_proxy(
+    _socket: Option<&str>,
+    _command: RegistryProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "registry daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn run_container_proxy(
     _socket: Option<&str>,
@@ -1168,6 +1250,7 @@ fn main() {
         Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
         Commands::NetworkProxy { socket, command } => run_network_proxy(socket.as_deref(), command),
         Commands::ContainerProxy { socket, command } => run_container_proxy(socket.as_deref(), command),
+        Commands::RegistryProxy { socket, command } => run_registry_proxy(socket.as_deref(), command),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -1197,6 +1280,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
             | Commands::VolumeProxy { .. }
             | Commands::NetworkProxy { .. }
             | Commands::ContainerProxy { .. }
+            | Commands::RegistryProxy { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -3285,8 +3369,8 @@ mod tests {
         render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
         save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        container_proxy_request, network_proxy_request, upsert_forward_entry, validate_daemon_addr,
-        vm_state_running, volume_proxy_request,
+        container_proxy_request, network_proxy_request, registry_login_request,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
         ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
@@ -3450,6 +3534,21 @@ mod tests {
             cpu_period: None,
         })
         .is_err());
+    }
+
+    #[test]
+    fn registry_login_proxy_builds_daemon_auth_request_without_argv_password() {
+        assert_eq!(
+            registry_login_request("registry.example.com", "alice", "secret")
+                .expect("auth request"),
+            (
+                "POST",
+                "/auth".to_string(),
+                br#"{"password":"secret","serveraddress":"registry.example.com","username":"alice"}"#.to_vec(),
+            )
+        );
+        assert!(registry_login_request("registry.example.com", " ", "secret").is_err());
+        assert!(registry_login_request("registry.example.com", "alice", "").is_err());
     }
 
     #[test]

@@ -1362,6 +1362,12 @@ pub fn main() {
         }
     }
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Daemon { .. }) {
+        if let Err(error) = ferro_core::cgroups::validate_explicit_delegated_daemon() {
+            eprintln!("error: delegated cgroup daemon validation failed: {error}");
+            process::exit(1);
+        }
+    }
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
     if let Err(err) = dispatch(cli.command) {

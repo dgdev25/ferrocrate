@@ -50,6 +50,65 @@ pub enum CgroupError {
     Io(#[from] io::Error),
 }
 
+fn delegated_daemon_target(
+    explicit_root: Option<&Path>,
+    current_cgroup: Option<&Path>,
+    rootless: bool,
+) -> Option<PathBuf> {
+    let root = explicit_root.filter(|_| rootless)?;
+    let current = current_cgroup?;
+    (!current.starts_with(root)).then(|| root.join("ferrocrate-daemon"))
+}
+
+#[cfg(target_os = "linux")]
+fn current_unified_cgroup() -> Result<PathBuf, CgroupError> {
+    let contents = fs::read_to_string("/proc/self/cgroup")?;
+    let relative = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .filter(|path| path.starts_with('/') && !path.contains(".."))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "could not resolve unified cgroup membership from /proc/self/cgroup",
+            )
+        })?;
+    Ok(Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
+}
+
+/// Verify that a rootless daemon using an explicit delegated cgroup root was
+/// launched from inside that delegation.
+///
+/// Ownership of controller files alone is insufficient. Cgroup v2 requires a
+/// writer to control the common ancestor of a process's source and destination
+/// cgroups, so an unprivileged daemon born in the host root cannot move itself
+/// or a child into a separate caller-owned subtree. Service managers satisfy
+/// this by placing the daemon in the delegation before exec. Non-systemd hosts
+/// must perform the same placement in their service/session launcher.
+#[cfg(target_os = "linux")]
+pub fn validate_explicit_delegated_daemon() -> Result<(), CgroupError> {
+    let explicit_root = std::env::var_os("FERROCRATE_CGROUP_ROOT").map(PathBuf::from);
+    if explicit_root.is_none() || effective_user_is_root() {
+        return Ok(());
+    }
+    let explicit_root = fs::canonicalize(explicit_root.expect("explicit root is present"))?;
+    let current = current_unified_cgroup()?;
+    let Some(target) = delegated_daemon_target(Some(&explicit_root), Some(&current), true) else {
+        return Ok(());
+    };
+
+    CgroupV2Manager::new(&explicit_root).ensure_v2_available()?;
+    Err(CgroupError::Io(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "explicit delegated cgroup root {} does not contain daemon cgroup {}; cgroup v2 cannot move rootless workloads across that boundary. On a non-systemd host, have the privileged service/session launcher place the daemon in a caller-owned leaf such as {} before exec",
+            explicit_root.display(),
+            current.display(),
+            target.display()
+        ),
+    )))
+}
+
 #[derive(Debug, Clone)]
 pub struct CgroupV2Manager {
     root: PathBuf,
@@ -427,7 +486,10 @@ fn read_cpu_stat(path: PathBuf) -> Result<CpuStat, CgroupError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_cgroup_io_error, CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
+    use super::{
+        delegated_daemon_target, format_cgroup_io_error, CgroupStats, CgroupV2Manager, CpuMax,
+        ResourceLimits,
+    };
     use std::fs;
     use std::sync::{Mutex, OnceLock};
 
@@ -445,6 +507,39 @@ mod tests {
         );
         assert!(message.contains("systemd-run --user --scope -p Delegate=yes"));
         assert!(message.contains("FERROCRATE_CGROUP_ROOT"));
+    }
+
+    #[test]
+    fn explicit_delegation_detects_only_processes_outside_the_subtree() {
+        let root = std::path::Path::new("/sys/fs/cgroup/ferro");
+        assert_eq!(
+            delegated_daemon_target(
+                Some(root),
+                Some(std::path::Path::new("/sys/fs/cgroup")),
+                true
+            ),
+            Some(root.join("ferrocrate-daemon"))
+        );
+        assert_eq!(
+            delegated_daemon_target(
+                Some(root),
+                Some(std::path::Path::new("/sys/fs/cgroup/ferro/session")),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            delegated_daemon_target(
+                Some(root),
+                Some(std::path::Path::new("/sys/fs/cgroup")),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            delegated_daemon_target(None, Some(std::path::Path::new("/sys/fs/cgroup")), true),
+            None
+        );
     }
 
     #[test]

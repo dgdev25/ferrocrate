@@ -15317,6 +15317,12 @@ fn handle_docker_compat_connection(
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/containers/create") => {
+                if docker_is_buildkit_bootstrap(&request.body) {
+                    return Ok(docker_error_response(
+                        501,
+                        "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
+                    ));
+                }
                 let name = query.get("name").cloned();
                 let id = docker_create_pending(&state, &request.body, name)?;
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
@@ -16902,6 +16908,24 @@ fn docker_error_response(status: u16, message: &str) -> Vec<u8> {
     })
     .to_string();
     http_response(status, body.as_bytes(), "application/json")
+}
+
+#[cfg(target_os = "linux")]
+fn docker_is_buildkit_bootstrap(body: &[u8]) -> bool {
+    let Ok(request) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(image) = request.get("Image").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    ["moby/buildkit", "docker.io/moby/buildkit"]
+        .iter()
+        .any(|repository| {
+            image == *repository
+                || image
+                    .strip_prefix(repository)
+                    .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with('@'))
+        })
 }
 
 #[cfg(target_os = "linux")]

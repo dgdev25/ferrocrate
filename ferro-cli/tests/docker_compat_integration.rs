@@ -2718,6 +2718,26 @@ fn docker_compat_buildkit_routes_name_the_supported_classic_mode() {
     }
 }
 
+#[test]
+fn docker_compat_buildx_bootstrap_names_the_supported_classic_mode() {
+    const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
+    let harness = DaemonHarness::spawn();
+    let body = serde_json::json!({
+        "Image": "moby/buildkit:buildx-stable-1",
+        "HostConfig": {"Init": true, "Privileged": true}
+    })
+    .to_string();
+    let request = format!(
+        "POST /containers/create?name=buildx_buildkit_default HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 501, "buildx bootstrap response={response}");
+    let payload: serde_json::Value =
+        serde_json::from_str(&response).expect("BuildKit compatibility JSON");
+    assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+}
+
 /// Decode a complete Docker multiplexed raw stream into (stream id, payload)
 /// frames; any truncated or invalid header is an error.
 fn decode_raw_frames(raw: &[u8]) -> Result<Vec<(u8, &[u8])>, String> {

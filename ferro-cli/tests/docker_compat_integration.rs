@@ -443,6 +443,224 @@ fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
 }
 
 #[test]
+#[allow(deprecated)]
+fn standalone_cli_waits_for_a_competing_process_owner() {
+    use nix::errno::Errno;
+    use nix::fcntl::{flock, FlockArg};
+    use std::os::fd::AsRawFd;
+
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let lock = runtime.path().join("engine.lock");
+    let mut holder = Command::new("flock")
+        .arg("-x")
+        .arg(&lock)
+        .arg("sleep")
+        .arg("0.25")
+        .spawn()
+        .expect("start competing lock holder");
+    let ready_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock)
+            .expect("open owner lock probe");
+        match flock(probe.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Err(Errno::EWOULDBLOCK) => break,
+            Ok(()) => {
+                flock(probe.as_raw_fd(), FlockArg::Unlock).expect("unlock probe");
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "competing owner never acquired the lock"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("probe owner lock: {error}"),
+        }
+    }
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run serialized CLI");
+    holder.wait().expect("wait for competing owner");
+    assert!(
+        output.status.success(),
+        "serialized CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "CLI did not wait for the competing process"
+    );
+}
+
+#[test]
+fn daemon_reconciles_authorization_before_publishing_or_opening_stores() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let authorization = runtime.path().join("authorization");
+    std::fs::create_dir_all(&authorization).expect("authorization directory");
+    std::fs::set_permissions(&authorization, std::fs::Permissions::from_mode(0o700))
+        .expect("authorization permissions");
+    let marker = authorization.join("emergency-active.json");
+    std::fs::write(&marker, b"durable-marker").expect("emergency marker");
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600))
+        .expect("marker permissions");
+    let socket = runtime.path().join("blocked.sock");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args([
+            "daemon",
+            "--docker-compat",
+            "--socket",
+            socket.to_str().expect("socket UTF-8"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start blocked daemon");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let output = loop {
+        if child.try_wait().expect("poll blocked daemon").is_some() {
+            break child.wait_with_output().expect("collect blocked daemon");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("unreconciled daemon remained running");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(!output.status.success(), "unreconciled daemon must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("reconciliation is required"),
+        "unexpected daemon error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!socket.exists(), "blocked daemon must not bind its socket");
+    assert!(
+        !runtime.path().join("engine-owner.json").exists(),
+        "blocked daemon must not publish ownership"
+    );
+    assert!(
+        !runtime.path().join("containers.db").exists(),
+        "blocked daemon must not open the container store"
+    );
+}
+
+#[test]
+fn native_cli_routes_representative_reads_writes_and_list_flags() {
+    let harness = DaemonHarness::spawn();
+    let create = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args([
+            "create",
+            "--name",
+            "delegated-create",
+            "busybox",
+            "true",
+        ])
+        .output()
+        .expect("delegate native create");
+    assert!(
+        create.status.success(),
+        "native create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    for command in ["info", "version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+            .env("FERROCRATE_DESKTOP_FORWARD", "0")
+            .arg(command)
+            .output()
+            .expect("delegate native read");
+        assert!(
+            output.status.success(),
+            "native {} failed: {}",
+            command,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.trim_start().starts_with('{'),
+            "native {command} emitted daemon JSON: {stdout}"
+        );
+        assert!(
+            stdout.contains(if command == "info" {
+                "Containers:"
+            } else {
+                "Client:"
+            }),
+            "native {command} presentation was not preserved: {stdout}"
+        );
+    }
+
+    let text = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all"])
+        .output()
+        .expect("delegate native text list");
+    assert!(text.status.success(), "text list failed");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("delegated-create"), "text list={text}");
+    assert!(!text.trim_start().starts_with('['), "text mode emitted JSON: {text}");
+
+    let quiet = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all", "--quiet", "--no-trunc"])
+        .output()
+        .expect("delegate native quiet list");
+    assert!(quiet.status.success(), "quiet list failed");
+    let quiet = String::from_utf8_lossy(&quiet.stdout);
+    assert_eq!(quiet.lines().count(), 1, "quiet list={quiet}");
+    assert!(quiet.trim().len() > 12, "--no-trunc ID was truncated: {quiet}");
+    assert!(!quiet.contains('['), "quiet mode emitted JSON: {quiet}");
+
+    let compose_file = harness.runtime_dir().join("compose.yaml");
+    std::fs::write(
+        &compose_file,
+        "services:\n  app:\n    image: busybox\n",
+    )
+    .expect("write delegated compose file");
+    let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args([
+            "compose",
+            "--file",
+            compose_file.to_str().expect("compose path UTF-8"),
+            "config",
+        ])
+        .output()
+        .expect("delegate compose config");
+    assert!(
+        compose.status.success(),
+        "compose config failed: {}",
+        String::from_utf8_lossy(&compose.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&compose.stdout).contains("services:"),
+        "compose output was not returned to the native CLI: {}",
+        String::from_utf8_lossy(&compose.stdout)
+    );
+}
+
+#[test]
 fn docker_container_list_projects_identity_labels_ports_networks_and_mounts() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/list-wire:latest");

@@ -996,7 +996,8 @@ pub enum MigrateCommands {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ComposeCommands {
     /// Create and start a Compose project.
     Up {
@@ -3092,6 +3093,16 @@ where
 
 #[cfg(target_os = "linux")]
 fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result<(), String> {
+    let output = execute_emergency_command(command, runtime_dir)?;
+    println!("{output}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn execute_emergency_command(
+    command: &EmergencyCommands,
+    runtime_dir: &Path,
+) -> Result<String, String> {
     let output = match command {
         EmergencyCommands::SinkServe {
             socket,
@@ -3271,8 +3282,37 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
             )
         }
     }?;
-    println!("{output}");
-    Ok(())
+    Ok(output)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteEmergencyExecute {
+    action: String,
+    resource: String,
+    sink_backend: String,
+    sink: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteScanRequest {
+    image: String,
+    scanner: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteComposeRequest {
+    file: PathBuf,
+    command: ComposeCommands,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct RemoteVolumeArchive {
+    name: String,
+    path: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -3285,6 +3325,7 @@ const ENGINE_OWNER_FILE: &str = "engine-owner.json";
 struct EngineOwnerRecord {
     schema_version: u32,
     pid: u32,
+    uid: u32,
     runtime_root: PathBuf,
     socket: PathBuf,
 }
@@ -3356,6 +3397,7 @@ impl EngineLockGuard {
         let record = EngineOwnerRecord {
             schema_version: 1,
             pid: std::process::id(),
+            uid: nix::unistd::geteuid().as_raw(),
             runtime_root: self.runtime_root.clone(),
             socket: socket.to_path_buf(),
         };
@@ -3379,55 +3421,122 @@ impl Drop for EngineLockGuard {
 #[derive(Debug)]
 enum EngineAccess {
     Direct(EngineLockGuard),
-    Delegate(PathBuf),
+    Delegate(EngineEndpoint),
 }
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EngineEndpoint {
+    socket: PathBuf,
+    pid: u32,
+    uid: u32,
+}
+
+#[cfg(target_os = "linux")]
+const ENGINE_OWNER_WAIT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const ENGINE_OWNER_POLL: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "linux")]
 impl EngineAccess {
     fn select(runtime_dir: &Path) -> Result<Self, String> {
-        if let Some(owner) = EngineLockGuard::try_acquire(runtime_dir)? {
-            return Ok(Self::Direct(owner));
+        let deadline = Instant::now() + ENGINE_OWNER_WAIT;
+        loop {
+            if let Some(owner) = EngineLockGuard::try_acquire(runtime_dir)? {
+                return Ok(Self::Direct(owner));
+            }
+            let last_error = match active_engine_endpoint(runtime_dir) {
+                Ok(endpoint) => return Ok(Self::Delegate(endpoint)),
+                Err(error) => error,
+            };
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "engine: timed out waiting for active owner publication or direct ownership: {last_error}"
+                ));
+            }
+            std::thread::sleep(ENGINE_OWNER_POLL);
         }
-
-        let runtime_root = runtime_dir
-            .canonicalize()
-            .map_err(|error| format!("engine: canonicalize owned runtime directory: {error}"))?;
-        let owner_path = runtime_root.join(ENGINE_OWNER_FILE);
-        let bytes = std::fs::read(&owner_path).map_err(|error| {
-            format!(
-                "engine: owner lock is held but {} is unreadable: {error}",
-                owner_path.display()
-            )
-        })?;
-        let record: EngineOwnerRecord = serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "engine: owner lock is held but {} is invalid: {error}",
-                owner_path.display()
-            )
-        })?;
-        if record.schema_version != 1 || record.runtime_root != runtime_root {
-            return Err("engine: active owner record does not match this runtime root".to_string());
-        }
-        let metadata = std::fs::symlink_metadata(&record.socket).map_err(|error| {
-            format!(
-                "engine: active owner socket {} is unavailable: {error}",
-                record.socket.display()
-            )
-        })?;
-        if !metadata.file_type().is_socket() {
-            return Err(format!(
-                "engine: active owner endpoint is not a Unix socket: {}",
-                record.socket.display()
-            ));
-        }
-        UnixStream::connect(&record.socket).map_err(|error| {
-            format!(
-                "engine: active owner socket {} is not connectable: {error}",
-                record.socket.display()
-            )
-        })?;
-        Ok(Self::Delegate(record.socket))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn active_engine_endpoint(runtime_dir: &Path) -> Result<EngineEndpoint, String> {
+    let runtime_root = runtime_dir
+        .canonicalize()
+        .map_err(|error| format!("engine: canonicalize owned runtime directory: {error}"))?;
+    let owner_path = runtime_root.join(ENGINE_OWNER_FILE);
+    let bytes = std::fs::read(&owner_path).map_err(|error| {
+        format!(
+            "engine: owner lock is held but {} is unreadable: {error}",
+            owner_path.display()
+        )
+    })?;
+    let record: EngineOwnerRecord = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "engine: owner lock is held but {} is invalid: {error}",
+            owner_path.display()
+        )
+    })?;
+    if record.schema_version != 1 || record.runtime_root != runtime_root {
+        return Err("engine: active owner record does not match this runtime root".to_string());
+    }
+    let metadata = std::fs::symlink_metadata(&record.socket).map_err(|error| {
+        format!(
+            "engine: active owner socket {} is unavailable: {error}",
+            record.socket.display()
+        )
+    })?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "engine: active owner endpoint is not a Unix socket: {}",
+            record.socket.display()
+        ));
+    }
+    let endpoint = EngineEndpoint {
+        socket: record.socket,
+        pid: record.pid,
+        uid: record.uid,
+    };
+    connect_engine_endpoint(&endpoint)?;
+    Ok(endpoint)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_engine_endpoint(endpoint: &EngineEndpoint) -> Result<UnixStream, String> {
+    use nix::sys::socket::{getsockopt, sockopt};
+
+    let stream = connect_remote_socket(&endpoint.socket)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
+    let peer = getsockopt(&stream, sockopt::PeerCredentials)
+        .map_err(|error| format!("remote context peer credentials failed: {error}"))?;
+    let peer_pid = u32::try_from(peer.pid())
+        .map_err(|_| "remote context peer PID is invalid".to_string())?;
+    if peer_pid != endpoint.pid || peer.uid() != endpoint.uid {
+        return Err(format!(
+            "remote context peer identity mismatch: expected pid={} uid={}, got pid={} uid={}",
+            endpoint.pid,
+            endpoint.uid,
+            peer_pid,
+            peer.uid()
+        ));
+    }
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_remote_socket(socket: &Path) -> Result<UnixStream, String> {
+    let socket = socket.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(UnixStream::connect(socket));
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "remote context connect timed out".to_string())?
+        .map_err(|error| format!("remote context connect failed: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -3467,6 +3576,96 @@ fn write_engine_owner_record(path: &Path, record: &EngineOwnerRecord) -> Result<
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandOwnership {
+    LocalOnly,
+    Engine,
+}
+
+#[cfg(target_os = "linux")]
+impl CommandOwnership {
+    fn for_command(command: &Commands) -> Self {
+        match command {
+            Commands::Policy { .. }
+            | Commands::Witness { .. }
+            | Commands::Rvf { .. }
+            | Commands::Login { .. }
+            | Commands::Logout { .. }
+            | Commands::Daemon { .. }
+            | Commands::Completion { .. }
+            | Commands::Ai { .. }
+            | Commands::AiTrain { .. }
+            | Commands::AiExport { .. }
+            | Commands::AiImport { .. }
+            | Commands::AiStats { .. }
+            | Commands::AiBranch { .. }
+            | Commands::AiLineage { .. }
+            | Commands::Config { .. }
+            | Commands::Context { .. }
+            | Commands::Doctor { .. }
+            | Commands::Entitlement { .. }
+            | Commands::AiAudit { .. }
+            | Commands::Migrate { .. }
+            | Commands::Emergency {
+                command:
+                    EmergencyCommands::SinkServe { .. }
+                    | EmergencyCommands::Activate { .. }
+                    | EmergencyCommands::Reconcile { .. },
+            } => Self::LocalOnly,
+            Commands::Emergency {
+                command: EmergencyCommands::Execute { .. },
+            }
+            | Commands::Run { .. }
+            | Commands::Build { .. }
+            | Commands::BuildCachePrune { .. }
+            | Commands::Images { .. }
+            | Commands::Cp { .. }
+            | Commands::Save { .. }
+            | Commands::Load { .. }
+            | Commands::Export { .. }
+            | Commands::Diff { .. }
+            | Commands::Search { .. }
+            | Commands::Create { .. }
+            | Commands::Attach { .. }
+            | Commands::Info
+            | Commands::Version
+            | Commands::SystemDf { .. }
+            | Commands::System { .. }
+            | Commands::ImageInspect { .. }
+            | Commands::Tag { .. }
+            | Commands::Commit { .. }
+            | Commands::History { .. }
+            | Commands::Rmi { .. }
+            | Commands::ImagePrune { .. }
+            | Commands::Volume { .. }
+            | Commands::Network { .. }
+            | Commands::Containers { .. }
+            | Commands::ContainerPrune { .. }
+            | Commands::Events { .. }
+            | Commands::Logs { .. }
+            | Commands::Stats { .. }
+            | Commands::Top { .. }
+            | Commands::Wait { .. }
+            | Commands::Inspect { .. }
+            | Commands::Pause { .. }
+            | Commands::Unpause { .. }
+            | Commands::Stop { .. }
+            | Commands::Kill { .. }
+            | Commands::Rm { .. }
+            | Commands::Rename { .. }
+            | Commands::Start { .. }
+            | Commands::Restart { .. }
+            | Commands::Exec { .. }
+            | Commands::Pull { .. }
+            | Commands::Push { .. }
+            | Commands::Scan { .. }
+            | Commands::Compose { .. }
+            | Commands::Tui => Self::Engine,
+        }
+    }
 }
 
 fn dispatch(command: Commands) -> Result<(), String> {
@@ -3519,7 +3718,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     | WitnessCommands::MerkleVerify { .. }
                     | WitnessCommands::Export { .. }),
             } => return dispatch_witness(command, &runtime_dir),
-            Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
+            Commands::Emergency { command }
+                if !matches!(command, EmergencyCommands::Execute { .. }) =>
+            {
+                return dispatch_emergency(command, &runtime_dir)
+            }
             _ => {}
         }
 
@@ -3534,19 +3737,22 @@ fn dispatch(command: Commands) -> Result<(), String> {
             return run_daemon(socket, docker_compat, metrics_addr.as_deref());
         }
 
-        // An explicitly selected remote context takes precedence over the
-        // automatically discovered owner of the local runtime root.
-        if let Some(result) = dispatch_remote_context(&command) {
-            return result;
-        }
-
-        let _engine_owner = match EngineAccess::select(&runtime_dir)? {
-            EngineAccess::Direct(owner) => owner,
-            EngineAccess::Delegate(endpoint) => {
-                return dispatch_remote_endpoint(&command, &endpoint).unwrap_or_else(|| {
-                    Err("engine: command cannot be delegated to the active daemon".to_string())
-                });
+        let _engine_owner = if CommandOwnership::for_command(&command) == CommandOwnership::Engine {
+            // An explicitly selected remote context takes precedence over the
+            // automatically discovered owner of the local runtime root.
+            if let Some(result) = dispatch_remote_context(&command) {
+                return result;
             }
+            match EngineAccess::select(&runtime_dir)? {
+                EngineAccess::Direct(owner) => Some(owner),
+                EngineAccess::Delegate(endpoint) => {
+                    return dispatch_remote_endpoint(&command, &endpoint).unwrap_or_else(|| {
+                        Err("engine: command cannot be delegated to the active daemon".to_string())
+                    });
+                }
+            }
+        } else {
+            None
         };
 
         authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
@@ -4038,6 +4244,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     file.as_deref(),
                     command,
                 )
+                .map(|output| print!("{output}"))
             }
             Commands::Daemon { .. } => {
                 unreachable!("daemon command handled before runtime initialization")
@@ -5706,9 +5913,57 @@ fn remote_docker_request_with_content_type(
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context request has an invalid socket or path".to_string());
     }
+    let stream = connect_remote_socket(Path::new(socket_path))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
+    remote_docker_request_stream(stream, method, path, body, content_type)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_request_endpoint(
+    endpoint: &EngineEndpoint,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<(u16, Vec<u8>), String> {
+    if path.contains('\r') || path.contains('\n') {
+        return Err("remote context request has an invalid path".to_string());
+    }
+    let stream = connect_engine_endpoint(endpoint)?;
+    remote_docker_request_stream(stream, method, path, body, None)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_request_with_content_type_endpoint(
+    endpoint: &EngineEndpoint,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, Vec<u8>), String> {
+    if path.contains('\r') || path.contains('\n') {
+        return Err("remote context request has an invalid path".to_string());
+    }
+    remote_docker_request_stream(
+        connect_engine_endpoint(endpoint)?,
+        method,
+        path,
+        body,
+        content_type,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_request_stream(
+    mut stream: UnixStream,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, Vec<u8>), String> {
     let body = body.unwrap_or_default();
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| format!("remote context connect failed: {error}"))?;
     let content_header = content_type
         .map(|value| format!("Content-Type: {value}\r\n"))
         .unwrap_or_default();
@@ -5748,7 +6003,7 @@ fn remote_docker_stream_request<F>(
     method: &str,
     path: &str,
     body: Option<&[u8]>,
-    mut on_chunk: F,
+    on_chunk: F,
 ) -> Result<(), String>
 where
     F: FnMut(&[u8]) -> Result<(), String>,
@@ -5756,9 +6011,43 @@ where
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context request has an invalid socket or path".to_string());
     }
+    let stream = connect_remote_socket(Path::new(socket_path))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
+    remote_docker_stream_on_stream(stream, method, path, body, on_chunk)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_stream_request_endpoint<F>(
+    endpoint: &EngineEndpoint,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    on_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
+    if path.contains('\r') || path.contains('\n') {
+        return Err("remote context request has an invalid path".to_string());
+    }
+    remote_docker_stream_on_stream(connect_engine_endpoint(endpoint)?, method, path, body, on_chunk)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_stream_on_stream<F>(
+    mut stream: UnixStream,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
     let body = body.unwrap_or_default();
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| format!("remote context connect failed: {error}"))?;
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
         body.len()
@@ -6046,8 +6335,45 @@ fn remote_docker_hijack_with_body(
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context hijack has an invalid socket or path".to_string());
     }
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|error| format!("remote context hijack connect failed: {error}"))?;
+    let stream = connect_remote_socket(Path::new(socket_path))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
+    remote_docker_hijack_on_stream(stream, path, body, stdin_requested, tty, detach_keys)
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_hijack_endpoint(
+    endpoint: &EngineEndpoint,
+    path: &str,
+    body: Option<&[u8]>,
+    stdin_requested: bool,
+    tty: bool,
+    detach_keys: &[u8],
+) -> Result<(), String> {
+    if path.contains('\r') || path.contains('\n') {
+        return Err("remote context hijack has an invalid path".to_string());
+    }
+    remote_docker_hijack_on_stream(
+        connect_engine_endpoint(endpoint)?,
+        path,
+        body,
+        stdin_requested,
+        tty,
+        detach_keys,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn remote_docker_hijack_on_stream(
+    mut stream: UnixStream,
+    path: &str,
+    body: Option<&[u8]>,
+    stdin_requested: bool,
+    tty: bool,
+    detach_keys: &[u8],
+) -> Result<(), String> {
     let body = body.unwrap_or_default();
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: ferrocrate-remote\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -6140,17 +6466,33 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Ok(endpoint) => endpoint,
         Err(error) => return Some(Err(error)),
     }?;
-    dispatch_remote_endpoint(command, Path::new(&endpoint))
+    dispatch_remote_socket(command, Path::new(&endpoint), None)
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Result<(), String>> {
-    let endpoint = match endpoint.to_str() {
+fn dispatch_remote_endpoint(
+    command: &Commands,
+    endpoint: &EngineEndpoint,
+) -> Option<Result<(), String>> {
+    dispatch_remote_socket(command, &endpoint.socket, Some(endpoint))
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_remote_socket(
+    command: &Commands,
+    socket: &Path,
+    owner: Option<&EngineEndpoint>,
+) -> Option<Result<(), String>> {
+    let endpoint = match socket.to_str() {
         Some(endpoint) => endpoint,
         None => return Some(Err("remote context socket path is not valid UTF-8".to_string())),
     };
     let request_with_body = |method: &str, path: String, payload: Option<Vec<u8>>| {
-        remote_docker_request(endpoint, method, &path, payload.as_deref()).and_then(
+        let response = match owner {
+            Some(owner) => remote_docker_request_endpoint(owner, method, &path, payload.as_deref()),
+            None => remote_docker_request(endpoint, method, &path, payload.as_deref()),
+        };
+        response.and_then(
             |(status, body)| {
                 if (200..300).contains(&status) {
                     Ok(body)
@@ -6357,18 +6699,20 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                 .ok_or_else(|| "remote run create response omitted Id".to_string())?;
             request("POST", format!("/containers/{id}/start"))?;
             if !detach {
-                remote_docker_hijack(
-                    &endpoint,
-                    &format!(
+                let path = format!(
                         "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1&detachKeys={}",
                         percent_encode_path_component(id),
                         if *interactive { 1 } else { 0 },
                         percent_encode_path_component(detach_keys),
+                    );
+                match owner {
+                    Some(owner) => remote_docker_hijack_endpoint(
+                        owner, &path, None, *interactive, *tty, &parsed_detach_keys,
                     ),
-                    *interactive,
-                    *tty,
-                    &parsed_detach_keys,
-                )?;
+                    None => remote_docker_hijack(
+                        endpoint, &path, *interactive, *tty, &parsed_detach_keys,
+                    ),
+                }?;
             }
             if *rm {
                 request(
@@ -6462,13 +6806,22 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                     path.push_str("&platform=");
                     path.push_str(&percent_encode_path_component(platform));
                 }
-                let (status, body) = remote_docker_request_with_content_type(
-                    &endpoint,
-                    "POST",
-                    &path,
-                    Some(&archive),
-                    Some("application/x-tar"),
-                )?;
+                let (status, body) = match owner {
+                    Some(owner) => remote_docker_request_with_content_type_endpoint(
+                        owner,
+                        "POST",
+                        &path,
+                        Some(&archive),
+                        Some("application/x-tar"),
+                    ),
+                    None => remote_docker_request_with_content_type(
+                        endpoint,
+                        "POST",
+                        &path,
+                        Some(&archive),
+                        Some("application/x-tar"),
+                    ),
+                }?;
                 if !(200..300).contains(&status) {
                     return Err(format!(
                         "remote context request returned HTTP {status}: {}",
@@ -6481,10 +6834,139 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                 Ok(())
             })()
         }
+        Commands::Save { output, images } => (|| -> Result<(), String> {
+            if images.is_empty() {
+                return Err("save: at least one image is required".to_string());
+            }
+            let encoded = serde_json::to_string(images).map_err(|error| error.to_string())?;
+            let body = request(
+                "GET",
+                format!("/images/get?names={}", percent_encode_path_component(&encoded)),
+            )?;
+            std::fs::write(output, body).map_err(|error| format!("save: {error}"))
+        })(),
+        Commands::Load { input } => (|| -> Result<(), String> {
+            let archive = std::fs::read(input).map_err(|error| format!("load: {error}"))?;
+            request_with_body("POST", "/images/load".to_string(), Some(archive))
+                .and_then(|body| print_docker_image_progress(&body))
+        })(),
+        Commands::Export { output, container } => request(
+            "GET",
+            format!(
+                "/containers/{}/export",
+                percent_encode_path_component(container)
+            ),
+        )
+        .and_then(|body| {
+            std::fs::write(output, body).map_err(|error| format!("export: {error}"))
+        }),
+        Commands::Diff { container } => request(
+            "GET",
+            format!(
+                "/containers/{}/changes",
+                percent_encode_path_component(container)
+            ),
+        )
+        .and_then(|body| print_json_bytes(&body)),
+        Commands::Cp { source, destination } => {
+            dispatch_remote_copy(&request, &request_with_body, source, destination)
+        }
+        Commands::Attach {
+            no_stdin,
+            detach_keys,
+            container,
+        } => (|| -> Result<(), String> {
+            let parsed = parse_detach_keys(detach_keys)?;
+            let path = format!(
+                "/containers/{}/attach?logs=1&stream=1&stdin={}&stdout=1&stderr=1&detachKeys={}",
+                percent_encode_path_component(container),
+                if *no_stdin { 0 } else { 1 },
+                percent_encode_path_component(detach_keys),
+            );
+            match owner {
+                Some(owner) => remote_docker_hijack_endpoint(
+                    owner, &path, None, !*no_stdin, false, &parsed,
+                ),
+                None => remote_docker_hijack(
+                    endpoint, &path, !*no_stdin, false, &parsed,
+                ),
+            }
+        })(),
+        Commands::Create {
+            name,
+            memory_max,
+            cpus,
+            image,
+            cmd,
+        } => (|| -> Result<(), String> {
+            let (cpu_quota, cpu_period) = docker_cpu_quota_period(None, None, cpus.as_deref())?;
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "Image": image,
+                "Cmd": cmd,
+                "HostConfig": {
+                    "Memory": memory_max.unwrap_or(0),
+                    "CpuQuota": cpu_quota.unwrap_or(0),
+                    "CpuPeriod": cpu_period.unwrap_or(0),
+                }
+            }))
+            .map_err(|error| error.to_string())?;
+            let path = name.as_ref().map_or_else(
+                || "/containers/create".to_string(),
+                |name| format!(
+                    "/containers/create?name={}",
+                    percent_encode_path_component(name)
+                ),
+            );
+            let body = request_with_body("POST", path, Some(payload))?;
+            let response: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| format!("remote create returned invalid JSON: {error}"))?;
+            let id = response["Id"]
+                .as_str()
+                .ok_or_else(|| "remote create response omitted Id".to_string())?;
+            println!("{id}");
+            Ok(())
+        })(),
+        Commands::Info => request("GET", "/info".to_string())
+            .and_then(|body| print_remote_info(&body)),
+        Commands::Version => request("GET", "/version".to_string())
+            .and_then(|body| print_remote_version(&body)),
         Commands::SystemDf { format } => {
             request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
         }
-        Commands::Images { format, filters, quiet: _ } => (|| -> Result<(), String> {
+        Commands::System {
+            command: SystemCommands::Prune { volumes, all, .. },
+        } => (|| -> Result<(), String> {
+            let container_filters = serde_json::json!({"status": {"exited": true}});
+            request(
+                "POST",
+                format!(
+                    "/containers/prune?filters={}",
+                    percent_encode_path_component(&container_filters.to_string())
+                ),
+            )?;
+            let image_filters = serde_json::json!({
+                "dangling": [if *all { "false" } else { "true" }]
+            });
+            request(
+                "POST",
+                format!(
+                    "/images/prune?filters={}",
+                    percent_encode_path_component(&image_filters.to_string())
+                ),
+            )?;
+            request("POST", "/networks/prune".to_string())?;
+            if *volumes {
+                request("POST", "/volumes/prune".to_string())?;
+            }
+            println!("system prune: completed");
+            Ok(())
+        })(),
+        Commands::Search { term } => request(
+            "GET",
+            format!("/images/search?term={}", percent_encode_path_component(term)),
+        )
+        .and_then(|body| print_json(body, "json")),
+        Commands::Images { format, filters, quiet } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_filters(&parsed)?;
             let path = if parsed.is_empty() {
@@ -6496,7 +6978,7 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                     percent_encode_path_component(&encoded)
                 )
             };
-            request("GET", path).and_then(|body| print_json(body, format))
+            request("GET", path).and_then(|body| print_remote_image_list(&body, format, *quiet))
         })(),
         Commands::History { image, format } => request(
             "GET",
@@ -6585,8 +7067,8 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
         })(),
         Commands::Containers {
             format,
-            quiet: _,
-            no_trunc: _,
+            quiet,
+            no_trunc,
             all,
             limit,
             since,
@@ -6611,7 +7093,9 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                 path.push_str("&filters=");
                 path.push_str(&percent_encode_path_component(&encoded));
             }
-            request("GET", path).and_then(|body| print_json(body, format))
+            request("GET", path).and_then(|body| {
+                print_remote_container_list(&body, format, *quiet, *no_trunc)
+            })
         })(),
         Commands::ContainerPrune { filters } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
@@ -6667,10 +7151,18 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
             }
             if *follow {
                 add("follow", "1");
-                remote_docker_stream_request(&endpoint, "GET", &path, None, |chunk| {
+                let mut on_chunk = |chunk: &[u8]| {
                     print!("{}", String::from_utf8_lossy(chunk));
                     std::io::stdout().flush().map_err(|error| error.to_string())
-                })
+                };
+                match owner {
+                    Some(owner) => remote_docker_stream_request_endpoint(
+                        owner, "GET", &path, None, &mut on_chunk,
+                    ),
+                    None => remote_docker_stream_request(
+                        endpoint, "GET", &path, None, &mut on_chunk,
+                    ),
+                }
             } else {
                 request("GET", path).map(|body| print!("{}", String::from_utf8_lossy(&body)))
             }
@@ -6717,14 +7209,15 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                     &serde_json::json!({"Detach": false, "Tty": tty}),
                 )
                 .map_err(|error| error.to_string())?;
-                return remote_docker_hijack_with_body(
-                    &endpoint,
-                    &format!("/exec/{}/start", percent_encode_path_component(id)),
-                    Some(&start),
-                    true,
-                    *tty,
-                    &[],
-                );
+                let path = format!("/exec/{}/start", percent_encode_path_component(id));
+                return match owner {
+                    Some(owner) => remote_docker_hijack_endpoint(
+                        owner, &path, Some(&start), true, *tty, &[],
+                    ),
+                    None => remote_docker_hijack_with_body(
+                        endpoint, &path, Some(&start), true, *tty, &[],
+                    ),
+                };
             }
             let start = serde_json::to_vec(
                 &serde_json::json!({"Detach": false, "Tty": tty}),
@@ -6764,15 +7257,11 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                     // The daemon multiplexes non-TTY follow streams as Docker
                     // stream frames and sends TTY follow streams raw.
                     let mut demuxer = DockerLogFrameDemuxer::new();
-                    remote_docker_stream_request(
-                        &endpoint,
-                        "GET",
-                        &format!(
+                    let path = format!(
                             "/containers/{}/logs?stdout=1&stderr=1&follow=1",
                             percent_encode_path_component(container)
-                        ),
-                        None,
-                        |chunk| {
+                        );
+                    let mut on_chunk = |chunk: &[u8]| {
                             let (stdout, stderr) = demuxer.feed(chunk);
                             if !stdout.is_empty() {
                                 print!("{}", String::from_utf8_lossy(&stdout));
@@ -6781,8 +7270,15 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                                 eprint!("{}", String::from_utf8_lossy(&stderr));
                             }
                             std::io::stdout().flush().map_err(|error| error.to_string())
-                        },
-                    )
+                        };
+                    match owner {
+                        Some(owner) => remote_docker_stream_request_endpoint(
+                            owner, "GET", &path, None, &mut on_chunk,
+                        ),
+                        None => remote_docker_stream_request(
+                            endpoint, "GET", &path, None, &mut on_chunk,
+                        ),
+                    }
                 }
             } else {
                 request(
@@ -6833,21 +7329,24 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                 if format != "json" {
                     Err("remote stats: --follow requires --format json".to_string())
                 } else {
-                    remote_docker_stream_request(
-                        &endpoint,
-                        "GET",
-                        &format!(
+                    let path = format!(
                             "/containers/{}/stats?stream=1",
                             percent_encode_path_component(container)
-                        ),
-                        None,
-                        |chunk| {
+                        );
+                    let mut on_chunk = |chunk: &[u8]| {
                             std::io::stdout()
                                 .write_all(chunk)
                                 .and_then(|_| std::io::stdout().flush())
                                 .map_err(|error| error.to_string())
-                        },
-                    )
+                        };
+                    match owner {
+                        Some(owner) => remote_docker_stream_request_endpoint(
+                            owner, "GET", &path, None, &mut on_chunk,
+                        ),
+                        None => remote_docker_stream_request(
+                            endpoint, "GET", &path, None, &mut on_chunk,
+                        ),
+                    }
                 }
             } else {
                 request(
@@ -7143,6 +7642,33 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
             format!("/volumes/{}", percent_encode_path_component(name)),
         )
         .map(|_| ()),
+        Commands::Volume {
+            command:
+                VolumeCommands::Backup { name, path }
+                | VolumeCommands::Restore { name, path },
+        } => (|| -> Result<(), String> {
+            let path = absolute_command_path(Path::new(path))?;
+            let payload = serde_json::to_vec(&RemoteVolumeArchive {
+                name: name.clone(),
+                path,
+            })
+            .map_err(|error| format!("volume archive: encode request: {error}"))?;
+            let operation = match command {
+                Commands::Volume {
+                    command: VolumeCommands::Backup { .. },
+                } => "backup",
+                Commands::Volume {
+                    command: VolumeCommands::Restore { .. },
+                } => "restore",
+                _ => unreachable!(),
+            };
+            request_with_body(
+                "POST",
+                format!("/ferrocrate/volume/{operation}"),
+                Some(payload),
+            )
+            .map(|body| print!("{}", String::from_utf8_lossy(&body)))
+        })(),
         Commands::BuildCachePrune {
             max_entries,
             format,
@@ -7162,11 +7688,285 @@ fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Resul
                 Ok(())
             }
         })(),
-        _ => {
-            Err("selected remote context has no transport mapping for this command yet".to_string())
+        Commands::Emergency {
+            command:
+                EmergencyCommands::Execute {
+                    action,
+                    resource,
+                    sink_backend,
+                    sink,
+                },
+        } => {
+            let payload = RemoteEmergencyExecute {
+                action: action.clone(),
+                resource: resource.clone(),
+                sink_backend: sink_backend.clone(),
+                sink: sink.clone(),
+            };
+            serde_json::to_vec(&payload)
+                .map_err(|error| format!("emergency execute: encode request: {error}"))
+                .and_then(|payload| {
+                    request_with_body(
+                        "POST",
+                        "/ferrocrate/emergency/execute".to_string(),
+                        Some(payload),
+                    )
+                })
+                .map(|body| print!("{}", String::from_utf8_lossy(&body)))
         }
+        Commands::Tui => Err(
+            "tui: interactive mode is unavailable while another process owns the engine"
+                .to_string(),
+        ),
+        Commands::Scan { image, scanner } => serde_json::to_vec(&RemoteScanRequest {
+            image: image.clone(),
+            scanner: scanner.clone(),
+        })
+        .map_err(|error| format!("scan: encode request: {error}"))
+        .and_then(|payload| {
+            request_with_body("POST", "/ferrocrate/scan".to_string(), Some(payload))
+        })
+        .map(|body| print!("{}", String::from_utf8_lossy(&body))),
+        Commands::Compose { file, command } => (|| -> Result<(), String> {
+            let file = find_compose_file(file.as_deref())
+                .map_err(|error| error.to_string())?
+                .canonicalize()
+                .map_err(|error| format!("compose: resolve file: {error}"))?;
+            let payload = serde_json::to_vec(&RemoteComposeRequest {
+                file,
+                command: command.clone(),
+            })
+            .map_err(|error| format!("compose: encode request: {error}"))?;
+            request_with_body(
+                "POST",
+                "/ferrocrate/compose".to_string(),
+                Some(payload),
+            )
+            .map(|body| print!("{}", String::from_utf8_lossy(&body)))
+        })(),
+        Commands::Policy { .. }
+        | Commands::Witness { .. }
+        | Commands::Rvf { .. }
+        | Commands::Login { .. }
+        | Commands::Logout { .. }
+        | Commands::Daemon { .. }
+        | Commands::Completion { .. }
+        | Commands::Ai { .. }
+        | Commands::AiTrain { .. }
+        | Commands::AiExport { .. }
+        | Commands::AiImport { .. }
+        | Commands::AiStats { .. }
+        | Commands::AiBranch { .. }
+        | Commands::AiLineage { .. }
+        | Commands::Config { .. }
+        | Commands::Context { .. }
+        | Commands::Doctor { .. }
+        | Commands::Entitlement { .. }
+        | Commands::AiAudit { .. }
+        | Commands::Migrate { .. }
+        | Commands::Emergency { .. } => Err(
+            "local-only command cannot be sent through the engine transport".to_string(),
+        ),
     };
     Some(result)
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_container_list(
+    body: &[u8],
+    format: &str,
+    quiet: bool,
+    no_trunc: bool,
+) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote container list returned invalid JSON: {error}"))?;
+    if quiet {
+        for entry in entries {
+            let id = entry["Id"].as_str().unwrap_or_default();
+            println!("{}", if no_trunc { id } else { &id[..id.len().min(12)] });
+        }
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("containers: no entries");
+        return Ok(());
+    }
+    for entry in entries {
+        let full_id = entry["Id"].as_str().unwrap_or_default();
+        let id = if no_trunc {
+            full_id
+        } else {
+            &full_id[..full_id.len().min(12)]
+        };
+        let image = entry["Image"].as_str().unwrap_or("-");
+        let status = entry["State"]
+            .as_str()
+            .or_else(|| entry["Status"].as_str())
+            .unwrap_or("unknown");
+        let name = entry["Names"]
+            .as_array()
+            .and_then(|names| names.first())
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-")
+            .trim_start_matches('/');
+        println!("{id} {image} {status} {name}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_remote_copy(
+    request: &impl Fn(&str, String) -> Result<Vec<u8>, String>,
+    request_with_body: &impl Fn(&str, String, Option<Vec<u8>>) -> Result<Vec<u8>, String>,
+    source: &str,
+    destination: &str,
+) -> Result<(), String> {
+    let source_container = source
+        .split_once(':')
+        .filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
+    let destination_container = destination
+        .split_once(':')
+        .filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
+    match (source_container, destination_container) {
+        (Some((container, path)), None) => {
+            let archive = request(
+                "GET",
+                format!(
+                    "/containers/{}/archive?path={}",
+                    percent_encode_path_component(container),
+                    percent_encode_path_component(path)
+                ),
+            )?;
+            let destination = Path::new(destination);
+            std::fs::create_dir_all(destination)
+                .map_err(|error| format!("cp: create destination: {error}"))?;
+            tar::Archive::new(Cursor::new(archive))
+                .unpack(destination)
+                .map_err(|error| format!("cp: extract archive: {error}"))
+        }
+        (None, Some((container, path))) => {
+            let source = Path::new(source);
+            let name = source
+                .file_name()
+                .ok_or_else(|| "cp: local source has no file name".to_string())?;
+            let mut builder = tar::Builder::new(Vec::new());
+            if source.is_dir() {
+                builder
+                    .append_dir_all(name, source)
+                    .map_err(|error| format!("cp: archive directory: {error}"))?;
+            } else {
+                builder
+                    .append_path_with_name(source, name)
+                    .map_err(|error| format!("cp: archive file: {error}"))?;
+            }
+            let archive = builder
+                .into_inner()
+                .map_err(|error| format!("cp: finish archive: {error}"))?;
+            request_with_body(
+                "PUT",
+                format!(
+                    "/containers/{}/archive?path={}",
+                    percent_encode_path_component(container),
+                    percent_encode_path_component(path)
+                ),
+                Some(archive),
+            )
+            .map(|_| ())
+        }
+        (Some(_), Some(_)) => Err("cp: container-to-container copy is unsupported".to_string()),
+        (None, None) => Err("cp: exactly one path must use container:/absolute/path".to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_image_list(body: &[u8], format: &str, quiet: bool) -> Result<(), String> {
+    if format == "json" {
+        return print_json_bytes(body);
+    }
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("remote image list returned invalid JSON: {error}"))?;
+    if quiet {
+        for entry in entries {
+            println!("{}", entry["Id"].as_str().unwrap_or_default());
+        }
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("images: no entries");
+        return Ok(());
+    }
+    for entry in entries {
+        let id = entry["Id"].as_str().unwrap_or_default();
+        let size = entry["Size"].as_u64().unwrap_or_default();
+        let tags = entry["RepoTags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        if tags.is_empty() {
+            println!("<none> {id} {size}");
+        } else {
+            for tag in tags {
+                println!("{tag} {id} {size}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_info(body: &[u8]) -> Result<(), String> {
+    let body: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote info returned invalid JSON: {error}"))?;
+    println!(
+        "Containers: {}\n Running: {}\n Paused: {}\n Stopped: {}\nImages: {}\nServer Version: {}\nStorage Driver: {}\nArchitecture: {}\nOperating System: {}",
+        body["Containers"],
+        body["ContainersRunning"],
+        body["ContainersPaused"],
+        body["ContainersStopped"],
+        body["Images"],
+        env!("CARGO_PKG_VERSION"),
+        body["Driver"],
+        body["Architecture"],
+        body["OperatingSystem"]
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_remote_version(body: &[u8]) -> Result<(), String> {
+    let body: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote version returned invalid JSON: {error}"))?;
+    println!(
+        "Client:\n Version: {}\n API version: {}\n\nServer:\n Engine:\n  Version: {}\n  API version: {}",
+        body["Version"], body["ApiVersion"], body["Version"], body["ApiVersion"]
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_json_bytes(body: &[u8]) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("remote context returned invalid JSON: {error}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn absolute_command_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|directory| directory.join(path))
+        .map_err(|error| format!("resolve command path: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -11201,6 +12001,18 @@ fn handle_scan(
     scanner: &str,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
+    let output = scan_image(store, image, scanner, authorization)?;
+    println!("{output}");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn scan_image(
+    store: &LocalImageStore,
+    image: &str,
+    scanner: &str,
+    authorization: &SurfaceAuthorization,
+) -> Result<String, String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     ensure_image_present(store, image, &origin, authorization)?;
     let runtime_dir = runtime_dir();
@@ -11216,9 +12028,7 @@ fn handle_scan(
         .map_err(|err| format!("scan: {err}"))?;
 
     let scanner = select_scanner(scanner)?;
-    let output = run_scanner(&scanner, &rootfs)?;
-    println!("{output}");
-    Ok(())
+    run_scanner(&scanner, &rootfs)
 }
 
 fn select_scanner(requested: &str) -> Result<String, String> {
@@ -11722,7 +12532,7 @@ fn handle_compose(
     volume_store: &LocalVolumeStore,
     file: Option<&str>,
     command: ComposeCommands,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
     let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
@@ -11734,6 +12544,7 @@ fn handle_compose(
         .map_err(|error| format!("compose: project directory cannot be resolved: {error}"))?;
     let default_network =
         compose_default_network_name_with_declared(&project_dir, project.compose.name.as_deref())?;
+    let mut output = String::new();
     match command {
         ComposeCommands::Up {
             profile,
@@ -12124,7 +12935,7 @@ fn handle_compose(
             }
         }
         ComposeCommands::Config => {
-            print!("{}", serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?);
+            output = serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?;
         }
         ComposeCommands::Down { services } => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
@@ -12323,14 +13134,14 @@ fn handle_compose(
         }
         ComposeCommands::Ps => {
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
-            println!("compose ps: {:?}", services);
+            output = format!("compose ps: {:?}\n", services);
         }
         ComposeCommands::Logs => {
             let services = compose_logs(&project).map_err(|err| err.to_string())?;
-            println!("compose logs: {:?}", services);
+            output = format!("compose logs: {:?}\n", services);
         }
     }
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(target_os = "linux")]
@@ -14382,6 +15193,7 @@ fn run_daemon(
     let runtime_dir = runtime_dir();
     let mut engine_owner = EngineLockGuard::try_acquire(&runtime_dir)?
         .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
+    authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
     // A daemon owns the request thread independently of each workload. Keep
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
@@ -14392,6 +15204,9 @@ fn run_daemon(
     // processes keep direct-to-file capture (their threads would die first).
     unsafe { std::env::set_var("FERROCRATE_LOG_JOURNAL", "1") };
     let socket_path = Path::new(socket);
+    if !socket_path.is_absolute() {
+        return Err("daemon: socket path must be absolute".to_string());
+    }
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -14409,7 +15224,6 @@ fn run_daemon(
     let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
-    engine_owner.publish_daemon_owner(socket_path)?;
     let runtime_dir = Arc::new(runtime_dir);
     ContainerRuntime::new(runtime_dir.as_ref())
         .and_then(|runtime| runtime.reconcile_daemon_boot())
@@ -14424,6 +15238,7 @@ fn run_daemon(
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime_dir.clone(), store.clone(), addr)?;
     }
+    engine_owner.publish_daemon_owner(socket_path)?;
 
     for stream in listener.incoming() {
         match stream {
@@ -14588,6 +15403,77 @@ fn handle_docker_compat_connection(
             request.body.clone(),
         ));
         let response = match (request.method.as_str(), path.as_str()) {
+            ("POST", "/ferrocrate/emergency/execute") => {
+                let request: RemoteEmergencyExecute = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("emergency execute: invalid request: {error}"))?;
+                let output = execute_emergency_command(
+                    &EmergencyCommands::Execute {
+                        action: request.action,
+                        resource: request.resource,
+                        sink_backend: request.sink_backend,
+                        sink: request.sink,
+                    },
+                    runtime_dir.as_ref(),
+                )?;
+                http_response(200, output.as_bytes(), "text/plain")
+            }
+            ("POST", "/ferrocrate/scan") => {
+                let request: RemoteScanRequest = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("scan: invalid request: {error}"))?;
+                let output = scan_image(
+                    &store,
+                    &request.image,
+                    &request.scanner,
+                    &surface_authorization,
+                )?;
+                http_response(200, output.as_bytes(), "application/json")
+            }
+            ("POST", "/ferrocrate/compose") => {
+                let request: RemoteComposeRequest = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("compose: invalid request: {error}"))?;
+                let file = request
+                    .file
+                    .to_str()
+                    .ok_or_else(|| "compose: file path is not valid UTF-8".to_string())?;
+                let output = handle_compose(
+                    &runtime,
+                    &store,
+                    &volume_store,
+                    Some(file),
+                    request.command,
+                )?;
+                http_response(200, output.as_bytes(), "text/plain")
+            }
+            ("POST", "/ferrocrate/volume/backup")
+            | ("POST", "/ferrocrate/volume/restore") => {
+                let request: RemoteVolumeArchive = serde_json::from_slice(&request.body)
+                    .map_err(|error| format!("volume archive: invalid request: {error}"))?;
+                let operation = if path.ends_with("/backup") {
+                    VolumeCommands::Backup {
+                        name: request.name.clone(),
+                        path: request.path.to_string_lossy().into_owned(),
+                    }
+                } else {
+                    VolumeCommands::Restore {
+                        name: request.name.clone(),
+                        path: request.path.to_string_lossy().into_owned(),
+                    }
+                };
+                handle_volume_authorized(
+                    runtime_dir.as_ref(),
+                    operation,
+                    &origin,
+                    &surface_authorization,
+                )?;
+                let output = format!(
+                    "volume {}: {} {} {}\n",
+                    if path.ends_with("/backup") { "backup" } else { "restore" },
+                    request.name,
+                    if path.ends_with("/backup") { "->" } else { "<-" },
+                    request.path.display()
+                );
+                http_response(200, output.as_bytes(), "text/plain")
+            }
             ("GET", "/events") => {
                 let follow = query
                     .get("follow")
@@ -16365,13 +17251,18 @@ fn handle_docker_compat_connection(
                 http_response(200, body.as_bytes(), "application/json")
             }
             ("GET", "/images/get") => {
-                let name = query
+                let names = query
                     .get("names")
                     .filter(|name| !name.is_empty())
                     .or_else(|| query.get("name").filter(|name| !name.is_empty()))
-                    .ok_or_else(|| "docker: image get requires names".to_string())?
-                    .to_string();
-                let archive = docker_save_image_archive(runtime_dir.as_ref(), &store, &[name])?;
+                    .ok_or_else(|| "docker: image get requires names".to_string())?;
+                let names = if names.starts_with('[') {
+                    serde_json::from_str::<Vec<String>>(names)
+                        .map_err(|error| format!("docker: invalid image names: {error}"))?
+                } else {
+                    vec![names.to_string()]
+                };
+                let archive = docker_save_image_archive(runtime_dir.as_ref(), &store, &names)?;
                 http_response(200, &archive, "application/x-tar")
             }
             ("POST", "/images/create") => {
@@ -19379,7 +20270,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::io::Read;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -19513,7 +20404,8 @@ mod tests {
         validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
-        VolumeCommands, WitnessCommands, EngineAccess, EngineLockGuard,
+        VolumeCommands, WitnessCommands, CommandOwnership, EngineAccess, EngineEndpoint,
+        EngineLockGuard,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
@@ -19532,7 +20424,7 @@ mod tests {
             .expect("publish daemon owner");
 
         match EngineAccess::select(runtime.path()).expect("select engine access") {
-            EngineAccess::Delegate(endpoint) => assert_eq!(endpoint, socket),
+            EngineAccess::Delegate(endpoint) => assert_eq!(endpoint.socket, socket),
             EngineAccess::Direct(_) => panic!("held daemon owner must be delegated"),
         }
 
@@ -19567,6 +20459,185 @@ mod tests {
         let competing = EngineLockGuard::try_acquire(runtime.path())
             .expect("probe direct owner lock");
         assert!(competing.is_none(), "direct access must retain the owner lock");
+    }
+
+    #[test]
+    fn standalone_cli_lock_contention_serializes_until_owner_releases() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let owner = EngineLockGuard::try_acquire(runtime.path())
+            .expect("acquire first owner")
+            .expect("unowned runtime");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            drop(owner);
+        });
+
+        let started = Instant::now();
+        let access = EngineAccess::select(runtime.path()).expect("serialize direct access");
+        assert!(matches!(access, EngineAccess::Direct(_)));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        release.join().expect("release owner");
+    }
+
+    #[test]
+    fn daemon_prepublication_window_retries_until_owner_record_is_ready() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let socket = runtime.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind daemon socket");
+        let mut daemon = EngineLockGuard::try_acquire(runtime.path())
+            .expect("acquire daemon owner")
+            .expect("unowned runtime");
+        let publish_socket = socket.clone();
+        let publisher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            daemon
+                .publish_daemon_owner(&publish_socket)
+                .expect("publish delayed owner");
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = Instant::now();
+        let access = EngineAccess::select(runtime.path()).expect("wait for owner publication");
+        assert!(matches!(access, EngineAccess::Delegate(_)));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        publisher.join().expect("publisher");
+        drop(listener);
+    }
+
+    #[test]
+    fn owned_endpoint_rejects_peer_process_replacement() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let socket = runtime.path().join("replacement.sock");
+        let listener = UnixListener::bind(&socket).expect("bind replacement socket");
+        let endpoint = EngineEndpoint {
+            socket,
+            pid: std::process::id().saturating_add(1),
+            uid: nix::unistd::geteuid().as_raw(),
+        };
+
+        let error = super::remote_docker_request_endpoint(
+            &endpoint,
+            "GET",
+            "/info",
+            None,
+        )
+        .expect_err("replacement peer must be rejected");
+        assert!(error.contains("peer identity mismatch"), "{error}");
+        drop(listener);
+    }
+
+    #[test]
+    fn command_ownership_classification_covers_local_and_engine_state() {
+        for args in [
+            vec!["ferrocrate", "config", "get", "detachKeys"],
+            vec!["ferrocrate", "doctor"],
+            vec!["ferrocrate", "entitlement", "status"],
+        ] {
+            let command = Cli::try_parse_from(args).expect("parse local command").command;
+            assert_eq!(CommandOwnership::for_command(&command), CommandOwnership::LocalOnly);
+        }
+        for args in [
+            vec!["ferrocrate", "create", "busybox"],
+            vec!["ferrocrate", "info"],
+            vec!["ferrocrate", "compose", "ps"],
+        ] {
+            let command = Cli::try_parse_from(args).expect("parse engine command").command;
+            assert_eq!(CommandOwnership::for_command(&command), CommandOwnership::Engine);
+        }
+    }
+
+    #[test]
+    fn emergency_execute_routes_to_daemon_transport() {
+        let temp = tempfile::tempdir().expect("emergency route fixture");
+        let socket = temp.path().join("emergency.sock");
+        let listener = UnixListener::bind(&socket).expect("bind emergency socket");
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept emergency request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read emergency request");
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("POST /ferrocrate/emergency/execute"));
+            assert!(request.contains("\"action\":\"container.stop\""));
+            assert!(request.contains("\"resource\":\"container:abc\""));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nstopped\n",
+                )
+                .expect("respond to emergency request");
+        });
+        let command = Cli::try_parse_from([
+            "ferrocrate",
+            "emergency",
+            "execute",
+            "--action",
+            "container.stop",
+            "--resource",
+            "container:abc",
+            "--sink",
+            "/tmp/emergency",
+        ])
+        .expect("parse emergency execute")
+        .command;
+        super::dispatch_remote_socket(&command, &socket, None)
+            .expect("engine command must be claimed")
+            .expect("emergency execute should route");
+        worker.join().expect("emergency route worker");
+    }
+
+    #[test]
+    fn scan_and_compose_commands_have_daemon_routes() {
+        let temp = tempfile::tempdir().expect("engine route fixtures");
+        let scan_socket = temp.path().join("scan.sock");
+        let scan_listener = UnixListener::bind(&scan_socket).expect("bind scan socket");
+        let scan_worker = std::thread::spawn(move || {
+            let (mut stream, _) = scan_listener.accept().expect("accept scan request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read scan request");
+            assert!(String::from_utf8_lossy(&request).contains("POST /ferrocrate/scan"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}\n",
+                )
+                .expect("respond to scan request");
+        });
+        let scan = Cli::try_parse_from(["ferrocrate", "scan", "busybox", "--scanner", "trivy"])
+            .expect("parse scan")
+            .command;
+        super::dispatch_remote_socket(&scan, &scan_socket, None)
+            .expect("scan must be claimed")
+            .expect("scan should route");
+        scan_worker.join().expect("scan route worker");
+
+        let compose_file = temp.path().join("compose.yaml");
+        std::fs::write(&compose_file, "services: {}\n").expect("write compose file");
+        let compose_socket = temp.path().join("compose.sock");
+        let compose_listener = UnixListener::bind(&compose_socket).expect("bind compose socket");
+        let compose_worker = std::thread::spawn(move || {
+            let (mut stream, _) = compose_listener.accept().expect("accept compose request");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("read compose request");
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("POST /ferrocrate/compose"));
+            assert!(request.contains("\"command\":\"config\""));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nservices: {}\n",
+                )
+                .expect("respond to compose request");
+        });
+        let compose = Cli::try_parse_from([
+            "ferrocrate",
+            "compose",
+            "--file",
+            compose_file.to_str().expect("compose path"),
+            "config",
+        ])
+        .expect("parse compose config")
+        .command;
+        super::dispatch_remote_socket(&compose, &compose_socket, None)
+            .expect("compose must be claimed")
+            .expect("compose should route");
+        compose_worker.join().expect("compose route worker");
     }
 
     #[test]

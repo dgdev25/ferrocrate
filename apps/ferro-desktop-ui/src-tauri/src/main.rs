@@ -721,15 +721,31 @@ fn network_summaries(
 }
 
 fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Vec<String>, String> {
-    let mut command = vec!["volume-proxy".to_string()];
+    let mut command = Vec::new();
     match action {
-        VolumeAction::List => command.push("list".to_string()),
-        VolumeAction::Prune => command.push("prune".to_string()),
+        VolumeAction::List => {
+            command = [
+                "exec",
+                "--",
+                "ferrocrate",
+                "volume",
+                "ls",
+                "--format",
+                "json",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        }
+        VolumeAction::Prune => {
+            command.extend(["volume-proxy".to_string(), "prune".to_string()]);
+        }
         VolumeAction::Create | VolumeAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "volume name is required".to_string())?;
+            command.push("volume-proxy".to_string());
             command.push(match action {
                 VolumeAction::Create => "create".to_string(),
                 VolumeAction::Remove => "remove".to_string(),
@@ -746,14 +762,28 @@ fn network_proxy_command(
     target: Option<&str>,
     subnet: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut command = vec!["network-proxy".to_string()];
+    let mut command = Vec::new();
     match action {
-        NetworkAction::List => command.push("list".to_string()),
+        NetworkAction::List => {
+            command = [
+                "exec",
+                "--",
+                "ferrocrate",
+                "network",
+                "ls",
+                "--format",
+                "json",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        }
         NetworkAction::Inspect | NetworkAction::Create | NetworkAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "network name is required".to_string())?;
+            command.push("network-proxy".to_string());
             command.push(
                 match action {
                     NetworkAction::Inspect => "inspect",
@@ -2331,10 +2361,18 @@ mod tests {
     }
 
     #[test]
-    fn volume_actions_use_typed_desktop_proxy_commands() {
+    fn volume_list_uses_json_exec_bridge_and_mutations_stay_typed() {
         assert_eq!(
             volume_proxy_command(VolumeAction::List, None).expect("list command"),
-            vec!["volume-proxy", "list"]
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "volume",
+                "ls",
+                "--format",
+                "json",
+            ]
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Create, Some("data")).expect("create command"),
@@ -2352,10 +2390,18 @@ mod tests {
     }
 
     #[test]
-    fn network_actions_use_typed_desktop_proxy_commands() {
+    fn network_list_uses_json_exec_bridge_and_mutations_stay_typed() {
         assert_eq!(
             network_proxy_command(NetworkAction::List, None, None).expect("list command"),
-            vec!["network-proxy", "list"]
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "network",
+                "ls",
+                "--format",
+                "json",
+            ]
         );
         assert_eq!(
             network_proxy_command(

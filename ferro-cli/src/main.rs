@@ -23941,6 +23941,12 @@ volumes:
         )
         .expect("driver availability is resolved when the container starts");
         assert_eq!(journald.log_driver, "journald");
+        let inspect = docker_pending_inspect_payload("pending", &journald, false);
+        assert_eq!(inspect["HostConfig"]["LogConfig"]["Type"], "journald");
+        assert_eq!(
+            super::ensure_docker_log_readback_supported(&journald.log_driver).unwrap_err(),
+            "configured logging driver does not support reading"
+        );
     }
 
     #[test]

@@ -90,6 +90,13 @@ enum Commands {
         #[command(subcommand)]
         command: VolumeProxyCommands,
     },
+    #[command(hide = true)]
+    NetworkProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: NetworkProxyCommands,
+    },
     Doctor {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -126,6 +133,22 @@ enum VolumeProxyCommands {
     Create { name: String },
     Remove { name: String },
     Prune,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkProxyCommands {
+    List,
+    Inspect {
+        name: String,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        subnet: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -637,6 +660,78 @@ fn run_volume_proxy(
     Ok(())
 }
 
+fn required_network_name(name: &str) -> Result<&str, DesktopError> {
+    if name.trim().is_empty() {
+        Err(DesktopError::Invalid("network name is required".to_string()))
+    } else {
+        Ok(name.trim())
+    }
+}
+
+fn network_proxy_request(
+    command: &NetworkProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        NetworkProxyCommands::List => Ok(("GET", "/networks".to_string(), Vec::new())),
+        NetworkProxyCommands::Inspect { name } => Ok((
+            "GET",
+            format!(
+                "/networks/{}",
+                percent_encode_terminal_path_component(required_network_name(name)?)
+            ),
+            Vec::new(),
+        )),
+        NetworkProxyCommands::Create { name, subnet } => {
+            let name = required_network_name(name)?;
+            let mut payload = serde_json::json!({"Name": name, "Driver": "bridge"});
+            if let Some(subnet) = subnet.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                payload["IPAM"] = serde_json::json!({"Config": [{"Subnet": subnet}]});
+            }
+            Ok((
+                "POST",
+                "/networks/create".to_string(),
+                serde_json::to_vec(&payload)?,
+            ))
+        }
+        NetworkProxyCommands::Remove { name } => Ok((
+            "DELETE",
+            format!(
+                "/networks/{}",
+                percent_encode_terminal_path_component(required_network_name(name)?)
+            ),
+            Vec::new(),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_network_proxy(
+    socket: Option<&str>,
+    command: NetworkProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = network_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.is_empty() && !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_network_proxy(
+    _socket: Option<&str>,
+    _command: NetworkProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "network daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn run_volume_proxy(
     _socket: Option<&str>,
@@ -969,6 +1064,7 @@ fn main() {
             rows,
         } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
         Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
+        Commands::NetworkProxy { socket, command } => run_network_proxy(socket.as_deref(), command),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -996,6 +1092,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
             | Commands::TerminalProxy { .. }
             | Commands::TerminalResize { .. }
             | Commands::VolumeProxy { .. }
+            | Commands::NetworkProxy { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -3084,7 +3181,8 @@ mod tests {
         render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
         save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
+        network_proxy_request, upsert_forward_entry, validate_daemon_addr, vm_state_running,
+        volume_proxy_request,
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
         ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
@@ -3177,6 +3275,45 @@ mod tests {
             volume_proxy_request(&super::VolumeProxyCommands::Prune).expect("prune request"),
             ("POST", "/volumes/prune".to_string(), Vec::new())
         );
+    }
+
+    #[test]
+    fn network_proxy_builds_bounded_daemon_requests() {
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::List).expect("list request"),
+            ("GET", "/networks".to_string(), Vec::new())
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Inspect {
+                name: "team/net".to_string(),
+            })
+            .expect("inspect request"),
+            ("GET", "/networks/team%2Fnet".to_string(), Vec::new())
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Create {
+                name: "frontend".to_string(),
+                subnet: Some("172.30.0.0/16".to_string()),
+            })
+            .expect("create request"),
+            (
+                "POST",
+                "/networks/create".to_string(),
+                br#"{"Driver":"bridge","IPAM":{"Config":[{"Subnet":"172.30.0.0/16"}]},"Name":"frontend"}"#.to_vec(),
+            )
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Remove {
+                name: "frontend".to_string(),
+            })
+            .expect("remove request"),
+            ("DELETE", "/networks/frontend".to_string(), Vec::new())
+        );
+        assert!(network_proxy_request(&super::NetworkProxyCommands::Create {
+            name: " ".to_string(),
+            subnet: None,
+        })
+        .is_err());
     }
 
     #[test]

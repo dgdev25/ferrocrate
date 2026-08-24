@@ -147,6 +147,18 @@ fi
 ip netns add "$ns_name"
 ip netns exec "$ns_name" ip link set lo up
 
+
+# The runtime writes network-operations.journal under the persistent root
+# (HOME/.ferrocrate) or, on hosts that resolve the root to the runtime dir,
+# directly under FERROCRATE_RUNTIME_DIR. Accept either location.
+journal_path() {
+  local root="$1" candidate
+  for candidate in "$root/.ferrocrate/network-operations.journal" "$root/network-operations.journal"; do
+    if [[ -f "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  printf '%s\n' "$root/.ferrocrate/network-operations.journal"
+}
+
 run_killed_create() {
   local phase="$1"
   local fault_runtime fault_name fault_bridge journal pid deadline recovery
@@ -154,7 +166,7 @@ run_killed_create() {
   fault_name="${net_name}-${phase,,}"
   fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
   fault_bridge="fc-${fault_bridge_suffix}"
-  journal="$fault_runtime/.ferrocrate/network-operations.journal"
+  journal=""  # resolved by journal_path below
 
   ip netns exec "$ns_name" env \
     FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
@@ -164,12 +176,14 @@ run_killed_create() {
   pid=$!
   deadline=$((SECONDS + 10))
   while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+    journal="$(journal_path "$fault_runtime")"
     if [[ -f "$journal" ]] && grep -aFq "\"phase\":\"$phase\"" "$journal"; then
       kill -KILL "$pid" 2>/dev/null || true
       break
     fi
     sleep 0.01
   done
+  journal="$(journal_path "$fault_runtime")"
   if ! grep -aFq "\"phase\":\"$phase\"" "$journal" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -312,7 +326,7 @@ run_killed_delete() {
   fault_name="${net_name}-removed"
   fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
   fault_bridge="fc-${fault_bridge_suffix}"
-  journal="$fault_runtime/.ferrocrate/network-operations.journal"
+  journal=""  # resolved by journal_path below
   ip netns exec "$ns_name" env FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
     "$ferro_cli" network create --subnet "$subnet" "$fault_name" >/dev/null \
     || fail "checkpoint delete fixture create failed"
@@ -322,12 +336,14 @@ run_killed_delete() {
   pid=$!
   deadline=$((SECONDS + 10))
   while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+    journal="$(journal_path "$fault_runtime")"
     if [[ -f "$journal" ]] && grep -aFq '"phase":"Removed"' "$journal"; then
       kill -KILL "$pid" 2>/dev/null || true
       break
     fi
     sleep 0.01
   done
+  journal="$(journal_path "$fault_runtime")"
   if ! grep -aFq '"phase":"Removed"' "$journal" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true

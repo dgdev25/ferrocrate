@@ -212,6 +212,7 @@ owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
+write_only_log_container="$run_prefix-write-only-log"
 network="$run_prefix-secondary"
 compose_project="$run_prefix-compose"
 compose_frontend_network="${compose_project}_frontend"
@@ -366,7 +367,8 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker rm --force "$container" "$attach_container" >/dev/null 2>&1 || true
+        docker rm --force "$container" "$attach_container" "$write_only_log_container" \
+      >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
@@ -589,6 +591,17 @@ record_command container-stop container stop --time 1 "$container"
 record_command container-wait container wait "$container"
 record_command container-logs container logs "$container"
 record_command container-remove container rm "$container"
+
+# Logging-driver selection is exercised with the genuine Docker CLI. The
+# default conformance binary intentionally lacks the journald feature, so the
+# container remains in created state; Docker still preserves LogConfig.Type,
+# and `docker logs` must return dockerd's write-only-driver error wording.
+record_command log-driver-create container create --label "$owner_label" \
+  --name "$write_only_log_container" --log-driver journald \
+  "$image" /bin/busybox true
+record_command log-driver-inspect container inspect "$write_only_log_container"
+record_expected_daemon_error log-driver-read-rejected container logs "$write_only_log_container"
+record_command log-driver-remove container rm "$write_only_log_container"
 
 # Save/remove/load makes both archive directions meaningful rather than merely
 # probing their help or argument parsing paths.

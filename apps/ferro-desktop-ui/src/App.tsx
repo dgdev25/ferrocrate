@@ -504,7 +504,11 @@ function App(): JSX.Element {
     setPullFailure(null);
     setPullProgress("Pull in progress. This may take a moment.");
     try {
-      const result = await invoke<CommandResult>("run_desktop_action", { action: "pull_image", target: imageTarget });
+      const result = await invoke<CommandResult>(
+        "run_desktop_action",
+        { action: "pull_image", target: imageTarget },
+        { timeoutMs: 10 * 60_000 },
+      );
       if (result.ok) {
         setLastAction(result);
         setPullProgress("Pull completed.");
@@ -911,7 +915,11 @@ function App(): JSX.Element {
       progress: [],
     }, ...history]);
     try {
-      const result = await invoke<CommandResult>("build_image", buildInvokeArgs(context, tag, buildId));
+      const result = await invoke<CommandResult>(
+        "build_image",
+        buildInvokeArgs(context, tag, buildId),
+        { timeoutMs: 30 * 60_000 },
+      );
       if (result.ok) setLastAction(result);
       setBuildHistory((history) => history.map((build) => build.id === buildId ? {
         ...build,

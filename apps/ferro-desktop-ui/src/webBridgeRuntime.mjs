@@ -1,4 +1,5 @@
 const TOKEN_STORAGE_KEY = "ferrocrate.webBridgeToken";
+export const DEFAULT_INVOKE_TIMEOUT_MS = 60_000;
 
 export function extractWebBridgeToken(target = globalThis) {
   const hash = target.location?.hash ?? "";
@@ -19,41 +20,78 @@ export function createWebBridgeRuntime(options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
   const eventSourceFactory = options.eventSourceFactory ?? ((url) => new globalThis.EventSource(url));
   const promptImpl = options.promptImpl ?? globalThis.prompt?.bind(globalThis);
-  const token = options.token ?? extractWebBridgeToken(options.target ?? globalThis);
+  const target = options.target ?? globalThis;
+  const token = options.token ?? extractWebBridgeToken(target);
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+  let eventSource;
+
+  function sharedEventSource() {
+    if (eventSource) return eventSource;
+    const streamUrl = token
+      ? `/__tauri/stream?token=${encodeURIComponent(token)}`
+      : "/__tauri/stream";
+    eventSource = eventSourceFactory(streamUrl);
+    target.addEventListener?.("beforeunload", () => eventSource.close(), { once: true });
+    return eventSource;
+  }
 
   return {
-    async invoke(command, args = {}) {
+    async invoke(command, args = {}, invokeOptions = {}) {
       if (!fetchImpl) throw new Error("web bridge fetch is unavailable");
-      const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(args ?? {}),
+      const timeoutMs = invokeOptions.timeoutMs ?? defaultTimeoutMs;
+      const controller = new AbortController();
+      const timeoutError = new Error(
+        `${command} timed out after ${timeoutMs} ${timeoutMs === 1 ? "millisecond" : "milliseconds"}. Please try again.`,
+      );
+      let timedOut = false;
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true;
+          reject(timeoutError);
+          controller.abort();
+        }, timeoutMs);
       });
-      const payload = await response.json();
-      if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
-        throw new Error(String(payload?.error ?? `command ${command} failed`));
+      const request = (async () => {
+        try {
+          const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(args ?? {}),
+            signal: controller.signal,
+          });
+          const payload = await response.json();
+          if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
+            throw new Error(String(payload?.error ?? `command ${command} failed`));
+          }
+          return payload;
+        } catch (error) {
+          if (timedOut) throw timeoutError;
+          throw error;
+        }
+      })();
+      try {
+        return await Promise.race([request, timeout]);
+      } finally {
+        clearTimeout(timeoutId);
       }
-      return payload;
     },
 
     async listen(event, handler) {
-      const streamCommand = event.startsWith("terminal-")
-        ? "start_terminal"
-        : event.startsWith("container-log-")
-          ? "start_log_follow"
-          : event === "image-build-progress"
-            ? "build_image"
-            : event;
-      const streamUrl = `/__tauri/stream/${encodeURIComponent(streamCommand)}`;
-      const source = eventSourceFactory(token ? `${streamUrl}?token=${encodeURIComponent(token)}` : streamUrl);
-      source.onmessage = (message) => {
-        const envelope = JSON.parse(message.data);
-        if (envelope.event === event) handler({ event, payload: envelope.payload });
+      const source = sharedEventSource();
+      const listener = (message) => {
+        handler({ event, payload: JSON.parse(message.data) });
       };
-      return () => source.close();
+      source.addEventListener(event, listener);
+      let listening = true;
+      return () => {
+        if (!listening) return;
+        listening = false;
+        source.removeEventListener(event, listener);
+      };
     },
 
     async open(options = {}) {

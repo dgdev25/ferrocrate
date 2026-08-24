@@ -7,8 +7,14 @@ import { createWebBridgeRuntime, installWebBridgeRuntime } from "./webBridgeRunt
 const nativeTauriAvailable = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const webRuntime = nativeTauriAvailable ? null : installWebBridgeRuntime(window, createWebBridgeRuntime());
 
-export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return nativeTauriAvailable ? tauriInvoke<T>(command, args) : webRuntime!.invoke<T>(command, args);
+export function invoke<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options?: { timeoutMs?: number },
+): Promise<T> {
+  return nativeTauriAvailable
+    ? tauriInvoke<T>(command, args)
+    : webRuntime!.invoke<T>(command, args, options);
 }
 
 export function listen<T>(event: string, handler: (event: { event: string; payload: T }) => void) {

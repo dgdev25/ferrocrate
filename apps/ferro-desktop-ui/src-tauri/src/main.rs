@@ -115,23 +115,23 @@ enum VolumeAction {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(deserialize = "PascalCase", serialize = "snake_case"))]
 struct VolumeMountUsage {
     container_id: String,
     container_name: String,
     destination: String,
-    #[serde(rename = "RW")]
+    #[serde(rename(deserialize = "RW", serialize = "read_write"))]
     read_write: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all(deserialize = "PascalCase", serialize = "snake_case"))]
 struct VolumeSummary {
     name: String,
     driver: String,
     mountpoint: String,
     created_at: String,
-    #[serde(rename = "FerrocrateMounts", default)]
+    #[serde(rename(deserialize = "FerrocrateMounts", serialize = "mounts"), default)]
     mounts: Vec<VolumeMountUsage>,
 }
 

@@ -21,6 +21,23 @@ export type DesktopAction =
   | "remove_container"
   | "image_prune";
 
+export type VolumeAction = "create" | "remove" | "prune";
+
+export type VolumeMountUsage = {
+  container_id: string;
+  container_name: string;
+  destination: string;
+  read_write: boolean;
+};
+
+export type VolumeSummary = {
+  name: string;
+  driver: string;
+  mountpoint: string;
+  created_at: string;
+  mounts: VolumeMountUsage[];
+};
+
 export type PaidBackendConfig = {
   release_base_url: string;
   token_endpoint: string;

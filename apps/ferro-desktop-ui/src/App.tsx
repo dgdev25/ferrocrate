@@ -10,12 +10,15 @@ import type {
   DoctorSummary,
   InstallerRunSummary,
   PaidAuthState,
+  VolumeAction,
+  VolumeSummary,
 } from "./types";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
+import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
@@ -55,6 +58,9 @@ function App(): JSX.Element {
   const [terminalEnv, setTerminalEnv] = useState(DEFAULT_TERMINAL_ENV);
   const [terminalUser, setTerminalUser] = useState("");
   const [terminalWorkdir, setTerminalWorkdir] = useState("");
+  const [volumes, setVolumes] = useState<VolumeSummary[]>([]);
+  const [volumeName, setVolumeName] = useState("");
+  const [volumesLoading, setVolumesLoading] = useState(false);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -199,9 +205,21 @@ function App(): JSX.Element {
     }
   }
 
+  async function refreshVolumes(): Promise<void> {
+    setVolumesLoading(true);
+    try {
+      setVolumes(await invoke<VolumeSummary[]>("get_volumes"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setVolumesLoading(false);
+    }
+  }
+
   useEffect(() => {
     void refresh();
     void refreshAuthState();
+    void refreshVolumes();
   }, []);
 
   useEffect(() => {
@@ -355,6 +373,30 @@ function App(): JSX.Element {
     }
   }
 
+  async function runVolumeAction(
+    action: VolumeAction,
+    label: string,
+    target?: string,
+  ): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_volume_action", { action, target });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      if (action === "create") setVolumeName("");
+      await Promise.all([refreshVolumes(), refresh()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
   async function saveBackendConfig(): Promise<void> {
     setError(null);
     try {
@@ -484,7 +526,7 @@ function App(): JSX.Element {
           >
             Theme: {theme === "dark" ? "Dark" : "Light"}
           </button>
-          <button className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
+          <button className="btn btn-primary" onClick={() => void Promise.all([refresh(), refreshVolumes()])} disabled={loading || volumesLoading}>
             {loading ? "Refreshing..." : "Refresh Runtime"}
           </button>
           <button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>
@@ -766,6 +808,71 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           </div>
           <pre>{snapshot?.images.stdout || EMPTY}</pre>
           {snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Volumes</h2>
+          <div className="field-row">
+            <input
+              value={volumeName}
+              onChange={(event) => setVolumeName(event.target.value)}
+              placeholder="named volume"
+            />
+          </div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => void runVolumeAction("create", "Volume Create", volumeName)}
+              disabled={runtimeBusy || volumesLoading || !volumeName.trim()}
+            >
+              Create
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void refreshVolumes()}
+              disabled={runtimeBusy || volumesLoading}
+            >
+              {volumesLoading ? "Refreshing..." : "Refresh Volumes"}
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={() => void runVolumeAction("prune", "Volume Prune")}
+              disabled={runtimeBusy || volumesLoading}
+            >
+              Prune Unused
+            </button>
+          </div>
+          {volumes.length === 0 ? <p className="muted">No named volumes.</p> : (
+            <div className="resource-list">
+              {volumes.map((volume) => (
+                <div className="resource-row" key={volume.name}>
+                  <div>
+                    <strong>{volume.name}</strong>
+                    <p className="muted">{volume.driver} · {volume.mountpoint}</p>
+                    {volume.mounts.length === 0 ? (
+                      <p className="muted">Unused</p>
+                    ) : (
+                      <ul className="mount-list">
+                        {volume.mounts.map((mount) => (
+                          <li key={`${mount.container_id}:${mount.destination}`}>
+                            {formatVolumeMount(mount)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)}
+                    disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}
+                    title={volumeIsInUse(volume) ? "Detach this volume from all containers before removing it" : "Remove volume"}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </article>
 
         <article className="panel">

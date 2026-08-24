@@ -225,3 +225,30 @@ pre {
   color: var(--text-muted);
   font-size: 0.85rem;
 }
+
+.resource-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.resource-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+}
+
+.resource-row p {
+  margin: 0.2rem 0;
+}
+
+.mount-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--text-secondary);
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.82rem;
+}

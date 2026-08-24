@@ -37,19 +37,43 @@ export function createWebBridgeRuntime(options = {}) {
     return eventSource;
   }
 
-  function waitForEventSource() {
+  function waitForEventSource(signal) {
     const source = sharedEventSource();
     if (source.readyState === 1) return Promise.resolve();
-    if (!eventSourceReady) {
-      eventSourceReady = new Promise((resolve) => {
-        const onOpen = () => {
-          source.removeEventListener("open", onOpen);
-          resolve();
-        };
-        source.addEventListener("open", onOpen);
-      });
+    if (source.readyState === 2) {
+      return Promise.reject(new Error("terminal event stream is closed"));
     }
-    return eventSourceReady;
+    if (eventSourceReady) return eventSourceReady;
+    if (signal.aborted) return Promise.reject(new Error("terminal event stream wait was aborted"));
+
+    let resolveReady;
+    let rejectReady;
+    const ready = new Promise((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    eventSourceReady = ready;
+
+    const cleanup = () => {
+      source.removeEventListener("open", onOpen);
+      source.removeEventListener("error", onError);
+      signal.removeEventListener("abort", onAbort);
+      if (eventSourceReady === ready) eventSourceReady = undefined;
+    };
+    const settle = (callback, value) => {
+      cleanup();
+      callback(value);
+    };
+    const onOpen = () => settle(resolveReady);
+    const onError = () => settle(rejectReady, new Error("terminal event stream failed to connect"));
+    const onAbort = () => settle(rejectReady, new Error("terminal event stream wait was aborted"));
+    source.addEventListener("open", onOpen);
+    source.addEventListener("error", onError);
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    if (source.readyState === 1) onOpen();
+    else if (source.readyState === 2) settle(rejectReady, new Error("terminal event stream is closed"));
+    return ready;
   }
 
   return {
@@ -74,7 +98,7 @@ export function createWebBridgeRuntime(options = {}) {
       const request = (async () => {
         try {
           if (command === "start_terminal") {
-            await waitForEventSource();
+            await waitForEventSource(controller.signal);
           }
           const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
             method: "POST",

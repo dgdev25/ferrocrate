@@ -59,6 +59,7 @@ import {
   applyTerminalResize,
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
+import { mountTerminalHost, writeTerminalOutput } from "./terminalLifecycle.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   beginContainerStatsPoll,
@@ -243,46 +244,47 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const host = terminalHost;
-    if (!host || terminalRef.current) return;
-    const terminal = new Terminal({
-      cursorBlink: true,
-      convertEol: true,
-      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
-      fontSize: 13,
-      rows: 18,
-      theme: theme === "dark"
-        ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
-        : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" },
-    });
-    terminal.open(host);
-    terminal.onData((data) => {
-      if (!terminalActiveRef.current) return;
-      void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
-        setError(String(err));
+    return mountTerminalHost(terminalHost, terminalRef, (host) => {
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+        fontSize: 13,
+        rows: 18,
+        theme: theme === "dark"
+          ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
+          : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" },
       });
-    });
-    terminal.writeln("Select a running container and open a shell.");
-    terminalRef.current = terminal;
+      terminal.open(host);
+      terminal.onData((data) => {
+        if (!terminalActiveRef.current) return;
+        void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
+          setError(String(err));
+        });
+      });
+      terminal.writeln("Select a running container and open a shell.");
 
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      applyTerminalResize(
-        entry.contentRect.width,
-        entry.contentRect.height,
-        terminalActiveRef.current,
-        (columns, rows) => terminal.resize(columns, rows),
-        (columns, rows) => {
-          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+      const observer = new ResizeObserver(([entry]) => {
+        if (!entry) return;
+        applyTerminalResize(
+          entry.contentRect.width,
+          entry.contentRect.height,
+          terminalActiveRef.current,
+          (columns, rows) => terminal.resize(columns, rows),
+          (columns, rows) => {
+            void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+          },
+        );
+      });
+      observer.observe(host);
+      return {
+        terminal,
+        dispose() {
+          observer.disconnect();
+          terminal.dispose();
         },
-      );
+      };
     });
-    observer.observe(host);
-    return () => {
-      observer.disconnect();
-      terminal.dispose();
-      terminalRef.current = null;
-    };
   }, [terminalHost]);
 
   useEffect(() => {
@@ -300,7 +302,7 @@ function App(): JSX.Element {
     let unlistenEnded: (() => void) | undefined;
     void (async () => {
       const stopOutput = await listen<TerminalOutput>("terminal-output", (event) => {
-        terminalRef.current?.write(new Uint8Array(event.payload.data));
+        writeTerminalOutput(terminalRef, event.payload);
       });
       const stopError = await listen<string>("terminal-error", (event) => setError(event.payload));
       const stopEnded = await listen<boolean>("terminal-ended", (event) => {

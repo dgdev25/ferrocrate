@@ -6,6 +6,7 @@ import {
   DEFAULT_INVOKE_TIMEOUT_MS,
   extractWebBridgeToken,
 } from "./webBridgeRuntime.mjs";
+import { writeTerminalOutput } from "./terminalLifecycle.mjs";
 
 test("web bridge token is extracted from the hash, persisted, and stripped", () => {
   const stored = new Map();
@@ -99,12 +100,15 @@ test("N web bridge listeners share one named-event SSE connection", async () => 
 test("terminal startup waits for the event stream so the first prompt is visible", async () => {
   const listeners = new Map();
   let streamOpen = false;
-  const terminal = {
+  const mountedTerminal = {
     visibleText: "",
+    rows: [""],
     write(bytes) {
       this.visibleText += new TextDecoder().decode(bytes);
+      this.rows = this.visibleText.split(/\r?\n/);
     },
   };
+  const terminalRef = { current: mountedTerminal };
   const source = {
     readyState: 0,
     addEventListener(name, handler) {
@@ -138,16 +142,118 @@ test("terminal startup waits for the event stream so the first prompt is visible
     },
   });
   await runtime.listen("terminal-output", (event) => {
-    terminal.write(new Uint8Array(event.payload.data));
+    writeTerminalOutput(terminalRef, event.payload);
   });
 
   const started = runtime.invoke("start_terminal", { target: "demo", shell: "sh", env: [] });
   await Promise.resolve();
-  assert.equal(terminal.visibleText, "");
+  assert.equal(mountedTerminal.visibleText, "");
   source.open();
   await started;
 
-  assert.equal(terminal.visibleText, "/ # ");
+  assert.equal(mountedTerminal.rows[0], "/ # ");
+
+  terminalRef.current = null;
+  source.emit("terminal-output", { data: [88], stderr: false });
+  assert.equal(mountedTerminal.visibleText, "/ # ");
+
+  const remountedTerminal = {
+    visibleText: "",
+    write(bytes) { this.visibleText += new TextDecoder().decode(bytes); },
+  };
+  terminalRef.current = remountedTerminal;
+  source.emit("terminal-output", { data: [36, 32], stderr: false });
+  assert.equal(remountedTerminal.visibleText, "$ ");
+});
+
+test("terminal startup rejects a closed event stream without posting", async () => {
+  let fetches = 0;
+  const source = {
+    readyState: 2,
+    addEventListener() {},
+    removeEventListener() {},
+    close() {},
+  };
+  const runtime = createWebBridgeRuntime({
+    token: "secret-token",
+    eventSourceFactory: () => source,
+    fetchImpl: async () => {
+      fetches += 1;
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+
+  await assert.rejects(
+    runtime.invoke("start_terminal", {}, { timeoutMs: 25 }),
+    /event stream is closed/i,
+  );
+  assert.equal(fetches, 0);
+});
+
+test("a failed event-stream wait cleans up and can retry", async () => {
+  const listeners = new Map();
+  const source = {
+    readyState: 0,
+    addEventListener(name, handler) {
+      const handlers = listeners.get(name) ?? new Set();
+      handlers.add(handler);
+      listeners.set(name, handlers);
+    },
+    removeEventListener(name, handler) { listeners.get(name)?.delete(handler); },
+    close() {},
+    emit(name) {
+      for (const handler of [...(listeners.get(name) ?? [])]) handler({});
+    },
+  };
+  let fetches = 0;
+  const runtime = createWebBridgeRuntime({
+    token: "secret-token",
+    eventSourceFactory: () => source,
+    fetchImpl: async () => {
+      fetches += 1;
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+
+  const failed = runtime.invoke("start_terminal", {}, { timeoutMs: 50 });
+  source.emit("error");
+  await assert.rejects(failed, /event stream failed/i);
+  assert.equal(listeners.get("open")?.size, 0);
+  assert.equal(listeners.get("error")?.size, 0);
+
+  const retried = runtime.invoke("start_terminal", {}, { timeoutMs: 50 });
+  source.readyState = 1;
+  source.emit("open");
+  await retried;
+  assert.equal(fetches, 1);
+  assert.equal(listeners.get("open")?.size, 0);
+  assert.equal(listeners.get("error")?.size, 0);
+});
+
+test("terminal startup timeout aborts and removes readiness listeners", async () => {
+  const listeners = new Map();
+  const source = {
+    readyState: 0,
+    addEventListener(name, handler) {
+      const handlers = listeners.get(name) ?? new Set();
+      handlers.add(handler);
+      listeners.set(name, handlers);
+    },
+    removeEventListener(name, handler) { listeners.get(name)?.delete(handler); },
+    close() {},
+  };
+  const runtime = createWebBridgeRuntime({
+    token: "secret-token",
+    eventSourceFactory: () => source,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true }) }),
+  });
+
+  await assert.rejects(
+    runtime.invoke("start_terminal", {}, { timeoutMs: 10 }),
+    /start_terminal timed out after 10 milliseconds/i,
+  );
+  assert.equal(listeners.get("open")?.size, 0);
+  assert.equal(listeners.get("error")?.size, 0);
 });
 
 test("a mount/unmount/remount cycle leaves exactly one listener", async () => {

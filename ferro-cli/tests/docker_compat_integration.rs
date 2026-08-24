@@ -68,6 +68,25 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
         builder
             .append(&header, &busybox[..])
             .expect("append busybox");
+        #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+        {
+            // Alpine's BusyBox is dynamically linked, unlike the static
+            // BusyBox fixture used by the glibc test host. A scratch image
+            // therefore needs musl's loader as well for its command to run.
+            let loader = fs::read("/lib/ld-musl-x86_64.so.1").expect("host musl loader fixture");
+            let mut header = tar::Header::new_gnu();
+            header
+                .set_path("lib/ld-musl-x86_64.so.1")
+                .expect("musl loader path");
+            header.set_size(loader.len() as u64);
+            header.set_mode(0o755);
+            header.set_uid(nix::unistd::geteuid().as_raw() as u64);
+            header.set_gid(nix::unistd::getegid().as_raw() as u64);
+            header.set_cksum();
+            builder
+                .append(&header, &loader[..])
+                .expect("append musl loader");
+        }
         builder.finish().expect("finish image context");
     }
     let encoded_tag = tag

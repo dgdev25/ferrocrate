@@ -1,14 +1,32 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const appSource = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+import * as imageView from "./imageView.mjs";
 
-test("images page presents a table, pull dialog, and overflow actions instead of permanent controls", () => {
-  assert.match(appSource, /const imageRows = useMemo\(\(\) => parseImageRows/);
-  assert.match(appSource, /<th>Repository<\/th><th>Size<\/th><th>Created<\/th><th>In use<\/th>/);
-  assert.match(appSource, /onClick=\{\(\) => setPullImageDialogOpen\(true\)\}/);
-  assert.match(appSource, /image-toolbar-overflow/);
-  assert.match(appSource, /aria-labelledby="pull-image-dialog-title"/);
-  assert.doesNotMatch(appSource, /onClick=\{\(\) => void runAction\("pull_image", "Image Pull", imageTarget\)\}/);
+test("image rows format byte sizes and Unix creation times for the table", () => {
+  assert.deepEqual(imageView.parseImageRows(JSON.stringify([{
+    Id: "sha256:abc",
+    RepoTags: ["docker.io/library/alpine:latest"],
+    Size: 1572864,
+    Created: 1700000000,
+  }])), [{
+    id: "sha256:abc",
+    reference: "docker.io/library/alpine:latest",
+    size: "1.5 MB",
+    created: "2023-11-14 22:13 UTC",
+  }]);
+});
+
+test("pull failures give people a recovery path while retaining the technical detail", () => {
+  assert.equal(typeof imageView.pullFailurePresentation, "function");
+  assert.deepEqual(imageView.pullFailurePresentation("daemon connection refused"), {
+    kind: "daemon",
+    message: "Ferrocrate isn't running",
+    detail: "daemon connection refused",
+  });
+  assert.deepEqual(imageView.pullFailurePresentation("missing entitlement for image pull"), {
+    kind: "license",
+    message: "Your current plan doesn't include image pulls.",
+    detail: "missing entitlement for image pull",
+  });
 });

@@ -25,7 +25,7 @@ import type {
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
-import { parseImageRows } from "./imageView.mjs";
+import { parseImageRows, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { registryStatusText } from "./registryAuth.mjs";
 import {
@@ -43,6 +43,7 @@ type AppSection = "containers" | "images" | "volumes" | "compose" | "networks" |
 type DetailTab = "logs" | "terminal" | "inspect" | "stats";
 type LogBatch = { text: string; truncated: boolean };
 type TerminalOutput = { data: number[]; stderr: boolean };
+type PullFailure = ReturnType<typeof pullFailurePresentation>;
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
@@ -64,6 +65,7 @@ function App(): JSX.Element {
   const [buildImageDialogOpen, setBuildImageDialogOpen] = useState(false);
   const [registryDialogOpen, setRegistryDialogOpen] = useState(false);
   const [pullProgress, setPullProgress] = useState("");
+  const [pullFailure, setPullFailure] = useState<PullFailure | null>(null);
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
   const [actionLabel, setActionLabel] = useState("");
@@ -432,17 +434,52 @@ function App(): JSX.Element {
 
   async function pullImage(): Promise<void> {
     if (!beginRuntimeAction()) return;
-    setError(null);
+    setLastAction(null);
     setActionLabel("Image Pull");
-    setPullProgress("Pulling image…");
+    setPullFailure(null);
+    setPullProgress("Pull in progress. This may take a moment.");
     try {
       const result = await invoke<CommandResult>("run_desktop_action", { action: "pull_image", target: imageTarget });
-      setLastAction(result);
-      setPullProgress(result.ok ? result.stdout || "Image pulled." : "Couldn’t pull this image.");
+      if (result.ok) {
+        setLastAction(result);
+        setPullProgress("Pull completed.");
+      } else {
+        setPullProgress("");
+        setPullFailure(pullFailurePresentation(result.stderr));
+      }
       await refresh();
     } catch (err) {
-      setPullProgress("Couldn’t pull this image.");
-      setError(String(err));
+      setPullProgress("");
+      setPullFailure(pullFailurePresentation(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  function openPullImageDialog(): void {
+    setPullProgress("");
+    setPullFailure(null);
+    setPullImageDialogOpen(true);
+  }
+
+  async function startFerrocrate(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setLastAction(null);
+    setPullFailure(null);
+    setPullProgress("Starting Ferrocrate…");
+    try {
+      const result = await invoke<CommandResult>("run_desktop_action", { action: "vm_start" });
+      if (result.ok) {
+        setLastAction(result);
+        setPullProgress("Ferrocrate is starting. Try the pull again in a moment.");
+      } else {
+        setPullProgress("");
+        setPullFailure(pullFailurePresentation(result.stderr));
+      }
+      await refresh();
+    } catch (err) {
+      setPullProgress("");
+      setPullFailure(pullFailurePresentation(err));
     } finally {
       finishRuntimeAction();
     }
@@ -988,7 +1025,7 @@ function App(): JSX.Element {
                   <button className="btn btn-primary" onClick={() => setRunDialogOpen(true)} disabled={runtimeBusy}>▶ Run container</button>
                 </>
               ) : activeSection === "images" ? (
-                <button className="btn btn-primary" onClick={() => setPullImageDialogOpen(true)} disabled={runtimeBusy}>Pull image</button>
+                imageRows.length ? <button className="btn btn-primary" onClick={openPullImageDialog} disabled={runtimeBusy}>Pull image</button> : null
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
                   {loading ? "Refreshing…" : "↻ Refresh runtime"}
@@ -1132,7 +1169,7 @@ function App(): JSX.Element {
                       ))}</tbody>
                     </table>
                   </div>
-                ) : <div className="empty-state"><strong>There are no local images.</strong><span>Pull an image to run or build containers.</span><button className="btn btn-primary" onClick={() => setPullImageDialogOpen(true)} disabled={runtimeBusy}>Pull image</button></div>}
+                ) : <div className="empty-state"><strong>There are no local images.</strong><span>Pull an image to run or build containers.</span><button className="btn btn-primary" onClick={openPullImageDialog} disabled={runtimeBusy}>Pull image</button></div>}
               </section>
             ) : null}
 
@@ -1163,7 +1200,7 @@ function App(): JSX.Element {
       ) : null}
 
       {pullImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="pull-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Image library</p><h2 id="pull-image-dialog-title">Pull image</h2></div><button className="btn btn-secondary" onClick={() => setPullImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Image reference</span><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="alpine:latest" autoFocus /></label>{pullProgress ? <p className="pull-progress detail-span" role="status">{pullProgress}</p> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void pullImage()} disabled={runtimeBusy || !imageTarget.trim()}>{runtimeBusy ? "Pulling…" : "Pull image"}</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="pull-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Image library</p><h2 id="pull-image-dialog-title">Pull image</h2></div><button className="btn btn-secondary" onClick={() => setPullImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Image reference</span><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="alpine:latest" autoFocus /></label>{pullProgress ? <p className="pull-progress detail-span" role="status"><strong>Pull progress</strong>{pullProgress}</p> : null}{pullFailure ? <section className="pull-failure detail-span" role="alert"><strong>{pullFailure.message}</strong>{pullFailure.kind === "daemon" ? <button className="btn btn-secondary" onClick={() => void startFerrocrate()} disabled={runtimeBusy}>Start</button> : null}{pullFailure.kind === "license" ? <button className="btn btn-secondary" onClick={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }}>Review licensing</button> : null}<details><summary>Technical details</summary><pre>{pullFailure.detail}</pre></details></section> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void pullImage()} disabled={runtimeBusy || !imageTarget.trim()}>{runtimeBusy ? "Pulling…" : "Pull image"}</button></div></section></div>
       ) : null}
 
       {buildImageDialogOpen ? (

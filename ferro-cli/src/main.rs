@@ -305,6 +305,33 @@ pub enum Commands {
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
+    /// Copy files between a container and the local filesystem.
+    #[cfg(target_os = "linux")]
+    Cp { source: String, destination: String },
+    /// Save one or more images as a Docker archive.
+    Save { #[arg(short = 'o', long)] output: String, images: Vec<String> },
+    /// Load an image archive created by `save`.
+    Load { #[arg(short = 'i', long)] input: String },
+    /// Export a container filesystem as a tar archive.
+    #[cfg(target_os = "linux")]
+    Export { #[arg(short = 'o', long)] output: String, container: String },
+    /// Show filesystem changes in a container.
+    #[cfg(target_os = "linux")]
+    Diff { container: String },
+    /// Search the local image catalog.
+    Search { term: String },
+    /// Create, without starting, a container.
+    #[cfg(target_os = "linux")]
+    Create { image: String, #[arg(trailing_var_arg = true)] cmd: Vec<String> },
+    /// Attach to a running container.
+    #[cfg(target_os = "linux")]
+    Attach { #[arg(long = "no-stdin")] no_stdin: bool, container: String },
+    /// Display daemon information.
+    #[cfg(target_os = "linux")]
+    Info,
+    /// Display version information.
+    #[cfg(target_os = "linux")]
+    Version,
     /// Report Docker-compatible image, container, and volume usage summary.
     SystemDf {
         #[arg(long, default_value = "json", value_parser = validate_output_format)]
@@ -3270,6 +3297,30 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 format,
             } => handle_build_cache_prune(&runtime_dir, max_entries, &format),
             Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
+            Commands::Search { term } => {
+                let images = image_store.list_references().map_err(|error| error.to_string())?;
+                println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
+                for image in docker_image_search_results(&images, &term, 25) {
+                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["StarCount"], image["Official"], image["Automated"]);
+                }
+                Ok(())
+            }
+            Commands::Save { output, images } => {
+                if images.is_empty() {
+                    return Err("docker: save requires at least one image".to_string());
+                }
+                let archive = docker_save_image_archive(&runtime_dir, &image_store, &images)?;
+                std::fs::write(output, archive)
+                    .map_err(|error| format!("docker: save write failed: {error}"))
+            }
+            Commands::Load { input } => {
+                let archive = std::fs::read(input)
+                    .map_err(|error| format!("docker: load read failed: {error}"))?;
+                let origin = runtime.request_origin().ok_or_else(|| "docker: authenticated request origin unavailable".to_string())?;
+                let loaded = docker_load_image_archive(&runtime_dir, &image_store, &surface_authorization, &origin, &archive)?;
+                println!("Loaded image: {loaded}");
+                Ok(())
+            }
             Commands::SystemDf { format } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|error| error.to_string())?;
@@ -3348,6 +3399,49 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 before.as_deref(),
                 &filters,
             ),
+            #[cfg(target_os = "linux")]
+            Commands::Export { output, container } => {
+                let archive = docker_export_container_archive(&runtime_dir, &runtime, &container)?;
+                std::fs::write(output, archive).map_err(|error| format!("docker: export write failed: {error}"))
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Cp { source, destination } => {
+                docker_copy_container_path(&runtime_dir, &runtime, &source, &destination)
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Diff { container } => {
+                for change in docker_container_changes(&runtime_dir, &runtime, &container)? {
+                    let kind = match change.kind { 0 => "C", 1 => "A", 2 => "D", _ => "C" };
+                    println!("{kind} {}", change.path);
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Create { image, cmd } => {
+                let state = DockerCompatState::new(&runtime_dir)?;
+                let payload = serde_json::json!({"Image": image, "Cmd": cmd});
+                let id = docker_create_pending(&state, payload.to_string().as_bytes(), None)?;
+                println!("{id}");
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Attach { no_stdin, container } => {
+                let id = resolve_container_id(&runtime, &container)?;
+                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                attach_local_container(&runtime_dir, &id, !no_stdin, record.tty)
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Info => {
+                let body = docker_info_payload(&runtime, &image_store)?;
+                println!("Containers: {}\n Running: {}\n Paused: {}\n Stopped: {}\nImages: {}\nServer Version: {}\nStorage Driver: {}\nArchitecture: {}\nOperating System: {}", body["Containers"], body["ContainersRunning"], body["ContainersPaused"], body["ContainersStopped"], body["Images"], env!("CARGO_PKG_VERSION"), body["Driver"], body["Architecture"], body["OperatingSystem"]);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::Version => {
+                let body = docker_version_payload();
+                println!("Client:\n Version: {}\n API version: {}\n\nServer:\n Engine:\n  Version: {}\n  API version: {}", body["Version"], body["ApiVersion"], body["Version"], body["ApiVersion"]);
+                Ok(())
+            }
             #[cfg(target_os = "linux")]
             Commands::ContainerPrune { filters } => handle_container_prune(&runtime, &filters),
             #[cfg(target_os = "linux")]
@@ -8146,6 +8240,62 @@ fn append_commit_symlink<W: Write>(
 }
 
 #[cfg(target_os = "linux")]
+fn docker_save_image_archive(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    names: &[String],
+) -> Result<Vec<u8>, String> {
+    let mut manifest_entries = Vec::new();
+    let mut repositories = serde_json::Map::new();
+    let mut blobs = Vec::<(String, Vec<u8>)>::new();
+    for (image_index, name) in names.iter().enumerate() {
+        let reference = resolve_reference(store, name).map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("docker: unknown image {name}"))?;
+        let manifest = parse_image_manifest(&reference.manifest_json)
+            .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
+        let config_path = resolve_config_path_with_store(runtime_dir, name, store)
+            .map_err(|error| format!("docker: image config unavailable: {error}"))?
+            .ok_or_else(|| "docker: image config blob is unavailable".to_string())?;
+        let layer_paths = resolve_layer_paths_with_store(runtime_dir, name, store)
+            .map_err(|error| format!("docker: image layer unavailable: {error}"))?;
+        if layer_paths.len() != manifest.layers.len() {
+            return Err("docker: image layer metadata does not match stored blobs".to_string());
+        }
+        let config_name = format!("{}.json", manifest.config.digest.strip_prefix("sha256:").unwrap_or(&manifest.config.digest));
+        blobs.push((config_name.clone(), std::fs::read(config_path)
+            .map_err(|error| format!("docker: image export config: {error}"))?));
+        let mut layers = Vec::new();
+        for (layer_index, layer_path) in layer_paths.iter().enumerate() {
+            let layer_name = format!("image-{image_index}/layer-{layer_index}.tar");
+            let mut reader = open_decompressed_layer_reader(layer_path)
+                .map_err(|error| format!("docker: image export layer: {error}"))?;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map_err(|error| format!("docker: image export layer: {error}"))?;
+            blobs.push((layer_name.clone(), bytes));
+            layers.push(layer_name);
+        }
+        manifest_entries.push(serde_json::json!({"Config": config_name, "RepoTags": [reference.reference.clone()], "Layers": layers}));
+        if let Some(colon) = reference.reference.rfind(':') {
+            if colon > reference.reference.rfind('/').unwrap_or(0) {
+                repositories.insert(reference.reference[..colon].to_string(), serde_json::json!({&reference.reference[colon + 1..]: reference.digest}));
+            }
+        }
+    }
+    let mut archive = Vec::new();
+    let mut builder = tar::Builder::new(&mut archive);
+    let append = |builder: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8]| -> Result<(), String> {
+        let mut header = tar::Header::new_gnu(); header.set_size(bytes.len() as u64); header.set_mode(0o644); header.set_cksum();
+        builder.append_data(&mut header, path, bytes).map_err(|error| format!("docker: image export {path}: {error}"))
+    };
+    append(&mut builder, "manifest.json", &serde_json::to_vec(&manifest_entries).map_err(|error| error.to_string())?)?;
+    append(&mut builder, "repositories", &serde_json::to_vec(&repositories).map_err(|error| error.to_string())?)?;
+    for (path, bytes) in blobs { append(&mut builder, &path, &bytes)?; }
+    builder.finish().map_err(|error| format!("docker: finish image export: {error}"))?;
+    drop(builder);
+    Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
 fn docker_load_image_archive(
     runtime_dir: &Path,
     store: &LocalImageStore,
@@ -8325,6 +8475,89 @@ fn docker_load_image_archive(
         .put_reference_authorized(plan, permit)
         .map_err(|error| format!("docker: image load reference publication: {error}"))?;
     Ok(reference)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_export_container_archive(runtime_dir: &Path, runtime: &ContainerRuntime, requested_id: &str) -> Result<Vec<u8>, String> {
+    let id = resolve_container_id(runtime, requested_id)?;
+    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+    let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
+    if !rootfs.is_dir() { return Err(format!("docker: container rootfs is unavailable: {}", rootfs.display())); }
+    let excluded = record.mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+        .chain(record.tmpfs_mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))).collect::<Vec<_>>();
+    let mut archive = Vec::new();
+    let mut builder = tar::Builder::new(&mut archive);
+    append_export_rootfs(&mut builder, &rootfs, &excluded).map_err(|error| format!("docker: export rootfs: {error}"))?;
+    builder.finish().map_err(|error| format!("docker: finish export archive: {error}"))?;
+    drop(builder);
+    Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requested_id: &str) -> Result<Vec<rootfs_diff::RootfsChange>, String> {
+    let id = resolve_container_id(runtime, requested_id)?;
+    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+    let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
+    let baseline = runtime_dir.join("containers").join(&record.id).join("rootfs-baseline.json");
+    let excluded = record.mounts.iter().map(|mount| rootfs.join(&mount.target))
+        .chain(record.tmpfs_mounts.iter().map(|mount| rootfs.join(&mount.target))).collect::<Vec<_>>();
+    if rootfs.is_dir() && baseline.is_file() {
+        rootfs_diff::diff(&rootfs, &baseline, &excluded).map_err(|error| format!("docker: container diff failed: {error}"))
+    } else { Ok(Vec::new()) }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_get_container_archive(runtime_dir: &Path, runtime: &ContainerRuntime, requested_id: &str, archive_path: &str) -> Result<Vec<u8>, String> {
+    let relative = archive_path.trim_start_matches('/');
+    if !relative.is_empty() && relative.split('/').any(|component| component.is_empty() || component == "." || component == "..") {
+        return Err("docker: archive path must be a normalized absolute path".to_string());
+    }
+    let id = resolve_container_id(runtime, requested_id)?;
+    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+    let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
+    if !rootfs.is_dir() { return Err(format!("docker: container rootfs is unavailable: {}", rootfs.display())); }
+    let selected = rootfs.join(relative).canonicalize().map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+    if !selected.starts_with(&rootfs) { return Err("docker: archive path escapes the container rootfs".to_string()); }
+    let excluded = record.mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+        .chain(record.tmpfs_mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))).collect::<Vec<_>>();
+    let selected_relative = selected.strip_prefix(&rootfs).expect("canonical archive path must remain beneath rootfs");
+    if excluded.iter().any(|target| selected_relative == target || selected_relative.starts_with(target)) { return Err("docker: archive path is a persisted mount target".to_string()); }
+    let mut archive = Vec::new(); let mut builder = tar::Builder::new(&mut archive);
+    append_export_archive_path(&mut builder, &rootfs, &selected, &excluded).map_err(|error| format!("docker: archive path: {error}"))?;
+    builder.finish().map_err(|error| format!("docker: finish archive: {error}"))?; drop(builder);
+    Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, source: &str, destination: &str) -> Result<(), String> {
+    let source_container = source.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
+    let destination_container = destination.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
+    match (source_container, destination_container) {
+        (Some((container, path)), None) => {
+            let archive = docker_get_container_archive(runtime_dir, runtime, container, path)?;
+            let target = Path::new(destination);
+            if target.exists() && target.is_dir() { tar::Archive::new(Cursor::new(archive)).unpack(target).map_err(|error| format!("docker: cp extract failed: {error}"))?; }
+            else { let parent = target.parent().unwrap_or_else(|| Path::new(".")); std::fs::create_dir_all(parent).map_err(|error| format!("docker: cp create destination: {error}"))?; tar::Archive::new(Cursor::new(archive)).unpack(parent).map_err(|error| format!("docker: cp extract failed: {error}"))?; }
+            Ok(())
+        }
+        (None, Some((container, path))) => {
+            let source = Path::new(source);
+            let mut archive = tar::Builder::new(Vec::new()); archive.append_path_with_name(source, source.file_name().ok_or_else(|| "docker: cp source has no filename".to_string())?).map_err(|error| format!("docker: cp archive source: {error}"))?;
+            let archive = archive.into_inner().map_err(|error| format!("docker: cp archive source: {error}"))?;
+            let id = resolve_container_id(runtime, container)?;
+            runtime.put_archive_options(&id, path, &archive, false).map_err(|error| format!("docker: put archive: {error}"))
+        }
+        _ => Err("docker: cp requires exactly one CONTAINER:PATH operand".to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_create_pending(state: &DockerCompatState, body: &[u8], name: Option<String>) -> Result<String, String> {
+    let spec = parse_docker_create_spec(body, name)?;
+    let id = docker_compat_id("d", &state.next_id);
+    state.pending.lock().map_err(|_| "failed to acquire lock".to_string())?.insert(id.clone(), spec);
+    if let Err(error) = state.persist_pending() { state.pending.lock().map_err(|_| "failed to acquire lock".to_string())?.remove(&id); return Err(error); }
+    Ok(id)
 }
 
 fn handle_tag(
@@ -13138,36 +13371,11 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/version") => {
-                let body = serde_json::json!({
-                    "Version": env!("CARGO_PKG_VERSION"),
-                    "ApiVersion": "1.45",
-                    "MinAPIVersion": "1.24",
-                    "GitCommit": "unknown",
-                    "Os": std::env::consts::OS,
-                    "Arch": std::env::consts::ARCH
-                });
+                let body = docker_version_payload();
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/info") => {
-                let containers = runtime.list().map_err(|err| err.to_string())?;
-                let images = store.list_references().map_err(|err| err.to_string())?;
-                let running = containers.iter().filter(|c| c.status == "running").count();
-                let paused = containers.iter().filter(|c| c.status == "paused").count();
-                let stopped = containers
-                    .iter()
-                    .filter(|c| c.status == "exited" || c.status == "stopped")
-                    .count();
-                let body = serde_json::json!({
-                    "ID": "ferrocrate",
-                    "Containers": containers.len(),
-                    "ContainersRunning": running,
-                    "ContainersPaused": paused,
-                    "ContainersStopped": stopped,
-                    "Images": images.len(),
-                    "Driver": "overlayfs",
-                    "OperatingSystem": std::env::consts::OS,
-                    "Architecture": std::env::consts::ARCH,
-                });
+                let body = docker_info_payload(&runtime, &store)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/system/df") => {
@@ -13326,38 +13534,7 @@ fn handle_docker_compat_connection(
                 let id = path
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/export");
-                let id = resolve_container_id(&runtime, id)?;
-                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                let rootfs = runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("rootfs");
-                if !rootfs.is_dir() {
-                    return Err(format!(
-                        "docker: container rootfs is unavailable: {}",
-                        rootfs.display()
-                    ));
-                }
-                let mut archive = Vec::new();
-                {
-                    let mut builder = tar::Builder::new(&mut archive);
-                    let excluded_targets = record
-                        .mounts
-                        .iter()
-                        .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
-                        .chain(
-                            record
-                                .tmpfs_mounts
-                                .iter()
-                                .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
-                        )
-                        .collect::<Vec<_>>();
-                    append_export_rootfs(&mut builder, &rootfs, &excluded_targets)
-                        .map_err(|error| format!("docker: export rootfs: {error}"))?;
-                    builder
-                        .finish()
-                        .map_err(|error| format!("docker: finish export archive: {error}"))?;
-                }
+                let archive = docker_export_container_archive(runtime_dir.as_ref(), &runtime, id)?;
                 http_response(200, &archive, "application/x-tar")
             }
             ("GET" | "HEAD", path)
@@ -13887,19 +14064,7 @@ fn handle_docker_compat_connection(
             }
             ("POST", "/containers/create") => {
                 let name = query.get("name").cloned();
-                let spec = parse_docker_create_spec(&request.body, name)?;
-                let id = docker_compat_id("d", &state.next_id);
-                if let Ok(mut pending) = state.pending.lock() {
-                    pending.insert(id.clone(), spec);
-                } else {
-                    return Err("failed to acquire lock".to_string());
-                }
-                if let Err(error) = state.persist_pending() {
-                    if let Ok(mut pending) = state.pending.lock() {
-                        pending.remove(&id);
-                    }
-                    return Err(error);
-                }
+                let id = docker_create_pending(&state, &request.body, name)?;
                 let body = serde_json::json!({ "Id": id, "Warnings": serde_json::Value::Null });
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
@@ -16097,6 +16262,28 @@ fn docker_image_search_results(
     results.sort_by(|left, right| left["Name"].as_str().cmp(&right["Name"].as_str()));
     results.truncate(limit);
     results
+}
+
+#[cfg(target_os = "linux")]
+fn docker_version_payload() -> serde_json::Value {
+    serde_json::json!({
+        "Version": env!("CARGO_PKG_VERSION"), "ApiVersion": "1.45", "MinAPIVersion": "1.24",
+        "GitCommit": "unknown", "Os": std::env::consts::OS, "Arch": std::env::consts::ARCH,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> Result<serde_json::Value, String> {
+    let containers = runtime.list().map_err(|error| error.to_string())?;
+    let images = store.list_references().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "ID": "ferrocrate", "Containers": containers.len(),
+        "ContainersRunning": containers.iter().filter(|c| c.status == "running").count(),
+        "ContainersPaused": containers.iter().filter(|c| c.status == "paused").count(),
+        "ContainersStopped": containers.iter().filter(|c| c.status == "exited" || c.status == "stopped").count(),
+        "Images": images.len(), "Driver": "overlayfs", "OperatingSystem": std::env::consts::OS,
+        "Architecture": std::env::consts::ARCH,
+    }))
 }
 
 fn validate_docker_image_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
@@ -19032,6 +19219,24 @@ volumes:
         let cli = Cli::try_parse_from(["ferrocrate", "system-df", "--format", "json"])
             .expect("parse system df");
         assert!(matches!(cli.command, Commands::SystemDf { format } if format == "json"));
+    }
+
+    #[test]
+    fn docker_native_easy_win_verbs_parse_the_documented_syntax() {
+        for args in [
+            vec!["ferrocrate", "cp", "box:/etc/hosts", "/tmp/hosts"],
+            vec!["ferrocrate", "save", "-o", "/tmp/image.tar", "alpine:latest"],
+            vec!["ferrocrate", "load", "-i", "/tmp/image.tar"],
+            vec!["ferrocrate", "export", "-o", "/tmp/rootfs.tar", "box"],
+            vec!["ferrocrate", "diff", "box"],
+            vec!["ferrocrate", "search", "alpine"],
+            vec!["ferrocrate", "create", "alpine", "echo", "ok"],
+            vec!["ferrocrate", "attach", "--no-stdin", "box"],
+            vec!["ferrocrate", "info"],
+            vec!["ferrocrate", "version"],
+        ] {
+            Cli::try_parse_from(args).expect("Docker-compatible native command parses");
+        }
     }
 
     #[test]

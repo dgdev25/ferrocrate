@@ -3900,29 +3900,17 @@ impl ContainerRuntime {
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let manager = CgroupV2Manager::new(&self.cgroup_root);
         let group_path = self.cgroup_root.join("ferrocrate").join(id);
-        let mut stats = manager.read_stats(group_path)?;
-        let needs_process_fallback = stats.memory_current.unwrap_or(0) == 0
-            || stats.cpu_usage_usec.is_none();
-        if needs_process_fallback && pid_identity_matches(&record) {
-            if let Some(process) = process_tree_stats(record.pid) {
-                stats.memory_current = Some(
-                    stats.memory_current.unwrap_or(0).max(process.memory_current.unwrap_or(0)),
-                );
-                stats.pids_current = Some(
-                    stats.pids_current.unwrap_or(0).max(process.pids_current.unwrap_or(0)),
-                );
-                stats.cpu_usage_usec = Some(
-                    stats.cpu_usage_usec.unwrap_or(0).max(process.cpu_usage_usec.unwrap_or(0)),
-                );
-                stats.cpu_user_usec = Some(
-                    stats.cpu_user_usec.unwrap_or(0).max(process.cpu_user_usec.unwrap_or(0)),
-                );
-                stats.cpu_system_usec = Some(
-                    stats.cpu_system_usec.unwrap_or(0).max(process.cpu_system_usec.unwrap_or(0)),
-                );
-            }
-        }
-        Ok(stats)
+        let cgroup = manager.read_stats(group_path);
+        let needs_process_fallback = cgroup
+            .as_ref()
+            .map(|stats| {
+                stats.memory_current.unwrap_or(0) == 0 || stats.cpu_usage_usec.is_none()
+            })
+            .unwrap_or(true);
+        let process = (needs_process_fallback && pid_identity_matches(&record))
+            .then(|| process_tree_stats(record.pid))
+            .flatten();
+        Ok(stats_with_process_fallback(cgroup, process)?)
     }
 
     pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {
@@ -6351,6 +6339,35 @@ fn process_tree_stats(root: u32) -> Option<CgroupStats> {
     }
     aggregate.pids_current = Some(samples);
     Some(aggregate)
+}
+
+fn stats_with_process_fallback<E>(
+    cgroup: Result<CgroupStats, E>,
+    process: Option<CgroupStats>,
+) -> Result<CgroupStats, E> {
+    match (cgroup, process) {
+        (Err(_), Some(process)) => Ok(process),
+        (Err(error), None) => Err(error),
+        (Ok(mut cgroup), Some(process)) => {
+            cgroup.memory_current = Some(
+                cgroup.memory_current.unwrap_or(0).max(process.memory_current.unwrap_or(0)),
+            );
+            cgroup.pids_current = Some(
+                cgroup.pids_current.unwrap_or(0).max(process.pids_current.unwrap_or(0)),
+            );
+            cgroup.cpu_usage_usec = Some(
+                cgroup.cpu_usage_usec.unwrap_or(0).max(process.cpu_usage_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_user_usec = Some(
+                cgroup.cpu_user_usec.unwrap_or(0).max(process.cpu_user_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_system_usec = Some(
+                cgroup.cpu_system_usec.unwrap_or(0).max(process.cpu_system_usec.unwrap_or(0)),
+            );
+            Ok(cgroup)
+        }
+        (Ok(cgroup), None) => Ok(cgroup),
+    }
 }
 
 fn recovery_observation(
@@ -15670,6 +15687,28 @@ mod tests {
         assert_eq!(stats.cpu_usage_usec, Some(1_500_000));
         assert_eq!(stats.cpu_user_usec, Some(1_000_000));
         assert_eq!(stats.cpu_system_usec, Some(500_000));
+    }
+
+    #[test]
+    fn process_stats_replace_an_unreadable_cgroup_sample() {
+        let process = crate::cgroups::CgroupStats {
+            memory_current: Some(4096),
+            cpu_usage_usec: Some(50),
+            ..crate::cgroups::CgroupStats::default()
+        };
+        let recovered = super::stats_with_process_fallback(
+            Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+            Some(process.clone()),
+        )
+        .expect("verified process fallback");
+        assert_eq!(recovered, process);
+        assert_eq!(
+            super::stats_with_process_fallback(
+                Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+                None,
+            ),
+            Err("permission denied"),
+        );
     }
 
     fn fixture_container_record(id: &str, status: &str) -> ContainerRecord {

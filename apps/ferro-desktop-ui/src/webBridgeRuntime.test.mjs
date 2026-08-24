@@ -190,7 +190,7 @@ test("terminal startup rejects a closed event stream without posting", async () 
   assert.equal(fetches, 0);
 });
 
-test("a failed event-stream wait cleans up and can retry", async () => {
+test("a reconnecting event stream keeps waiting through error and starts after open", async () => {
   const listeners = new Map();
   const source = {
     readyState: 0,
@@ -215,16 +215,21 @@ test("a failed event-stream wait cleans up and can retry", async () => {
     },
   });
 
-  const failed = runtime.invoke("start_terminal", {}, { timeoutMs: 50 });
+  let settled = false;
+  const started = runtime.invoke("start_terminal", {}, { timeoutMs: 50 });
+  void started.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
   source.emit("error");
-  await assert.rejects(failed, /event stream failed/i);
-  assert.equal(listeners.get("open")?.size, 0);
-  assert.equal(listeners.get("error")?.size, 0);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(listeners.get("open")?.size, 1);
+  assert.equal(listeners.get("error")?.size, 1);
 
-  const retried = runtime.invoke("start_terminal", {}, { timeoutMs: 50 });
   source.readyState = 1;
   source.emit("open");
-  await retried;
+  await started;
   assert.equal(fetches, 1);
   assert.equal(listeners.get("open")?.size, 0);
   assert.equal(listeners.get("error")?.size, 0);

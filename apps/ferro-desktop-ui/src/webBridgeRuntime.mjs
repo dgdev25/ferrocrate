@@ -65,7 +65,11 @@ export function createWebBridgeRuntime(options = {}) {
       callback(value);
     };
     const onOpen = () => settle(resolveReady);
-    const onError = () => settle(rejectReady, new Error("terminal event stream failed to connect"));
+    const onError = () => {
+      if (source.readyState === 2) {
+        settle(rejectReady, new Error("terminal event stream is closed"));
+      }
+    };
     const onAbort = () => settle(rejectReady, new Error("terminal event stream wait was aborted"));
     source.addEventListener("open", onOpen);
     source.addEventListener("error", onError);

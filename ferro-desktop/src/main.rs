@@ -57,6 +57,32 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    #[command(hide = true)]
+    TerminalProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[arg(long)]
+        container: String,
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        workdir: Option<String>,
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+    #[command(hide = true)]
+    TerminalResize {
+        #[arg(long)]
+        socket: Option<String>,
+        #[arg(long)]
+        exec_id: String,
+        #[arg(long)]
+        columns: u16,
+        #[arg(long)]
+        rows: u16,
+    },
     Doctor {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -233,6 +259,320 @@ struct ExecResponse {
     status: i32,
     stdout: String,
     stderr: String,
+}
+
+fn percent_encode_terminal_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn terminal_exec_create_path(container: &str) -> String {
+    format!(
+        "/containers/{}/exec",
+        percent_encode_terminal_path_component(container)
+    )
+}
+
+fn terminal_resize_path(exec_id: &str, columns: u16, rows: u16) -> String {
+    format!(
+        "/exec/{}/resize?w={columns}&h={rows}",
+        percent_encode_terminal_path_component(exec_id)
+    )
+}
+
+fn terminal_exec_create_payload(
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<Vec<u8>, DesktopError> {
+    Ok(serde_json::to_vec(&serde_json::json!({
+        "Cmd": cmd,
+        "AttachStdin": true,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Tty": true,
+        "Env": env,
+        "User": user,
+        "WorkingDir": workdir,
+    }))?)
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_http_request(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(u16, Vec<u8>), DesktopError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(body)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| DesktopError::Invalid("daemon returned malformed HTTP".to_string()))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| DesktopError::Invalid("daemon returned non-UTF-8 headers".to_string()))?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| DesktopError::Invalid("daemon returned invalid HTTP status".to_string()))?;
+    Ok((status, response[header_end + 4..].to_vec()))
+}
+
+fn terminal_daemon_error(status: u16, body: &[u8]) -> DesktopError {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string());
+    DesktopError::Invalid(format!("daemon returned HTTP {status}: {message}"))
+}
+
+#[cfg(target_os = "linux")]
+fn create_terminal_exec(
+    socket: &Path,
+    container: &str,
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<String, DesktopError> {
+    if container.trim().is_empty() {
+        return Err(DesktopError::Invalid(
+            "terminal container is required".to_string(),
+        ));
+    }
+    if cmd.is_empty() {
+        return Err(DesktopError::Invalid(
+            "terminal command is required".to_string(),
+        ));
+    }
+    let body = terminal_exec_create_payload(cmd, env, user, workdir)?;
+    let (status, response) =
+        terminal_http_request(socket, "POST", &terminal_exec_create_path(container), &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&response)?;
+    response
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| DesktopError::Invalid("daemon exec create omitted Id".to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn read_terminal_http_headers(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<(u16, Vec<u8>), DesktopError> {
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+        if headers.len() > MAX_REQUEST_BYTES {
+            return Err(DesktopError::Invalid(
+                "daemon response headers are too large".to_string(),
+            ));
+        }
+    }
+    let text = std::str::from_utf8(&headers)
+        .map_err(|_| DesktopError::Invalid("daemon returned non-UTF-8 headers".to_string()))?;
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| DesktopError::Invalid("daemon returned invalid HTTP status".to_string()))?;
+    Ok((status, headers))
+}
+
+#[cfg(target_os = "linux")]
+fn open_terminal_exec(
+    socket: &Path,
+    exec_id: &str,
+) -> Result<std::os::unix::net::UnixStream, DesktopError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let body = serde_json::to_vec(&serde_json::json!({"Detach": false, "Tty": true}))?;
+    let path = format!(
+        "/exec/{}/start",
+        percent_encode_terminal_path_component(exec_id)
+    );
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(&body)?;
+    let (status, _) = read_terminal_http_headers(&mut stream)?;
+    if status != 101 {
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response)?;
+        return Err(terminal_daemon_error(status, &response));
+    }
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+fn resize_terminal_exec(
+    socket: &Path,
+    exec_id: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<(), DesktopError> {
+    let (status, response) = terminal_http_request(
+        socket,
+        "POST",
+        &terminal_resize_path(exec_id, columns, rows),
+        &[],
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut candidates = Vec::new();
+    if let Some(path) = explicit {
+        candidates.push(PathBuf::from(path));
+    } else {
+        if let Some(path) = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET") {
+            candidates.push(PathBuf::from(path));
+        }
+        if let Some(host) = std::env::var_os("DOCKER_HOST") {
+            if let Some(path) = host
+                .to_str()
+                .and_then(|value| value.strip_prefix("unix://"))
+            {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let runtime = PathBuf::from(runtime);
+            candidates.push(runtime.join("ferrocrate.sock"));
+            candidates.push(runtime.join("docker.sock"));
+        }
+        if let Some(runtime) = std::env::var_os("FERROCRATE_RUNTIME_DIR") {
+            let runtime = PathBuf::from(runtime);
+            candidates.push(runtime.join("ferrocrate.sock"));
+            candidates.push(runtime.join("docker.sock"));
+        }
+        candidates.push(PathBuf::from("/var/run/ferrocrate.sock"));
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
+    }
+
+    let mut rejected = Vec::new();
+    for path in candidates {
+        if !path.is_absolute() {
+            rejected.push(format!("{} (not absolute)", path.display()));
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_socket() => return Ok(path),
+            Ok(_) => rejected.push(format!("{} (not a Unix socket)", path.display())),
+            Err(_) => rejected.push(format!("{} (missing)", path.display())),
+        }
+    }
+    Err(DesktopError::Invalid(format!(
+        "daemon socket not found; probed {}",
+        rejected.join(", ")
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn run_terminal_proxy(
+    socket: Option<&str>,
+    container: &str,
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let exec_id = create_terminal_exec(&socket, container, cmd, env, user, workdir)?;
+    let mut stream = open_terminal_exec(&socket, &exec_id)?;
+    eprintln!("FERROCRATE_EXEC_ID={exec_id}");
+    std::io::stderr().flush()?;
+
+    let mut input_stream = stream.try_clone()?;
+    thread::spawn(move || {
+        let mut input = std::io::stdin().lock();
+        let _ = std::io::copy(&mut input, &mut input_stream);
+        let _ = input_stream.shutdown(std::net::Shutdown::Write);
+    });
+    let mut output = std::io::stdout().lock();
+    std::io::copy(&mut stream, &mut output)?;
+    output.flush()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_terminal_proxy(
+    _socket: Option<&str>,
+    _container: &str,
+    _cmd: &[String],
+    _env: &[String],
+    _user: Option<&str>,
+    _workdir: Option<&str>,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "terminal daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_terminal_resize(
+    socket: Option<&str>,
+    exec_id: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<(), DesktopError> {
+    if columns == 0 || rows == 0 {
+        return Err(DesktopError::Invalid(
+            "terminal dimensions must be non-zero".to_string(),
+        ));
+    }
+    let socket = select_terminal_socket(socket)?;
+    resize_terminal_exec(&socket, exec_id, columns, rows)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_terminal_resize(
+    _socket: Option<&str>,
+    _exec_id: &str,
+    _columns: u16,
+    _rows: u16,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "terminal daemon proxy is supported only on Linux".to_string(),
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -535,6 +875,27 @@ fn main() {
             follow,
             interactive,
         ),
+        Commands::TerminalProxy {
+            socket,
+            container,
+            env,
+            user,
+            workdir,
+            cmd,
+        } => run_terminal_proxy(
+            socket.as_deref(),
+            &container,
+            &cmd,
+            &env,
+            user.as_deref(),
+            workdir.as_deref(),
+        ),
+        Commands::TerminalResize {
+            socket,
+            exec_id,
+            columns,
+            rows,
+        } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -559,6 +920,8 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
         command,
         Commands::Daemon { .. }
             | Commands::Exec { .. }
+            | Commands::TerminalProxy { .. }
+            | Commands::TerminalResize { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -2641,16 +3004,196 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, copy_interactive_input,
-        exec_mode_from_env, gather_phase0_check, is_interactive_exec_command,
+        create_terminal_exec, exec_mode_from_env, gather_phase0_check, is_interactive_exec_command,
         is_log_follow_command, load_channel_manifest, load_forward_entries, load_vm_state,
-        parse_exec_mode, read_exec_request, render_macos_launch_agent_plist,
-        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
-        save_vm_state, should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr,
-        vm_state_running, write_follow_frame, Commands, ExecMode, ExecRequest, FollowChannel,
-        FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        open_terminal_exec, parse_exec_mode, read_exec_request, render_macos_launch_agent_plist,
+        render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
+        save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
+        terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, write_follow_frame, Cli,
+        Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
+        VmCommands, VmConfig, VmState,
     };
-    use std::io::{BufReader, Cursor, Read};
+    use clap::Parser;
+    use std::io::{BufRead, BufReader, Cursor, Read, Write};
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    fn read_test_http_request(stream: &mut std::os::unix::net::UnixStream) -> (String, Vec<u8>) {
+        let mut reader = BufReader::new(stream);
+        let mut headers = String::new();
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("request header");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                if key.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("content length");
+                }
+            }
+            headers.push_str(&line);
+        }
+        let mut body = vec![0_u8; content_length];
+        reader.read_exact(&mut body).expect("request body");
+        (headers, body)
+    }
+
+    #[test]
+    fn parses_typed_terminal_proxy_commands() {
+        assert!(Cli::try_parse_from([
+            "ferro-desktop",
+            "terminal-proxy",
+            "--socket",
+            "/tmp/ferrocrate.sock",
+            "--container",
+            "web",
+            "--env",
+            "TERM=xterm-256color",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/workspace",
+            "--",
+            "sh",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "ferro-desktop",
+            "terminal-resize",
+            "--socket",
+            "/tmp/ferrocrate.sock",
+            "--exec-id",
+            "exec-1",
+            "--columns",
+            "100",
+            "--rows",
+            "40",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn terminal_proxy_builds_typed_exec_create_payload() {
+        let payload = terminal_exec_create_payload(
+            &["sh".to_string()],
+            &["TERM=xterm-256color".to_string()],
+            Some("1000:1000"),
+            Some("/workspace"),
+        )
+        .expect("exec payload");
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload JSON");
+
+        assert_eq!(payload["Cmd"], serde_json::json!(["sh"]));
+        assert_eq!(payload["AttachStdin"], true);
+        assert_eq!(payload["AttachStdout"], true);
+        assert_eq!(payload["AttachStderr"], true);
+        assert_eq!(payload["Tty"], true);
+        assert_eq!(payload["Env"], serde_json::json!(["TERM=xterm-256color"]));
+        assert_eq!(payload["User"], "1000:1000");
+        assert_eq!(payload["WorkingDir"], "/workspace");
+    }
+
+    #[test]
+    fn terminal_proxy_percent_encodes_daemon_resource_paths() {
+        assert_eq!(
+            terminal_exec_create_path("web/name"),
+            "/containers/web%2Fname/exec"
+        );
+        assert_eq!(
+            terminal_resize_path("exec/id", 100, 40),
+            "/exec/exec%2Fid/resize?w=100&h=40"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_creates_exec_through_daemon_socket() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept create");
+            let (headers, body) = read_test_http_request(&mut stream);
+            assert!(headers.starts_with("POST /containers/web%2Fblue/exec HTTP/1.1\r\n"));
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("create JSON");
+            assert_eq!(payload["Cmd"], serde_json::json!(["sh"]));
+            assert_eq!(payload["Env"], serde_json::json!(["TERM=xterm-256color"]));
+            stream
+                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 15\r\n\r\n{\"Id\":\"exec-1\"}")
+                .expect("create response");
+        });
+
+        let exec_id = create_terminal_exec(
+            &socket,
+            "web/blue",
+            &["sh".to_string()],
+            &["TERM=xterm-256color".to_string()],
+            None,
+            None,
+        )
+        .expect("create terminal exec");
+
+        assert_eq!(exec_id, "exec-1");
+        server.join().expect("server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_opens_hijack_and_resizes_exec() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let server = std::thread::spawn(move || {
+            let (mut start, _) = listener.accept().expect("accept start");
+            let (headers, body) = read_test_http_request(&mut start);
+            assert!(headers.starts_with("POST /exec/exec%2F1/start HTTP/1.1\r\n"));
+            assert!(headers.contains("Connection: Upgrade\r\n"));
+            assert_eq!(body, br#"{"Detach":false,"Tty":true}"#);
+            start
+                .write_all(
+                    b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nready",
+                )
+                .expect("hijack response");
+
+            let (mut resize, _) = listener.accept().expect("accept resize");
+            let (headers, body) = read_test_http_request(&mut resize);
+            assert!(headers.starts_with("POST /exec/exec%2F1/resize?w=100&h=40 HTTP/1.1\r\n"));
+            assert!(body.is_empty());
+            resize
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .expect("resize response");
+        });
+
+        let mut hijack = open_terminal_exec(&socket, "exec/1").expect("open terminal exec");
+        let mut ready = [0_u8; 5];
+        hijack
+            .read_exact(&mut ready)
+            .expect("initial terminal output");
+        assert_eq!(&ready, b"ready");
+        resize_terminal_exec(&socket, "exec/1", 100, 40).expect("resize terminal exec");
+        server.join().expect("server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_requires_an_actual_daemon_socket() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let regular = temp.path().join("regular");
+        std::fs::write(&regular, b"not a socket").expect("regular file");
+        let error = select_terminal_socket(Some(regular.to_str().expect("path")))
+            .expect_err("regular file must be rejected");
+        assert!(error.to_string().contains("not a Unix socket"));
+
+        let socket = temp.path().join("ferrocrate.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert_eq!(
+            select_terminal_socket(Some(socket.to_str().expect("path"))).expect("daemon socket"),
+            socket
+        );
+    }
 
     #[test]
     fn command_exists_treats_binary_name_as_literal_argv() {

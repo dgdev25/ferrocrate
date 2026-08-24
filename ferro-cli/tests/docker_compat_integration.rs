@@ -731,9 +731,6 @@ fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery(
     // consume the second (and final) retry slot.
     harness.restart();
 
-    #[cfg(target_env = "musl")]
-    let recovered_restart_deadline = Instant::now() + Duration::from_secs(20);
-    #[cfg(not(target_env = "musl"))]
     let recovered_restart_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let inspect = inspect_container(&harness, &id);
@@ -752,9 +749,6 @@ fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery(
         thread::sleep(Duration::from_millis(50));
     }
 
-    #[cfg(target_env = "musl")]
-    let terminal_deadline = Instant::now() + Duration::from_secs(25);
-    #[cfg(not(target_env = "musl"))]
     let terminal_deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let inspect = inspect_container(&harness, &id);

@@ -1999,8 +1999,23 @@ impl ContainerRuntime {
                 current.last_exit_code.unwrap_or(-1),
                 current.restart_count,
             ) {
-                if let Ok(runtime) = ContainerRuntime::new(&runtime_dir) {
-                    let _ = runtime.start_from_reconciliation(&current.id);
+                match ContainerRuntime::new(&runtime_dir) {
+                    Ok(runtime) => {
+                        if let Err(error) = runtime.start_from_reconciliation(&current.id) {
+                            log::warn!(
+                                "[reconcile] failed to restart recovered container {}: {}",
+                                current.id,
+                                error
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[reconcile] failed to reopen runtime for recovered container {}: {}",
+                            current.id,
+                            error
+                        );
+                    }
                 }
             }
             return;
@@ -2010,12 +2025,35 @@ impl ContainerRuntime {
     fn reconcile_pending_mutations(&self) -> Result<(), RuntimeError> {
         let records = self.store.list()?;
         let Some(journal) = self.authorization.journal() else {
-            for record in records {
-                let Some(reservation) = record.pending_mutation else {
+            for record_snapshot in records {
+                let Some(reservation_snapshot) = record_snapshot.pending_mutation else {
                     continue;
                 };
+
+                // Compatibility mode has no witness journal to classify an
+                // abandoned reservation, but it still shares the lifecycle
+                // lock with its active owner. A request-scoped runtime may be
+                // initialized while that owner is between effect and commit;
+                // only clear the reservation after proving no owner holds it.
+                #[cfg(unix)]
+                let _lifecycle_lock = {
+                    let lock_path = lifecycle_lock_path(&self.runtime_dir, &record_snapshot.id);
+                    if let Some(parent) = lock_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    match LifecycleLock::try_acquire(&lock_path)? {
+                        Some(lock) => lock,
+                        None => continue,
+                    }
+                };
+                let Some(record) = self.store.get(&record_snapshot.id)? else {
+                    continue;
+                };
+                if record.pending_mutation.as_ref() != Some(&reservation_snapshot) {
+                    continue;
+                }
                 self.store
-                    .finish_mutation(&record.id, reservation.operation_id)?;
+                    .finish_mutation(&record.id, reservation_snapshot.operation_id)?;
             }
             return Ok(());
         };
@@ -15411,6 +15449,34 @@ mod tests {
         runtime.reconcile_persisted_state().unwrap();
         let stored = runtime.store.get("pending-running").unwrap().unwrap();
         assert_eq!(stored.status, "running");
+        assert_eq!(stored.pending_mutation.unwrap().operation_id, operation_id);
+    }
+
+    #[test]
+    fn startup_without_journal_does_not_clear_a_live_lifecycle_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(temp.path()).unwrap();
+        let operation_id = [18u8; 16];
+        let record = fixture_container_record("live-reservation", "exited");
+        runtime.store.put(&record).unwrap();
+        runtime
+            .store
+            .reserve_mutation(
+                &record.id,
+                &record.status,
+                record.mutation_generation,
+                operation_id,
+                "container.start",
+            )
+            .unwrap();
+
+        let lock_path = super::lifecycle_lock_path(temp.path(), &record.id);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let _owner = super::LifecycleLock::acquire(&lock_path).unwrap();
+
+        ContainerRuntime::new(temp.path()).unwrap();
+
+        let stored = runtime.store.get(&record.id).unwrap().unwrap();
         assert_eq!(stored.pending_mutation.unwrap().operation_id, operation_id);
     }
 

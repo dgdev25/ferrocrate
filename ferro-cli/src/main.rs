@@ -3594,11 +3594,17 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }),
             #[cfg(target_os = "linux")]
             Commands::Rm { force, volumes, containers } => {
-                if volumes {
-                    eprintln!("rm: --volumes is accepted; anonymous volume removal is pending round 8");
-                }
+                let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                    .map_err(|error| error.to_string())?;
                 handle_multiple_containers(&containers, "rm", |container| {
-                    handle_rm(&runtime, container, force)
+                    handle_rm(
+                        &runtime,
+                        &volume_store,
+                        &surface_authorization,
+                        container,
+                        force,
+                        volumes,
+                    )
                 })
             }
             #[cfg(target_os = "linux")]
@@ -9334,7 +9340,14 @@ fn handle_kill(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_rm(runtime: &ContainerRuntime, container: &str, force: bool) -> Result<(), String> {
+fn handle_rm(
+    runtime: &ContainerRuntime,
+    volume_store: &LocalVolumeStore,
+    authorization: &SurfaceAuthorization,
+    container: &str,
+    force: bool,
+    volumes: bool,
+) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
     }
@@ -9345,9 +9358,58 @@ fn handle_rm(runtime: &ContainerRuntime, container: &str, force: bool) -> Result
             runtime.kill(&resolved).map_err(|err| err.to_string())?;
         }
     }
+    let anonymous_volumes = if volumes {
+        let mounted_sources = record_mount_sources(runtime, &resolved)?;
+        anonymous_volume_names_for_sources(volume_store, &mounted_sources)?
+    } else {
+        Vec::new()
+    };
     runtime.remove(&resolved).map_err(|err| err.to_string())?;
+    let origin = runtime
+        .request_origin()
+        .ok_or_else(|| "rm: authenticated request origin unavailable".to_string())?;
+    for name in anonymous_volumes {
+        let permit = authorization
+            .authorize_named(
+                &origin,
+                AuthorizationAction::VolumeDelete,
+                ResourceKind::Volume,
+                &name,
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        execute_volume_remove(volume_store, &name, permit)?;
+    }
     println!("rm: {resolved}");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn record_mount_sources(runtime: &ContainerRuntime, id: &str) -> Result<Vec<String>, String> {
+    Ok(runtime
+        .inspect(id)
+        .map_err(|error| error.to_string())?
+        .mounts
+        .into_iter()
+        .map(|mount| mount.source)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn anonymous_volume_names_for_sources(
+    volume_store: &LocalVolumeStore,
+    mounted_sources: &[String],
+) -> Result<Vec<String>, String> {
+    Ok(volume_store
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|volume| {
+            mounted_sources.iter().any(|source| source == &volume.path)
+                && volume.driver_opts.get("ferrocrate.anonymous") == Some(&"true".to_string())
+        })
+        .map(|volume| volume.name)
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -21456,6 +21518,9 @@ volumes:
     fn stop_kill_rm_restart_require_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let volume_store = LocalVolumeStore::open(temp.path().join("volumes"))
+            .expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
 
         let err = handle_stop(&runtime, "", 1).expect_err("stop requires container");
         assert!(err.contains("stop: container is required"));
@@ -21469,7 +21534,8 @@ volumes:
         let err = handle_unpause(&runtime, "").expect_err("unpause requires container");
         assert!(err.contains("unpause: container is required"));
 
-        let err = handle_rm(&runtime, "", false).expect_err("rm requires container");
+        let err = handle_rm(&runtime, &volume_store, &authorization, "", false, false)
+            .expect_err("rm requires container");
         assert!(err.contains("rm: container is required"));
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");

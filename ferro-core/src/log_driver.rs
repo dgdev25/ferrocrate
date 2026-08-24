@@ -8,7 +8,9 @@ use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 
-use crate::plugin_contract::{PluginKind, PluginManifest};
+use crate::plugin_contract::{
+    load_plugin_trust_root, parse_plugin_manifest, PluginKind, PluginManifest,
+};
 use crate::plugin_runtime::execute_plugin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,69 @@ pub trait LogDriver: Send + Sync {
             ),
         ))
     }
+}
+
+pub fn load_log_driver(
+    name: &str,
+    runtime_dir: &Path,
+    rotation: Option<LogRotation>,
+) -> io::Result<Arc<dyn LogDriver>> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log driver name contains unsupported characters",
+        ));
+    }
+    if name == "json-file" {
+        return Ok(Arc::new(JsonFileLogDriver::new(rotation)));
+    }
+    if name == "journald" {
+        #[cfg(feature = "journald")]
+        {
+            let socket = std::env::var_os("FERROCRATE_JOURNAL_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/run/systemd/journal/socket"));
+            return Ok(Arc::new(JournaldLogDriver::new(socket)));
+        }
+        #[cfg(not(feature = "journald"))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "log driver journald is unavailable: build with feature journald",
+        ));
+    }
+    if name == "syslog" {
+        #[cfg(feature = "syslog")]
+        {
+            let socket = std::env::var_os("FERROCRATE_SYSLOG_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/dev/log"));
+            return Ok(Arc::new(SyslogLogDriver::new(socket)));
+        }
+        #[cfg(not(feature = "syslog"))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "log driver syslog is unavailable: build with feature syslog",
+        ));
+    }
+
+    let manifest_path = runtime_dir
+        .join("plugins/log-drivers")
+        .join(format!("{name}.json"));
+    let manifest = parse_plugin_manifest(&fs::read(&manifest_path)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if manifest.name != name {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "log driver manifest name does not match selection",
+        ));
+    }
+    let trust_root = load_plugin_trust_root(&runtime_dir.join("plugins/trust-root.pub"))
+        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+    Ok(Arc::new(ExternalLogDriver::new(manifest, trust_root)?))
 }
 
 #[derive(Clone)]
@@ -1014,10 +1079,8 @@ mod tests {
             let _guard = crate::test_support::acquire_env_lock();
             unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
         }
-        assert!(
-            std::fs::read_to_string(capture)
-                .unwrap()
-                .contains("registry-container")
-        );
+        assert!(std::fs::read_to_string(capture)
+            .unwrap()
+            .contains("registry-container"));
     }
 }

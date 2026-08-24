@@ -4550,6 +4550,11 @@ impl ContainerRuntime {
         record.process_start_time = process_start_time_for_pid(child_id);
         record.status = "running".to_string();
         record.user_stopped = false;
+        if record.health.is_some() {
+            record.health_status = "starting".to_string();
+            record.health_failures = 0;
+            record.health_checked_at_unix = None;
+        }
         if reset_restart_count {
             record.restart_count = 0;
         }
@@ -12296,6 +12301,14 @@ fn should_restart(
     }
 }
 
+fn should_health_restart(record: &ContainerRecord) -> bool {
+    record
+        .annotations
+        .get("io.ferrocrate.health-restart")
+        .is_some_and(|value| value == "true")
+        && !matches!(record.restart_policy, RestartPolicy::No)
+}
+
 fn restart_limit_allows(policy: &RestartPolicy, restart_count: u32) -> bool {
     match policy {
         RestartPolicy::OnFailureWithRetries(maximum_retry_count) => {
@@ -12514,6 +12527,17 @@ fn run_health_checks(
                                     &record.image,
                                     std::iter::empty::<(&str, String)>(),
                                 );
+                                // The supervisor owns the ordinary restart path. Only
+                                // terminate a verified current workload; a persisted PID
+                                // may have been recycled after this health worker started.
+                                if record.pid == pid
+                                    && record.status == "running"
+                                    && should_health_restart(&record)
+                                    && pid_identity_matches(&record)
+                                {
+                                    let _ = kill_pid(record.pid);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -14150,6 +14174,19 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    #[test]
+    fn health_restart_requires_opt_in_and_a_restart_policy() {
+        let mut record = fixture_container_record("health-restart", "running");
+        record.restart_policy = RestartPolicy::Always;
+        assert!(!super::should_health_restart(&record));
+        record
+            .annotations
+            .insert("io.ferrocrate.health-restart".to_string(), "true".to_string());
+        assert!(super::should_health_restart(&record));
+        record.restart_policy = RestartPolicy::No;
+        assert!(!super::should_health_restart(&record));
     }
 
     #[test]

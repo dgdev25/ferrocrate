@@ -226,6 +226,9 @@ pub enum Commands {
         health_retries: Option<u32>,
         #[arg(long = "health-start-period")]
         health_start_period: Option<u64>,
+        /// Restart through the configured policy after a health transition to unhealthy.
+        #[arg(long = "health-restart")]
+        health_restart: bool,
         #[arg(long = "restart", default_value = "no")]
         restart_policy: String,
         #[arg(long)]
@@ -3250,6 +3253,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 health_timeout,
                 health_retries,
                 health_start_period,
+                health_restart,
                 restart_policy,
                 rm,
                 bridge_cidr,
@@ -3302,6 +3306,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     health_timeout,
                     health_retries,
                     health_start_period,
+                    health_restart,
                     None,
                     &restart_policy,
                     false,
@@ -4786,6 +4791,7 @@ fn handle_run(
     health_timeout: Option<u64>,
     health_retries: Option<u32>,
     health_start_period: Option<u64>,
+    health_restart: bool,
     health_override: Option<ferro_core::container_store::HealthConfig>,
     restart_policy: &str,
     rm: bool,
@@ -4890,7 +4896,10 @@ fn handle_run(
             .map_err(|e| e.to_string())?;
     }
     let labels = parse_key_values("label", labels)?;
-    let annotations = parse_key_values("annotation", annotations)?;
+    let mut annotations = parse_key_values("annotation", annotations)?;
+    if health_restart {
+        annotations.insert("io.ferrocrate.health-restart".to_string(), "true".to_string());
+    }
     let caps = parse_capabilities(cap_add)?;
     let port_mappings = parse_publish(publish)?;
     let health = match health_override {
@@ -5677,6 +5686,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             health_timeout,
             health_retries,
             health_start_period,
+            health_restart,
             restart_policy,
             rm,
             bridge_cidr,
@@ -5701,6 +5711,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 (bridge_name.is_some(), "--bridge-name"),
                 (net_limit.is_some(), "--net-limit"),
                 (ai_model.is_some(), "--ai-model"),
+                (*health_restart, "--health-restart"),
             ];
             if let Some((_, option)) = unsupported.into_iter().find(|(enabled, _)| *enabled) {
                 return Err(format!(
@@ -12068,6 +12079,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            false,
             health.clone(),
             restart,
             false,
@@ -14952,6 +14964,7 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     None,
+                    false,
                     health_override,
                     &spec.restart_policy,
                     spec.auto_remove,
@@ -18708,6 +18721,7 @@ configs:
                 health_timeout,
                 health_retries,
                 health_start_period,
+                health_restart,
                 restart_policy,
                 memory_max,
                 cpu_quota,
@@ -18742,6 +18756,7 @@ configs:
                 assert!(health_timeout.is_none());
                 assert!(health_retries.is_none());
                 assert!(health_start_period.is_none());
+                assert!(!health_restart);
                 assert_eq!(restart_policy, "no");
                 assert_eq!(profile, "dev");
                 assert!(ai_model.is_none());
@@ -18751,6 +18766,24 @@ configs:
                 assert!(pids_max.is_none());
                 assert!(cap_add.is_empty());
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_health_restart_opt_in() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "run",
+            "--health-cmd",
+            "false",
+            "--health-restart",
+            "--restart",
+            "always",
+            "alpine:latest",
+        ]);
+        match cli.command {
+            Commands::Run { health_restart, .. } => assert!(health_restart),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -21684,6 +21717,7 @@ volumes:
             None,
             None,
             None,
+            false,
             None,
             "no",
             false,

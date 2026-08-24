@@ -330,6 +330,10 @@ pub enum Commands {
     Create {
         #[arg(long)]
         name: Option<String>,
+        #[arg(long = "memory", alias = "memory-max")]
+        memory_max: Option<u64>,
+        #[arg(long)]
+        cpus: Option<String>,
         image: String,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
@@ -3461,9 +3465,18 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::Create { name, image, cmd } => {
+            Commands::Create { name, memory_max, cpus, image, cmd } => {
                 let state = DockerCompatState::new(&runtime_dir)?;
-                let payload = serde_json::json!({"Image": image, "Cmd": cmd});
+                let (cpu_quota, cpu_period) = docker_cpu_quota_period(None, None, cpus.as_deref())?;
+                let payload = serde_json::json!({
+                    "Image": image,
+                    "Cmd": cmd,
+                    "HostConfig": {
+                        "Memory": memory_max.unwrap_or(0),
+                        "CpuQuota": cpu_quota.unwrap_or(0),
+                        "CpuPeriod": cpu_period.unwrap_or(0),
+                    },
+                });
                 let id = docker_create_pending(&state, payload.to_string().as_bytes(), name)?;
                 println!("{id}");
                 Ok(())
@@ -19292,6 +19305,25 @@ volumes:
     fn native_create_accepts_a_docker_name_flag() {
         assert!(Cli::try_parse_from(["ferrocrate", "create", "--name", "web", "alpine"])
             .is_ok(), "create accepts --name");
+    }
+
+    #[test]
+    fn create_cpus_alias_builds_docker_resource_limits() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate", "create", "--memory", "1048576", "--cpus", "1.5", "alpine:latest",
+        ])
+        .expect("Docker create resource aliases parse");
+        match cli.command {
+            Commands::Create {
+                memory_max,
+                cpus,
+                ..
+            } => {
+                assert_eq!(memory_max, Some(1_048_576));
+                assert_eq!(cpus.as_deref(), Some("1.5"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

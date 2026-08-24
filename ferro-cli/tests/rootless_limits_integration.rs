@@ -25,6 +25,7 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
     let image = std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE")
         .unwrap_or_else(|_| "alpine:3.20".to_string());
     let pull = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["pull", &image])
         .output()
@@ -36,6 +37,7 @@ fn rootless_run_attaches_before_workload_and_applies_limits() {
     );
 
     let mut run = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .args([
@@ -122,6 +124,7 @@ fn rootless_run_reports_pid_limit_exhaustion() {
     let image = std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE")
         .unwrap_or_else(|_| "alpine:3.20".to_string());
     let pull = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["pull", &image])
         .output()
@@ -133,6 +136,7 @@ fn rootless_run_reports_pid_limit_exhaustion() {
     );
 
     let mut run = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .args([
@@ -218,6 +222,7 @@ fn rootless_run_reports_memory_oom_event() {
     let image = std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE")
         .unwrap_or_else(|_| "alpine:3.20".to_string());
     let pull = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["pull", &image])
         .output()
@@ -229,6 +234,7 @@ fn rootless_run_reports_memory_oom_event() {
     );
 
     let mut run = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .args([

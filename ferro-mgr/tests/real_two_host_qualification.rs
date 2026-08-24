@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(unix)]
 
 //! Opt-in production-kernel qualification for the authenticated

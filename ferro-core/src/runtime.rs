@@ -3467,12 +3467,16 @@ impl ContainerRuntime {
         let operation_id = permit.operation_id();
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_with_options_authorized(proof, intent, id, cmd, options);
-        self.store.mark_mutation_effect(id, operation_id, result.is_ok())?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
+        self.store
+            .mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
         self.store.finish_mutation(id, operation_id)?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
     }
 
@@ -3484,7 +3488,10 @@ impl ContainerRuntime {
         cmd: &[String],
         options: &ExecOptions,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let record = self.store.get(id)?.ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             if options.user.is_some() {
@@ -3494,20 +3501,60 @@ impl ContainerRuntime {
             }
             let mut env = record.env.clone();
             env.extend(options.env.iter().cloned());
-            let mounts = record.mounts.iter().map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only)).collect::<Vec<_>>();
-            let tmpfs_mounts = record.tmpfs_mounts.iter().map(|mount| (mount.target.clone(), mount.size.clone())).collect::<Vec<_>>();
+            let mounts = record
+                .mounts
+                .iter()
+                .map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only))
+                .collect::<Vec<_>>();
+            let tmpfs_mounts = record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| (mount.target.clone(), mount.size.clone()))
+                .collect::<Vec<_>>();
             let workdir = options.working_dir.as_deref().or(record.workdir.as_deref());
             if options.tty {
-                exec_in_rootless_rootfs_tty(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs)?
+                exec_in_rootless_rootfs_tty(
+                    &rootfs,
+                    cmd,
+                    &env,
+                    workdir,
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                )?
             } else {
-                exec_in_rootless_rootfs(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs, None)?
+                exec_in_rootless_rootfs(
+                    &rootfs,
+                    cmd,
+                    &env,
+                    workdir,
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                    None,
+                )?
             }
         } else if options.tty {
-            exec_in_container_tty_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+            exec_in_container_tty_with_options(
+                record.pid,
+                cmd,
+                &options.env,
+                options.working_dir.as_deref(),
+                options.user.as_deref(),
+            )?
         } else {
-            exec_in_container_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+            exec_in_container_with_options(
+                record.pid,
+                cmd,
+                &options.env,
+                options.working_dir.as_deref(),
+                options.user.as_deref(),
+            )?
         };
-        let _ = log_event(&self.runtime_dir, make_event("exec", Some(&record.id), Some(&record.image), None, None));
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("exec", Some(&record.id), Some(&record.image), None, None),
+        );
         Ok(result)
     }
 
@@ -6618,9 +6665,9 @@ fn build_command(
         command.env(key, value);
     }
 
-    if let Some(dir) = workdir.filter(|_| {
-        rootfs_dir.is_none() && !direct_container_setup && !rootfs_chroot_launcher
-    }) {
+    if let Some(dir) = workdir
+        .filter(|_| rootfs_dir.is_none() && !direct_container_setup && !rootfs_chroot_launcher)
+    {
         command.current_dir(dir);
     }
 
@@ -7044,12 +7091,16 @@ fn spawn_child_with_logs(
         if let Some(mut pipe) = child.stdout.take() {
             let mut log = stdout_file;
             let journal = log_journal_path(stdout_path);
-            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
+            thread::spawn(move || {
+                copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation)
+            });
         }
         if let Some(mut pipe) = child.stderr.take() {
             let mut log = stderr_file;
             let journal = log_journal_path(stderr_path);
-            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
+            thread::spawn(move || {
+                copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation)
+            });
         }
         child
     } else {
@@ -7162,7 +7213,10 @@ fn log_rotation_from_env() -> Option<LogRotation> {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
-    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+    (max_files >= 2).then_some(LogRotation {
+        max_size,
+        max_files,
+    })
 }
 
 fn log_rotation_from_annotations(annotations: &HashMap<String, String>) -> Option<LogRotation> {
@@ -7173,12 +7227,16 @@ fn log_rotation_from_annotations(annotations: &HashMap<String, String>) -> Optio
         .get("io.ferrocrate.log.max-file")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
-    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+    (max_files >= 2).then_some(LogRotation {
+        max_size,
+        max_files,
+    })
 }
 
 fn parse_log_size(value: &str) -> Option<u64> {
     let value = value.trim();
-    let split = value.find(|character: char| !character.is_ascii_digit())
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
         .unwrap_or(value.len());
     let (number, suffix) = value.split_at(split);
     let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
@@ -7188,7 +7246,11 @@ fn parse_log_size(value: &str) -> Option<u64> {
         "g" | "gb" | "gib" => 1024 * 1024 * 1024,
         _ => return None,
     };
-    number.parse::<u64>().ok()?.checked_mul(multiplier).filter(|size| *size > 0)
+    number
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
 }
 
 #[cfg(test)]
@@ -7244,7 +7306,11 @@ fn copy_line_journaled_with_rotation(
                     Ok(file) => *log = file,
                     Err(_) => return false,
                 }
-                match OpenOptions::new().create(true).append(true).open(journal_path) {
+                match OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(journal_path)
+                {
                     Ok(file) => *journal = file,
                     Err(_) => return false,
                 }
@@ -7279,7 +7345,14 @@ fn copy_line_journaled_with_rotation(
                     };
                     pending.extend_from_slice(&buffer[start..end]);
                     if newline.is_some() || pending.len() >= MAX_LINE_BYTES {
-                        if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
+                        if !flush(
+                            log,
+                            &mut journal,
+                            journal_path,
+                            &mut offset,
+                            &pending,
+                            rotation,
+                        ) {
                             let _ = journal.sync_all();
                             return;
                         }
@@ -7290,7 +7363,14 @@ fn copy_line_journaled_with_rotation(
             }
         }
     }
-    if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
+    if !flush(
+        log,
+        &mut journal,
+        journal_path,
+        &mut offset,
+        &pending,
+        rotation,
+    ) {
         let _ = journal.sync_all();
         return;
     }
@@ -7665,7 +7745,8 @@ fn supervise_child(
             }
         };
         let (pid, new_child, new_pidfd) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty, rotation) {
+            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty, rotation)
+            {
                 Ok(tuple) => tuple,
                 Err(error) => {
                     warn!(
@@ -13332,9 +13413,10 @@ mod tests {
     use super::{
         adaptive_restart_delay, associated_network_name, copy_line_journaled,
         immutable_image_manifest_reference, immutable_image_reference, log_journal_path,
-        rotate_log_pair, timestamped_lines_from, validate_archive_target, BindMount, ContainerRuntime,
-        KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
-        NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
+        rotate_log_pair, timestamped_lines_from, validate_archive_target, BindMount,
+        ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
+        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
+        TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -13942,10 +14024,22 @@ mod tests {
         rotate_log_pair(&log_path, 3).expect("rotate");
 
         assert!(!log_path.exists());
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1")).unwrap(), b"active\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1.ts")).unwrap(), b"0 300\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2")).unwrap(), b"one\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2.ts")).unwrap(), b"0 200\n");
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.1")).unwrap(),
+            b"active\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.1.ts")).unwrap(),
+            b"0 300\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.2")).unwrap(),
+            b"one\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.2.ts")).unwrap(),
+            b"0 200\n"
+        );
         assert!(!log_path.with_file_name("stdout.log.3").exists());
         assert!(!log_path.with_file_name("stdout.log.3.ts").exists());
     }
@@ -14343,9 +14437,10 @@ mod tests {
         let mut record = fixture_container_record("health-restart", "running");
         record.restart_policy = RestartPolicy::Always;
         assert!(!super::should_health_restart(&record));
-        record
-            .annotations
-            .insert("io.ferrocrate.health-restart".to_string(), "true".to_string());
+        record.annotations.insert(
+            "io.ferrocrate.health-restart".to_string(),
+            "true".to_string(),
+        );
         assert!(super::should_health_restart(&record));
         record.restart_policy = RestartPolicy::No;
         assert!(!super::should_health_restart(&record));
@@ -14592,10 +14687,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("cgroup");
         std::fs::create_dir_all(&root).expect("cgroup root");
-        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids")
-            .expect("controllers");
-        std::fs::write(root.join("cgroup.subtree_control"), "")
-            .expect("subtree control");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
         unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root) };
 
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
@@ -16281,17 +16374,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args
-            .windows(2)
-            .any(|window| window == ["--chdir", "/data"]));
+        assert!(args.windows(2).any(|window| window == ["--chdir", "/data"]));
         assert_eq!(command.get_current_dir(), None);
     }
 
     #[test]
     fn missing_image_workdir_is_created_inside_the_rootfs() {
         let temp = tempfile::tempdir().expect("tempdir");
-        super::ensure_rootfs_workdir(temp.path(), "/var/lib/app")
-            .expect("prepare image workdir");
+        super::ensure_rootfs_workdir(temp.path(), "/var/lib/app").expect("prepare image workdir");
         assert!(temp.path().join("var/lib/app").is_dir());
         assert!(super::ensure_rootfs_workdir(temp.path(), "/safe/../escape").is_err());
     }

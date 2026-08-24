@@ -22639,7 +22639,7 @@ mod tests {
     #[test]
     fn rvf_import_delegates_before_any_local_image_store_access() {
         let _guard = ENV_MUTEX.lock().expect("environment lock");
-        let previous_runtime = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous_runtime = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("rvf route fixture");
         let image = temp.path().join("fixture.rvf");
         std::fs::write(&image, b"rvf-transfer").expect("rvf fixture");
@@ -22650,7 +22650,7 @@ mod tests {
             .expect("daemon lock")
             .expect("unowned runtime");
         daemon.publish_daemon_owner(&socket).expect("publish owner");
-        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        unsafe { std::env::set_var("FERROCRATE_HOME", temp.path()) };
         let worker = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_millis(500);
             while Instant::now() < deadline {
@@ -22686,8 +22686,8 @@ mod tests {
         let result = super::dispatch(command);
         worker.join().expect("RVF route worker");
         match previous_runtime {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
         result.expect("RVF import should delegate");
     }
@@ -28152,10 +28152,10 @@ volumes:
     #[test]
     fn context_lifecycle_persists_selected_endpoint() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("context config");
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
 
         handle_context(ContextCommands::Create {
@@ -28187,8 +28187,8 @@ volumes:
         .expect("remove context");
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
@@ -28329,7 +28329,7 @@ volumes:
     #[test]
     fn remote_system_df_routes_to_docker_endpoint() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote df config");
         let socket = temp.path().join("remote-df.sock");
         let listener = UnixListener::bind(&socket).expect("bind remote df socket");
@@ -28345,7 +28345,7 @@ volumes:
                 .expect("respond");
         });
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
@@ -28364,8 +28364,8 @@ volumes:
             .expect("remote df should succeed");
         worker.join().expect("remote df worker");
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
@@ -28495,10 +28495,10 @@ volumes:
     #[test]
     fn remote_run_rejects_unrepresentable_options_and_routes_cache_prune() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote run config");
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
@@ -28592,7 +28592,7 @@ volumes:
                 )
                 .expect("respond to remote cache prune");
         });
-        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        unsafe { std::env::set_var("FERROCRATE_HOME", temp.path()) };
         handle_context(ContextCommands::Create {
             name: "remote-cache".to_string(),
             endpoint: format!("unix://{}", socket.display()),
@@ -28608,15 +28608,15 @@ volumes:
         worker.join().expect("remote cache prune worker");
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
     #[test]
     fn remote_run_sends_docker_create_then_start() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote run config");
         let socket = temp.path().join("remote-run.sock");
         let listener = UnixListener::bind(&socket).expect("bind remote run socket");
@@ -28635,7 +28635,7 @@ volumes:
             requests
         });
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
@@ -28707,15 +28707,15 @@ volumes:
         assert!(String::from_utf8_lossy(&requests[1]).contains("POST /containers/remote-id/start"));
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
     #[test]
     fn remote_run_it_uses_the_attach_hijack() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote interactive run config");
         let socket = temp.path().join("remote-run-it.sock");
         let listener = UnixListener::bind(&socket).expect("bind remote run socket");
@@ -28756,7 +28756,7 @@ volumes:
             }
             requests
         });
-        unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path()) };
+        unsafe { std::env::set_var("FERROCRATE_HOME", temp.path()) };
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
             endpoint: format!("unix://{}", socket.display()),
@@ -28789,8 +28789,8 @@ volumes:
         assert!(attach.contains("Connection: Upgrade"), "{attach}");
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
@@ -28798,7 +28798,7 @@ volumes:
     #[test]
     fn remote_build_sends_tar_context_to_docker_build_api() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote build config");
         let context = temp.path().join("context");
         std::fs::create_dir(&context).expect("create context");
@@ -28820,7 +28820,7 @@ volumes:
                 .expect("respond");
         });
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
@@ -28846,15 +28846,15 @@ volumes:
         dispatch_remote_context(&command).unwrap().unwrap();
         worker.join().unwrap();
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
     #[test]
     fn remote_run_rm_waits_for_exit_then_removes_container() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
-        let previous = std::env::var_os("FERROCRATE_RUNTIME_DIR");
+        let previous = std::env::var_os("FERROCRATE_HOME");
         let temp = tempfile::tempdir().expect("remote run rm config");
         let socket = temp.path().join("remote-run-rm.sock");
         let listener = UnixListener::bind(&socket).expect("bind remote run rm socket");
@@ -28879,7 +28879,7 @@ volumes:
             requests
         });
         unsafe {
-            std::env::set_var("FERROCRATE_RUNTIME_DIR", temp.path());
+            std::env::set_var("FERROCRATE_HOME", temp.path());
         }
         handle_context(ContextCommands::Create {
             name: "remote".to_string(),
@@ -28906,8 +28906,8 @@ volumes:
         assert!(String::from_utf8_lossy(&requests[3]).contains("DELETE /containers/remote-rm-id"));
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("FERROCRATE_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("FERROCRATE_RUNTIME_DIR") },
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
         }
     }
 
@@ -29251,9 +29251,9 @@ volumes:
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().expect("tempdir");
-            let original = std::env::var("FERROCRATE_RUNTIME_DIR").ok();
+            let original = std::env::var("FERROCRATE_HOME").ok();
             unsafe {
-                std::env::set_var("FERROCRATE_RUNTIME_DIR", dir.path());
+                std::env::set_var("FERROCRATE_HOME", dir.path());
             }
             Self {
                 original,
@@ -29267,11 +29267,11 @@ volumes:
         fn drop(&mut self) {
             if let Some(value) = &self.original {
                 unsafe {
-                    std::env::set_var("FERROCRATE_RUNTIME_DIR", value);
+                    std::env::set_var("FERROCRATE_HOME", value);
                 }
             } else {
                 unsafe {
-                    std::env::remove_var("FERROCRATE_RUNTIME_DIR");
+                    std::env::remove_var("FERROCRATE_HOME");
                 }
             }
         }
@@ -29334,7 +29334,7 @@ mod tests_non_linux {
 }
 
 fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("FERROCRATE_RUNTIME_DIR") {
+    if let Ok(dir) = std::env::var("FERROCRATE_HOME") {
         return PathBuf::from(dir);
     }
     if let Ok(home) = std::env::var("HOME") {

@@ -21,6 +21,7 @@ fn hex(bytes: &[u8]) -> String {
 fn run(runtime: &Path, args: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .args(args)
+        .env("FERROCRATE_HOME", runtime)
         .env("FERROCRATE_RUNTIME_DIR", runtime)
         .env("FERROCRATE_TEST_CONSOLE", "1")
         .output()
@@ -105,6 +106,7 @@ fn start_sink(
             "--requests",
             &requests.to_string(),
         ])
+        .env("FERROCRATE_HOME", runtime)
         .env("FERROCRATE_RUNTIME_DIR", runtime)
         .spawn()
         .unwrap()

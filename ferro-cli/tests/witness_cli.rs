@@ -16,6 +16,7 @@ fn cli(args: &[&str]) -> std::process::Output {
 fn cli_runtime(args: &[&str], runtime: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .args(args)
+        .env("FERROCRATE_HOME", runtime)
         .env("FERROCRATE_RUNTIME_DIR", runtime)
         .output()
         .expect("run ferrocrate")
@@ -294,6 +295,7 @@ fn unreconciled_emergency_state_blocks_normal_commands_after_restart() {
     protected_write(&state_dir.join("emergency-active.json"), b"durable-marker");
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .args(["images"])
+        .env("FERROCRATE_HOME", temp.path())
         .env("FERROCRATE_RUNTIME_DIR", temp.path())
         .output()
         .unwrap();

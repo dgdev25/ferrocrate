@@ -106,6 +106,7 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     prepare_image(binary, &runtime, &rootless_test_image());
     let mut up = Command::new(binary);
     up.current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -125,12 +126,14 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     if !workspace.join("output").exists() {
         let diagnostics = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["logs", "writer"])
             .output()
             .expect("compose logs");
         let inspect = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["inspect", "writer"])
             .output()
@@ -146,6 +149,7 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
 
     let mut down = Command::new(binary);
     down.current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -188,6 +192,7 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     prepare_image(binary, &runtime, &rootless_test_image());
     let up = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -218,12 +223,14 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     if !(workspace.join("leader").is_file() && workspace.join("follower").is_file()) {
         let diagnostics = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["logs", "follower"])
             .output()
             .expect("follower logs");
         let inspect = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["inspect", "follower"])
             .output()
@@ -240,6 +247,7 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     }
     let down = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -277,6 +285,7 @@ fn rootless_run_mounts_bind_and_named_volumes() {
     prepare_image(binary, &runtime, &image);
 
     let bind = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .args([
@@ -305,6 +314,7 @@ fn rootless_run_mounts_bind_and_named_volumes() {
     );
 
     let named = Command::new(binary)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .args([
@@ -357,6 +367,7 @@ fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
     prepare_image(binary, &runtime, &rootless_test_image());
     let up = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -377,12 +388,14 @@ fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
     if !workspace.join("output").exists() {
         let logs = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["logs", "reader"])
             .output()
             .expect("compose logs");
         let inspect = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["inspect", "reader"])
             .output()
@@ -402,6 +415,7 @@ fn rootless_compose_mounts_file_backed_secrets_and_configs_read_only() {
 
     let down = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
@@ -435,6 +449,7 @@ fn rootless_compose_waits_for_successfully_completed_dependency() {
     prepare_image(binary, &runtime, &rootless_test_image());
     let output = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -459,6 +474,7 @@ fn rootless_compose_waits_for_successfully_completed_dependency() {
 
     let down = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
@@ -492,6 +508,7 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
     prepare_image(binary, &runtime, &rootless_test_image());
     let up = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -516,6 +533,7 @@ fn rootless_compose_read_only_rootfs_preserves_writable_bind_mounts() {
 
     let down = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
@@ -571,6 +589,7 @@ fn rootless_compose_applies_deploy_resource_limits() {
 
     let up = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -585,6 +604,7 @@ fn rootless_compose_applies_deploy_resource_limits() {
 
     let inspect = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .args(["inspect", "--format", "json", "limited"])
         .output()
@@ -598,6 +618,7 @@ fn rootless_compose_applies_deploy_resource_limits() {
 
     let down = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -632,6 +653,7 @@ fn rootless_named_volume_receives_image_content_on_first_use() {
     let cli = |args: &[&str]| {
         let output = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .env("FERROCRATE_ROOTLESS_NETNS", "1")
             .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -770,6 +792,7 @@ fn rootless_compose_profiles_scale_restart_and_teardown() {
         let mut command = Command::new(binary);
         command
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .env("FERROCRATE_ROOTLESS_NETNS", "1")
             .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -795,6 +818,7 @@ fn rootless_compose_profiles_scale_restart_and_teardown() {
     let cli_ps = || -> String {
         let output = Command::new(binary)
             .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
             .env("FERROCRATE_RUNTIME_DIR", &runtime)
             .args(["ps", "--all"])
             .output()
@@ -828,6 +852,7 @@ fn rootless_compose_profiles_scale_restart_and_teardown() {
     // the CLI process, so the attached path is the supported restart mode.)
     let mut attach_up = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
@@ -874,6 +899,7 @@ fn rootless_compose_profiles_scale_restart_and_teardown() {
     // Teardown from a separate process while nothing supervises the project.
     let down_output = Command::new(binary)
         .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
         .env("FERROCRATE_RUNTIME_DIR", &runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")

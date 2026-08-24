@@ -694,6 +694,7 @@ impl DaemonHarness {
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_ferro-cli"));
         command
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args([
                 "daemon",
@@ -818,6 +819,7 @@ impl DaemonHarness {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("FERROCRATE_HOME", self._runtime_dir.path())
             .env("FERROCRATE_RUNTIME_DIR", self._runtime_dir.path())
             .args([
                 "daemon",
@@ -1113,8 +1115,7 @@ fn docker_api_create_retains_anonymous_volume_targets() {
         r#"{"Image":"busybox","Volumes":{"/data":{}}}"#,
     );
     assert_eq!(status, 201, "create response: {body}");
-    let id = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create JSON")["Id"]
         .as_str()
         .expect("created ID")
         .to_string();
@@ -1122,7 +1123,10 @@ fn docker_api_create_retains_anonymous_volume_targets() {
     let (status, body) = harness.request("GET", &format!("/containers/{id}/json"), "");
     assert_eq!(status, 200, "inspect response: {body}");
     let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("inspect JSON");
-    assert_eq!(inspect["Config"]["Volumes"], serde_json::json!({"/data": {}}));
+    assert_eq!(
+        inspect["Config"]["Volumes"],
+        serde_json::json!({"/data": {}})
+    );
 }
 
 /// Docker clients read `/events` as newline-delimited JSON where each frame

@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(target_os = "linux")]
 
 use std::{os::unix::net::UnixStream, sync::Arc};

@@ -23,7 +23,12 @@ fn compose_project(root: &std::path::Path) -> std::path::PathBuf {
 /// crate-private.
 fn start_time_of(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 fn live_web_record(
@@ -132,6 +137,7 @@ fn compose_down_treats_unverifiable_pid_as_exited_and_deletes() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .current_dir(&project)
+        .env("FERROCRATE_HOME", root.path())
         .env("FERROCRATE_RUNTIME_DIR", root.path())
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
@@ -185,6 +191,7 @@ fn compose_down_stops_then_deletes_using_post_stop_record() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .current_dir(&project)
+        .env("FERROCRATE_HOME", root.path())
         .env("FERROCRATE_RUNTIME_DIR", root.path())
         .args(["compose", "--file", "compose.yml", "down"])
         .output()
@@ -214,6 +221,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .current_dir(&project)
+            .env("FERROCRATE_HOME", root.path())
             .env("FERROCRATE_RUNTIME_DIR", root.path())
             .env(
                 "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
@@ -243,6 +251,7 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
     drop(store);
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .current_dir(&project)
+        .env("FERROCRATE_HOME", root.path())
         .env("FERROCRATE_RUNTIME_DIR", root.path())
         .env(
             "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",

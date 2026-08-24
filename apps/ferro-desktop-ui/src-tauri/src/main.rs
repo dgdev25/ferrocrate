@@ -131,7 +131,10 @@ struct VolumeSummary {
     driver: String,
     mountpoint: String,
     created_at: String,
-    #[serde(rename(deserialize = "FerrocrateMounts", serialize = "mounts"), default)]
+    #[serde(
+        rename(deserialize = "FerrocrateMounts", serialize = "mounts"),
+        default
+    )]
     mounts: Vec<VolumeMountUsage>,
 }
 
@@ -141,10 +144,7 @@ struct VolumeListResponse {
     volumes: Vec<VolumeSummary>,
 }
 
-fn volume_proxy_command(
-    action: VolumeAction,
-    target: Option<&str>,
-) -> Result<Vec<String>, String> {
+fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Vec<String>, String> {
     let mut command = vec!["volume-proxy".to_string()];
     match action {
         VolumeAction::List => command.push("list".to_string()),
@@ -165,7 +165,10 @@ fn volume_proxy_command(
     Ok(command)
 }
 
-fn execute_volume_proxy(action: VolumeAction, target: Option<&str>) -> Result<CommandResult, String> {
+fn execute_volume_proxy(
+    action: VolumeAction,
+    target: Option<&str>,
+) -> Result<CommandResult, String> {
     let args = volume_proxy_command(action, target)?;
     let output = Command::new("ferro-desktop")
         .args(&args)
@@ -896,7 +899,10 @@ fn get_volumes() -> Result<Vec<VolumeSummary>, String> {
 }
 
 #[tauri::command]
-fn run_volume_action(action: VolumeAction, target: Option<String>) -> Result<CommandResult, String> {
+fn run_volume_action(
+    action: VolumeAction,
+    target: Option<String>,
+) -> Result<CommandResult, String> {
     if matches!(action, VolumeAction::List) {
         return Err("list is a read-only snapshot action".to_string());
     }

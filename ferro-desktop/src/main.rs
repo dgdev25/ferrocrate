@@ -611,16 +611,11 @@ fn volume_proxy_request(
             }
             Ok((
                 "DELETE",
-                format!(
-                    "/volumes/{}",
-                    percent_encode_terminal_path_component(name)
-                ),
+                format!("/volumes/{}", percent_encode_terminal_path_component(name)),
                 Vec::new(),
             ))
         }
-        VolumeProxyCommands::Prune => {
-            Ok(("POST", "/volumes/prune".to_string(), Vec::new()))
-        }
+        VolumeProxyCommands::Prune => Ok(("POST", "/volumes/prune".to_string(), Vec::new())),
     }
 }
 
@@ -973,9 +968,7 @@ fn main() {
             columns,
             rows,
         } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
-        Commands::VolumeProxy { socket, command } => {
-            run_volume_proxy(socket.as_deref(), command)
-        }
+        Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -3092,9 +3085,8 @@ mod tests {
         save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
         upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
-        write_follow_frame, Cli,
-        Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
-        VmCommands, VmConfig, VmState,
+        write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
+        ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};

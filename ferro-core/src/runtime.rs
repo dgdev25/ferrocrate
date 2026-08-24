@@ -17394,7 +17394,16 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             let container_dir = root.join("containers").join(container_id);
             let rootfs = container_dir.join("rootfs");
             std::fs::create_dir_all(rootfs.join("bin")).unwrap();
-            std::fs::copy("/usr/bin/busybox", rootfs.join("bin/busybox")).unwrap();
+            std::fs::copy("/bin/busybox", rootfs.join("bin/busybox")).unwrap();
+            #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+            {
+                std::fs::create_dir_all(rootfs.join("lib")).unwrap();
+                std::fs::copy(
+                    "/lib/ld-musl-x86_64.so.1",
+                    rootfs.join("lib/ld-musl-x86_64.so.1"),
+                )
+                .unwrap();
+            }
             std::os::unix::fs::symlink("busybox", rootfs.join("bin/sh")).unwrap();
             std::os::unix::fs::symlink("busybox", rootfs.join("bin/sleep")).unwrap();
             let mut record = ContainerRecord::authorization_candidate(

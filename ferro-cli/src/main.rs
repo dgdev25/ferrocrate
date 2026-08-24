@@ -528,7 +528,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Start a stopped container.
     Start {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
     },
     #[cfg(target_os = "linux")]
     /// Restart a container.
@@ -3524,9 +3525,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Rename { container, name } => handle_rename(&runtime, &container, &name),
             #[cfg(target_os = "linux")]
-            Commands::Start { container } => {
+            Commands::Start { containers } => {
                 unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
-                handle_start(&runtime, &container)
+                handle_multiple_containers(&containers, "start", |container| {
+                    handle_start(&runtime, container)
+                })
             }
             #[cfg(target_os = "linux")]
             Commands::Restart { container, timeout } => {
@@ -6281,14 +6284,16 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ),
         )
         .map(|_| ()),
-        Commands::Start { container } => request(
-            "POST",
-            format!(
-                "/containers/{}/start",
-                percent_encode_path_component(container)
-            ),
-        )
-        .map(|_| ()),
+        Commands::Start { containers } => handle_multiple_containers(containers, "start", |container| {
+            request(
+                "POST",
+                format!(
+                    "/containers/{}/start",
+                    percent_encode_path_component(container)
+                ),
+            )
+            .map(|_| ())
+        }),
         Commands::Rm { force, volumes, containers } => {
             if *volumes {
                 eprintln!("rm: --volumes is accepted; anonymous volume removal is pending round 8");
@@ -20055,9 +20060,9 @@ volumes:
 
     #[test]
     fn parses_start_command() {
-        let cli = Cli::parse_from(["ferrocrate", "start", "abc123"]);
+        let cli = Cli::parse_from(["ferrocrate", "start", "first", "second"]);
         match cli.command {
-            Commands::Start { container } => assert_eq!(container, "abc123"),
+            Commands::Start { containers } => assert_eq!(containers, vec!["first", "second"]),
             other => panic!("unexpected command: {other:?}"),
         }
     }

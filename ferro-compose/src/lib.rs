@@ -584,6 +584,7 @@ networks:
         assert!(error.to_string().contains("one durable attachment"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn service_network_mapping_syntax_preserves_sorted_names() {
         let content = r#"

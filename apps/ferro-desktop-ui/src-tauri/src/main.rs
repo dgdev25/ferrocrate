@@ -354,6 +354,232 @@ struct NetworkSummary {
     containers: Vec<NetworkContainerSummary>,
 }
 
+#[derive(Debug, Serialize)]
+struct ContainerMountSummary {
+    kind: String,
+    source: String,
+    destination: String,
+    access: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerHealthLogSummary {
+    start: String,
+    end: String,
+    exit_code: i64,
+    output: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerHealthSummary {
+    status: String,
+    failing_streak: u64,
+    log: Vec<ContainerHealthLogSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerResourceSummary {
+    memory: u64,
+    cpu_quota: u64,
+    cpu_period: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerRestartPolicySummary {
+    name: String,
+    maximum_retry_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerDetailSummary {
+    id: String,
+    name: String,
+    image: String,
+    status: String,
+    command: Vec<String>,
+    environment: Vec<String>,
+    working_dir: String,
+    user: String,
+    mounts: Vec<ContainerMountSummary>,
+    health: Option<ContainerHealthSummary>,
+    resources: ContainerResourceSummary,
+    restart_policy: ContainerRestartPolicySummary,
+}
+
+fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary, String> {
+    let string = |path: &[&str]| {
+        path.iter()
+            .try_fold(&value, |current, key| current.get(*key))
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let number = |path: &[&str]| {
+        path.iter()
+            .try_fold(&value, |current, key| current.get(*key))
+            .and_then(JsonValue::as_u64)
+            .unwrap_or_default()
+    };
+    let array_strings = |path: &[&str]| {
+        path.iter()
+            .try_fold(&value, |current, key| current.get(*key))
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mounts = value
+        .get("Mounts")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mount| ContainerMountSummary {
+            kind: mount.get("Type").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            source: mount.get("Source").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            destination: mount.get("Destination").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            access: if mount.get("RW").and_then(JsonValue::as_bool).unwrap_or(false) {
+                "rw".to_string()
+            } else {
+                "ro".to_string()
+            },
+        })
+        .collect();
+    let health = value
+        .pointer("/State/Health")
+        .filter(|health| !health.is_null())
+        .map(|health| ContainerHealthSummary {
+            status: health.get("Status").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            failing_streak: health.get("FailingStreak").and_then(JsonValue::as_u64).unwrap_or_default(),
+            log: health
+                .get("Log")
+                .and_then(JsonValue::as_array)
+                .into_iter()
+                .flatten()
+                .map(|entry| ContainerHealthLogSummary {
+                    start: entry.get("Start").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+                    end: entry.get("End").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+                    exit_code: entry.get("ExitCode").and_then(JsonValue::as_i64).unwrap_or_default(),
+                    output: entry.get("Output").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+                })
+                .collect(),
+        });
+    let id = string(&["Id"]);
+    if id.is_empty() {
+        return Err("container inspect response omitted Id".to_string());
+    }
+    Ok(ContainerDetailSummary {
+        id,
+        name: string(&["Name"]).trim_start_matches('/').to_string(),
+        image: string(&["Config", "Image"]),
+        status: string(&["State", "Status"]),
+        command: array_strings(&["Config", "Cmd"]),
+        environment: array_strings(&["Config", "Env"]),
+        working_dir: string(&["Config", "WorkingDir"]),
+        user: string(&["Config", "User"]),
+        mounts,
+        health,
+        resources: ContainerResourceSummary {
+            memory: number(&["HostConfig", "Memory"]),
+            cpu_quota: number(&["HostConfig", "CpuQuota"]),
+            cpu_period: number(&["HostConfig", "CpuPeriod"]),
+        },
+        restart_policy: ContainerRestartPolicySummary {
+            name: string(&["HostConfig", "RestartPolicy", "Name"]),
+            maximum_retry_count: number(&[
+                "HostConfig",
+                "RestartPolicy",
+                "MaximumRetryCount",
+            ]),
+        },
+    })
+}
+
+fn container_inspect_command(target: &str) -> Result<Vec<String>, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("container name or id is required".to_string());
+    }
+    Ok(vec![
+        "container-proxy".to_string(),
+        "inspect".to_string(),
+        target.to_string(),
+    ])
+}
+
+fn container_update_command(
+    target: &str,
+    memory: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+) -> Result<Vec<String>, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("container name or id is required".to_string());
+    }
+    if memory.is_none() && cpu_quota.is_none() && cpu_period.is_none() {
+        return Err("at least one resource limit is required".to_string());
+    }
+    let mut command = vec![
+        "container-proxy".to_string(),
+        "update".to_string(),
+        target.to_string(),
+    ];
+    for (flag, value) in [
+        ("--memory", memory),
+        ("--cpu-quota", cpu_quota),
+        ("--cpu-period", cpu_period),
+    ] {
+        if let Some(value) = value {
+            command.push(flag.to_string());
+            command.push(value.to_string());
+        }
+    }
+    Ok(command)
+}
+
+fn run_container_bridge_command(
+    image: &str,
+    name: Option<&str>,
+    environment: &[String],
+    memory: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+) -> Result<Vec<String>, String> {
+    let image = image.trim();
+    if image.is_empty() {
+        return Err("container image is required".to_string());
+    }
+    let mut command = ["exec", "--", "ferrocrate", "run", "--detach"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(name) = name.map(str::trim).filter(|value| !value.is_empty()) {
+        command.extend(["--name".to_string(), name.to_string()]);
+    }
+    for value in environment.iter().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        if !value.contains('=') {
+            return Err(format!("environment entry must use KEY=value: {value}"));
+        }
+        command.extend(["--env".to_string(), value.to_string()]);
+    }
+    for (flag, value) in [
+        ("--memory-max", memory),
+        ("--cpu-quota", cpu_quota),
+        ("--cpu-period", cpu_period),
+    ] {
+        if let Some(value) = value {
+            command.extend([flag.to_string(), value.to_string()]);
+        }
+    }
+    command.push(image.to_string());
+    Ok(command)
+}
+
 fn network_summaries(
     mut networks: Vec<NetworkListRecord>,
     inspections: &BTreeMap<String, NetworkInspectRecord>,
@@ -1256,6 +1482,17 @@ fn get_networks() -> Result<Vec<NetworkSummary>, String> {
     Ok(network_summaries(networks, &inspections, &containers))
 }
 
+#[tauri::command]
+fn get_container_detail(target: String) -> Result<ContainerDetailSummary, String> {
+    let result = run_owned_command("ferro-desktop", &container_inspect_command(&target)?);
+    if !result.ok {
+        return Err(command_failure("container inspect", &result));
+    }
+    let value = serde_json::from_str::<JsonValue>(&result.stdout)
+        .map_err(|error| format!("container inspect returned invalid JSON: {error}"))?;
+    container_detail_from_json(value)
+}
+
 fn command_failure(label: &str, result: &CommandResult) -> String {
     if result.stderr.trim().is_empty() {
         format!("{label} failed with status {}", result.code)
@@ -1389,6 +1626,41 @@ fn run_network_action(
         return Err("list is a read-only snapshot action".to_string());
     }
     execute_network_proxy(action, target.as_deref(), subnet.as_deref())
+}
+
+#[tauri::command]
+fn update_container_resources(
+    target: String,
+    memory: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+) -> Result<CommandResult, String> {
+    Ok(run_owned_command(
+        "ferro-desktop",
+        &container_update_command(&target, memory, cpu_quota, cpu_period)?,
+    ))
+}
+
+#[tauri::command]
+fn run_new_container(
+    image: String,
+    name: Option<String>,
+    environment: Vec<String>,
+    memory: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+) -> Result<CommandResult, String> {
+    Ok(run_owned_command(
+        "ferro-desktop",
+        &run_container_bridge_command(
+            &image,
+            name.as_deref(),
+            &environment,
+            memory,
+            cpu_quota,
+            cpu_period,
+        )?,
+    ))
 }
 
 #[tauri::command]
@@ -1630,12 +1902,15 @@ fn main() {
             get_desktop_snapshot,
             get_volumes,
             get_networks,
+            get_container_detail,
             get_compose_snapshot,
             build_image,
             run_desktop_action,
             run_compose_action,
             run_volume_action,
             run_network_action,
+            update_container_resources,
+            run_new_container,
             start_log_follow,
             stop_log_follow,
             start_terminal,
@@ -1659,9 +1934,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        build_bridge_command, compose_bridge_command, compose_service_rows, log_channel,
-        log_follow_command, parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
-        network_proxy_command, network_summaries, volume_proxy_command, ComposeAction,
+        build_bridge_command, compose_bridge_command, compose_service_rows,
+        container_detail_from_json, container_inspect_command, container_update_command, log_channel,
+        log_follow_command, parse_terminal_exec_id, run_container_bridge_command,
+        terminal_exec_command, terminal_resize_command, network_proxy_command, network_summaries,
+        volume_proxy_command, ComposeAction,
         ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, LogBuffer,
         NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
         VolumeAction,
@@ -1914,5 +2191,64 @@ mod tests {
         assert_eq!(rows[0].containers[0].name, "web");
         assert_eq!(rows[0].containers[0].ipv4_address, "172.30.0.2");
         assert_eq!(rows[0].containers[0].ports, vec!["0.0.0.0:8080→80/tcp"]);
+    }
+
+    #[test]
+    fn container_detail_projects_inspect_configuration_and_health_history() {
+        let detail = container_detail_from_json(serde_json::json!({
+            "Id": "container-1",
+            "Name": "/web",
+            "Image": "alpine:latest",
+            "Config": {"Env": ["TOKEN=secret", "MODE=dev"], "Cmd": ["sh"], "WorkingDir": "/app", "User": "1000"},
+            "Mounts": [{"Type": "volume", "Source": "/data", "Destination": "/app/data", "RW": false}],
+            "HostConfig": {
+                "Memory": 134217728,
+                "CpuQuota": 50000,
+                "CpuPeriod": 100000,
+                "RestartPolicy": {"Name": "always", "MaximumRetryCount": 0}
+            },
+            "State": {"Status": "running", "Health": {"Status": "healthy", "FailingStreak": 0, "Log": [
+                {"Start": "start", "End": "end", "ExitCode": 0, "Output": "ok"}
+            ]}}
+        }))
+        .expect("detail projection");
+        assert_eq!(detail.name, "web");
+        assert_eq!(detail.environment, vec!["TOKEN=secret", "MODE=dev"]);
+        assert_eq!(detail.mounts[0].access, "ro");
+        assert_eq!(detail.health.expect("health").log[0].output, "ok");
+        assert_eq!(detail.resources.memory, 134_217_728);
+        assert_eq!(detail.restart_policy.name, "always");
+    }
+
+    #[test]
+    fn container_detail_commands_preserve_resource_and_new_container_options() {
+        assert_eq!(
+            container_inspect_command("web").expect("inspect command"),
+            vec!["container-proxy", "inspect", "web"]
+        );
+        assert_eq!(
+            container_update_command("web", Some(134_217_728), Some(50_000), Some(100_000))
+                .expect("update command"),
+            vec![
+                "container-proxy", "update", "web", "--memory", "134217728",
+                "--cpu-quota", "50000", "--cpu-period", "100000",
+            ]
+        );
+        assert_eq!(
+            run_container_bridge_command(
+                "alpine:latest",
+                Some("web"),
+                &["MODE=dev".to_string(), "TOKEN=secret".to_string()],
+                Some(67_108_864),
+                Some(25_000),
+                Some(100_000),
+            )
+            .expect("run command"),
+            vec![
+                "exec", "--", "ferrocrate", "run", "--detach", "--name", "web",
+                "--env", "MODE=dev", "--env", "TOKEN=secret", "--memory-max", "67108864",
+                "--cpu-quota", "25000", "--cpu-period", "100000", "alpine:latest",
+            ]
+        );
     }
 }

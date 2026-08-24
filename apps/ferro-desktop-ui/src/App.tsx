@@ -141,7 +141,7 @@ function App(): JSX.Element {
   const runtimeActionRef = useRef(false);
   const containerStatsPollOwnerRef = useRef({ inFlight: false });
   const logFollowRef = useRef(false);
-  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const [terminalHost, setTerminalHost] = useState<HTMLDivElement | null>(null);
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const terminalActiveRef = useRef(false);
@@ -243,7 +243,7 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const host = terminalHostRef.current;
+    const host = terminalHost;
     if (!host || terminalRef.current) return;
     const terminal = new Terminal({
       cursorBlink: true,
@@ -283,7 +283,7 @@ function App(): JSX.Element {
       terminal.dispose();
       terminalRef.current = null;
     };
-  }, []);
+  }, [terminalHost]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -1455,7 +1455,7 @@ function App(): JSX.Element {
                       <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
                       <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
                     </div>
-                    <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
+                    <div className="terminal-host" ref={setTerminalHost} aria-label="Interactive container terminal" />
                     <div className="detail-foot">
                       <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || !containerTarget.trim()}>Open shell</button>
                       <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>

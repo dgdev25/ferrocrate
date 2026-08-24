@@ -591,6 +591,21 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn terminal_prompt_reaches_a_subscriber_registered_before_startup() {
+        let hub = WebEventHub::new();
+        let mut subscriber = hub.sender.subscribe();
+
+        hub.emit(
+            "terminal-output",
+            json!({ "data": [47, 32, 35, 32], "stderr": false }),
+        );
+
+        let event = subscriber.recv().await.expect("terminal prompt event");
+        assert_eq!(event.name, "terminal-output");
+        assert_eq!(event.payload["data"], json!([47, 32, 35, 32]));
+    }
+
     fn skip_space(source: &str, mut cursor: usize) -> usize {
         while source
             .as_bytes()

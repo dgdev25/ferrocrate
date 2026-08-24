@@ -96,6 +96,60 @@ test("N web bridge listeners share one named-event SSE connection", async () => 
   assert.equal(sources[0].closed, true);
 });
 
+test("terminal startup waits for the event stream so the first prompt is visible", async () => {
+  const listeners = new Map();
+  let streamOpen = false;
+  const terminal = {
+    visibleText: "",
+    write(bytes) {
+      this.visibleText += new TextDecoder().decode(bytes);
+    },
+  };
+  const source = {
+    readyState: 0,
+    addEventListener(name, handler) {
+      const handlers = listeners.get(name) ?? new Set();
+      handlers.add(handler);
+      listeners.set(name, handlers);
+    },
+    removeEventListener(name, handler) { listeners.get(name)?.delete(handler); },
+    close() {},
+    open() {
+      streamOpen = true;
+      this.readyState = 1;
+      for (const handler of listeners.get("open") ?? []) handler({});
+    },
+    emit(name, payload) {
+      if (!streamOpen) return;
+      for (const handler of listeners.get(name) ?? []) {
+        handler({ data: JSON.stringify(payload) });
+      }
+    },
+  };
+  const runtime = createWebBridgeRuntime({
+    token: "secret-token",
+    eventSourceFactory: () => source,
+    fetchImpl: async () => {
+      source.emit("terminal-output", {
+        data: Array.from(new TextEncoder().encode("/ # ")),
+        stderr: false,
+      });
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await runtime.listen("terminal-output", (event) => {
+    terminal.write(new Uint8Array(event.payload.data));
+  });
+
+  const started = runtime.invoke("start_terminal", { target: "demo", shell: "sh", env: [] });
+  await Promise.resolve();
+  assert.equal(terminal.visibleText, "");
+  source.open();
+  await started;
+
+  assert.equal(terminal.visibleText, "/ # ");
+});
+
 test("a mount/unmount/remount cycle leaves exactly one listener", async () => {
   const registered = new Map();
   const source = {

@@ -25,6 +25,7 @@ export function createWebBridgeRuntime(options = {}) {
   const token = options.token ?? extractWebBridgeToken(target);
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
   let eventSource;
+  let eventSourceReady;
 
   function sharedEventSource() {
     if (eventSource) return eventSource;
@@ -34,6 +35,21 @@ export function createWebBridgeRuntime(options = {}) {
     eventSource = eventSourceFactory(streamUrl);
     target.addEventListener?.("beforeunload", () => eventSource.close(), { once: true });
     return eventSource;
+  }
+
+  function waitForEventSource() {
+    const source = sharedEventSource();
+    if (source.readyState === 1) return Promise.resolve();
+    if (!eventSourceReady) {
+      eventSourceReady = new Promise((resolve) => {
+        const onOpen = () => {
+          source.removeEventListener("open", onOpen);
+          resolve();
+        };
+        source.addEventListener("open", onOpen);
+      });
+    }
+    return eventSourceReady;
   }
 
   return {
@@ -57,6 +73,9 @@ export function createWebBridgeRuntime(options = {}) {
       });
       const request = (async () => {
         try {
+          if (command === "start_terminal") {
+            await waitForEventSource();
+          }
           const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
             method: "POST",
             headers: {

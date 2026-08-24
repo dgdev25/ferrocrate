@@ -55,6 +55,48 @@ export type NetworkSummary = {
   containers: NetworkContainerAttachment[];
 };
 
+export type ContainerMountSummary = {
+  kind: string;
+  source: string;
+  destination: string;
+  access: "ro" | "rw";
+};
+
+export type ContainerHealthLogSummary = {
+  start: string;
+  end: string;
+  exit_code: number;
+  output: string;
+};
+
+export type ContainerHealthSummary = {
+  status: string;
+  failing_streak: number;
+  log: ContainerHealthLogSummary[];
+};
+
+export type ContainerDetailSummary = {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  command: string[];
+  environment: string[];
+  working_dir: string;
+  user: string;
+  mounts: ContainerMountSummary[];
+  health: ContainerHealthSummary | null;
+  resources: {
+    memory: number;
+    cpu_quota: number;
+    cpu_period: number;
+  };
+  restart_policy: {
+    name: string;
+    maximum_retry_count: number;
+  };
+};
+
 export type ComposeAction = "up" | "down" | "stop" | "start";
 
 export type ComposeServiceSummary = {

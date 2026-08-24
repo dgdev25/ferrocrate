@@ -10,6 +10,7 @@ import type {
   ComposeAction,
   ComposeServiceSummary,
   ComposeSnapshot,
+  ContainerDetailSummary,
   DesktopAction,
   DesktopSnapshot,
   DoctorSummary,
@@ -21,6 +22,7 @@ import type {
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
+import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import {
@@ -81,6 +83,18 @@ function App(): JSX.Element {
   const [buildContext, setBuildContext] = useState("");
   const [buildTag, setBuildTag] = useState("local/build:latest");
   const [buildSteps, setBuildSteps] = useState<BuildProgressFrame[]>([]);
+  const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
+  const [showEnvironment, setShowEnvironment] = useState(false);
+  const [detailMemory, setDetailMemory] = useState("");
+  const [detailCpuQuota, setDetailCpuQuota] = useState("");
+  const [detailCpuPeriod, setDetailCpuPeriod] = useState("");
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
+  const [newContainerName, setNewContainerName] = useState("");
+  const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
+  const [newContainerMemory, setNewContainerMemory] = useState("");
+  const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
+  const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -505,6 +519,86 @@ function App(): JSX.Element {
     }
   }
 
+  async function inspectContainer(target = containerTarget): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    try {
+      const detail = await invoke<ContainerDetailSummary>("get_container_detail", { target });
+      setContainerTarget(target);
+      setContainerDetail(detail);
+      setShowEnvironment(false);
+      setDetailMemory(String(detail.resources.memory));
+      setDetailCpuQuota(String(detail.resources.cpu_quota));
+      setDetailCpuPeriod(String(detail.resources.cpu_period));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function updateContainerResources(): Promise<void> {
+    if (!containerDetail || !beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Container Update");
+    try {
+      const result = await invoke<CommandResult>("update_container_resources", {
+        target: containerDetail.id,
+        memory: parseOptionalLimit(detailMemory),
+        cpuQuota: parseOptionalLimit(detailCpuQuota),
+        cpuPeriod: parseOptionalLimit(detailCpuPeriod),
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Container update failed with status ${result.code}`);
+        return;
+      }
+      const detail = await invoke<ContainerDetailSummary>("get_container_detail", {
+        target: containerDetail.id,
+      });
+      setContainerDetail(detail);
+      setDetailMemory(String(detail.resources.memory));
+      setDetailCpuQuota(String(detail.resources.cpu_quota));
+      setDetailCpuPeriod(String(detail.resources.cpu_period));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runNewContainer(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Container Run");
+    try {
+      const result = await invoke<CommandResult>("run_new_container", {
+        image: newContainerImage,
+        name: newContainerName.trim() || null,
+        environment: newContainerEnvironment
+          .split("\n")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        memory: parseOptionalLimit(newContainerMemory),
+        cpuQuota: parseOptionalLimit(newContainerCpuQuota),
+        cpuPeriod: parseOptionalLimit(newContainerCpuPeriod),
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Container run failed with status ${result.code}`);
+        return;
+      }
+      setRunDialogOpen(false);
+      setNewContainerName("");
+      setNewContainerEnvironment("");
+      await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
   async function validateCompose(): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
@@ -900,6 +994,20 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             >
               Remove
             </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void inspectContainer()}
+              disabled={runtimeBusy || !containerTarget.trim()}
+            >
+              Inspect Details
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => setRunDialogOpen(true)}
+              disabled={runtimeBusy}
+            >
+              Run New Container
+            </button>
           </div>
           <div className="field-row">
             <input
@@ -1207,6 +1315,117 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           {lastAction?.stderr ? <p className="muted">{lastAction.stderr}</p> : null}
         </article>
       </section>
+
+      {containerDetail ? (
+        <aside className="detail-drawer" role="dialog" aria-modal="false" aria-labelledby="container-detail-title">
+          <div className="drawer-header">
+            <div>
+              <p className="eyebrow">Container details</p>
+              <h2 id="container-detail-title">{containerDetail.name || containerDetail.id}</h2>
+            </div>
+            <button className="btn btn-secondary" onClick={() => setContainerDetail(null)} aria-label="Close container details">
+              Close
+            </button>
+          </div>
+
+          <dl className="detail-grid">
+            <div><dt>Status</dt><dd>{containerDetail.status}</dd></div>
+            <div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
+            <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div>
+            <div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
+            <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
+            <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
+          </dl>
+
+          <section className="drawer-section">
+            <div className="drawer-section-header">
+              <h3>Environment</h3>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowEnvironment((visible) => !visible)}
+                aria-pressed={showEnvironment}
+              >
+                {showEnvironment ? "Mask values" : "Reveal values"}
+              </button>
+            </div>
+            <pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre>
+          </section>
+
+          <section className="drawer-section">
+            <h3>Mounts</h3>
+            {containerDetail.mounts.length ? (
+              <ul className="mount-list">
+                {containerDetail.mounts.map((mount, index) => (
+                  <li key={`${mount.destination}:${index}`}>
+                    {mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="muted">No mounts.</p>}
+          </section>
+
+          <section className="drawer-section">
+            <h3>Health history</h3>
+            {containerDetail.health ? (
+              <>
+                <p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>
+                {containerDetail.health.log.length ? (
+                  <ol className="health-list">
+                    {containerDetail.health.log.map((entry, index) => (
+                      <li key={`${entry.start}:${index}`}>
+                        <strong>Exit {entry.exit_code}</strong>
+                        <span>{entry.start} → {entry.end}</span>
+                        <code>{entry.output || "No output"}</code>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <p className="muted">No health checks recorded.</p>}
+              </>
+            ) : <p className="muted">No health check configured.</p>}
+          </section>
+
+          <section className="drawer-section">
+            <h3>Resource limits</h3>
+            <div className="editor-grid">
+              <label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label>
+              <label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label>
+              <label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label>
+            </div>
+            <button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>
+              Apply Limits
+            </button>
+          </section>
+        </aside>
+      ) : null}
+
+      {runDialogOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title">
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">New workload</p>
+                <h2 id="run-dialog-title">Run container</h2>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)} aria-label="Close run container dialog">
+                Cancel
+              </button>
+            </div>
+            <div className="editor-grid">
+              <label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label>
+              <label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
+              <label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label>
+              <label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label>
+              <label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label>
+              <label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>
+            </div>
+            <div className="panel-actions dialog-actions">
+              <button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>
+                Run Detached
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

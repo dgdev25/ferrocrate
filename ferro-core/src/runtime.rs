@@ -7023,6 +7023,7 @@ fn parse_log_size(value: &str) -> Option<u64> {
     number.parse::<u64>().ok()?.checked_mul(multiplier).filter(|size| *size > 0)
 }
 
+#[cfg(test)]
 fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_path: &Path) {
     copy_line_journaled_with_rotation(pipe, log, journal_path, None);
 }
@@ -16894,7 +16895,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .unwrap();
         let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, false).unwrap();
+            super::spawn_child_with_logs(command, &stdout, &stderr, false, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
             !marker.exists(),
@@ -16927,7 +16928,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         )
         .expect("build command");
         let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, true)
+            super::spawn_child_with_logs(command, &stdout, &stderr, false, true, None)
                 .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
@@ -17099,6 +17100,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             &root.path().join("stderr"),
             false,
             false,
+            None,
         )
         .unwrap();
         if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {

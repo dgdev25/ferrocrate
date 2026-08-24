@@ -569,6 +569,15 @@ pub enum Commands {
     /// Run a command inside a running container.
     Exec {
         container: String,
+        /// Set an environment variable for the exec process.
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+        /// Run the exec process as this numeric uid or uid:gid.
+        #[arg(short = 'u', long = "user")]
+        user: Option<String>,
+        /// Set the exec process working directory.
+        #[arg(short = 'w', long = "workdir")]
+        workdir: Option<String>,
         /// Keep stdin open and forward it to the command.
         #[arg(short = 'i', long = "interactive")]
         interactive: bool,
@@ -3651,10 +3660,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Exec {
                 container,
+                env,
+                user,
+                workdir,
                 interactive,
                 tty,
                 cmd,
-            } => handle_exec(&runtime, &container, &cmd, interactive, tty),
+            } => handle_exec(&runtime, &container, &cmd, &env, user.as_deref(), workdir.as_deref(), interactive, tty),
             Commands::Pull { image, lazy } => {
                 handle_pull(&image_store, &image, lazy, &surface_authorization)
             }
@@ -6173,6 +6185,9 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         })(),
         Commands::Exec {
             container,
+            env,
+            user,
+            workdir,
             interactive,
             tty,
             cmd,
@@ -6186,6 +6201,9 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 "AttachStdout": true,
                 "AttachStderr": true,
                 "Tty": tty,
+                "Env": env,
+                "User": user,
+                "WorkingDir": workdir,
             });
             let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
             let create_body = request_with_body(
@@ -10377,6 +10395,9 @@ fn handle_exec(
     runtime: &ContainerRuntime,
     container: &str,
     cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
     interactive: bool,
     tty: bool,
 ) -> Result<(), String> {
@@ -10396,11 +10417,21 @@ fn handle_exec(
         if input.len() > 4 * 1024 * 1024 {
             return Err("exec: stdin exceeds 4 MiB".to_string());
         }
+        if !env.is_empty() || user.is_some() || workdir.is_some() {
+            return Err("exec: interactive environment, user, and working-directory overrides are unsupported".to_string());
+        }
         runtime.exec_with_input(&resolved, cmd, &input, tty)
-    } else if tty {
-        runtime.exec_tty(&resolved, cmd)
     } else {
-        runtime.exec(&resolved, cmd)
+        runtime.exec_with_options(
+            &resolved,
+            cmd,
+            &ferro_core::runtime::ExecOptions {
+                env: env.to_vec(),
+                user: user.map(ToOwned::to_owned),
+                working_dir: workdir.map(ToOwned::to_owned),
+                tty,
+            },
+        )
     }
     .map_err(|err| err.to_string())?;
     if !result.stdout.is_empty() {
@@ -12885,6 +12916,9 @@ struct DockerHealthSpec {
 struct DockerExecSpec {
     container: String,
     cmd: Vec<String>,
+    env: Vec<String>,
+    user: Option<String>,
+    working_dir: Option<String>,
     attach_stdin: bool,
     running: bool,
     exit_code: Option<i32>,
@@ -12896,6 +12930,12 @@ struct DockerExecSpec {
 struct DockerExecCreateRequest {
     #[serde(rename = "Cmd")]
     cmd: Vec<String>,
+    #[serde(rename = "Env", default)]
+    env: Vec<String>,
+    #[serde(rename = "User")]
+    user: Option<String>,
+    #[serde(rename = "WorkingDir")]
+    working_dir: Option<String>,
     #[serde(rename = "AttachStdin", default)]
     attach_stdin: bool,
     #[serde(rename = "Tty", default)]
@@ -14701,6 +14741,9 @@ fn handle_docker_compat_connection(
                         DockerExecSpec {
                             container: resolved_container,
                             cmd: request.cmd,
+                            env: request.env,
+                            user: request.user,
+                            working_dir: request.working_dir,
                             attach_stdin: request.attach_stdin,
                             running: false,
                             exit_code: None,
@@ -14824,6 +14867,12 @@ fn handle_docker_compat_connection(
                     let exec_id = id.to_string();
                     let container = spec.container.clone();
                     let command = spec.cmd.clone();
+                    let options = ferro_core::runtime::ExecOptions {
+                        env: spec.env.clone(),
+                        user: spec.user.clone(),
+                        working_dir: spec.working_dir.clone(),
+                        tty: start.tty,
+                    };
                     let worker = std::thread::Builder::new()
                         .name(format!("ferro-exec-{exec_id}"))
                         .spawn(move || {
@@ -14835,7 +14884,7 @@ fn handle_docker_compat_connection(
                                         runtime
                                     }
                                 })
-                                .and_then(|runtime| runtime.exec(&container, &command));
+                                .and_then(|runtime| runtime.exec_with_options(&container, &command, &options));
                             if let Ok(mut execs) = state_for_worker.execs.lock() {
                                 if let Some(exec) = execs.get_mut(&exec_id) {
                                     exec.running = false;
@@ -14856,11 +14905,16 @@ fn handle_docker_compat_connection(
                     }
                     return Ok(http_response(200, &[], "application/vnd.docker.raw-stream"));
                 }
-                let result = match if start.tty {
-                    runtime.exec_tty(&spec.container, &spec.cmd)
-                } else {
-                    runtime.exec(&spec.container, &spec.cmd)
-                } {
+                let result = match runtime.exec_with_options(
+                    &spec.container,
+                    &spec.cmd,
+                    &ferro_core::runtime::ExecOptions {
+                        env: spec.env.clone(),
+                        user: spec.user.clone(),
+                        working_dir: spec.working_dir.clone(),
+                        tty: start.tty,
+                    },
+                ) {
                     Ok(result) => result,
                     Err(error) => {
                         if let Ok(mut execs) = state.execs.lock() {
@@ -15960,12 +16014,13 @@ fn handle_docker_compat_connection(
                 }
             })
             .map_err(|error| error.to_string())?;
-        let result = runtime.exec_streaming(
-            &spec.container,
-            &spec.cmd,
-            input,
-            tty,
-            &mut |tty_device| {
+        let result = if spec.env.is_empty() && spec.user.is_none() && spec.working_dir.is_none() {
+            runtime.exec_streaming(
+                &spec.container,
+                &spec.cmd,
+                input,
+                tty,
+                &mut |tty_device| {
                 let mut execs = state
                     .execs
                     .lock()
@@ -15976,7 +16031,7 @@ fn handle_docker_compat_connection(
                 exec.tty_device = Some(tty_device.to_path_buf());
                 Ok(())
             },
-            &mut |output_stream, bytes| {
+                &mut |output_stream, bytes| {
                 if tty {
                     stream.write_all(bytes)
                 } else {
@@ -15986,8 +16041,13 @@ fn handle_docker_compat_connection(
                     };
                     stream.write_all(&docker_raw_stream_frame(stream_id, bytes))
                 }
-            },
-        );
+                },
+            )
+        } else {
+            Err(ferro_core::runtime::RuntimeError::InvalidCommand(
+                "attached exec with environment, user, or working-directory overrides is unsupported".to_string(),
+            ))
+        };
         let exit_code = result.as_ref().map_or(-1, |result| result.exit_code);
         if let Ok(mut execs) = state.execs.lock() {
             if let Some(exec) = execs.get_mut(&exec_id) {
@@ -22062,6 +22122,9 @@ volumes:
         let _guard = TestRuntimeDir::new();
         let err = dispatch(Commands::Exec {
             container: "c1".to_string(),
+            env: vec![],
+            user: None,
+            workdir: None,
             interactive: false,
             tty: false,
             cmd: vec![],
@@ -23279,9 +23342,17 @@ volumes:
     #[test]
     fn docker_exec_create_payload_preserves_argv_and_rejects_empty_commands() {
         let request: DockerExecCreateRequest =
-            serde_json::from_value(serde_json::json!({"Cmd": ["/bin/echo", "hello"]}))
+            serde_json::from_value(serde_json::json!({
+                "Cmd": ["/bin/echo", "hello"],
+                "Env": ["COLOR=blue"],
+                "User": "1001:1002",
+                "WorkingDir": "/workspace"
+            }))
                 .expect("exec request");
         assert_eq!(request.cmd, vec!["/bin/echo", "hello"]);
+        assert_eq!(request.env, vec!["COLOR=blue"]);
+        assert_eq!(request.user.as_deref(), Some("1001:1002"));
+        assert_eq!(request.working_dir.as_deref(), Some("/workspace"));
         let empty: DockerExecCreateRequest =
             serde_json::from_value(serde_json::json!({"Cmd": []})).expect("empty request");
         assert!(empty.cmd.is_empty());
@@ -24703,11 +24774,11 @@ volumes:
     fn exec_handler_requires_container_and_command() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()], false, false)
+        let err = handle_exec(&runtime, "", &["/bin/sh".to_string()], &[], None, None, false, false)
             .expect_err("container required");
         assert!(err.contains("exec: container is required"));
 
-        let err = handle_exec(&runtime, "c1", &[], false, false).expect_err("command required");
+        let err = handle_exec(&runtime, "c1", &[], &[], None, None, false, false).expect_err("command required");
         assert!(err.contains("exec: command is required"));
     }
 

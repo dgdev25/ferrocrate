@@ -12,10 +12,21 @@ use crate::capabilities::{drop_all_capabilities, set_capabilities};
 use crate::cgroups::{CgroupStats, CgroupV2Manager, CpuMax, ResourceLimits};
 use crate::container_exec::{
     exec_in_container, exec_in_container_streaming, exec_in_container_tty,
-    exec_in_container_tty_with_input, exec_in_container_with_input, exec_in_container_with_timeout,
+    exec_in_container_tty_with_input, exec_in_container_tty_with_options,
+    exec_in_container_with_input, exec_in_container_with_options, exec_in_container_with_timeout,
     exec_in_rootless_rootfs, exec_in_rootless_rootfs_streaming, exec_in_rootless_rootfs_tty,
     exec_in_rootless_rootfs_tty_with_input, exec_in_rootless_rootfs_with_input, ExecOutputStream,
 };
+
+/// Docker exec settings that override the container's configured process
+/// environment for a single command.
+#[derive(Debug, Default, Clone)]
+pub struct ExecOptions {
+    pub env: Vec<String>,
+    pub user: Option<String>,
+    pub working_dir: Option<String>,
+    pub tty: bool,
+}
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
     ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
@@ -3401,6 +3412,62 @@ impl ContainerRuntime {
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
         self.exec_with_timeout(id, cmd, None)
+    }
+
+    /// Execute a command with Docker exec-specific environment, user, and
+    /// working-directory overrides.
+    pub fn exec_with_options(
+        &self,
+        id: &str,
+        cmd: &[String],
+        options: &ExecOptions,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let permit = self.authorize_existing(Action::ContainerExec, id)?;
+        let operation_id = permit.operation_id();
+        let (proof, intent) = permit.execution_authority();
+        let result = self.exec_with_options_authorized(proof, intent, id, cmd, options);
+        self.store.mark_mutation_effect(id, operation_id, result.is_ok())?;
+        self.phase_hook.reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
+        self.authorization.complete(permit, result.is_ok())?;
+        self.phase_hook.reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
+        self.store.finish_mutation(id, operation_id)?;
+        self.phase_hook.reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
+        result
+    }
+
+    fn exec_with_options_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        cmd: &[String],
+        options: &ExecOptions,
+    ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
+        let record = self.store.get(id)?.ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
+        let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
+            if options.user.is_some() {
+                return Err(RuntimeError::InvalidCommand(
+                    "rootless exec does not support a user override".to_string(),
+                ));
+            }
+            let mut env = record.env.clone();
+            env.extend(options.env.iter().cloned());
+            let mounts = record.mounts.iter().map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only)).collect::<Vec<_>>();
+            let tmpfs_mounts = record.tmpfs_mounts.iter().map(|mount| (mount.target.clone(), mount.size.clone())).collect::<Vec<_>>();
+            let workdir = options.working_dir.as_deref().or(record.workdir.as_deref());
+            if options.tty {
+                exec_in_rootless_rootfs_tty(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs)?
+            } else {
+                exec_in_rootless_rootfs(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs, None)?
+            }
+        } else if options.tty {
+            exec_in_container_tty_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+        } else {
+            exec_in_container_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+        };
+        let _ = log_event(&self.runtime_dir, make_event("exec", Some(&record.id), Some(&record.image), None, None));
+        Ok(result)
     }
 
     /// Execute a command on a merged stdout/stderr pseudo-terminal.

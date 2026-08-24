@@ -264,6 +264,21 @@ pub fn build_nsenter_args(
     target_pid: u32,
     command: &[String],
 ) -> Result<Vec<String>, ContainerExecError> {
+    build_nsenter_args_with_options(target_pid, command, &[], None, None)
+}
+
+/// Build namespace-entering arguments while applying Docker exec overrides.
+///
+/// `nsenter` performs the uid/gid change after it has joined the target user
+/// namespace, and `/usr/bin/env` applies only the explicitly requested exec
+/// variables without mutating the daemon's environment.
+pub fn build_nsenter_args_with_options(
+    target_pid: u32,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<Vec<String>, ContainerExecError> {
     if command.is_empty() {
         return Err(ContainerExecError::EmptyCommand);
     }
@@ -275,6 +290,38 @@ pub fn build_nsenter_args(
     }
 
     let mut args = vec!["-t".to_string(), target_pid.to_string(), "-a".to_string()];
+    if let Some(workdir) = workdir.filter(|value| !value.is_empty()) {
+        args.extend(["--wd".to_string(), workdir.to_string()]);
+    }
+    if let Some(user) = user.filter(|value| !value.is_empty()) {
+        let (uid, gid) = user.split_once(':').map_or((user, None), |(uid, gid)| (uid, Some(gid)));
+        if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ContainerExecError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "exec user must be a numeric uid or uid:gid",
+            )));
+        }
+        args.extend(["--setuid".to_string(), uid.to_string()]);
+        if let Some(gid) = gid {
+            if gid.is_empty() || !gid.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ContainerExecError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "exec user group must be numeric",
+                )));
+            }
+            args.extend(["--setgid".to_string(), gid.to_string()]);
+        }
+    }
+    if !env.is_empty() {
+        if env.iter().any(|entry| entry.split_once('=').is_none()) {
+            return Err(ContainerExecError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "exec environment entry must use KEY=VALUE",
+            )));
+        }
+        args.push("/usr/bin/env".to_string());
+        args.extend(env.iter().cloned());
+    }
     args.extend(command.iter().cloned());
     Ok(args)
 }
@@ -285,6 +332,25 @@ pub fn exec_in_container(
     command: &[String],
 ) -> Result<ExecResult, ContainerExecError> {
     let args = build_nsenter_args(target_pid, command)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    execute_command(&nsenter, &args)
+}
+
+/// Execute a rootful command with Docker exec environment, user, and working
+/// directory overrides.
+pub fn exec_in_container_with_options(
+    target_pid: u32,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args_with_options(target_pid, command, env, workdir, user)?;
     let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
         ContainerExecError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -382,6 +448,47 @@ pub fn exec_in_container_tty(
     if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         // Linux reports EIO when the last PTY slave closes; for a PTY this is
         // the normal end-of-stream signal rather than an execution failure.
+        if error.raw_os_error() != Some(nix::libc::EIO) {
+            return Err(ContainerExecError::Io(error));
+        }
+    }
+    let status = child.wait()?;
+    Ok(ExecResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output).into_owned(),
+        stderr: String::new(),
+    })
+}
+
+/// Execute a rootful TTY command with Docker exec overrides.
+pub fn exec_in_container_tty_with_options(
+    target_pid: u32,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<ExecResult, ContainerExecError> {
+    let args = build_nsenter_args_with_options(target_pid, command, env, workdir, user)?;
+    let nsenter = crate::rootless::trusted_executable_path("nsenter").ok_or_else(|| {
+        ContainerExecError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nsenter is unavailable or not a trusted root-owned executable",
+        ))
+    })?;
+    let pty = crate::pty::PtyPair::new(24, 80).map_err(ContainerExecError::Io)?;
+    let (master, slave) = pty.into_parts();
+    let slave = File::from(slave);
+    let mut child = Command::new(nsenter);
+    child
+        .args(args)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    crate::pty::configure_command(&mut child)?;
+    let mut child = child.spawn()?;
+    let master = File::from(master);
+    let mut output = Vec::new();
+    if let Err(error) = master.take(MAX_OUTPUT_SIZE).read_to_end(&mut output) {
         if error.raw_os_error() != Some(nix::libc::EIO) {
             return Err(ContainerExecError::Io(error));
         }
@@ -717,7 +824,8 @@ fn collect_output(mut child: Child, exit_code: i32) -> Result<ExecResult, Contai
 #[cfg(test)]
 mod tests {
     use super::{
-        build_nsenter_args, exec_in_container_tty, execute_command, execute_command_with_timeout,
+        build_nsenter_args, build_nsenter_args_with_options, exec_in_container_tty,
+        execute_command, execute_command_with_timeout,
     };
     use nix::unistd::Uid;
     use std::path::Path;
@@ -744,6 +852,26 @@ mod tests {
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 "echo hi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_nsenter_args_with_exec_environment_user_and_workdir() {
+        let args = build_nsenter_args_with_options(
+            1234,
+            &["/bin/sh".to_string(), "-c".to_string(), "id".to_string()],
+            &["COLOR=blue".to_string()],
+            Some("/workspace"),
+            Some("1001:1002"),
+        )
+        .expect("exec arguments");
+
+        assert_eq!(
+            args,
+            vec![
+                "-t", "1234", "-a", "--wd", "/workspace", "--setuid", "1001",
+                "--setgid", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
             ]
         );
     }

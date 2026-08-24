@@ -1,6 +1,8 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
@@ -61,6 +63,99 @@ pub trait LogDriver: Send + Sync {
             ),
         ))
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct LogCapture {
+    inner: Arc<LogCaptureInner>,
+}
+
+struct LogCaptureInner {
+    writer: Mutex<Option<Box<dyn ContainerLogWriter>>>,
+    remaining_streams: AtomicUsize,
+}
+
+impl LogCapture {
+    pub(crate) fn new(writer: Box<dyn ContainerLogWriter>, stream_count: usize) -> Self {
+        Self {
+            inner: Arc::new(LogCaptureInner {
+                writer: Mutex::new(Some(writer)),
+                remaining_streams: AtomicUsize::new(stream_count),
+            }),
+        }
+    }
+
+    fn write(&self, stream: LogStream, bytes: Vec<u8>) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .writer
+            .lock()
+            .map_err(|_| io::Error::other("log writer lock poisoned"))?;
+        let writer = guard
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "log writer is closed"))?;
+        writer.write(&LogEntry {
+            stream,
+            timestamp_nanos: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0),
+            bytes,
+        })
+    }
+
+    fn finish(&self) -> io::Result<()> {
+        if self.inner.remaining_streams.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return Ok(());
+        }
+        let mut guard = self
+            .inner
+            .writer
+            .lock()
+            .map_err(|_| io::Error::other("log writer lock poisoned"))?;
+        if let Some(mut writer) = guard.take() {
+            writer.flush()?;
+            writer.close()?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn capture_stream(
+    mut reader: impl Read,
+    capture: LogCapture,
+    stream: LogStream,
+) -> io::Result<()> {
+    const MAX_LINE_BYTES: usize = 1024 * 1024;
+    let result = (|| {
+        let mut pending = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let mut start = 0;
+            while start < count {
+                let newline = buffer[start..count]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|index| start + index);
+                let end = newline.map_or(count, |index| index + 1);
+                pending.extend_from_slice(&buffer[start..end]);
+                if newline.is_some() || pending.len() >= MAX_LINE_BYTES {
+                    capture.write(stream, std::mem::take(&mut pending))?;
+                }
+                start = end;
+            }
+        }
+        if !pending.is_empty() {
+            capture.write(stream, pending)?;
+        }
+        Ok(())
+    })();
+    let finish = capture.finish();
+    result.and(finish)
 }
 
 #[cfg(feature = "journald")]
@@ -842,13 +937,16 @@ mod tests {
 
         let calls = Arc::new(Mutex::new(Vec::new()));
         let capture = LogCapture::new(Box::new(RecordingWriter(Arc::clone(&calls))), 2);
-        capture_stream(b"out\n".as_slice(), capture.clone(), LogStream::Stdout);
+        capture_stream(b"out\n".as_slice(), capture.clone(), LogStream::Stdout).expect("stdout");
         assert!(!calls.lock().unwrap().contains(&"close".to_string()));
-        capture_stream(b"err\n".as_slice(), capture, LogStream::Stderr);
+        capture_stream(b"err\n".as_slice(), capture, LogStream::Stderr).expect("stderr");
 
         let calls = calls.lock().unwrap();
         assert!(calls.iter().any(|call| call == "write:stdout:out\n"));
         assert!(calls.iter().any(|call| call == "write:stderr:err\n"));
-        assert_eq!(calls.iter().filter(|call| call.as_str() == "close").count(), 1);
+        assert_eq!(
+            calls.iter().filter(|call| call.as_str() == "close").count(),
+            1
+        );
     }
 }

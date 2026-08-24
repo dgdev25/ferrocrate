@@ -19,9 +19,17 @@ export function createWebBridgeRuntime(options = {}) {
     },
 
     async listen(event, handler) {
-      const source = eventSourceFactory(`/__tauri/stream/${encodeURIComponent(event)}`);
+      const streamCommand = event.startsWith("terminal-")
+        ? "start_terminal"
+        : event.startsWith("container-log-")
+          ? "start_log_follow"
+          : event === "image-build-progress"
+            ? "build_image"
+            : event;
+      const source = eventSourceFactory(`/__tauri/stream/${encodeURIComponent(streamCommand)}`);
       source.onmessage = (message) => {
-        handler({ event, payload: JSON.parse(message.data) });
+        const envelope = JSON.parse(message.data);
+        if (envelope.event === event) handler({ event, payload: envelope.payload });
       };
       return () => source.close();
     },

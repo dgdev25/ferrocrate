@@ -136,14 +136,15 @@ async fn invoke_command(
 
 async fn stream_event(
     State(state): State<BridgeState>,
-    Path(event_name): Path<String>,
+    Path(command): Path<String>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     let mut receiver = state.events.sender.subscribe();
     let stream = async_stream::stream! {
         loop {
             match receiver.recv().await {
-                Ok(event) if event.name == event_name => {
-                    yield Ok(Event::default().json_data(event.payload).unwrap_or_else(|_| Event::default()));
+                Ok(event) if stream_command_matches_event(&command, &event.name) => {
+                    let envelope = json!({ "event": event.name, "payload": event.payload });
+                    yield Ok(Event::default().json_data(envelope).unwrap_or_else(|_| Event::default()));
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -151,6 +152,15 @@ async fn stream_event(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn stream_command_matches_event(command: &str, event: &str) -> bool {
+    match command {
+        "start_terminal" => event.starts_with("terminal-"),
+        "start_log_follow" => event.starts_with("container-log-"),
+        "build_image" => event == "image-build-progress",
+        _ => command == event,
+    }
 }
 
 fn decode<T: DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -458,7 +468,27 @@ mod tests {
     use reqwest::Client;
     use serde_json::{json, Value};
 
-    use super::spawn_web_bridge;
+    use super::{spawn_web_bridge, stream_command_matches_event};
+
+    #[test]
+    fn streaming_command_routes_cover_terminal_logs_and_build_progress() {
+        assert!(stream_command_matches_event(
+            "start_terminal",
+            "terminal-output"
+        ));
+        assert!(stream_command_matches_event(
+            "start_log_follow",
+            "container-log-batch"
+        ));
+        assert!(stream_command_matches_event(
+            "build_image",
+            "image-build-progress"
+        ));
+        assert!(!stream_command_matches_event(
+            "start_terminal",
+            "container-log-batch"
+        ));
+    }
 
     #[tokio::test]
     async fn bridge_boots_and_dispatches_three_desktop_commands() {

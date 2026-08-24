@@ -36,8 +36,10 @@ test("web bridge listen delivers SSE payloads and closes on unlisten", async () 
   const received = [];
 
   const unlisten = await runtime.listen("terminal-output", (event) => received.push(event));
-  assert.equal(sources[0].url, "/__tauri/stream/terminal-output");
-  sources[0].onmessage({ data: JSON.stringify({ data: [65], stderr: false }) });
+  assert.equal(sources[0].url, "/__tauri/stream/start_terminal");
+  sources[0].onmessage({
+    data: JSON.stringify({ event: "terminal-output", payload: { data: [65], stderr: false } }),
+  });
   assert.deepEqual(received, [{ event: "terminal-output", payload: { data: [65], stderr: false } }]);
 
   unlisten();

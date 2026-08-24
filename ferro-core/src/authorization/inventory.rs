@@ -65,7 +65,7 @@ pub const MUTATION_INVENTORY: &[MutationInventoryEntry] = &[
     entry("mutation.cri", "CRI image mutation executor with effective identity", "authenticated Unix connect info -> immutable image binding -> SurfaceAuthorization::authorize_image_binding -> proof-consuming image executor", "metadata_is_telemetry_only_and_signed_delegation_becomes_gate_origin"),
     entry("mutation.runtime-background", "runtime-owned recovery and cleanup", "RuntimeAuthorization internal recovery", "quota_preserves_cleanup_reserve_and_exhaustion_stops_cleanup"),
     entry("mutation.images", "pull_image_with_store_authorized / pull_manifest_only_with_store_authorized / execute_dockerfile_build_authorized / execute_image_tag_authorized / LocalImageStore authorized reference executors", "authenticated origin -> immutable fetch/build/tag plan -> durable SurfacePermit", "image_fetch::tests::planned_pull_rejects_manifest_swap_before_store_mutation"),
-    entry("mutation.volumes", "LocalVolumeStore::create_with_driver_authorized / remove_authorized / restore_authorized", "authenticated origin -> immutable VolumeCreatePlan or exact stored generation -> durable SurfacePermit", "volume_store::tests::preparing_volume_create_is_side_effect_free_and_binds_options"),
+    entry("mutation.volumes", "LocalVolumeStore::create_with_driver_authorized / remove_authorized / backup_authorized / restore_authorized", "authenticated origin -> action-specific VolumeCreate/VolumeDelete/VolumeBackup/VolumeRestore binding -> durable SurfacePermit", "authorization::tests::volume_archive_actions_have_distinct_policy_vocabulary"),
     entry(
         "mutation.networks",
         "execute_network_create / execute_network_remove",

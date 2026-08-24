@@ -14,6 +14,20 @@ fn operation_origin_preserves_authenticated_caller_attribution() {
 }
 
 #[test]
+fn volume_archive_actions_have_distinct_policy_vocabulary() {
+    assert_eq!(
+        serde_json::to_string(&Action::VolumeBackup).expect("backup action"),
+        "\"volume.backup\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Action::VolumeRestore).expect("restore action"),
+        "\"volume.restore\""
+    );
+    assert_ne!(Action::VolumeBackup, Action::VolumeCreate);
+    assert_ne!(Action::VolumeRestore, Action::VolumeCreate);
+}
+
+#[test]
 fn service_mode_rejects_missing_digest_and_cross_service_contradictions() {
     use super::{AuthorizationServiceMode, AuthorizationServiceModeError};
     assert_eq!(

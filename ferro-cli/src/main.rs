@@ -3310,6 +3310,37 @@ struct RemoteComposeRequest {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Disconnect is injected by the watcher/cancellation boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteComposeWatchSignal {
+    Changed,
+    Disconnected,
+}
+
+#[cfg(target_os = "linux")]
+fn run_remote_compose_watch_loop(
+    profile: Vec<String>,
+    mut send_command: impl FnMut(ComposeCommands) -> Result<(), String>,
+    mut wait_for_signal: impl FnMut() -> Result<RemoteComposeWatchSignal, String>,
+) -> Result<(), String> {
+    loop {
+        send_command(ComposeCommands::Up {
+            profile: profile.clone(),
+            detach: true,
+            services: Vec::new(),
+        })?;
+        match wait_for_signal()? {
+            RemoteComposeWatchSignal::Disconnected => return Ok(()),
+            RemoteComposeWatchSignal::Changed => {
+                send_command(ComposeCommands::Down {
+                    services: Vec::new(),
+                })?;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Serialize, Deserialize)]
 struct RemoteBuildRequest {
     dockerfile: Option<String>,
@@ -3365,34 +3396,441 @@ fn decode_metadata_archive<T: for<'de> Deserialize<'de>>(
 }
 
 #[cfg(target_os = "linux")]
-fn append_regular_directory(
+#[derive(Clone, Copy)]
+struct TransferArchiveLimits {
+    max_files: usize,
+    max_entry_bytes: u64,
+    max_total_bytes: u64,
+}
+
+impl Default for TransferArchiveLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 100_000,
+            max_entry_bytes: 256 * 1024 * 1024,
+            max_total_bytes: 480 * 1024 * 1024,
+        }
+    }
+}
+
+struct TransferArchiveBudget {
+    limits: TransferArchiveLimits,
+    files: usize,
+    bytes: u64,
+}
+
+fn append_regular_file_bounded(
+    archive: &mut tar::Builder<Vec<u8>>,
+    source: &Path,
+    destination: &Path,
+    budget: &mut TransferArchiveBudget,
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| format!("archive {}: {error}", source.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "archive source is not a regular file: {}",
+            source.display()
+        ));
+    }
+    budget.files = budget.files.saturating_add(1);
+    if budget.files > budget.limits.max_files {
+        return Err("archive file count exceeds transfer limit".to_string());
+    }
+    if metadata.len() > budget.limits.max_entry_bytes {
+        return Err(format!(
+            "archive entry size exceeds transfer limit: {}",
+            source.display()
+        ));
+    }
+    budget.bytes = budget.bytes.saturating_add(metadata.len());
+    if budget.bytes > budget.limits.max_total_bytes {
+        return Err("archive total size exceeds transfer limit".to_string());
+    }
+    archive
+        .append_path_with_name(source, destination)
+        .map_err(|error| format!("archive {}: {error}", source.display()))
+}
+
+fn append_bytes_bounded(
+    archive: &mut tar::Builder<Vec<u8>>,
+    destination: &Path,
+    bytes: &[u8],
+    budget: &mut TransferArchiveBudget,
+) -> Result<(), String> {
+    let size = u64::try_from(bytes.len()).map_err(|_| "archive entry is too large".to_string())?;
+    budget.files = budget.files.saturating_add(1);
+    if budget.files > budget.limits.max_files {
+        return Err("archive file count exceeds transfer limit".to_string());
+    }
+    if size > budget.limits.max_entry_bytes {
+        return Err(format!(
+            "archive entry size exceeds transfer limit: {}",
+            destination.display()
+        ));
+    }
+    budget.bytes = budget.bytes.saturating_add(size);
+    if budget.bytes > budget.limits.max_total_bytes {
+        return Err("archive total size exceeds transfer limit".to_string());
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_path(destination).map_err(|error| error.to_string())?;
+    header.set_size(size);
+    header.set_mode(0o600);
+    header.set_cksum();
+    archive
+        .append(&header, bytes)
+        .map_err(|error| format!("archive {}: {error}", destination.display()))
+}
+
+#[derive(Debug)]
+struct TransferIgnoreRule {
+    pattern: String,
+    negated: bool,
+}
+
+fn load_transfer_ignore_rules(root: &Path) -> Result<Vec<TransferIgnoreRule>, String> {
+    let mut rules = vec![TransferIgnoreRule {
+        pattern: ".git/".to_string(),
+        negated: false,
+    }];
+    for name in [".dockerignore", ".gitignore"] {
+        let path = root.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("archive read {}: {error}", path.display()))?;
+        rules.extend(content.lines().filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (negated, pattern) = line
+                .strip_prefix('!')
+                .map_or((false, line), |pattern| (true, pattern));
+            (!pattern.is_empty()).then(|| TransferIgnoreRule {
+                pattern: pattern.to_string(),
+                negated,
+            })
+        }));
+    }
+    Ok(rules)
+}
+
+fn transfer_wildcard_match(pattern: &str, value: &str) -> bool {
+    fn matches(
+        pattern: &[u8],
+        value: &[u8],
+        pattern_index: usize,
+        value_index: usize,
+        memo: &mut HashMap<(usize, usize), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(pattern_index, value_index)) {
+            return *result;
+        }
+        let result = if pattern_index == pattern.len() {
+            value_index == value.len()
+        } else if pattern[pattern_index] == b'*' {
+            let recursive = pattern.get(pattern_index + 1) == Some(&b'*');
+            let next_pattern = pattern_index + if recursive { 2 } else { 1 };
+            matches(pattern, value, next_pattern, value_index, memo)
+                || (value_index < value.len()
+                    && (recursive || value[value_index] != b'/')
+                    && matches(pattern, value, pattern_index, value_index + 1, memo))
+        } else if pattern[pattern_index] == b'?' {
+            value_index < value.len()
+                && value[value_index] != b'/'
+                && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+        } else {
+            value_index < value.len()
+                && pattern[pattern_index] == value[value_index]
+                && matches(pattern, value, pattern_index + 1, value_index + 1, memo)
+        };
+        memo.insert((pattern_index, value_index), result);
+        result
+    }
+
+    let mut memo = HashMap::new();
+    matches(pattern.as_bytes(), value.as_bytes(), 0, 0, &mut memo)
+        || pattern.strip_prefix("**/").is_some_and(|pattern| {
+            let mut memo = HashMap::new();
+            matches(pattern.as_bytes(), value.as_bytes(), 0, 0, &mut memo)
+        })
+}
+
+fn transfer_ignore_matches(pattern: &str, path: &str) -> bool {
+    let normalized = pattern.trim_start_matches('/').trim_start_matches("./");
+    if normalized.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = normalized.strip_suffix('/') {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if normalized.contains('*') {
+        return transfer_wildcard_match(normalized, path)
+            || path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| transfer_wildcard_match(normalized, name));
+    }
+    path == normalized
+        || path.starts_with(&format!("{normalized}/"))
+        || (!normalized.contains('/') && path.rsplit('/').next() == Some(normalized))
+}
+
+fn transfer_path_ignored(relative: &Path, rules: &[TransferIgnoreRule]) -> bool {
+    if relative
+        .components()
+        .any(|component| component.as_os_str() == ".git")
+    {
+        return true;
+    }
+    let path = relative.to_string_lossy().trim_start_matches("./").to_string();
+    rules.iter().fold(false, |ignored, rule| {
+        if transfer_ignore_matches(&rule.pattern, &path) {
+            !rule.negated
+        } else {
+            ignored
+        }
+    })
+}
+
+fn append_regular_directory_inner(
     archive: &mut tar::Builder<Vec<u8>>,
     root: &Path,
-    relative: &Path,
+    source_relative: &Path,
+    archive_relative: &Path,
+    rules: &[TransferIgnoreRule],
+    budget: &mut TransferArchiveBudget,
 ) -> Result<(), String> {
-    let directory = root.join(relative);
+    let directory = root.join(source_relative);
     let mut entries = std::fs::read_dir(&directory)
         .map_err(|error| format!("archive {}: {error}", directory.display()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("archive {}: {error}", directory.display()))?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        let metadata = entry
-            .metadata()
+        let metadata = std::fs::symlink_metadata(entry.path())
             .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
-        let child = relative.join(entry.file_name());
+        let source_child = source_relative.join(entry.file_name());
+        let archive_child = archive_relative.join(entry.file_name());
+        let ignored = transfer_path_ignored(&source_child, rules);
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         if metadata.is_dir() {
-            archive
-                .append_dir(&child, entry.path())
-                .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
-            append_regular_directory(archive, root, &child)?;
-        } else if metadata.is_file() {
-            archive
-                .append_path_with_name(entry.path(), &child)
-                .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
+            if !ignored {
+                archive
+                    .append_dir(&archive_child, entry.path())
+                    .map_err(|error| format!("archive {}: {error}", entry.path().display()))?;
+            }
+            append_regular_directory_inner(
+                archive,
+                root,
+                &source_child,
+                &archive_child,
+                rules,
+                budget,
+            )?;
+        } else if metadata.is_file() && !ignored {
+            append_regular_file_bounded(archive, &entry.path(), &archive_child, budget)?;
         }
     }
     Ok(())
+}
+
+fn append_regular_directory_with_limits(
+    archive: &mut tar::Builder<Vec<u8>>,
+    root: &Path,
+    relative: &Path,
+    limits: TransferArchiveLimits,
+) -> Result<(), String> {
+    let rules = load_transfer_ignore_rules(root)?;
+    let mut budget = TransferArchiveBudget {
+        limits,
+        files: 0,
+        bytes: 0,
+    };
+    append_regular_directory_inner(
+        archive,
+        root,
+        relative,
+        relative,
+        &rules,
+        &mut budget,
+    )
+}
+
+fn append_regular_directory(
+    archive: &mut tar::Builder<Vec<u8>>,
+    root: &Path,
+    relative: &Path,
+) -> Result<(), String> {
+    append_regular_directory_with_limits(
+        archive,
+        root,
+        relative,
+        TransferArchiveLimits::default(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn stage_compose_input(
+    archive: &mut tar::Builder<Vec<u8>>,
+    budget: &mut TransferArchiveBudget,
+    project_dir: &Path,
+    input: &str,
+    index: usize,
+) -> Result<String, String> {
+    if input.trim().is_empty() {
+        return Err("compose: transferred input path is empty".to_string());
+    }
+    let input_path = Path::new(input);
+    let source = if input_path.is_absolute() {
+        input_path.to_path_buf()
+    } else {
+        project_dir.join(input_path)
+    };
+    let metadata = std::fs::symlink_metadata(&source)
+        .map_err(|error| format!("compose: inspect input {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "compose: input may not be a symlink: {}",
+            source.display()
+        ));
+    }
+    let staged = PathBuf::from(format!(".ferrocrate-transfer/compose/{index}"));
+    if metadata.is_dir() {
+        let rules = load_transfer_ignore_rules(&source)?;
+        archive
+            .append_dir(&staged, &source)
+            .map_err(|error| format!("compose: archive input {}: {error}", source.display()))?;
+        append_regular_directory_inner(
+            archive,
+            &source,
+            Path::new("."),
+            &staged,
+            &rules,
+            budget,
+        )?;
+    } else if metadata.is_file() {
+        append_regular_file_bounded(archive, &source, &staged, budget)?;
+    } else {
+        return Err(format!(
+            "compose: input is not a regular file or directory: {}",
+            source.display()
+        ));
+    }
+    Ok(staged.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_remote_compose_payload(
+    file: &Path,
+    command: ComposeCommands,
+) -> Result<Vec<u8>, String> {
+    let project_dir = file
+        .parent()
+        .ok_or_else(|| "compose: file has no project directory".to_string())?;
+    let mut project = ComposeProject::load(file).or_else(|error| {
+        let content = std::fs::read_to_string(file)
+            .map_err(|read_error| ferro_compose::ComposeError::Parse(read_error.to_string()))?;
+        let compose = serde_yaml::from_str(&content)
+            .map_err(|parse_error| ferro_compose::ComposeError::Parse(parse_error.to_string()))?;
+        if !matches!(error, ferro_compose::ComposeError::Validation(_)) {
+            return Err(error);
+        }
+        Ok(ComposeProject {
+            path: file.to_path_buf(),
+            compose,
+        })
+    }).map_err(|error| error.to_string())?;
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut budget = TransferArchiveBudget {
+        limits: TransferArchiveLimits::default(),
+        files: 0,
+        bytes: 0,
+    };
+    let mut input_index = 0usize;
+    for service in project.compose.services.values_mut() {
+        if let Some(build) = service.build.as_mut() {
+            let original = build.context.as_deref().unwrap_or(".");
+            build.context = Some(stage_compose_input(
+                &mut archive,
+                &mut budget,
+                project_dir,
+                original,
+                input_index,
+            )?);
+            input_index += 1;
+        }
+        if let Some(env_files) = service.env_file.as_mut() {
+            for env_file in env_files {
+                *env_file = stage_compose_input(
+                    &mut archive,
+                    &mut budget,
+                    project_dir,
+                    env_file,
+                    input_index,
+                )?;
+                input_index += 1;
+            }
+        }
+        if let Some(volumes) = service.volumes.as_mut() {
+            for volume in volumes {
+                let parts = volume.split(':').collect::<Vec<_>>();
+                if parts.len() < 2 {
+                    return Err(format!("compose: invalid volume entry {volume}"));
+                }
+                let source = parts[0];
+                if source.starts_with('.') || source.contains('/') {
+                    let staged = stage_compose_input(
+                        &mut archive,
+                        &mut budget,
+                        project_dir,
+                        source,
+                        input_index,
+                    )?;
+                    input_index += 1;
+                    *volume = if parts.len() >= 3 {
+                        format!("{staged}:{}:{}", parts[1], parts[2])
+                    } else {
+                        format!("{staged}:{}", parts[1])
+                    };
+                }
+            }
+        }
+    }
+    for resources in [&mut project.compose.secrets, &mut project.compose.configs]
+        .into_iter()
+        .flatten()
+    {
+        for resource in resources.values_mut() {
+            if let Some(path) = resource.file.as_mut() {
+                *path = stage_compose_input(
+                    &mut archive,
+                    &mut budget,
+                    project_dir,
+                    path,
+                    input_index,
+                )?;
+                input_index += 1;
+            }
+        }
+    }
+    let file_name = PathBuf::from("compose.remote.yaml");
+    let compose = serde_yaml::to_string(&project.compose)
+        .map_err(|error| format!("compose: serialize transferred project: {error}"))?;
+    append_bytes_bounded(&mut archive, &file_name, compose.as_bytes(), &mut budget)?;
+    let archive = archive
+        .into_inner()
+        .map_err(|error| format!("compose: finish project archive: {error}"))?;
+    if archive.len() > 512 * 1024 * 1024 {
+        return Err("compose: transfer archive exceeds request body limit".to_string());
+    }
+    encode_metadata_archive(&RemoteComposeRequest { file_name, command }, &archive)
+        .map_err(|error| format!("compose: encode request: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -3422,19 +3860,41 @@ fn prepare_remote_build(
         .ok_or_else(|| "build: input file name is not valid UTF-8".to_string())?
         .to_string();
     let mut archive = tar::Builder::new(Vec::new());
-    append_regular_directory(&mut archive, project, Path::new("."))?;
+    let mut budget = TransferArchiveBudget {
+        limits: TransferArchiveLimits::default(),
+        files: 0,
+        bytes: 0,
+    };
+    let project_rules = load_transfer_ignore_rules(project)?;
+    append_regular_directory_inner(
+        &mut archive,
+        project,
+        Path::new("."),
+        Path::new("."),
+        &project_rules,
+        &mut budget,
+    )?;
 
     let mut transferred_contexts = Vec::new();
     for (index, (name, path)) in parse_build_contexts(build_context)?.into_iter().enumerate() {
         let staged = format!(".ferrocrate-transfer/contexts/{index}");
-        if path.is_dir() {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("build: inspect context {name}: {error}"))?;
+        if metadata.is_dir() {
+            let rules = load_transfer_ignore_rules(&path)?;
             archive
-                .append_dir_all(&staged, &path)
+                .append_dir(Path::new(&staged), &path)
                 .map_err(|error| format!("build: archive context {name}: {error}"))?;
-        } else if path.is_file() {
-            archive
-                .append_path_with_name(&path, &staged)
-                .map_err(|error| format!("build: archive context {name}: {error}"))?;
+            append_regular_directory_inner(
+                &mut archive,
+                &path,
+                Path::new("."),
+                Path::new(&staged),
+                &rules,
+                &mut budget,
+            )?;
+        } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+            append_regular_file_bounded(&mut archive, &path, Path::new(&staged), &mut budget)?;
         } else {
             return Err(format!("build: context {name} is not a regular file or directory"));
         }
@@ -3444,8 +3904,7 @@ fn prepare_remote_build(
     let mut transferred_secrets = Vec::new();
     for (index, (id, path)) in parse_build_secrets(secrets)?.into_iter().enumerate() {
         let staged = format!(".ferrocrate-transfer/secrets/{index}");
-        archive
-            .append_path_with_name(&path, &staged)
+        append_regular_file_bounded(&mut archive, &path, Path::new(&staged), &mut budget)
             .map_err(|error| format!("build: archive secret {id}: {error}"))?;
         transferred_secrets.push(format!("id={id},src={staged}"));
     }
@@ -3453,8 +3912,7 @@ fn prepare_remote_build(
     let transferred_model = embed_model
         .map(|path| -> Result<String, String> {
             let staged = ".ferrocrate-transfer/embed-model".to_string();
-            archive
-                .append_path_with_name(path, &staged)
+            append_regular_file_bounded(&mut archive, Path::new(path), Path::new(&staged), &mut budget)
                 .map_err(|error| format!("build: archive embed model: {error}"))?;
             Ok(staged)
         })
@@ -3465,9 +3923,30 @@ fn prepare_remote_build(
                 return Ok(source.to_string());
             }
             let staged = ".ferrocrate-transfer/cache-from".to_string();
-            archive
-                .append_path_with_name(source, &staged)
-                .map_err(|error| format!("build: archive cache-from: {error}"))?;
+            append_regular_file_bounded(
+                &mut archive,
+                Path::new(source),
+                Path::new(&staged),
+                &mut budget,
+            )
+            .map_err(|error| format!("build: archive cache-from: {error}"))?;
+            let artifacts = PathBuf::from(format!("{source}.artifacts"));
+            if artifacts.exists() {
+                let metadata = std::fs::symlink_metadata(&artifacts)
+                    .map_err(|error| format!("build: inspect cache artifacts: {error}"))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err("build: cache artifacts must be a regular directory".to_string());
+                }
+                let rules = Vec::new();
+                append_regular_directory_inner(
+                    &mut archive,
+                    &artifacts,
+                    Path::new("."),
+                    Path::new(".ferrocrate-transfer/cache-from.artifacts"),
+                    &rules,
+                    &mut budget,
+                )?;
+            }
             Ok(staged)
         })
         .transpose()?;
@@ -3482,6 +3961,9 @@ fn prepare_remote_build(
     let archive = archive
         .into_inner()
         .map_err(|error| format!("build: finish transfer archive: {error}"))?;
+    if archive.len() > 512 * 1024 * 1024 {
+        return Err("build: transfer archive exceeds request body limit".to_string());
+    }
     Ok(PreparedRemoteBuild {
         request: RemoteBuildRequest {
             dockerfile: dockerfile.map(|_| source_name.clone()),
@@ -3509,18 +3991,27 @@ fn apply_remote_build_response(body: &[u8], cache_to: Option<&Path>) -> Result<(
     let mut stdout = None;
     let mut rvf = None;
     let mut cache = None;
+    let mut cache_artifacts = Vec::new();
     for entry in tar::Archive::new(Cursor::new(body))
         .entries()
         .map_err(|error| format!("build: invalid daemon response: {error}"))?
     {
         let mut entry = entry.map_err(|error| format!("build: invalid daemon response: {error}"))?;
-        if !entry.header().entry_type().is_file() {
-            return Err("build: daemon response contains a non-file entry".to_string());
-        }
         let path = entry
             .path()
             .map_err(|error| format!("build: invalid daemon response path: {error}"))?
             .into_owned();
+        if entry.header().entry_type().is_dir()
+            && path.starts_with("cache.artifacts")
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err("build: daemon response contains an unsafe entry".to_string());
+        }
         let mut bytes = Vec::new();
         entry
             .read_to_end(&mut bytes)
@@ -3529,6 +4020,15 @@ fn apply_remote_build_response(body: &[u8], cache_to: Option<&Path>) -> Result<(
             stdout = Some(bytes);
         } else if path == Path::new("cache.bin") {
             cache = Some(bytes);
+        } else if let Ok(relative) = path.strip_prefix("cache.artifacts") {
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err("build: daemon returned an unsafe cache artifact path".to_string());
+            }
+            cache_artifacts.push((relative.to_path_buf(), bytes));
         } else if path.components().count() == 2
             && path.starts_with("rvf")
             && matches!(path.components().nth(1), Some(Component::Normal(_)))
@@ -3547,13 +4047,76 @@ fn apply_remote_build_response(body: &[u8], cache_to: Option<&Path>) -> Result<(
         })?;
     }
     match (cache_to, cache) {
-        (Some(path), Some(bytes)) => std::fs::write(path, bytes)
-            .map_err(|error| format!("build: write cache output {}: {error}", path.display()))?,
+        (Some(path), Some(bytes)) => {
+            publish_remote_cache_export(path, &bytes, &cache_artifacts)?;
+        }
         (Some(_), None) => return Err("build: daemon response omitted cache output".to_string()),
         (None, Some(_)) => return Err("build: daemon returned an unexpected cache output".to_string()),
         (None, None) => {}
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn publish_remote_cache_export(
+    destination: &Path,
+    metadata: &[u8],
+    artifacts: &[(PathBuf, Vec<u8>)],
+) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("build: create cache output parent: {error}"))?;
+    let nonce = format!(
+        "{}.{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let temporary = parent.join(format!(".ferrocrate-cache-{nonce}.tmp"));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| format!("build: create cache output: {error}"))?;
+    file.write_all(metadata)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("build: write cache output: {error}"))?;
+    let artifact_destination = PathBuf::from(format!("{}.artifacts", destination.display()));
+    let temporary_artifacts = parent.join(format!(".ferrocrate-cache-artifacts-{nonce}.tmp"));
+    std::fs::create_dir(&temporary_artifacts)
+        .map_err(|error| format!("build: create cache artifacts: {error}"))?;
+    for (relative, bytes) in artifacts {
+        let target = temporary_artifacts.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("build: create cache artifact parent: {error}"))?;
+        }
+        let mut artifact = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&target)
+            .map_err(|error| format!("build: create cache artifact: {error}"))?;
+        artifact
+            .write_all(bytes)
+            .and_then(|_| artifact.sync_all())
+            .map_err(|error| format!("build: write cache artifact: {error}"))?;
+    }
+    if artifact_destination.exists() {
+        std::fs::remove_dir_all(&artifact_destination)
+            .map_err(|error| format!("build: replace cache artifacts: {error}"))?;
+    }
+    std::fs::rename(&temporary_artifacts, &artifact_destination)
+        .map_err(|error| format!("build: publish cache artifacts: {error}"))?;
+    std::fs::rename(&temporary, destination)
+        .map_err(|error| format!("build: publish cache metadata: {error}"))?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("build: sync cache output: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -5853,15 +6416,17 @@ fn handle_completion(shell: &str) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::channel::<TuiInput>();
     std::thread::spawn(move || {
-        let mut input = String::new();
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
         loop {
-            input.clear();
-            if std::io::stdin().read_line(&mut input).is_err() {
-                break;
-            }
-            if tx.send(input.trim().to_string()).is_err() {
+            let input = match read_tui_input(&mut stdin) {
+                Ok(input) => input,
+                Err(_) => TuiInput::Eof,
+            };
+            let terminal = matches!(input, TuiInput::Eof);
+            if tx.send(input).is_err() || terminal {
                 break;
             }
         }
@@ -5883,8 +6448,10 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
                 name, record.status, record.image, cmd
             );
         }
-        if let Ok(msg) = rx.try_recv() {
-            if msg.eq_ignore_ascii_case("q") {
+        if let Ok(input) = rx.try_recv() {
+            if matches!(input, TuiInput::Eof)
+                || matches!(input, TuiInput::Line(ref line) if line.eq_ignore_ascii_case("q"))
+            {
                 break;
             }
         }
@@ -5894,18 +6461,38 @@ fn handle_tui(runtime: &ContainerRuntime) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Eq, PartialEq)]
+enum TuiInput {
+    Line(String),
+    Eof,
+}
+
+#[cfg(target_os = "linux")]
+fn read_tui_input(reader: &mut impl BufRead) -> std::io::Result<TuiInput> {
+    let mut input = String::new();
+    let read = reader.read_line(&mut input)?;
+    if read == 0 {
+        Ok(TuiInput::Eof)
+    } else {
+        Ok(TuiInput::Line(input.trim().to_string()))
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn handle_remote_tui(
     request: impl FnMut() -> Result<Vec<u8>, String>,
 ) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::channel::<TuiInput>();
     std::thread::spawn(move || {
-        let mut input = String::new();
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
         loop {
-            input.clear();
-            if std::io::stdin().read_line(&mut input).is_err() {
-                break;
-            }
-            if tx.send(input.trim().to_string()).is_err() {
+            let input = match read_tui_input(&mut stdin) {
+                Ok(input) => input,
+                Err(_) => TuiInput::Eof,
+            };
+            let terminal = matches!(input, TuiInput::Eof);
+            if tx.send(input).is_err() || terminal {
                 break;
             }
         }
@@ -5916,7 +6503,7 @@ fn handle_remote_tui(
 #[cfg(target_os = "linux")]
 fn handle_remote_tui_with_input(
     mut request: impl FnMut() -> Result<Vec<u8>, String>,
-    input: std::sync::mpsc::Receiver<String>,
+    input: std::sync::mpsc::Receiver<TuiInput>,
 ) -> Result<(), String> {
     loop {
         let body = request()?;
@@ -5943,11 +6530,12 @@ fn handle_remote_tui_with_input(
                 record["Command"].as_str().unwrap_or("")
             );
         }
-        if input
-            .try_recv()
-            .is_ok_and(|message| message.eq_ignore_ascii_case("q"))
-        {
-            return Ok(());
+        if let Ok(input) = input.try_recv() {
+            if matches!(input, TuiInput::Eof)
+                || matches!(input, TuiInput::Line(ref line) if line.eq_ignore_ascii_case("q"))
+            {
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -6293,10 +6881,10 @@ fn remote_docker_request_stream(
     // request is intentionally open ended; all other ordinary requests retain
     // a generous finite response deadline.  Connection establishment remains
     // independently bounded by `connect_remote_socket`.
-    let response_timeout = remote_response_timeout(path);
+    let response_timeout = remote_response_timeout(path, body);
     stream
         .set_read_timeout(response_timeout)
-        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30))))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(30 * 60))))
         .map_err(|error| format!("remote context timeout setup failed: {error}"))?;
     let body = body.unwrap_or_default();
     let content_header = content_type
@@ -6333,8 +6921,24 @@ fn remote_docker_request_stream(
 }
 
 #[cfg(target_os = "linux")]
-fn remote_response_timeout(path: &str) -> Option<Duration> {
-    (!path.contains("/wait?")).then_some(Duration::from_secs(30 * 60))
+fn remote_response_timeout(path: &str, body: Option<&[u8]>) -> Option<Duration> {
+    if path.contains("/wait?") {
+        return None;
+    }
+    if path == "/ferrocrate/compose" {
+        let attached = body
+            .and_then(|payload| decode_metadata_archive::<RemoteComposeRequest>(payload).ok())
+            .is_some_and(|(request, _)| {
+                matches!(
+                    request.command,
+                    ComposeCommands::Up { detach: false, .. } | ComposeCommands::Watch { .. }
+                )
+            });
+        if attached {
+            return None;
+        }
+    }
+    Some(Duration::from_secs(30 * 60))
 }
 
 #[cfg(target_os = "linux")]
@@ -7174,12 +7778,14 @@ fn dispatch_remote_socket(
                 }
                 let context_dir = dockerfile_path.parent().unwrap_or_else(|| Path::new("."));
                 let mut archive = tar::Builder::new(Vec::new());
-                archive
-                    .append_dir_all(".", context_dir)
+                append_regular_directory(&mut archive, context_dir, Path::new("."))
                     .map_err(|error| format!("remote build: archive context failed: {error}"))?;
                 let archive = archive
                     .into_inner()
                     .map_err(|error| format!("remote build: finalize context failed: {error}"))?;
+                if archive.len() > 512 * 1024 * 1024 {
+                    return Err("remote build: context exceeds request body limit".to_string());
+                }
                 let filename = dockerfile_path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -8148,27 +8754,32 @@ fn dispatch_remote_socket(
             let project_dir = file
                 .parent()
                 .ok_or_else(|| "compose: file has no project directory".to_string())?;
-            let file_name = file
-                .file_name()
-                .map(PathBuf::from)
-                .ok_or_else(|| "compose: file has no file name".to_string())?;
-            let mut archive = tar::Builder::new(Vec::new());
-            append_regular_directory(&mut archive, project_dir, Path::new("."))
-                .map_err(|error| format!("compose: archive project: {error}"))?;
-            let archive = archive
-                .into_inner()
-                .map_err(|error| format!("compose: finish project archive: {error}"))?;
-            let payload = encode_metadata_archive(&RemoteComposeRequest {
-                file_name,
-                command: command.clone(),
-            }, &archive)
-            .map_err(|error| format!("compose: encode request: {error}"))?;
-            request_with_body(
-                "POST",
-                "/ferrocrate/compose".to_string(),
-                Some(payload),
-            )
-            .map(|body| print!("{}", String::from_utf8_lossy(&body)))
+            let send_command = |command| {
+                let payload = prepare_remote_compose_payload(&file, command)?;
+                request_with_body(
+                    "POST",
+                    "/ferrocrate/compose".to_string(),
+                    Some(payload),
+                )
+                .map(|body| print!("{}", String::from_utf8_lossy(&body)))
+            };
+            if let ComposeCommands::Watch { profile, interval } = command {
+                let mut last_mtime = latest_mtime(project_dir)?;
+                run_remote_compose_watch_loop(
+                    profile.clone(),
+                    send_command,
+                    || loop {
+                        std::thread::sleep(Duration::from_secs(*interval));
+                        let current = latest_mtime(project_dir)?;
+                        if current > last_mtime {
+                            last_mtime = current;
+                            return Ok(RemoteComposeWatchSignal::Changed);
+                        }
+                    },
+                )
+            } else {
+                send_command(command.clone())
+            }
         })(),
         Commands::Policy { .. }
         | Commands::Witness { .. }
@@ -8464,12 +9075,22 @@ fn format_remote_network_list_text(body: &[u8]) -> Result<String, String> {
     let mut text = "NAME\tDRIVER\tSUBNET\tGATEWAY\n".to_string();
     for entry in &entries {
         let ipam = &entry["IPAM"]["Config"][0];
+        let builtin_bridge = entry["Name"].as_str() == Some("bridge")
+            && entry["Driver"].as_str() == Some("bridge");
+        let subnet = ipam["Subnet"]
+            .as_str()
+            .or_else(|| builtin_bridge.then_some("10.0.0.0/24"))
+            .unwrap_or_default();
+        let gateway = ipam["Gateway"]
+            .as_str()
+            .or_else(|| builtin_bridge.then_some("10.0.0.1"))
+            .unwrap_or_default();
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\n",
             entry["Name"].as_str().unwrap_or_default(),
             entry["Driver"].as_str().unwrap_or_default(),
-            ipam["Subnet"].as_str().unwrap_or_default(),
-            ipam["Gateway"].as_str().unwrap_or_default(),
+            subnet,
+            gateway,
         ));
     }
     Ok(text)
@@ -9342,8 +9963,22 @@ fn retry_transient_cas<T>(
 }
 
 fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<(), String> {
+    extract_docker_build_context_with_limits(
+        archive,
+        destination,
+        TransferArchiveLimits::default(),
+    )
+}
+
+fn extract_docker_build_context_with_limits(
+    archive: &[u8],
+    destination: &Path,
+    limits: TransferArchiveLimits,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let mut archive = tar::Archive::new(Cursor::new(archive));
+    let mut files = 0usize;
+    let mut total_bytes = 0u64;
     for entry in archive
         .entries()
         .map_err(|error| format!("docker build: invalid tar context: {error}"))?
@@ -9370,6 +10005,24 @@ fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<()
                 format!("docker build: create context directory failed: {error}")
             })?,
             tar::EntryType::Regular => {
+                let size = entry
+                    .header()
+                    .size()
+                    .map_err(|error| format!("docker build: invalid entry size: {error}"))?;
+                files = files.saturating_add(1);
+                if files > limits.max_files {
+                    return Err("docker build: archive file count exceeds transfer limit".to_string());
+                }
+                if size > limits.max_entry_bytes {
+                    return Err(format!(
+                        "docker build: archive entry size exceeds transfer limit: {}",
+                        path.display()
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(size);
+                if total_bytes > limits.max_total_bytes {
+                    return Err("docker build: archive total size exceeds transfer limit".to_string());
+                }
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|error| {
                         format!("docker build: create context parent failed: {error}")
@@ -11538,7 +12191,18 @@ fn handle_volume_authorized(
             println!("volume create: {} {}", record.name, record.path);
         }
         VolumeCommands::Backup { name, path } => {
-            store.backup(&name, &path).map_err(|err| err.to_string())?;
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::VolumeBackup,
+                    ResourceKind::Volume,
+                    &name,
+                    1,
+                )
+                .map_err(|error| error.to_string())?;
+            store
+                .backup_authorized(&name, &path, permit)
+                .map_err(|err| err.to_string())?;
             println!("volume backup: {name} -> {path}");
         }
         VolumeCommands::Restore { name, path } => {
@@ -11556,7 +12220,7 @@ fn handle_volume_authorized(
             let permit = authorization
                 .authorize_named(
                     origin,
-                    AuthorizationAction::VolumeCreate,
+                    AuthorizationAction::VolumeRestore,
                     ResourceKind::Volume,
                     &name,
                     1,
@@ -12062,6 +12726,10 @@ fn handle_network_authorized(
                         "Id": "bridge",
                         "Driver": "bridge",
                         "Scope": "local",
+                        "IPAM": {"Config": [{
+                            "Subnet": "10.0.0.0/24",
+                            "Gateway": "10.0.0.1"
+                        }]},
                     }));
                 }
                 entries.extend(records.into_iter().map(|record| {
@@ -13585,14 +14253,16 @@ fn handle_compose(
             })?;
         }
         ComposeCommands::Pull { services } => {
-            let order = compose_up(&project).map_err(|err| err.to_string())?;
-            let requested = compose_explicit_service_selection(&project, &services)?;
             let authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
-            for name in order.into_iter().filter(|name| requested.contains(name)) {
-                let service = project.compose.services.get(&name).expect("service from graph");
-                let image = service.image.as_deref().ok_or_else(|| format!("compose: service {name} has no image"))?;
-                handle_pull(store, image, false, &authorization)?;
-            }
+            compose_pull_with_origin(&project, &services, authenticated_origin, |image, origin| {
+                handle_pull_authorized(
+                    store,
+                    image,
+                    false,
+                    origin,
+                    &authorization,
+                )
+            })?;
         }
         ComposeCommands::Config => {
             output = serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?;
@@ -13801,6 +14471,30 @@ fn handle_compose(
         }
     }
     Ok(output)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_pull_with_origin(
+    project: &ComposeProject,
+    services: &[String],
+    authenticated_origin: &RequestOrigin,
+    mut pull: impl FnMut(&str, &RequestOrigin) -> Result<(), String>,
+) -> Result<(), String> {
+    let order = compose_up(project).map_err(|error| error.to_string())?;
+    let requested = compose_explicit_service_selection(project, services)?;
+    for name in order.into_iter().filter(|name| requested.contains(name)) {
+        let service = project
+            .compose
+            .services
+            .get(&name)
+            .expect("service from graph");
+        let image = service
+            .image
+            .as_deref()
+            .ok_or_else(|| format!("compose: service {name} has no image"))?;
+        pull(image, authenticated_origin)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -16201,6 +16895,23 @@ fn handle_docker_compat_connection(
                     response
                         .append_path_with_name(cache, "cache.bin")
                         .map_err(|error| format!("build: archive cache output: {error}"))?;
+                    let artifacts = PathBuf::from(format!("{cache}.artifacts"));
+                    if artifacts.is_dir() {
+                        let rules = Vec::new();
+                        let mut budget = TransferArchiveBudget {
+                            limits: TransferArchiveLimits::default(),
+                            files: 0,
+                            bytes: 0,
+                        };
+                        append_regular_directory_inner(
+                            &mut response,
+                            &artifacts,
+                            Path::new("."),
+                            Path::new("cache.artifacts"),
+                            &rules,
+                            &mut budget,
+                        )?;
+                    }
                 }
                 let response = response
                     .into_inner()
@@ -16261,7 +16972,7 @@ fn handle_docker_compat_connection(
                     let permit = surface_authorization
                         .authorize_named(
                             &origin,
-                            AuthorizationAction::VolumeCreate,
+                            AuthorizationAction::VolumeBackup,
                             ResourceKind::Volume,
                             name,
                             1,
@@ -16269,17 +16980,12 @@ fn handle_docker_compat_connection(
                         .map_err(|error| error.to_string())?;
                     let archive = tempfile::NamedTempFile::new()
                         .map_err(|error| format!("volume backup: create archive: {error}"))?;
-                    let result = volume_store
-                        .backup(name, archive.path())
-                        .map_err(|error| error.to_string())
-                        .and_then(|_| {
-                            std::fs::read(archive.path())
-                                .map_err(|error| format!("volume backup: read archive: {error}"))
-                        });
-                    permit
-                        .finish(result.is_ok())
+                    volume_store
+                        .backup_authorized(name, archive.path(), permit)
                         .map_err(|error| error.to_string())?;
-                    http_response(200, &result?, "application/x-tar")
+                    let result = std::fs::read(archive.path())
+                        .map_err(|error| format!("volume backup: read archive: {error}"))?;
+                    http_response(200, &result, "application/x-tar")
                 } else {
                     if request.body.is_empty() {
                         return Err("volume restore: archive body is required".to_string());
@@ -17919,7 +18625,9 @@ fn handle_docker_compat_connection(
                     let containers = docker_network_containers(&runtime, "bridge")?;
                     let body = serde_json::json!({
                         "Name": "bridge", "Id": "bridge", "Driver": "bridge",
-                        "Scope": "local", "IPAM": {"Config": []}, "Containers": containers
+                        "Scope": "local", "IPAM": {"Config": [{
+                            "Subnet": "10.0.0.0/24", "Gateway": "10.0.0.1"
+                        }]}, "Containers": containers
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 } else {
@@ -20285,9 +20993,31 @@ struct HttpRequest {
 }
 
 #[cfg(target_os = "linux")]
+fn http_body_limit(method: &str, path: &str) -> usize {
+    const ORDINARY: usize = 4 * 1024 * 1024;
+    const ARCHIVE: usize = 512 * 1024 * 1024;
+    const IMAGE: usize = 1024 * 1024 * 1024;
+    let route = path.split('?').next().unwrap_or(path);
+    let route = normalize_docker_api_path(route);
+    match (method, route.as_str()) {
+        ("POST", "/ferrocrate/rvf/import" | "/images/load") => IMAGE,
+        (
+            "POST",
+            "/ferrocrate/build"
+            | "/ferrocrate/compose"
+            | "/ferrocrate/volume/restore"
+            | "/build",
+        ) => ARCHIVE,
+        ("PUT", route) if route.starts_with("/containers/") && route.ends_with("/archive") => {
+            ARCHIVE
+        }
+        _ => ORDINARY,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
-    const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 
     let mut buffer = Vec::new();
     let mut header_end = None;
@@ -20371,7 +21101,8 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     if chunked && content_length != 0 {
         return Err("docker: request cannot combine chunked encoding and content-length".into());
     }
-    if content_length > MAX_HTTP_BODY_BYTES {
+    let max_body_bytes = http_body_limit(&method, &path);
+    if content_length > max_body_bytes {
         return Err("docker: request too large".to_string());
     }
     let prefix = Cursor::new(buffer[header_end..].to_vec());
@@ -20400,7 +21131,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
                 }
                 break;
             }
-            if body.len().saturating_add(size) > MAX_HTTP_BODY_BYTES {
+            if body.len().saturating_add(size) > max_body_bytes {
                 return Err("docker: request too large".to_string());
             }
             let start = body.len();
@@ -21409,12 +22140,45 @@ mod tests {
     #[test]
     fn transport_deadlines_are_phased_for_long_requests_and_established_streams() {
         assert_eq!(
-            super::remote_response_timeout("/build"),
+            super::remote_response_timeout("/build", None),
             Some(Duration::from_secs(30 * 60))
         );
         assert_eq!(
-            super::remote_response_timeout("/containers/demo/wait?condition=not-running"),
+            super::remote_response_timeout(
+                "/containers/demo/wait?condition=not-running",
+                None,
+            ),
             None
+        );
+        let attached = super::encode_metadata_archive(
+            &super::RemoteComposeRequest {
+                file_name: PathBuf::from("compose.yaml"),
+                command: super::ComposeCommands::Up {
+                    profile: Vec::new(),
+                    detach: false,
+                    services: Vec::new(),
+                },
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            super::remote_response_timeout("/ferrocrate/compose", Some(&attached)),
+            None,
+            "attached compose up must not inherit a finite timeout"
+        );
+        let finite = super::encode_metadata_archive(
+            &super::RemoteComposeRequest {
+                file_name: PathBuf::from("compose.yaml"),
+                command: super::ComposeCommands::Config,
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            super::remote_response_timeout("/ferrocrate/compose", Some(&finite)),
+            Some(Duration::from_secs(30 * 60)),
+            "finite compose operations retain a bounded response deadline"
         );
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("transport pair");
         stream
@@ -21425,6 +22189,173 @@ mod tests {
             .expect("clear established stream deadlines");
         assert_eq!(stream.read_timeout().expect("read timeout"), None);
         assert_eq!(stream.write_timeout().expect("write timeout"), None);
+    }
+
+    #[test]
+    fn large_transfer_routes_use_explicit_bounded_body_limits() {
+        let ordinary = super::http_body_limit("POST", "/containers/create");
+        assert_eq!(ordinary, 4 * 1024 * 1024);
+        for route in [
+            "/ferrocrate/rvf/import",
+            "/ferrocrate/build",
+            "/ferrocrate/compose",
+            "/ferrocrate/volume/restore",
+            "/build",
+            "/images/load",
+            "/v1.44/build",
+            "/v1.44/images/load",
+        ] {
+            let limit = super::http_body_limit("POST", route);
+            assert!(limit > ordinary, "{route} retained the 4 MiB cap");
+            assert!(limit <= 1024 * 1024 * 1024, "{route} is not bounded");
+        }
+    }
+
+    #[test]
+    fn project_transfer_ignores_secrets_git_and_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(project.path().join("compose.yaml"), "services: {}\n")
+            .expect("compose");
+        std::fs::write(
+            project.path().join(".dockerignore"),
+            "ignored.secret\n**/*.pem\n!keep.pem\n!.git/config\n",
+        )
+            .expect("ignore file");
+        std::fs::write(project.path().join("ignored.secret"), "credential")
+            .expect("ignored secret");
+        std::fs::write(project.path().join("root.pem"), "root key").expect("root key");
+        std::fs::write(project.path().join("keep.pem"), "kept key").expect("negated key");
+        std::fs::create_dir(project.path().join("nested")).expect("nested");
+        std::fs::write(project.path().join("nested/secret.pem"), "nested key")
+            .expect("nested key");
+        std::fs::create_dir(project.path().join(".git")).expect("git dir");
+        std::fs::write(project.path().join(".git/config"), "private remote")
+            .expect("git config");
+        std::fs::write(outside.path().join("outside.secret"), "escaped")
+            .expect("outside secret");
+        symlink(outside.path(), project.path().join("escape")).expect("escape symlink");
+
+        let mut builder = tar::Builder::new(Vec::new());
+        super::append_regular_directory(
+            &mut builder,
+            project.path(),
+            std::path::Path::new("."),
+        )
+            .expect("archive project");
+        let bytes = builder.into_inner().expect("archive bytes");
+        let paths = tar::Archive::new(std::io::Cursor::new(bytes))
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .path()
+                    .expect("path")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|path| path.ends_with("compose.yaml")));
+        assert!(!paths.iter().any(|path| path.contains("ignored.secret")));
+        assert!(!paths.iter().any(|path| path.ends_with("root.pem")));
+        assert!(!paths.iter().any(|path| path.ends_with("nested/secret.pem")));
+        assert!(paths.iter().any(|path| path.ends_with("keep.pem")));
+        assert!(!paths.iter().any(|path| path.contains(".git")));
+        assert!(!paths.iter().any(|path| path.contains("outside.secret")));
+    }
+
+    #[test]
+    fn project_transfer_enforces_file_entry_and_total_bounds() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join("one"), b"1234").expect("first");
+        std::fs::write(project.path().join("two"), b"5678").expect("second");
+        for (limits, expected) in [
+            (
+                super::TransferArchiveLimits {
+                    max_files: 1,
+                    max_entry_bytes: 100,
+                    max_total_bytes: 100,
+                },
+                "file count",
+            ),
+            (
+                super::TransferArchiveLimits {
+                    max_files: 10,
+                    max_entry_bytes: 3,
+                    max_total_bytes: 100,
+                },
+                "entry size",
+            ),
+            (
+                super::TransferArchiveLimits {
+                    max_files: 10,
+                    max_entry_bytes: 100,
+                    max_total_bytes: 6,
+                },
+                "total size",
+            ),
+        ] {
+            let mut builder = tar::Builder::new(Vec::new());
+            let error = super::append_regular_directory_with_limits(
+                &mut builder,
+                project.path(),
+                std::path::Path::new("."),
+                limits,
+            )
+            .expect_err("bound must reject transfer");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn daemon_archive_extraction_enforces_file_entry_and_total_bounds() {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in [("one", b"1234".as_slice()), ("two", b"5678".as_slice())] {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            builder.append(&header, bytes).unwrap();
+        }
+        let archive = builder.into_inner().unwrap();
+        for (limits, expected) in [
+            (
+                super::TransferArchiveLimits {
+                    max_files: 1,
+                    max_entry_bytes: 100,
+                    max_total_bytes: 100,
+                },
+                "file count",
+            ),
+            (
+                super::TransferArchiveLimits {
+                    max_files: 10,
+                    max_entry_bytes: 3,
+                    max_total_bytes: 100,
+                },
+                "entry size",
+            ),
+            (
+                super::TransferArchiveLimits {
+                    max_files: 10,
+                    max_entry_bytes: 100,
+                    max_total_bytes: 6,
+                },
+                "total size",
+            ),
+        ] {
+            let destination = tempfile::tempdir().unwrap();
+            let error = super::extract_docker_build_context_with_limits(
+                &archive,
+                destination.path(),
+                limits,
+            )
+            .expect_err("daemon extraction bound");
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -21456,6 +22387,11 @@ mod tests {
         )
         .expect("network list text")
         .contains("mesh\tbridge\t10.2.0.0/24\t10.2.0.1\n"));
+        assert!(super::format_remote_network_list_text(
+            br#"[{"Name":"bridge","Driver":"bridge","Scope":"local"}]"#
+        )
+        .expect("built-in bridge text")
+        .contains("bridge\tbridge\t10.0.0.0/24\t10.0.0.1\n"));
         assert!(super::format_remote_network_inspect_text(
             br#"{"Name":"mesh","Driver":"bridge","Scope":"local"}"#
         )
@@ -21563,6 +22499,8 @@ mod tests {
 
         let compose_file = temp.path().join("compose.yaml");
         std::fs::write(&compose_file, "services: {}\n").expect("write compose file");
+        std::fs::write(temp.path().join("unrelated.credentials"), b"do-not-transfer-me")
+            .expect("unrelated credential fixture");
         let compose_socket = temp.path().join("compose.sock");
         let compose_listener = UnixListener::bind(&compose_socket).expect("bind compose socket");
         let forbidden = compose_file.display().to_string();
@@ -21575,6 +22513,7 @@ mod tests {
             assert!(request.contains("\"command\":\"config\""));
             assert!(!request.contains(&forbidden), "daemon request exposed client path");
             assert!(request.contains("services: {}"), "compose content was not transferred");
+            assert!(!request.contains("do-not-transfer-me"));
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nservices: {}\n",
@@ -21594,6 +22533,37 @@ mod tests {
             .expect("compose must be claimed")
             .expect("compose should route");
         compose_worker.join().expect("compose route worker");
+    }
+
+    #[test]
+    fn compose_transfer_rewrites_absolute_inputs_and_only_stages_required_files() {
+        let project = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("required.txt"), b"required-input").unwrap();
+        std::fs::write(project.path().join("unrelated.key"), b"unrelated-secret").unwrap();
+        let compose_file = project.path().join("compose.yaml");
+        std::fs::write(
+            &compose_file,
+            format!(
+                "services:\n  api:\n    image: busybox\n    volumes:\n      - '{}:/input:ro'\n",
+                external.path().display()
+            ),
+        )
+        .unwrap();
+
+        let payload = super::prepare_remote_compose_payload(
+            &compose_file,
+            super::ComposeCommands::Config,
+        )
+        .unwrap();
+        let (metadata, archive): (super::RemoteComposeRequest, &[u8]) =
+            super::decode_metadata_archive(&payload).unwrap();
+        assert_eq!(metadata.file_name, PathBuf::from("compose.remote.yaml"));
+        let bytes = String::from_utf8_lossy(archive);
+        assert!(bytes.contains("required-input"));
+        assert!(!bytes.contains("unrelated-secret"));
+        assert!(!bytes.contains(&external.path().display().to_string()));
+        assert!(bytes.contains(".ferrocrate-transfer/compose/0:/input:ro"));
     }
 
     #[test]
@@ -21724,6 +22694,8 @@ mod tests {
 
     #[test]
     fn native_build_options_use_authenticated_daemon_build_route() {
+        use std::os::unix::fs::symlink;
+
         let temp = tempfile::tempdir().expect("native build fixture");
         let ferrofile = temp.path().join("Ferrofile");
         std::fs::write(&ferrofile, "image = \"scratch\"\n").expect("write Ferrofile");
@@ -21731,11 +22703,29 @@ mod tests {
         std::fs::write(&model, b"model-bytes").expect("write model");
         let secret = temp.path().join("token.txt");
         std::fs::write(&secret, b"secret-bytes").expect("write secret");
-        let context = temp.path().join("aux-context");
+        let context_temp = tempfile::tempdir().expect("named context fixture");
+        let context = context_temp.path().join("aux-context");
         std::fs::create_dir(&context).expect("create named context");
         std::fs::write(context.join("fixture.txt"), b"context-bytes").expect("write context");
+        std::fs::write(context.join(".dockerignore"), "ignored.secret\n")
+            .expect("named context ignore file");
+        std::fs::write(context.join("ignored.secret"), b"named-context-secret")
+            .expect("ignored context secret");
+        let outside = tempfile::tempdir().expect("named context outside fixture");
+        std::fs::write(outside.path().join("host-secret"), b"symlink-escape-secret")
+            .expect("outside secret");
+        symlink(outside.path(), context.join("escape")).expect("named context symlink");
         let cache_from = temp.path().join("cache-from.bin");
         std::fs::write(&cache_from, b"cache-input").expect("write cache input");
+        let cache_from_artifacts =
+            std::path::PathBuf::from(format!("{}.artifacts", cache_from.display()));
+        std::fs::create_dir_all(cache_from_artifacts.join("layers"))
+            .expect("cache artifact directory");
+        std::fs::write(
+            cache_from_artifacts.join("layers/layer"),
+            b"cache-artifact-input",
+        )
+        .expect("cache artifact");
         let cache_to = temp.path().join("cache-to.bin");
         let socket = temp.path().join("build.sock");
         let listener = UnixListener::bind(&socket).expect("bind build socket");
@@ -21746,9 +22736,17 @@ mod tests {
             let request_text = String::from_utf8_lossy(&request);
             assert!(request_text.contains("POST /ferrocrate/build"));
             assert!(request_text.contains("Ferrofile"));
-            for transferred in ["model-bytes", "secret-bytes", "context-bytes", "cache-input"] {
+            for transferred in [
+                "model-bytes",
+                "secret-bytes",
+                "context-bytes",
+                "cache-input",
+                "cache-artifact-input",
+            ] {
                 assert!(request_text.contains(transferred), "missing {transferred}");
             }
+            assert!(!request_text.contains("named-context-secret"));
+            assert!(!request_text.contains("symlink-escape-secret"));
             let output = b"build: complete\n";
             let mut archive = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
@@ -21762,6 +22760,16 @@ mod tests {
             header.set_size(cache.len() as u64);
             header.set_cksum();
             archive.append(&header, &cache[..]).expect("response cache");
+            let artifact = b"cache-artifact-output";
+            let mut header = tar::Header::new_gnu();
+            header
+                .set_path("cache.artifacts/layers/layer")
+                .expect("artifact response path");
+            header.set_size(artifact.len() as u64);
+            header.set_cksum();
+            archive
+                .append(&header, &artifact[..])
+                .expect("response artifact");
             let archive = archive.into_inner().expect("finish response archive");
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -21801,15 +22809,25 @@ mod tests {
             .expect("native build should route");
         worker.join().expect("build worker");
         assert_eq!(
-            std::fs::read(cache_to).expect("downloaded cache"),
+            std::fs::read(&cache_to).expect("downloaded cache"),
             b"cache-output"
+        );
+        assert_eq!(
+            std::fs::read(
+                std::path::PathBuf::from(format!("{}.artifacts", cache_to.display()))
+                    .join("layers/layer")
+            )
+            .expect("downloaded cache artifact"),
+            b"cache-artifact-output"
         );
     }
 
     #[test]
     fn remote_tui_reads_snapshots_from_daemon_transport() {
         let (sender, receiver) = std::sync::mpsc::channel();
-        sender.send("q".to_string()).expect("queue TUI exit");
+        sender
+            .send(super::TuiInput::Line("q".to_string()))
+            .expect("queue TUI exit");
         let calls = std::cell::Cell::new(0usize);
         super::handle_remote_tui_with_input(
             || {
@@ -21820,6 +22838,66 @@ mod tests {
         )
         .expect("remote TUI snapshot");
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn tui_stdin_eof_is_a_terminal_input_event() {
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        assert!(matches!(
+            super::read_tui_input(&mut empty).expect("read EOF"),
+            super::TuiInput::Eof
+        ));
+    }
+
+    #[test]
+    fn remote_compose_watch_reconciles_changes_and_stops_on_disconnect() {
+        let commands = std::cell::RefCell::new(Vec::new());
+        let signals = std::cell::RefCell::new(vec![
+            super::RemoteComposeWatchSignal::Disconnected,
+            super::RemoteComposeWatchSignal::Changed,
+        ]);
+        super::run_remote_compose_watch_loop(
+            vec!["dev".to_string()],
+            |command| {
+                commands.borrow_mut().push(command);
+                Ok(())
+            },
+            || Ok(signals.borrow_mut().pop().expect("watch signal")),
+        )
+        .expect("watch loop");
+        let commands = commands.into_inner();
+        assert!(matches!(commands[0], super::ComposeCommands::Up { detach: true, .. }));
+        assert!(matches!(commands[1], super::ComposeCommands::Down { .. }));
+        assert!(matches!(commands[2], super::ComposeCommands::Up { detach: true, .. }));
+        assert_eq!(commands.len(), 3);
+    }
+
+    #[test]
+    fn compose_pull_preserves_authenticated_parent_origin() {
+        let compose: ferro_compose::ComposeFile = serde_yaml::from_str(
+            "services:\n  api:\n    image: registry.example/api:latest\n",
+        )
+        .unwrap();
+        let project = super::ComposeProject {
+            path: PathBuf::from("compose.yaml"),
+            compose,
+        };
+        let origin = super::RequestOrigin::cli_current()
+            .unwrap()
+            .for_operation([77; 16]);
+        let mut observed = None;
+        super::compose_pull_with_origin(
+            &project,
+            &[],
+            &origin,
+            |image, caller| {
+                assert_eq!(image, "registry.example/api:latest");
+                observed = caller.request_id();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, Some([77; 16]));
     }
 
     #[test]

@@ -407,6 +407,36 @@ impl LocalVolumeStore {
         Ok(())
     }
 
+    pub fn backup_authorized(
+        &self,
+        name: &str,
+        dest: impl AsRef<Path>,
+        permit: crate::authorization::surface::SurfacePermit,
+    ) -> Result<(), VolumeStoreError> {
+        crate::authorization::surface::SurfaceAuthorization::validate_execution(
+            &permit,
+            crate::authorization::Action::VolumeBackup,
+            crate::authorization::ResourceKind::Volume,
+            name,
+            1,
+        )
+        .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+        match self.backup(name, dest) {
+            Ok(()) => {
+                permit
+                    .finish(true)
+                    .map_err(|error| VolumeStoreError::Authorization(error.to_string()))?;
+                Ok(())
+            }
+            Err(error) => {
+                permit
+                    .finish(false)
+                    .map_err(|finish| VolumeStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
+    }
+
     fn restore(&self, name: &str, src: impl AsRef<Path>) -> Result<(), VolumeStoreError> {
         let record = self
             .get(name)?
@@ -427,7 +457,7 @@ impl LocalVolumeStore {
     ) -> Result<(), VolumeStoreError> {
         crate::authorization::surface::SurfaceAuthorization::validate_execution(
             &permit,
-            crate::authorization::Action::VolumeCreate,
+            crate::authorization::Action::VolumeRestore,
             crate::authorization::ResourceKind::Volume,
             name,
             1,

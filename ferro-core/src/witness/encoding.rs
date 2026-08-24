@@ -316,6 +316,8 @@ fn action(value: u8) -> Result<WitnessAction, WitnessError> {
         31 => ContainerStart,
         32 => ContainerArchiveWrite,
         33 => ContainerUpdate,
+        34 => VolumeBackup,
+        35 => VolumeRestore,
         _ => return Err(WitnessError::UnknownDiscriminant { field: "action" }),
     };
     Ok(action)

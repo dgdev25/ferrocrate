@@ -718,6 +718,10 @@ pub enum Action {
     VolumeMount,
     #[serde(rename = "volume.unmount")]
     VolumeUnmount,
+    #[serde(rename = "volume.backup")]
+    VolumeBackup,
+    #[serde(rename = "volume.restore")]
+    VolumeRestore,
     #[serde(rename = "network.create")]
     NetworkCreate,
     #[serde(rename = "network.delete")]

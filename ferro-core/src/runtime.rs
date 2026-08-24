@@ -15343,6 +15343,9 @@ mod tests {
         )
         .unwrap()
         .is_none());
+        #[cfg(target_env = "musl")]
+        std::fs::rename(&target, rootfs.join("replaced-data")).unwrap();
+        #[cfg(not(target_env = "musl"))]
         std::fs::remove_dir(&target).unwrap();
         std::fs::create_dir(&target).unwrap();
         assert!(super::classify_unmarked_mount(
@@ -17014,8 +17017,12 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let marker = root.path().join("workload-ran");
         let stdout = root.path().join("stdout");
         let stderr = root.path().join("stderr");
+        #[cfg(target_env = "musl")]
+        let touch = "/bin/touch";
+        #[cfg(not(target_env = "musl"))]
+        let touch = "/usr/bin/touch";
         let command = super::build_command(
-            &["/usr/bin/touch".into(), marker.display().to_string()],
+            &[touch.into(), marker.display().to_string()],
             &[],
             None,
             false,

@@ -322,7 +322,13 @@ pub enum Commands {
     Search { term: String },
     /// Create, without starting, a container.
     #[cfg(target_os = "linux")]
-    Create { image: String, #[arg(trailing_var_arg = true)] cmd: Vec<String> },
+    Create {
+        #[arg(long)]
+        name: Option<String>,
+        image: String,
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
     /// Attach to a running container.
     #[cfg(target_os = "linux")]
     Attach { #[arg(long = "no-stdin")] no_stdin: bool, container: String },
@@ -3417,10 +3423,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::Create { image, cmd } => {
+            Commands::Create { name, image, cmd } => {
                 let state = DockerCompatState::new(&runtime_dir)?;
                 let payload = serde_json::json!({"Image": image, "Cmd": cmd});
-                let id = docker_create_pending(&state, payload.to_string().as_bytes(), None)?;
+                let id = docker_create_pending(&state, payload.to_string().as_bytes(), name)?;
                 println!("{id}");
                 Ok(())
             }
@@ -19106,6 +19112,13 @@ volumes:
         ] {
             Cli::try_parse_from(args).expect("Docker-compatible native command parses");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_create_accepts_a_docker_name_flag() {
+        assert!(Cli::try_parse_from(["ferrocrate", "create", "--name", "web", "alpine"])
+            .is_ok(), "create accepts --name");
     }
 
     #[test]

@@ -196,7 +196,11 @@ pub(crate) fn capture_stream(
         let mut pending = Vec::new();
         let mut buffer = [0_u8; 8192];
         loop {
-            let count = reader.read(&mut buffer)?;
+            let count = match reader.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => 0,
+                Err(error) => return Err(error),
+            };
             if count == 0 {
                 break;
             }
@@ -748,6 +752,7 @@ fn read_rotated(path: &Path) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{ContainerLogContext, JsonFileLogDriver, LogDriver, LogEntry, LogStream};
+    use std::path::PathBuf;
 
     #[test]
     fn json_file_driver_runs_container_lifecycle_and_reads_streams() {
@@ -918,8 +923,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let capture = temp.path().join("capture.jsonl");
         let entrypoint = temp.path().join("fixture-log-driver.sh");
+        let capture = PathBuf::from(format!("{}.capture", entrypoint.display()));
         std::fs::write(
             &entrypoint,
             include_bytes!("../../tests/fixtures/plugins/log-driver-recorder.sh"),
@@ -927,11 +932,6 @@ mod tests {
         .expect("fixture entrypoint");
         std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o700))
             .expect("executable fixture");
-        {
-            let _guard = crate::test_support::acquire_env_lock();
-            unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
-        }
-
         let mut manifest = parse_plugin_manifest(include_bytes!(
             "../../tests/fixtures/plugins/log-driver-v1.json"
         ))
@@ -958,11 +958,6 @@ mod tests {
             .expect("write");
         writer.flush().expect("flush");
         writer.close().expect("close");
-        {
-            let _guard = crate::test_support::acquire_env_lock();
-            unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
-        }
-
         let records = std::fs::read_to_string(capture).expect("plugin capture");
         let operations = records
             .lines()
@@ -1025,8 +1020,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let plugin_dir = temp.path().join("plugins/log-drivers");
         std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
-        let capture = temp.path().join("registry-capture.jsonl");
         let entrypoint = temp.path().join("fixture-log-driver.sh");
+        let capture = PathBuf::from(format!("{}.capture", entrypoint.display()));
         std::fs::write(
             &entrypoint,
             include_bytes!("../../tests/fixtures/plugins/log-driver-recorder.sh"),
@@ -1054,11 +1049,6 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .expect("manifest");
-        {
-            let _guard = crate::test_support::acquire_env_lock();
-            unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
-        }
-
         let driver = load_log_driver("audit-log", temp.path(), None).expect("registry driver");
         assert_eq!(driver.name(), "audit-log");
         let context = ContainerLogContext {
@@ -1075,10 +1065,6 @@ mod tests {
             })
             .expect("write");
         writer.close().expect("close");
-        {
-            let _guard = crate::test_support::acquire_env_lock();
-            unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
-        }
         assert!(std::fs::read_to_string(capture)
             .unwrap()
             .contains("registry-container"));

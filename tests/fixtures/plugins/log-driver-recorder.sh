@@ -1,5 +1,5 @@
 #!/bin/sh
 set -eu
-test -n "${FERROCRATE_LOG_DRIVER_CAPTURE:-}"
+capture=${FERROCRATE_LOG_DRIVER_CAPTURE:-"$0.capture"}
 payload=$(cat)
-printf '%s\n' "$payload" >> "$FERROCRATE_LOG_DRIVER_CAPTURE"
+printf '%s\n' "$payload" >> "$capture"

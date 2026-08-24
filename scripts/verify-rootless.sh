@@ -241,17 +241,32 @@ if [[ -r "$apparmor_userns_path" ]]; then
   userns_restricted="$(cat "$apparmor_userns_path")"
   echo "rootless.apparmor_restrict_unprivileged_userns=${userns_restricted}"
   if [[ "$userns_restricted" == "1" ]]; then
-    if [[ -f "$apparmor_profile_path" ]] && [[ -r "$apparmor_profiles_path" ]] &&
-       awk -v name="$apparmor_profile_name" '$1 == name { found=1 } END { exit !found }' "$apparmor_profiles_path"; then
-      echo "rootless.apparmor_profile=loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
-      echo "rootless.apparmor_note=FerroCrate profile grants userns while the host-wide restriction remains active"
-    elif [[ -f "$apparmor_profile_path" ]] && [[ -r "$apparmor_profiles_path" ]]; then
-      echo "rootless.apparmor_profile=installed-not-loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
-      echo "rootless.apparmor_remedy=sudo apparmor_parser -r ${apparmor_profile_path}"
-      missing=1
-    elif [[ -f "$apparmor_profile_path" ]]; then
-      echo "rootless.apparmor_profile=installed-load-state-unreadable name=${apparmor_profile_name} path=${apparmor_profile_path}"
-      echo "rootless.apparmor_note=run sudo aa-status to confirm the FerroCrate profile is loaded"
+    profile_load_state="unreadable"
+    if [[ -r "$apparmor_profiles_path" ]]; then
+      if awk -v name="$apparmor_profile_name" \
+          '$1 == name { found=1 } END { exit !found }' \
+          "$apparmor_profiles_path" 2>/dev/null; then
+        profile_load_state="loaded"
+      elif [[ "$?" == 1 ]]; then
+        profile_load_state="not-loaded"
+      fi
+    fi
+    if [[ -f "$apparmor_profile_path" ]]; then
+      case "$profile_load_state" in
+        loaded)
+          echo "rootless.apparmor_profile=loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
+          echo "rootless.apparmor_note=FerroCrate profile grants userns while the host-wide restriction remains active"
+          ;;
+        not-loaded)
+          echo "rootless.apparmor_profile=installed-not-loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
+          echo "rootless.apparmor_remedy=sudo apparmor_parser -r ${apparmor_profile_path}"
+          missing=1
+          ;;
+        *)
+          echo "rootless.apparmor_profile=installed-load-state-unreadable name=${apparmor_profile_name} path=${apparmor_profile_path}"
+          echo "rootless.apparmor_note=run sudo aa-status to confirm the FerroCrate profile is loaded"
+          ;;
+      esac
     else
       echo "rootless.apparmor_profile=absent name=${apparmor_profile_name} path=${apparmor_profile_path}"
       echo "rootless.apparmor_remedy=install or reinstall the FerroCrate Debian package, then run sudo apparmor_parser -r ${apparmor_profile_path}"

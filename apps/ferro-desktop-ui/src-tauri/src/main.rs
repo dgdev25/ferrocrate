@@ -2553,6 +2553,7 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
 #[derive(Debug, Clone, Copy)]
 struct WebModeOptions {
     listen: SocketAddr,
+    insecure_bind: bool,
 }
 
 fn parse_web_mode<I, S>(args: I) -> Result<Option<WebModeOptions>, String>
@@ -2593,7 +2594,10 @@ where
             "refusing non-loopback web bridge bind {listen}; pass --insecure-bind to override"
         ));
     }
-    Ok(Some(WebModeOptions { listen }))
+    Ok(Some(WebModeOptions {
+        listen,
+        insecure_bind,
+    }))
 }
 
 fn main() {
@@ -2613,7 +2617,9 @@ fn main() {
             );
             std::process::exit(2);
         }
-        println!("Ferrocrate Desktop web bridge: http://{}", options.listen);
+        if options.insecure_bind {
+            eprintln!("WARNING: --insecure-bind exposes container control to the network");
+        }
         let runtime = tokio::runtime::Runtime::new().expect("create web bridge runtime");
         if let Err(error) = runtime.block_on(web_bridge::run_web_bridge(options.listen, dist)) {
             eprintln!("ferro-desktop-ui: {error}");

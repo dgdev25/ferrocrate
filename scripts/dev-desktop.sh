@@ -60,8 +60,6 @@ daemon_pid=$!
 trap 'kill "$daemon_pid" 2>/dev/null || true' EXIT
 sleep 1
 if [[ "$web" == true ]]; then
-  url="http://127.0.0.1:4190"
-  say "web bridge ready at $url"
   "$ui/src-tauri/target/debug/ferro-desktop-ui" --web --listen 127.0.0.1:4190
 else
   say "launching Ferrocrate Desktop"

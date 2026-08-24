@@ -9987,18 +9987,15 @@ fn force_kill_running_with_retry(
     mut inspect_status: impl FnMut() -> Result<String, String>,
     mut kill: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
-    retry_transient_cas(|| {
-        let status = inspect_status()?;
-        if status == "running" || status == "paused" {
-            kill()
-        } else {
-            // A SIGKILL may have completed even when its terminal store CAS
-            // lost to the exit publisher. Re-reading a terminal state makes
-            // that post-effect retry idempotent and avoids signalling a PID
-            // from a stale record a second time.
-            Ok(())
-        }
-    })
+    let status = inspect_status()?;
+    if status == "running" || status == "paused" {
+        // A post-effect persistence failure is not equivalent to a completed
+        // lifecycle mutation. Surface it so remove cannot proceed past an
+        // unfinalized kill reservation.
+        kill()
+    } else {
+        Ok(())
+    }
 }
 
 fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<(), String> {
@@ -26818,12 +26815,12 @@ volumes:
     }
 
     #[test]
-    fn force_remove_rechecks_terminal_state_after_post_effect_cas_loss() {
+    fn force_remove_surfaces_post_effect_cas_loss() {
         use std::cell::Cell;
 
         let status = Cell::new("running");
         let kill_calls = Cell::new(0usize);
-        force_kill_running_with_retry(
+        let error = force_kill_running_with_retry(
             || Ok(status.get().to_string()),
             || {
                 kill_calls.set(kill_calls.get() + 1);
@@ -26833,9 +26830,10 @@ volumes:
                 Err("kernel effect completed but lifecycle state persistence failed: container mutation compare-and-swap failed".to_string())
             },
         )
-        .expect("the fresh terminal state satisfies force removal");
+        .expect_err("a lost terminal write must remain visible");
 
         assert_eq!(kill_calls.get(), 1, "the terminal process must not be signalled twice");
+        assert!(error.contains("compare-and-swap"));
     }
 
     #[test]

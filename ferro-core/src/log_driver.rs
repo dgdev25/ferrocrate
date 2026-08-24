@@ -949,4 +949,75 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn registry_loads_signed_manifest_fixture_by_driver_name() {
+        use super::load_log_driver;
+        use crate::plugin_contract::parse_plugin_manifest;
+        use ed25519_dalek::{Signer, SigningKey};
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = temp.path().join("plugins/log-drivers");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+        let capture = temp.path().join("registry-capture.jsonl");
+        let entrypoint = temp.path().join("fixture-log-driver.sh");
+        std::fs::write(
+            &entrypoint,
+            include_bytes!("../../tests/fixtures/plugins/log-driver-recorder.sh"),
+        )
+        .expect("fixture entrypoint");
+        std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o700))
+            .expect("entrypoint mode");
+
+        let key = SigningKey::from_bytes(&[23_u8; 32]);
+        let trust_root = temp.path().join("plugins/trust-root.pub");
+        std::fs::write(&trust_root, hex::encode(key.verifying_key().to_bytes()))
+            .expect("trust root");
+        std::fs::set_permissions(&trust_root, std::fs::Permissions::from_mode(0o600))
+            .expect("trust root mode");
+        let mut manifest = parse_plugin_manifest(include_bytes!(
+            "../../tests/fixtures/plugins/log-driver-v1.json"
+        ))
+        .expect("published manifest fixture");
+        manifest.entrypoint = entrypoint.display().to_string();
+        manifest.signature.clear();
+        let unsigned = serde_json::to_vec(&manifest).expect("manifest bytes");
+        manifest.signature = format!("ed25519:{}", hex::encode(key.sign(&unsigned).to_bytes()));
+        std::fs::write(
+            plugin_dir.join("audit-log.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .expect("manifest");
+        {
+            let _guard = crate::test_support::acquire_env_lock();
+            unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
+        }
+
+        let driver = load_log_driver("audit-log", temp.path(), None).expect("registry driver");
+        assert_eq!(driver.name(), "audit-log");
+        let context = ContainerLogContext {
+            container_id: "registry-container".into(),
+            log_dir: temp.path().join("logs"),
+            append: false,
+        };
+        let mut writer = driver.open(&context).expect("open");
+        writer
+            .write(&LogEntry {
+                stream: LogStream::Stdout,
+                timestamp_nanos: 101,
+                bytes: b"registry hello\n".to_vec(),
+            })
+            .expect("write");
+        writer.close().expect("close");
+        {
+            let _guard = crate::test_support::acquire_env_lock();
+            unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
+        }
+        assert!(
+            std::fs::read_to_string(capture)
+                .unwrap()
+                .contains("registry-container")
+        );
+    }
 }

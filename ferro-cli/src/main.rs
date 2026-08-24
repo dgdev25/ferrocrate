@@ -9982,6 +9982,25 @@ fn retry_transient_cas<T>(
     last
 }
 
+#[cfg(target_os = "linux")]
+fn force_kill_running_with_retry(
+    mut inspect_status: impl FnMut() -> Result<String, String>,
+    mut kill: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    retry_transient_cas(|| {
+        let status = inspect_status()?;
+        if status == "running" || status == "paused" {
+            kill()
+        } else {
+            // A SIGKILL may have completed even when its terminal store CAS
+            // lost to the exit publisher. Re-reading a terminal state makes
+            // that post-effect retry idempotent and avoids signalling a PID
+            // from a stale record a second time.
+            Ok(())
+        }
+    })
+}
+
 fn extract_docker_build_context(archive: &[u8], destination: &Path) -> Result<(), String> {
     extract_docker_build_context_with_limits(
         archive,
@@ -12084,12 +12103,19 @@ fn handle_rm(
     }
     let resolved = resolve_container_id(runtime, container)?;
     if force {
-        let record = runtime.inspect(&resolved).map_err(|err| err.to_string())?;
-        if record.status == "running" || record.status == "paused" {
-            runtime
-                .kill(&resolved)
-                .map_err(|err| format!("rm: force kill failed: {err}"))?;
-        }
+        force_kill_running_with_retry(
+            || {
+                runtime
+                    .inspect(&resolved)
+                    .map(|record| record.status)
+                    .map_err(|err| err.to_string())
+            },
+            || {
+                runtime
+                    .kill(&resolved)
+                    .map_err(|err| format!("rm: force kill failed: {err}"))
+            },
+        )?;
     }
     let anonymous_volumes = if volumes {
         let mounted_sources = record_mount_sources(runtime, &resolved)?;
@@ -22396,7 +22422,8 @@ mod tests {
         handle_build, handle_containers, handle_context, handle_events, handle_exec,
         handle_image_prune, handle_images, handle_inspect, handle_kill, handle_logs,
         handle_migrate_compose_report, handle_network, handle_pause, handle_pull, handle_push,
-        handle_restart, handle_rm, handle_rmi, handle_run, handle_stats, handle_stop, handle_top,
+        force_kill_running_with_retry, handle_restart, handle_rm, handle_rmi, handle_run,
+        handle_stats, handle_stop, handle_top,
         handle_unpause, handle_volume, handle_wait, handle_rvf_launch, host_build_arch,
         import_rvf_image_at,
         normalize_docker_api_path, parse_bind_mounts, parse_build_contexts, parse_build_secrets,
@@ -26788,6 +26815,27 @@ volumes:
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
         assert!(err.contains("restart: container is required"));
+    }
+
+    #[test]
+    fn force_remove_rechecks_terminal_state_after_post_effect_cas_loss() {
+        use std::cell::Cell;
+
+        let status = Cell::new("running");
+        let kill_calls = Cell::new(0usize);
+        force_kill_running_with_retry(
+            || Ok(status.get().to_string()),
+            || {
+                kill_calls.set(kill_calls.get() + 1);
+                // Deterministically model the exit publisher winning after
+                // SIGKILL but before the request persists `killed`.
+                status.set("exited");
+                Err("kernel effect completed but lifecycle state persistence failed: container mutation compare-and-swap failed".to_string())
+            },
+        )
+        .expect("the fresh terminal state satisfies force removal");
+
+        assert_eq!(kill_calls.get(), 1, "the terminal process must not be signalled twice");
     }
 
     #[test]

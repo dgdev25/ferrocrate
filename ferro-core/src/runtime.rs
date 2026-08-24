@@ -4345,6 +4345,43 @@ impl ContainerRuntime {
                 user_stopped,
             )
         };
+        if matches!(result, Err(ContainerStoreError::MutationConflict)) {
+            match self.store.get(id) {
+                Ok(Some(current)) => {
+                    let last_writer = current
+                        .pending_mutation
+                        .as_ref()
+                        .map(|reservation| reservation.action.as_str())
+                        .unwrap_or_else(|| {
+                            if current.status == "exited" {
+                                "process-exit-publisher"
+                            } else {
+                                "terminal-or-background-writer"
+                            }
+                        });
+                    log::warn!(
+                        "post-effect container CAS conflict: container_id={} authorized_generation={} current_generation={} expected_status={} current_status={} last_writer={}",
+                        id,
+                        proof.canonical().resource_generation(),
+                        current.mutation_generation,
+                        expected_status,
+                        current.status,
+                        last_writer
+                    );
+                }
+                Ok(None) => log::warn!(
+                    "post-effect container CAS conflict: container_id={} authorized_generation={} current_record=deleted last_writer=container-delete",
+                    id,
+                    proof.canonical().resource_generation()
+                ),
+                Err(error) => log::warn!(
+                    "post-effect container CAS conflict: container_id={} authorized_generation={} current_record=unreadable error={}",
+                    id,
+                    proof.canonical().resource_generation(),
+                    error
+                ),
+            }
+        }
         result.map_err(RuntimeError::PostEffectPersistence)
     }
 

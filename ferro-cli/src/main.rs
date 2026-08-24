@@ -12783,7 +12783,7 @@ struct DockerLogConfig {
     #[serde(rename = "Type", default)]
     driver: String,
     #[serde(rename = "Config", default)]
-    options: HashMap<String, String>,
+    options: Option<HashMap<String, String>>,
 }
 
 /// True for values that only restate a default: null, false, 0, -1, empty
@@ -12837,7 +12837,7 @@ fn validate_docker_log_config(config: Option<&DockerLogConfig>) -> Result<(), St
     if !config.driver.is_empty() && config.driver != "json-file" {
         return Err(format!("docker: unsupported log driver {}", config.driver));
     }
-    for (key, value) in &config.options {
+    for (key, value) in config.options.as_ref().into_iter().flatten() {
         match key.as_str() {
             "max-size" if parse_docker_log_size(value).is_some() => {}
             "max-file" if value.parse::<u32>().ok().is_some_and(|count| count >= 1) => {}
@@ -17190,7 +17190,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         log_options: host_config
             .log_config
             .as_ref()
-            .map(|config| config.options.clone())
+            .and_then(|config| config.options.clone())
             .unwrap_or_default(),
         auto_remove: host_config.auto_remove,
         health,
@@ -22864,6 +22864,15 @@ volumes:
         )
         .expect_err("unknown log drivers must fail closed");
         assert!(error.contains("unsupported log driver"), "{error}");
+    }
+
+    #[test]
+    fn docker_create_log_config_accepts_docker_default_null_options() {
+        parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"LogConfig":{"Type":"","Config":null}}}"#,
+            None,
+        )
+        .expect("Docker's null default LogConfig options are accepted");
     }
 
     /// Docker's CLI sends the complete HostConfig shape with default values

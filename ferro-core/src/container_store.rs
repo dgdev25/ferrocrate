@@ -164,6 +164,11 @@ pub struct ContainerRecord {
     pub network_backend: Option<String>,
     #[serde(default)]
     pub network_ownership: Option<NetworkOwnershipRecord>,
+    /// Durable per-network endpoint identities. Records written before
+    /// multi-network support leave this empty and are projected from the
+    /// legacy single-network fields by `effective_network_endpoints`.
+    #[serde(default)]
+    pub network_endpoints: Vec<NetworkEndpointRecord>,
     #[serde(default)]
     pub managed_overlay: Option<String>,
     #[serde(default)]
@@ -272,6 +277,7 @@ impl ContainerRecord {
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             managed_overlay: None,
             managed_cleanup_provenance: None,
             managed_host_veth: None,
@@ -281,6 +287,56 @@ impl ContainerRecord {
             pending_mutation: None,
         }
     }
+
+    /// Return the canonical endpoint view while keeping pre-migration records
+    /// readable. New writes populate `network_endpoints`; the legacy fields
+    /// remain as a compatibility projection for older clients and stores.
+    pub fn effective_network_endpoints(&self) -> Vec<NetworkEndpointRecord> {
+        if !self.network_endpoints.is_empty() {
+            return self.network_endpoints.clone();
+        }
+        let Some(network_name) = self.network_name.clone() else {
+            return Vec::new();
+        };
+        vec![NetworkEndpointRecord {
+            endpoint_id: self
+                .network_ownership
+                .as_ref()
+                .map(|ownership| ownership.host_interface.clone())
+                .unwrap_or_else(|| self.id.clone()),
+            network_name,
+            interface_name: "eth0".to_string(),
+            ipv4_address: self.ip_address.clone(),
+            ipv6_address: self.ipv6_address.clone(),
+            generation: 1,
+            namespace_identity: self.namespace_identity,
+            network_backend: self.network_backend.clone(),
+            ownership: self.network_ownership.clone(),
+        }]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkEndpointRecord {
+    pub network_name: String,
+    pub endpoint_id: String,
+    pub interface_name: String,
+    #[serde(default)]
+    pub ipv4_address: Option<String>,
+    #[serde(default)]
+    pub ipv6_address: Option<String>,
+    #[serde(default = "default_endpoint_generation")]
+    pub generation: u64,
+    #[serde(default)]
+    pub namespace_identity: Option<KernelObjectIdentityRecord>,
+    #[serde(default)]
+    pub network_backend: Option<String>,
+    #[serde(default)]
+    pub ownership: Option<NetworkOwnershipRecord>,
+}
+
+fn default_endpoint_generation() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -448,4 +504,38 @@ pub fn now_unix() -> u64 {
 
 fn default_health_status() -> String {
     "none".to_string()
+}
+
+#[cfg(test)]
+mod network_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_single_network_record_projects_one_endpoint() {
+        let mut record = ContainerRecord::authorization_candidate(
+            "legacy".into(),
+            "example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+        );
+        record.netns = Some("ferro-legacy".into());
+        record.namespace_identity = Some(KernelObjectIdentityRecord {
+            device: 12,
+            inode: 34,
+        });
+        record.network_name = Some("legacy-net".into());
+        record.ip_address = Some("172.28.0.7".into());
+        record.ipv6_address = Some("fd28::7".into());
+        record.network_backend = Some("nftables".into());
+
+        let endpoints = record.effective_network_endpoints();
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].network_name, "legacy-net");
+        assert_eq!(endpoints[0].endpoint_id, "legacy");
+        assert_eq!(endpoints[0].interface_name, "eth0");
+        assert_eq!(endpoints[0].ipv4_address.as_deref(), Some("172.28.0.7"));
+        assert_eq!(endpoints[0].ipv6_address.as_deref(), Some("fd28::7"));
+        assert_eq!(endpoints[0].generation, 1);
+        assert_eq!(endpoints[0].namespace_identity, record.namespace_identity);
+    }
 }

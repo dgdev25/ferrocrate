@@ -13,3 +13,19 @@ export function buildRunContainerOptions({ command, ports, volumes, memoryMb, cp
     cpuPeriod,
   };
 }
+
+export function buildRunContainerInvokeArgs({ image, name, environment, pullIfMissing, ...fields }) {
+  const options = buildRunContainerOptions(fields);
+  return {
+    image,
+    name: name.trim() || null,
+    command: options.command,
+    ports: options.ports,
+    volumes: options.volumes,
+    pullIfMissing,
+    environment: environment.split("\n").map((value) => value.trim()).filter(Boolean),
+    memory: options.memory,
+    cpuQuota: options.cpuQuota,
+    cpuPeriod: options.cpuPeriod,
+  };
+}

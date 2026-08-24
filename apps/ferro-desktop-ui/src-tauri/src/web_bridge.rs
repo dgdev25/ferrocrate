@@ -828,6 +828,7 @@ mod tests {
         }))
         .expect("browser payload");
 
+        assert_eq!(args.name.as_deref(), Some("demo"));
         assert_eq!(args.command, ["echo", "ready"]);
         assert_eq!(args.ports, ["8080:80"]);
         assert_eq!(args.volumes, ["data:/data"]);

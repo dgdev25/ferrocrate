@@ -171,11 +171,13 @@ export function HostPathField({
 }) {
   const validationError = hostPathError(value, kind);
   const visibleError = value.trim() ? validationError : null;
+  const inputId = `host-${kind}-path`;
   return createElement("div", { className: "host-path-field detail-span" },
-    createElement("label", null,
+    createElement("label", { htmlFor: inputId },
       createElement("span", null, label),
       createElement("div", { className: "field-row" },
         createElement("input", {
+          id: inputId,
           value,
           onChange,
           placeholder: `absolute ${kind} path on the daemon host`,
@@ -318,13 +320,13 @@ export function ResourceCreateDialog({
         createElement("button", { className: "btn btn-secondary", onClick: onCancel }, "Cancel"),
       ),
       createElement("div", { className: "editor-grid" },
-        createElement("label", { className: "detail-span" },
+        createElement("label", { className: "detail-span", htmlFor: `${kind}-name` },
           createElement("span", null, isNetwork ? "Network name" : "Volume name"),
-          createElement("input", { value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data", autoFocus: true }),
+          createElement("input", { id: `${kind}-name`, value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data", autoFocus: true }),
         ),
-        isNetwork ? createElement("label", { className: "detail-span" },
+        isNetwork ? createElement("label", { className: "detail-span", htmlFor: "network-subnet" },
           createElement("span", null, "Subnet (optional)"),
-          createElement("input", { value: subnet, onChange: onSubnetChange, placeholder: "172.20.0.0/16" }),
+          createElement("input", { id: "network-subnet", value: subnet, onChange: onSubnetChange, placeholder: "172.20.0.0/16" }),
         ) : null,
         error ? createElement(ActionErrorNotice, { error, onStart, onReviewLicensing }) : null,
       ),

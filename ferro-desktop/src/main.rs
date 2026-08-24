@@ -97,6 +97,13 @@ enum Commands {
         #[command(subcommand)]
         command: NetworkProxyCommands,
     },
+    #[command(hide = true)]
+    ContainerProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: ContainerProxyCommands,
+    },
     Doctor {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -148,6 +155,22 @@ enum NetworkProxyCommands {
     },
     Remove {
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContainerProxyCommands {
+    Inspect {
+        container: String,
+    },
+    Update {
+        container: String,
+        #[arg(long)]
+        memory: Option<u64>,
+        #[arg(long)]
+        cpu_quota: Option<u64>,
+        #[arg(long)]
+        cpu_period: Option<u64>,
     },
 }
 
@@ -722,6 +745,85 @@ fn run_network_proxy(
     Ok(())
 }
 
+fn container_proxy_request(
+    command: &ContainerProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        ContainerProxyCommands::Inspect { container } => {
+            let container = required_network_name(container)
+                .map_err(|_| DesktopError::Invalid("container is required".to_string()))?;
+            Ok((
+                "GET",
+                format!(
+                    "/containers/{}/json",
+                    percent_encode_terminal_path_component(container)
+                ),
+                Vec::new(),
+            ))
+        }
+        ContainerProxyCommands::Update {
+            container,
+            memory,
+            cpu_quota,
+            cpu_period,
+        } => {
+            let container = required_network_name(container)
+                .map_err(|_| DesktopError::Invalid("container is required".to_string()))?;
+            if memory.is_none() && cpu_quota.is_none() && cpu_period.is_none() {
+                return Err(DesktopError::Invalid(
+                    "at least one resource limit is required".to_string(),
+                ));
+            }
+            let mut payload = serde_json::Map::new();
+            if let Some(value) = memory {
+                payload.insert("Memory".to_string(), serde_json::json!(value));
+            }
+            if let Some(value) = cpu_quota {
+                payload.insert("CpuQuota".to_string(), serde_json::json!(value));
+            }
+            if let Some(value) = cpu_period {
+                payload.insert("CpuPeriod".to_string(), serde_json::json!(value));
+            }
+            Ok((
+                "POST",
+                format!(
+                    "/containers/{}/update",
+                    percent_encode_terminal_path_component(container)
+                ),
+                serde_json::to_vec(&payload)?,
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_container_proxy(
+    socket: Option<&str>,
+    command: ContainerProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = container_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.is_empty() && !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_container_proxy(
+    _socket: Option<&str>,
+    _command: ContainerProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "container daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn run_network_proxy(
     _socket: Option<&str>,
@@ -1065,6 +1167,7 @@ fn main() {
         } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
         Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
         Commands::NetworkProxy { socket, command } => run_network_proxy(socket.as_deref(), command),
+        Commands::ContainerProxy { socket, command } => run_container_proxy(socket.as_deref(), command),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -1093,6 +1196,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
             | Commands::TerminalResize { .. }
             | Commands::VolumeProxy { .. }
             | Commands::NetworkProxy { .. }
+            | Commands::ContainerProxy { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -3181,8 +3285,8 @@ mod tests {
         render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
         save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        network_proxy_request, upsert_forward_entry, validate_daemon_addr, vm_state_running,
-        volume_proxy_request,
+        container_proxy_request, network_proxy_request, upsert_forward_entry, validate_daemon_addr,
+        vm_state_running, volume_proxy_request,
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
         ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
@@ -3312,6 +3416,38 @@ mod tests {
         assert!(network_proxy_request(&super::NetworkProxyCommands::Create {
             name: " ".to_string(),
             subnet: None,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn container_proxy_builds_inspect_and_resource_update_requests() {
+        assert_eq!(
+            container_proxy_request(&super::ContainerProxyCommands::Inspect {
+                container: "web/api".to_string(),
+            })
+            .expect("inspect request"),
+            ("GET", "/containers/web%2Fapi/json".to_string(), Vec::new())
+        );
+        assert_eq!(
+            container_proxy_request(&super::ContainerProxyCommands::Update {
+                container: "web".to_string(),
+                memory: Some(134_217_728),
+                cpu_quota: Some(50_000),
+                cpu_period: Some(100_000),
+            })
+            .expect("update request"),
+            (
+                "POST",
+                "/containers/web/update".to_string(),
+                br#"{"CpuPeriod":100000,"CpuQuota":50000,"Memory":134217728}"#.to_vec(),
+            )
+        );
+        assert!(container_proxy_request(&super::ContainerProxyCommands::Update {
+            container: " ".to_string(),
+            memory: None,
+            cpu_quota: None,
+            cpu_period: None,
         })
         .is_err());
     }

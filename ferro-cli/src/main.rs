@@ -14863,11 +14863,12 @@ fn handle_docker_compat_connection(
                 // Docker's Binds mixes host-path binds (absolute source)
                 // with named volumes; named volumes resolve through the
                 // volume store, never as literal paths.
-                let (path_binds, volume_binds): (Vec<String>, Vec<String>) = spec
+                let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
                     .binds
                     .iter()
                     .cloned()
                     .partition(|entry| entry.starts_with('/'));
+                volume_binds.extend(spec.image_volumes.iter().cloned());
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,

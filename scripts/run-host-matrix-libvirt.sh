@@ -98,7 +98,7 @@ git -C "$repo_root" bundle create - "$source_ref" | \
 ssh "${ssh_args[@]}" "$remote" "set -eu; export PATH=\"\$HOME/.cargo/bin:\$PATH:/usr/sbin:/sbin\"; export CARGO_HOME=\"\$HOME/.cargo\" RUSTUP_HOME=\"\$HOME/.rustup\"; cd '$remote_root'; cargo build --locked --workspace; sudo -n env PATH=\"\$PATH\" CARGO_HOME=\"\$CARGO_HOME\" RUSTUP_HOME=\"\$RUSTUP_HOME\" FERROCRATE_REPO_ROOT='$remote_root' bash scripts/run-host-matrix-row.sh '$row_id'"
 
 mkdir -p "$evidence_root"
-ssh "${ssh_args[@]}" "$remote" "tar -C '$remote_root/docs/evidence/host-matrix' -cf - '$row_id'" | \
+ssh "${ssh_args[@]}" "$remote" "sudo -n chown -R \"\$(id -un)\" '$remote_root/docs/evidence/host-matrix/$row_id' 2>/dev/null || true; tar -C '$remote_root/docs/evidence/host-matrix' -cf - '$row_id'" | \
   tar -C "$evidence_root" -xf -
 
 printf 'host-matrix libvirt row completed: row=%s guest=%s commit=%s evidence=%s/%s\n' \

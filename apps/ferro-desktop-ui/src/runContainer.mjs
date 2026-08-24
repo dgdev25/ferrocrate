@@ -29,3 +29,23 @@ export function buildRunContainerInvokeArgs({ image, name, environment, pullIfMi
     cpuPeriod: options.cpuPeriod,
   };
 }
+
+export async function submitRunContainer({ invoke, payload, begin, onBegin, onResult, onError, onSuccess, finish }) {
+  if (!begin()) return null;
+  onBegin();
+  try {
+    const result = await invoke("run_new_container", payload);
+    onResult(result);
+    if (!result.ok) {
+      onError(result.message || result.stderr || `Container run failed with status ${result.code}`);
+      return result;
+    }
+    await onSuccess(result);
+    return result;
+  } catch (error) {
+    onError(String(error));
+    return null;
+  } finally {
+    finish();
+  }
+}

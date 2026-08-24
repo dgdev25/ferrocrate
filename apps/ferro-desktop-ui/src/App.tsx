@@ -53,6 +53,7 @@ import {
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import { runtimeActionAvailability } from "./runtimeActions.mjs";
+import { submitRunContainer } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -861,25 +862,24 @@ function App(): JSX.Element {
   }
 
   async function runNewContainer(payload: RunContainerInvokeArgs): Promise<void> {
-    if (!beginRuntimeAction()) return;
-    setError(null);
-    setRunDialogError(null);
-    setActionLabel("Container Run");
-    try {
-      const result = await invoke<CommandResult>("run_new_container", payload);
-      setLastAction(result);
-      if (!result.ok) {
-        setRunDialogError(commandMessage(result, `Container run failed with status ${result.code}`));
-        return;
-      }
-      setRunDialogOpen(false);
-      setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
-      await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
-    } catch (err) {
-      setRunDialogError(String(err));
-    } finally {
-      finishRuntimeAction();
-    }
+    await submitRunContainer<CommandResult>({
+      invoke,
+      payload,
+      begin: beginRuntimeAction,
+      onBegin: () => {
+        setError(null);
+        setRunDialogError(null);
+        setActionLabel("Container Run");
+      },
+      onResult: setLastAction,
+      onError: setRunDialogError,
+      onSuccess: async () => {
+        setRunDialogOpen(false);
+        setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
+        await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
+      },
+      finish: finishRuntimeAction,
+    });
   }
 
   async function loginRegistry(): Promise<void> {

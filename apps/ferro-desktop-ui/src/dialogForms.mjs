@@ -92,7 +92,7 @@ export function RunContainerDialog({ open, draft, busy, error, onDraftChange, on
   const change = (field, value) => onDraftChange({ ...draft, [field]: value });
   const submit = () => {
     try {
-      onRun(buildRunContainerInvokeArgs({ image, name, command, pullIfMissing, ports, volumes, environment, memoryMb, cpus }));
+      return onRun(buildRunContainerInvokeArgs({ image, name, command, pullIfMissing, ports, volumes, environment, memoryMb, cpus }));
     } catch (error) {
       onInvalid?.(error);
     }

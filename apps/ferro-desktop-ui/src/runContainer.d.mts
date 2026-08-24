@@ -29,3 +29,13 @@ export function buildRunContainerInvokeArgs(input: {
   cpuQuota: number | null;
   cpuPeriod: number | null;
 };
+export function submitRunContainer<Result extends { ok: boolean; code: number; message: string; stderr: string }>(options: {
+  invoke: (command: "run_new_container", payload: ReturnType<typeof buildRunContainerInvokeArgs>) => Promise<Result>;
+  payload: ReturnType<typeof buildRunContainerInvokeArgs>;
+  begin: () => boolean;
+  onBegin: () => void;
+  onResult: (result: Result) => void;
+  onError: (message: string) => void;
+  onSuccess: (result: Result) => void | Promise<void>;
+  finish: () => void;
+}): Promise<Result | null>;

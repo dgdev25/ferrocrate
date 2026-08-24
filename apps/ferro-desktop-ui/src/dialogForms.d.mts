@@ -43,7 +43,7 @@ export function InstallDialog(props: {
 
 export function RunContainerDialog(props: {
   open: boolean; draft: RunContainerDraft; busy: boolean; error: string | null;
-  onDraftChange: (draft: RunContainerDraft) => void; onCancel: Action; onRun: (payload: RunContainerInvokeArgs) => void; onInvalid: (error: unknown) => void;
+  onDraftChange: (draft: RunContainerDraft) => void; onCancel: Action; onRun: (payload: RunContainerInvokeArgs) => void | Promise<void>; onInvalid: (error: unknown) => void;
   onStart: Action; onReviewLicensing: (detail: string) => void; onDoctor: Action;
 }): ReactElement | null;
 

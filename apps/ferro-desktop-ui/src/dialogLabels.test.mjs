@@ -7,6 +7,7 @@ import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryD
 import { BuildLicensingDialog } from "./imageBuild.mjs";
 import { PullImageDialog } from "./imageView.mjs";
 import { LicensingDialog, ResourceCreateDialog } from "./resourcePages.mjs";
+import { submitRunContainer } from "./runContainer.mjs";
 
 const noop = () => {};
 
@@ -65,19 +66,32 @@ function findElement(node, predicate) {
   return null;
 }
 
-test("Run container edits forward the entered name and parsed command on click", () => {
+test("Run container edits invoke the native command with the entered name and parsed command", async () => {
   const props = appDialogProps().run;
-  let submitted;
+  const calls = [];
   props.onDraftChange = (draft) => { props.draft = draft; };
-  props.onRun = (payload) => { submitted = payload; };
+  props.onRun = (payload) => submitRunContainer({
+    invoke: async (command, invokePayload) => {
+      calls.push({ command, payload: invokePayload });
+      return { ok: true, code: 0, message: "", stdout: "", stderr: "" };
+    },
+    payload,
+    begin: () => true,
+    onBegin: noop,
+    onResult: noop,
+    onError: assert.fail,
+    onSuccess: noop,
+    finish: noop,
+  });
 
   let tree = RunContainerDialog(props);
   findElement(tree, (node) => node.props?.id === "run-container-name").props.onChange({ target: { value: "sentinel-worker" } });
   tree = RunContainerDialog(props);
   findElement(tree, (node) => node.props?.id === "run-container-command").props.onChange({ target: { value: "printf sentinel-command" } });
   tree = RunContainerDialog(props);
-  findElement(tree, (node) => node.props?.id === "run-container-submit").props.onClick();
+  await findElement(tree, (node) => node.props?.id === "run-container-submit").props.onClick();
 
-  assert.equal(submitted.name, "sentinel-worker");
-  assert.deepEqual(submitted.command, ["printf", "sentinel-command"]);
+  assert.equal(calls[0].command, "run_new_container");
+  assert.equal(calls[0].payload.name, "sentinel-worker");
+  assert.deepEqual(calls[0].payload.command, ["printf", "sentinel-command"]);
 });

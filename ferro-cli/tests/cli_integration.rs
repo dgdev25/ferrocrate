@@ -78,6 +78,12 @@ struct DesktopVolumeRecord {
 fn desktop_proxied_list_commands_emit_parseable_machine_output() {
     let commands: &[(&[&str], fn(&[u8]))] = &[
         (&["network", "ls", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("network list JSON value")
+                    .is_array(),
+                "network list must use an array, including when empty"
+            );
             let records: Vec<DesktopNetworkListRecord> =
                 serde_json::from_slice(stdout).expect("network list JSON");
             assert!(records.iter().any(|record| {
@@ -90,7 +96,28 @@ fn desktop_proxied_list_commands_emit_parseable_machine_output() {
                         .all(|config| config.subnet.is_some())
             }));
         }),
+        (
+            &[
+                "network",
+                "ls",
+                "--format",
+                "json",
+                "--filter",
+                "name=desktop-no-match",
+            ],
+            |stdout| {
+                let records: Vec<serde_json::Value> =
+                    serde_json::from_slice(stdout).expect("empty network list JSON array");
+                assert!(records.is_empty());
+            },
+        ),
         (&["volume", "ls", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("volume list JSON value")["Volumes"]
+                    .is_array(),
+                "Volumes must use an array when empty"
+            );
             let response: DesktopVolumeListResponse =
                 serde_json::from_slice(stdout).expect("volume list JSON");
             assert!(response.volumes.iter().all(|volume| {
@@ -101,11 +128,23 @@ fn desktop_proxied_list_commands_emit_parseable_machine_output() {
             }));
         }),
         (&["containers", "--all", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("container list JSON value")
+                    .is_array(),
+                "container list must use an array when empty"
+            );
             let records: Vec<serde_json::Value> =
                 serde_json::from_slice(stdout).expect("container list JSON");
             assert!(records.iter().all(serde_json::Value::is_object));
         }),
         (&["images", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("image list JSON value")
+                    .is_array(),
+                "image list must use an array when empty"
+            );
             let records: Vec<serde_json::Value> =
                 serde_json::from_slice(stdout).expect("image list JSON");
             assert!(records.iter().all(serde_json::Value::is_object));

@@ -1,7 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -36,6 +37,28 @@ struct CommandResult {
     stdout: String,
     stderr: String,
     message: String,
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn parse_nullable_json_list<T: DeserializeOwned>(
+    stdout: &str,
+) -> Result<Vec<T>, serde_json::Error> {
+    serde_json::from_str::<Option<Vec<T>>>(stdout).map(Option::unwrap_or_default)
+}
+
+fn normalize_nullable_list_output(result: &mut CommandResult) {
+    if result.ok
+        && matches!(parse_nullable_json_list::<JsonValue>(&result.stdout), Ok(records) if records.is_empty() && result.stdout.trim() == "null")
+    {
+        result.stdout = "[]".to_string();
+    }
 }
 
 fn strip_ansi(input: &str) -> String {
@@ -204,7 +227,7 @@ fn attach_container_resource_usage(
     stdout: &str,
     usage: &BTreeMap<String, ContainerResourceUsage>,
 ) -> Result<String, serde_json::Error> {
-    let mut records = serde_json::from_str::<Vec<JsonValue>>(stdout)?;
+    let mut records = parse_nullable_json_list::<JsonValue>(stdout)?;
     for record in &mut records {
         let Some(id) = record.get("id").and_then(JsonValue::as_str) else {
             continue;
@@ -455,7 +478,8 @@ struct VolumeSummary {
     created_at: String,
     #[serde(
         rename(deserialize = "FerrocrateMounts", serialize = "mounts"),
-        default
+        default,
+        deserialize_with = "deserialize_null_default"
     )]
     mounts: Vec<VolumeMountUsage>,
 }
@@ -463,6 +487,7 @@ struct VolumeSummary {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct VolumeListResponse {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     volumes: Vec<VolumeSummary>,
 }
 
@@ -475,7 +500,7 @@ struct NetworkIpamConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct NetworkIpam {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     config: Vec<NetworkIpamConfig>,
 }
 
@@ -516,7 +541,7 @@ struct ContainerPortRecord {
 struct ContainerNetworkRecord {
     id: String,
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     ports: Vec<ContainerPortRecord>,
 }
 
@@ -1925,8 +1950,9 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
         "ferro-desktop",
         &ferrocrate_proxy_command(&["containers", "--all", "--format", "json"]),
     );
+    normalize_nullable_list_output(&mut containers);
     if containers.ok {
-        if let Ok(records) = serde_json::from_str::<Vec<JsonValue>>(&containers.stdout) {
+        if let Ok(records) = parse_nullable_json_list::<JsonValue>(&containers.stdout) {
             let running_ids = records
                 .iter()
                 .filter(|record| {
@@ -1945,10 +1971,11 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
             }
         }
     }
-    let images = run_owned_command(
+    let mut images = run_owned_command(
         "ferro-desktop",
         &ferrocrate_proxy_command(&["images", "--format", "json"]),
     );
+    normalize_nullable_list_output(&mut images);
 
     DesktopSnapshot {
         runtime,
@@ -1978,7 +2005,7 @@ fn get_networks() -> Result<Vec<NetworkSummary>, String> {
     if !list_result.ok {
         return Err(command_failure("network list", &list_result));
     }
-    let networks = serde_json::from_str::<Vec<NetworkListRecord>>(&list_result.stdout)
+    let networks = parse_nullable_json_list::<NetworkListRecord>(&list_result.stdout)
         .map_err(|error| format!("network proxy returned invalid JSON: {error}"))?;
     let mut inspections = BTreeMap::new();
     for network in &networks {
@@ -1996,7 +2023,7 @@ fn get_networks() -> Result<Vec<NetworkSummary>, String> {
     if !containers_result.ok {
         return Err(command_failure("container port list", &containers_result));
     }
-    let containers = serde_json::from_str::<Vec<ContainerNetworkRecord>>(&containers_result.stdout)
+    let containers = parse_nullable_json_list::<ContainerNetworkRecord>(&containers_result.stdout)
         .map_err(|error| format!("container port list returned invalid JSON: {error}"))?;
     Ok(network_summaries(networks, &inspections, &containers))
 }
@@ -2035,7 +2062,7 @@ fn get_compose_snapshot(file: String) -> Result<ComposeSnapshot, String> {
     if !containers_result.ok {
         return Err(command_failure("container status", &containers_result));
     }
-    let containers = serde_json::from_str::<Vec<ComposeContainerRecord>>(&containers_result.stdout)
+    let containers = parse_nullable_json_list::<ComposeContainerRecord>(&containers_result.stdout)
         .map_err(|error| format!("container status returned invalid JSON: {error}"))?;
     Ok(ComposeSnapshot {
         config: config_result.stdout,
@@ -2524,12 +2551,14 @@ mod tests {
         actionable_error, attach_container_resource_usage, build_bridge_command, command_failure,
         compose_bridge_command, compose_service_rows, container_detail_from_json,
         container_inspect_command, container_update_command, ferrocrate_proxy_command, log_channel,
-        log_follow_command, network_proxy_command, network_summaries, parse_terminal_exec_id,
+        log_follow_command, network_proxy_command, network_summaries,
+        normalize_nullable_list_output, parse_nullable_json_list, parse_terminal_exec_id,
         registry_login_command, registry_logout_command, run_container_bridge_command,
         terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
         CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
         ContainerPortRecord, ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction,
         NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction,
+        VolumeListResponse,
     };
 
     #[test]
@@ -2796,6 +2825,33 @@ mod tests {
             vec!["volume-proxy", "prune"]
         );
         assert!(volume_proxy_command(VolumeAction::Create, Some("  ")).is_err());
+    }
+
+    #[test]
+    fn volume_list_accepts_exact_legacy_null_payload_as_empty() {
+        let response: VolumeListResponse =
+            serde_json::from_str(r#"{"Volumes":null,"Warnings":[]}"#)
+                .expect("legacy daemon null volume list");
+
+        assert!(response.volumes.is_empty());
+    }
+
+    #[test]
+    fn top_level_legacy_null_lists_decode_and_normalize_as_empty_arrays() {
+        let records = parse_nullable_json_list::<JsonValue>("null")
+            .expect("legacy daemon null top-level list");
+        assert!(records.is_empty());
+
+        let mut result = CommandResult {
+            ok: true,
+            code: 0,
+            stdout: "null\n".to_string(),
+            stderr: String::new(),
+            message: String::new(),
+        };
+        normalize_nullable_list_output(&mut result);
+
+        assert_eq!(result.stdout, "[]");
     }
 
     #[test]

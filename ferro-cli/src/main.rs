@@ -180,6 +180,9 @@ pub enum Commands {
         /// Run in the background instead of attaching this CLI process.
         #[arg(short = 'd', long = "detach")]
         detach: bool,
+        /// Override the detach key sequence (for example, `ctrl-\\,ctrl-]`).
+        #[arg(long = "detach-keys", default_value = "ctrl-p,ctrl-q")]
+        detach_keys: String,
         #[arg(long)]
         name: Option<String>,
         #[arg(long, default_value = "bridge")]
@@ -343,7 +346,14 @@ pub enum Commands {
     },
     /// Attach to a running container.
     #[cfg(target_os = "linux")]
-    Attach { #[arg(long = "no-stdin")] no_stdin: bool, container: String },
+    Attach {
+        #[arg(long = "no-stdin")]
+        no_stdin: bool,
+        /// Override the detach key sequence (for example, `ctrl-\\,ctrl-]`).
+        #[arg(long = "detach-keys", default_value = "ctrl-p,ctrl-q")]
+        detach_keys: String,
+        container: String,
+    },
     /// Display daemon information.
     #[cfg(target_os = "linux")]
     Info,
@@ -3258,6 +3268,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 interactive,
                 tty,
                 detach,
+                detach_keys,
                 cmd,
                 network_backend,
                 network,
@@ -3295,6 +3306,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 pids_max,
                 ai_model,
             } => {
+                let detach_keys = parse_detach_keys(&detach_keys)?;
                 let _detach_guard = ScopedEnv::set(
                     "FERROCRATE_DETACH_WORKLOAD",
                     detach.then_some("1"),
@@ -3351,7 +3363,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     None,
                 )?;
                 if !detach {
-                    attach_local_container(&runtime_dir, &id, interactive, tty)?;
+                    attach_local_container(&runtime_dir, &id, interactive, tty, &detach_keys)?;
                 }
                 if rm {
                     wait_for_container_exit(&runtime, &id)?;
@@ -3549,10 +3561,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::Attach { no_stdin, container } => {
+            Commands::Attach { no_stdin, detach_keys, container } => {
                 let id = resolve_container_id(&runtime, &container)?;
                 let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                attach_local_container(&runtime_dir, &id, !no_stdin, record.tty)
+                let detach_keys = parse_detach_keys(&detach_keys)?;
+                attach_local_container(&runtime_dir, &id, !no_stdin, record.tty, &detach_keys)
             }
             #[cfg(target_os = "linux")]
             Commands::Info => {
@@ -5513,28 +5526,130 @@ where
 }
 
 #[cfg(target_os = "linux")]
+fn parse_detach_keys(value: &str) -> Result<Vec<u8>, String> {
+    let keys = value
+        .split(',')
+        .map(|name| {
+            let name = name.trim();
+            let control = name
+                .strip_prefix("ctrl-")
+                .or_else(|| name.strip_prefix("CTRL-"));
+            match control {
+                Some(key) if key.len() == 1 => {
+                    let byte = key.as_bytes()[0];
+                    if !(b'@'..=b'_').contains(&byte) && !(b'a'..=b'z').contains(&byte) && !(b'A'..=b'Z').contains(&byte) {
+                        return Err(format!("detach keys: invalid control key {name:?}"));
+                    }
+                    Ok(byte.to_ascii_uppercase() & 0x1f)
+                }
+                Some(_) => Err(format!("detach keys: invalid control key {name:?}")),
+                None if name.len() == 1 && name.is_ascii() => Ok(name.as_bytes()[0]),
+                None => Err(format!("detach keys: invalid key name {name:?}")),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.is_empty() {
+        return Err("detach keys: sequence must not be empty".to_string());
+    }
+    Ok(keys)
+}
+
+#[cfg(target_os = "linux")]
+struct DetachKeyMatcher {
+    keys: Vec<u8>,
+    pending: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+impl DetachKeyMatcher {
+    fn new(keys: Vec<u8>) -> Self {
+        Self { keys, pending: Vec::new() }
+    }
+
+    fn feed(&mut self, input: &[u8]) -> (Vec<u8>, bool) {
+        let mut output = Vec::with_capacity(input.len());
+        for &byte in input {
+            let mut candidate = byte;
+            loop {
+                self.pending.push(candidate);
+                if self.keys.starts_with(&self.pending) {
+                    if self.pending.len() == self.keys.len() {
+                        self.pending.clear();
+                        return (output, true);
+                    }
+                    break;
+                }
+                output.push(self.pending.remove(0));
+                if self.pending.is_empty() {
+                    break;
+                }
+                candidate = self.pending.remove(0);
+            }
+        }
+        (output, false)
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn proxy_docker_hijacked_stream(
     mut stream: UnixStream,
     stdin_requested: bool,
     tty: bool,
+    detach_keys: &[u8],
 ) -> Result<(), String> {
+    let (detach_sender, detach_receiver) = std::sync::mpsc::channel();
     if stdin_requested {
         let mut input_stream = stream
             .try_clone()
             .map_err(|error| format!("remote context hijack clone failed: {error}"))?;
+        let detach_keys = detach_keys.to_vec();
         std::thread::spawn(move || {
             let mut input = std::io::stdin().lock();
-            let _ = std::io::copy(&mut input, &mut input_stream);
+            let mut matcher = DetachKeyMatcher::new(detach_keys);
+            let mut buffer = [0_u8; 16 * 1024];
+            loop {
+                let size = match input.read(&mut buffer) {
+                    Ok(size) => size,
+                    Err(_) => break,
+                };
+                if size == 0 {
+                    let _ = input_stream.write_all(&matcher.finish());
+                    break;
+                }
+                let (forward, detached) = matcher.feed(&buffer[..size]);
+                if input_stream.write_all(&forward).is_err() || detached {
+                    if detached {
+                        let _ = detach_sender.send(());
+                    }
+                    break;
+                }
+            }
             let _ = input_stream.shutdown(std::net::Shutdown::Write);
         });
     }
 
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|error| format!("remote context hijack timeout setup failed: {error}"))?;
     let mut demuxer = DockerLogFrameDemuxer::new();
     let mut chunk = [0_u8; 16 * 1024];
     loop {
-        let size = stream
-            .read(&mut chunk)
-            .map_err(|error| format!("remote context hijack read failed: {error}"))?;
+        if detach_receiver.try_recv().is_ok() {
+            return Ok(());
+        }
+        let size = match stream.read(&mut chunk) {
+            Ok(size) => size,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => continue,
+            Err(error) => return Err(format!("remote context hijack read failed: {error}")),
+        };
         if size == 0 {
             break;
         }
@@ -5568,8 +5683,9 @@ fn remote_docker_hijack(
     path: &str,
     stdin_requested: bool,
     tty: bool,
+    detach_keys: &[u8],
 ) -> Result<(), String> {
-    remote_docker_hijack_with_body(socket_path, path, None, stdin_requested, tty)
+    remote_docker_hijack_with_body(socket_path, path, None, stdin_requested, tty, detach_keys)
 }
 
 #[cfg(target_os = "linux")]
@@ -5579,6 +5695,7 @@ fn remote_docker_hijack_with_body(
     body: Option<&[u8]>,
     stdin_requested: bool,
     tty: bool,
+    detach_keys: &[u8],
 ) -> Result<(), String> {
     if !Path::new(socket_path).is_absolute() || path.contains('\r') || path.contains('\n') {
         return Err("remote context hijack has an invalid socket or path".to_string());
@@ -5617,7 +5734,7 @@ fn remote_docker_hijack_with_body(
     if status != 101 {
         return Err(format!("remote context hijack returned HTTP {status}"));
     }
-    proxy_docker_hijacked_stream(stream, stdin_requested, tty)
+    proxy_docker_hijacked_stream(stream, stdin_requested, tty, detach_keys)
 }
 
 #[cfg(target_os = "linux")]
@@ -5626,11 +5743,13 @@ fn attach_local_container(
     id: &str,
     stdin_requested: bool,
     tty: bool,
+    detach_keys: &[u8],
 ) -> Result<(), String> {
     let (client, mut server) = UnixStream::pair()
         .map_err(|error| format!("run: failed to create attach channel: {error}"))?;
     let runtime_dir = runtime_dir.to_path_buf();
     let id = id.to_string();
+    let worker_detach_keys = detach_keys.to_vec();
     let worker = std::thread::Builder::new()
         .name(format!("ferro-run-attach-{id}"))
         .spawn(move || {
@@ -5645,10 +5764,11 @@ fn attach_local_container(
                 true,
                 true,
                 &[],
+                &worker_detach_keys,
             )
         })
         .map_err(|error| format!("run: failed to start attach worker: {error}"))?;
-    let client_result = proxy_docker_hijacked_stream(client, stdin_requested, tty);
+    let client_result = proxy_docker_hijacked_stream(client, stdin_requested, tty, detach_keys);
     let server_result = worker
         .join()
         .map_err(|_| "run: attach worker panicked".to_string())?;
@@ -5695,6 +5815,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             interactive,
             tty,
             detach,
+            detach_keys,
             name,
             network,
             network_backend,
@@ -5732,6 +5853,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             ai_model,
             cmd,
         } => (|| -> Result<(), String> {
+            let detach_keys = parse_detach_keys(detach_keys)?;
             let unsupported = [
                 (
                     *network_backend != "ebpf",
@@ -5876,6 +5998,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     ),
                     *interactive,
                     *tty,
+                    &detach_keys,
                 )?;
             }
             if *rm {
@@ -6231,6 +6354,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     Some(&start),
                     true,
                     *tty,
+                    &[],
                 );
             }
             let start = serde_json::to_vec(
@@ -13946,7 +14070,7 @@ type DockerEventRequest = (String, String, HashMap<String, String>, Vec<u8>);
 /// Hijacked attach session: container id, the five request flags (logs,
 /// stream, stdin, stdout, stderr), and the initial stdin payload.
 #[cfg(target_os = "linux")]
-type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>);
+type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>, Vec<u8>);
 
 #[cfg(target_os = "linux")]
 fn handle_docker_compat_connection(
@@ -14454,6 +14578,11 @@ fn handle_docker_compat_connection(
                 for key in ["logs", "stream", "stdin", "stdout", "stderr"] {
                     let _ = parse_docker_bool_query(query.get(key), key)?;
                 }
+                let detach_keys = query
+                    .get("detachKeys")
+                    .map(|value| parse_detach_keys(value))
+                    .transpose()?
+                    .unwrap_or_else(|| vec![0x10, 0x11]);
                 let id = {
                     let pending = state
                         .pending
@@ -14534,6 +14663,7 @@ fn handle_docker_compat_connection(
                             stdout_requested,
                             stderr_requested,
                             request.body.clone(),
+                            detach_keys,
                         ));
                     }
                     docker_hijack_headers()
@@ -16171,6 +16301,7 @@ fn handle_docker_compat_connection(
         stdout_requested,
         stderr_requested,
         initial_stdin,
+        detach_keys,
     )) = attach_hijack
     {
         let follow_runtime =
@@ -16185,6 +16316,7 @@ fn handle_docker_compat_connection(
             stdout_requested,
             stderr_requested,
             &initial_stdin,
+            &detach_keys,
         )?;
         return Ok(());
     }
@@ -18425,6 +18557,7 @@ fn stream_docker_attach(
     stdout_requested: bool,
     stderr_requested: bool,
     initial_stdin: &[u8],
+    detach_keys: &[u8],
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -18516,22 +18649,34 @@ fn stream_docker_attach(
     let mut emitted_stderr = initial_stderr.len();
     let mut input = [0_u8; 16 * 1024];
     let mut input_closed = false;
+    let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
     loop {
         if !input_closed {
             match stream.read(&mut input) {
                 Ok(0) => {
+                    let trailing = detach_matcher.finish();
+                    if let Some(stdin) = stdin.as_mut() {
+                        use std::io::Write as _;
+                        stdin.write_all(&trailing).map_err(|error| {
+                            format!("docker: writing container stdin: {error}")
+                        })?;
+                    }
                     input_closed = true;
                     stdin = None;
                 }
                 Ok(size) => {
                     use std::io::Write as _;
+                    let (forward, detached) = detach_matcher.feed(&input[..size]);
                     if let Some(stdin) = stdin.as_mut() {
-                        stdin.write_all(&input[..size]).map_err(|error| {
+                        stdin.write_all(&forward).map_err(|error| {
                             format!("docker: writing container stdin: {error}")
                         })?;
                         stdin.flush().map_err(|error| {
                             format!("docker: flushing container stdin: {error}")
                         })?;
+                    }
+                    if detached {
+                        return Ok(());
                     }
                 }
                 Err(error)
@@ -18687,6 +18832,20 @@ mod tests {
     use std::time::Duration;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn detach_keys_use_docker_control_key_syntax() {
+        assert_eq!(
+            super::parse_detach_keys("ctrl-p,ctrl-q").expect("default detach keys"),
+            vec![0x10, 0x11]
+        );
+        assert_eq!(
+            super::parse_detach_keys("ctrl-\\,ctrl-]").expect("escaped control key"),
+            vec![0x1c, 0x1d]
+        );
+        assert!(super::parse_detach_keys("ctrl-too-long").is_err());
+        assert!(super::parse_detach_keys("ctrl-p,unknown").is_err());
+    }
 
     #[test]
     fn docker_status_for_running_container_delete_is_conflict() {

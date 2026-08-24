@@ -9399,7 +9399,7 @@ fn handle_rm(
     } else {
         Vec::new()
     };
-    runtime.remove(&resolved).map_err(|err| err.to_string())?;
+    retry_transient_cas(|| runtime.remove(&resolved).map_err(|err| err.to_string()))?;
     let origin = runtime
         .request_origin()
         .ok_or_else(|| "rm: authenticated request origin unavailable".to_string())?;
@@ -15077,6 +15077,7 @@ fn handle_docker_compat_connection(
             ("DELETE", path) if path.starts_with("/containers/") => {
                 let id = path.trim_start_matches("/containers/");
                 let force = parse_docker_bool_query(query.get("force"), "force")?;
+                let volumes = parse_docker_bool_query(query.get("v"), "v")?;
                 // Docker accepts either the provisional ID returned by
                 // `/containers/create` or its `?name=` alias before the
                 // container has been started. Resolve both forms while the
@@ -15112,29 +15113,14 @@ fn handle_docker_compat_connection(
                 } else {
                     let resolved_id =
                         resolve_container_id(&runtime, id).unwrap_or_else(|_| id.to_string());
-                    if let Ok(record) = runtime.inspect(&resolved_id) {
-                        if record.status == "running" {
-                            if !force {
-                                return Err(format!("container {resolved_id} is still running"));
-                            }
-                            retry_transient_cas(|| {
-                                runtime
-                                    .kill_with_signal(
-                                        &resolved_id,
-                                        Some(nix::sys::signal::Signal::SIGKILL),
-                                    )
-                                    .map_err(|error| error.to_string())
-                            })?;
-                        }
-                    }
-                    // The supervisor publishes the terminal state from its
-                    // own process; a remove issued right after stop can lose
-                    // the store's compare-and-swap to that publication. The
-                    // conflict is transient by construction — retry briefly
-                    // instead of surfacing it to the client.
-                    retry_transient_cas(|| {
-                        runtime.remove(&resolved_id).map_err(|err| err.to_string())
-                    })?;
+                    handle_rm(
+                        &runtime,
+                        &volume_store,
+                        &surface_authorization,
+                        &resolved_id,
+                        force,
+                        volumes,
+                    )?;
                     http_response(204, &[], "text/plain")
                 }
             }

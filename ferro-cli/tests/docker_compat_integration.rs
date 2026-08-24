@@ -3139,6 +3139,53 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 }
 
 #[test]
+fn docker_compat_rm_v_removes_only_anonymous_volumes() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/rm-volumes:latest");
+
+    let create_body = r#"{"Image":"compat/rm-volumes:latest","Cmd":["true"],"Volumes":{"/data":{}}}"#;
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=anonymous-volume-container",
+        "application/json",
+        create_body.as_bytes(),
+    );
+    assert_eq!(status, 201, "create response: {body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create response JSON")["Id"]
+        .as_str()
+        .expect("container ID")
+        .to_string();
+
+    let (status, body) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response: {body}");
+    let (status, body) = harness.request("GET", "/v1.45/volumes");
+    assert_eq!(status, 200, "volume list response: {body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body)
+            .expect("volume list JSON")["Volumes"]
+            .as_array()
+            .expect("volume array")
+            .len(),
+        1,
+        "anonymous volume should exist after start"
+    );
+
+    let (status, body) = harness.request("DELETE", &format!("/v1.45/containers/{id}?force=1&v=1"));
+    assert_eq!(status, 204, "rm response: {body}");
+    let (status, body) = harness.request("GET", "/v1.45/volumes");
+    assert_eq!(status, 200, "volume list response: {body}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&body)
+            .expect("volume list JSON")["Volumes"]
+            .as_array()
+            .expect("volume array")
+            .is_empty(),
+        "rm -v must remove its anonymous volume"
+    );
+}
+
+#[test]
 fn docker_compat_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() {
     for mode in ["disabled", "shadow"] {
         let harness = DaemonHarness::spawn_mode(mode);

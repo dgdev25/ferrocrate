@@ -8544,11 +8544,24 @@ fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, so
             let source = Path::new(source);
             let mut archive = tar::Builder::new(Vec::new()); archive.append_path_with_name(source, source.file_name().ok_or_else(|| "docker: cp source has no filename".to_string())?).map_err(|error| format!("docker: cp archive source: {error}"))?;
             let archive = archive.into_inner().map_err(|error| format!("docker: cp archive source: {error}"))?;
-            let id = resolve_container_id(runtime, container)?;
-            runtime.put_archive_options(&id, path, &archive, false).map_err(|error| format!("docker: put archive: {error}"))
+            docker_put_container_archive(runtime, container, path, &archive, false)
         }
         _ => Err("docker: cp requires exactly one CONTAINER:PATH operand".to_string()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_put_container_archive(
+    runtime: &ContainerRuntime,
+    requested_id: &str,
+    archive_path: &str,
+    archive: &[u8],
+    no_overwrite_dir_non_dir: bool,
+) -> Result<(), String> {
+    let id = resolve_container_id(runtime, requested_id)?;
+    runtime
+        .put_archive_options(&id, archive_path, archive, no_overwrite_dir_non_dir)
+        .map_err(|error| format!("docker: put archive: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -13501,32 +13514,7 @@ fn handle_docker_compat_connection(
                 if pending.contains_key(&id) && runtime.inspect(&id).is_err() {
                     return Ok(http_response(200, b"[]", "application/json"));
                 }
-                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                let rootfs = runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("rootfs");
-                let baseline = runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("rootfs-baseline.json");
-                let excluded = record
-                    .mounts
-                    .iter()
-                    .map(|mount| rootfs.join(&mount.target))
-                    .chain(
-                        record
-                            .tmpfs_mounts
-                            .iter()
-                            .map(|mount| rootfs.join(&mount.target)),
-                    )
-                    .collect::<Vec<_>>();
-                let changes = if rootfs.is_dir() && baseline.is_file() {
-                    rootfs_diff::diff(&rootfs, &baseline, &excluded)
-                        .map_err(|error| format!("docker: container diff failed: {error}"))?
-                } else {
-                    Vec::new()
-                };
+                let changes = docker_container_changes(runtime_dir.as_ref(), &runtime, &id)?;
                 let body = serde_json::to_string(&changes).map_err(|error| error.to_string())?;
                 http_response(200, body.as_bytes(), "application/json")
             }
@@ -13546,16 +13534,6 @@ fn handle_docker_compat_connection(
                 let archive_path = query
                     .get("path")
                     .ok_or_else(|| "docker: archive path is required".to_string())?;
-                let relative = archive_path.trim_start_matches('/');
-                if !relative.is_empty()
-                    && relative.split('/').any(|component| {
-                        component.is_empty() || component == "." || component == ".."
-                    })
-                {
-                    return Err(
-                        "docker: archive path must be a normalized absolute path".to_string()
-                    );
-                }
                 let id = resolve_container_id(&runtime, id)?;
                 let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
                 let rootfs = runtime_dir
@@ -13568,41 +13546,14 @@ fn handle_docker_compat_connection(
                         rootfs.display()
                     ));
                 }
-                let selected = rootfs.join(relative);
+                let selected = rootfs.join(archive_path.trim_start_matches('/'));
                 let selected = selected
                     .canonicalize()
                     .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
                 if !selected.starts_with(&rootfs) {
                     return Err("docker: archive path escapes the container rootfs".to_string());
                 }
-                let excluded_targets = record
-                    .mounts
-                    .iter()
-                    .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
-                    .chain(
-                        record
-                            .tmpfs_mounts
-                            .iter()
-                            .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
-                    )
-                    .collect::<Vec<_>>();
-                let selected_relative = selected
-                    .strip_prefix(&rootfs)
-                    .expect("canonical archive path must remain beneath rootfs");
-                if excluded_targets.iter().any(|target| {
-                    selected_relative == target || selected_relative.starts_with(target)
-                }) {
-                    return Err("docker: archive path is a persisted mount target".to_string());
-                }
-                let mut archive = Vec::new();
-                {
-                    let mut builder = tar::Builder::new(&mut archive);
-                    append_export_archive_path(&mut builder, &rootfs, &selected, &excluded_targets)
-                        .map_err(|error| format!("docker: archive path: {error}"))?;
-                    builder
-                        .finish()
-                        .map_err(|error| format!("docker: finish archive: {error}"))?;
-                }
+                let archive = docker_get_container_archive(runtime_dir.as_ref(), &runtime, &id, archive_path)?;
                 let stat = docker_archive_path_stat(&selected, archive_path)?;
                 if request.method == "HEAD" {
                     http_response_with_headers(
@@ -13631,15 +13582,13 @@ fn handle_docker_compat_connection(
                     query.get("noOverwriteDirNonDir"),
                     "noOverwriteDirNonDir",
                 )?;
-                let id = resolve_container_id(&runtime, requested_id)?;
-                runtime
-                    .put_archive_options(
-                        &id,
-                        archive_path,
-                        &request.body,
-                        no_overwrite_dir_non_dir,
-                    )
-                    .map_err(|error| format!("docker: put archive: {error}"))?;
+                docker_put_container_archive(
+                    &runtime,
+                    requested_id,
+                    archive_path,
+                    &request.body,
+                    no_overwrite_dir_non_dir,
+                )?;
                 http_response(200, &[], "text/plain")
             }
             ("GET", path) if path.starts_with("/containers/") && path.ends_with("/logs") => {

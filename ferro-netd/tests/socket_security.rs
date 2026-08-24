@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_netd::{policy, protocol, server};
 
 use base64::Engine;

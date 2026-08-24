@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ed25519_dalek::{Signer, SigningKey};
 use ferro_core::authorization::{
     gate::AuthorizationGate, policy::PolicyStore, Action, PrincipalResolver,

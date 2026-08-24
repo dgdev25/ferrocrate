@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 #![cfg(feature = "test-support")]
 
 //! Enforcement proofs for every local mutation path in the netd executor:

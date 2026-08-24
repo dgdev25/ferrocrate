@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ed25519_dalek::SigningKey;
 use ferro_mgr::{
     agent::{Agent, NetdClient, StateStore},

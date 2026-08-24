@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::{
     control::{ControlError, ControlServiceImpl},
     desired_state::{DesiredStateBuilder, MAX_LEASE_SECONDS},

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::agent::{
     ipam::{Ipam, IpamError},
     local_api::{LocalApi, LocalApiError, OverlayConfig},

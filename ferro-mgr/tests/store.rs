@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::recovery::restore_backup;
 use ferro_mgr::store::{Enrollment, ManagerStore, Overlay, ScopedToken, StoreError};
 use ipnet::Ipv4Net;

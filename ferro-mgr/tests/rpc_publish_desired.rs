@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 use ed25519_dalek::SigningKey;

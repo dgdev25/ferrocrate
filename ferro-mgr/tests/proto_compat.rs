@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::proto::DesiredState;
 use prost::Message;
 

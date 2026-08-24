@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::agent::credentials::{CredentialError, CredentialStore};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::tempdir;

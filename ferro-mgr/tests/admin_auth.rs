@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use ferro_mgr::{
     admin::{AdminAuthorizer, AuthError},
     pki::{CertificateAuthority, CertificateIdentity, CertificateRole, PkiError},

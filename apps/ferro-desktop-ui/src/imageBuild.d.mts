@@ -22,6 +22,12 @@ export function appendBuildProgress(
   frame: BuildProgressFrame,
 ): BuildHistoryEntry[];
 
+export function buildInvokeArgs(context: string, tag: string, buildId: string): {
+  context: string;
+  tag: string;
+  buildId: string;
+};
+
 export function BuildHistoryList(props: {
   builds: BuildHistoryEntry[];
   disabled?: boolean;

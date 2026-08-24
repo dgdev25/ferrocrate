@@ -7,6 +7,17 @@ import * as imageBuild from "./imageBuild.mjs";
 
 const { buildStepText } = imageBuild;
 
+function findButton(element, label) {
+  if (!element || typeof element !== "object") return null;
+  if (element.type === "button" && element.props.children === label) return element;
+  const children = element.props?.children;
+  for (const child of Array.isArray(children) ? children : [children]) {
+    const found = findButton(child, label);
+    if (found) return found;
+  }
+  return null;
+}
+
 test("build progress unwraps daemon stream frames and preserves failures", () => {
   assert.equal(buildStepText('{"stream":"Step 1/2 : FROM alpine\\n"}'), "Step 1/2 : FROM alpine");
   assert.equal(buildStepText('{"error":"executor failed"}'), "executor failed");
@@ -132,4 +143,47 @@ test("missing build access exposes the friendly licensing route from its history
   assert.match(markup, /Your current plan doesn&#x27;t include image builds\./);
   assert.match(markup, />Review licensing<\/button>/);
   assert.match(markup, /<details><summary>Technical details<\/summary>/);
+});
+
+test("build invocation uses Tauri's camelCase argument contract", () => {
+  assert.equal(typeof imageBuild.buildInvokeArgs, "function");
+  assert.deepEqual(imageBuild.buildInvokeArgs("/work/demo", "local/demo:latest", "build-9"), {
+    context: "/work/demo",
+    tag: "local/demo:latest",
+    buildId: "build-9",
+  });
+});
+
+test("build recovery buttons call their supplied callbacks", () => {
+  let starts = 0;
+  let licensingDetail = "";
+  const element = imageBuild.BuildHistoryList({
+    builds: [{
+      id: "build-daemon",
+      image: "local/daemon:latest",
+      status: "failed",
+      durationMs: 900,
+      progress: [],
+      error: "daemon connection refused",
+    }, {
+      id: "build-license",
+      image: "local/license:latest",
+      status: "failed",
+      durationMs: 900,
+      progress: [],
+      error: "missing entitlement for image build",
+    }],
+    onNewBuild: () => {},
+    onStart: () => { starts += 1; },
+    onReviewLicensing: (detail) => { licensingDetail = detail; },
+  });
+
+  const start = findButton(element, "Start");
+  const review = findButton(element, "Review licensing");
+  assert.ok(start);
+  assert.ok(review);
+  start.props.onClick();
+  review.props.onClick();
+  assert.equal(starts, 1);
+  assert.equal(licensingDetail, "missing entitlement for image build");
 });

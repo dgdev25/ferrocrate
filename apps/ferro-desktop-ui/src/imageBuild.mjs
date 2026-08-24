@@ -36,6 +36,10 @@ export function appendBuildProgress(history, frame) {
     : build);
 }
 
+export function buildInvokeArgs(context, tag, buildId) {
+  return { context, tag, buildId };
+}
+
 export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onReviewLicensing }) {
   if (!builds.length) {
     return createElement("section", { className: "panel table-panel build-history-panel", "aria-label": "Builds" },

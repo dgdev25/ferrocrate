@@ -24,7 +24,7 @@ import type {
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
-import { appendBuildProgress, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
+import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { ImageEmptyState, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
@@ -827,11 +827,7 @@ function App(): JSX.Element {
       progress: [],
     }, ...history]);
     try {
-      const result = await invoke<CommandResult>("build_image", {
-        context,
-        tag,
-        build_id: buildId,
-      });
+      const result = await invoke<CommandResult>("build_image", buildInvokeArgs(context, tag, buildId));
       if (result.ok) setLastAction(result);
       setBuildHistory((history) => history.map((build) => build.id === buildId ? {
         ...build,

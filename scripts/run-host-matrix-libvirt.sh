@@ -63,7 +63,12 @@ if [[ "$dry_run" == "--dry-run" ]]; then
   exit 0
 fi
 
+# Remote (non-libvirt) hosts skip domain management entirely.
+if [[ "$domain" == *-oracle ]]; then
+  state="running"
+else
 state="$(virsh -c qemu:///system domstate "$domain" | tr -d '\r' | xargs)"
+fi
 if [[ "$state" == "shut off" ]]; then
   run virsh -c qemu:///system start "$domain"
 elif [[ "$state" != "running" ]]; then

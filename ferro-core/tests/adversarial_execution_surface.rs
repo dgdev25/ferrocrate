@@ -275,6 +275,9 @@ fn netns_deletion_allows_only_the_exact_recorded_namespace() {
     );
 
     // A recreated file at the same name is a different kernel object.
+    #[cfg(target_env = "musl")]
+    fs::rename(&namespace, netns_root.join("retired-namespace")).expect("retire namespace");
+    #[cfg(not(target_env = "musl"))]
     fs::remove_file(&namespace).expect("remove namespace");
     fs::write(&namespace, b"").expect("recreate namespace");
     assert_eq!(

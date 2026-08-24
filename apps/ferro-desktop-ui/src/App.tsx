@@ -48,6 +48,7 @@ import {
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import { runtimeActionAvailability } from "./runtimeActions.mjs";
+import { buildRunContainerOptions } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -161,9 +162,12 @@ function App(): JSX.Element {
   const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
   const [newContainerName, setNewContainerName] = useState("");
   const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
+  const [newContainerCommand, setNewContainerCommand] = useState("");
+  const [newContainerPullMissing, setNewContainerPullMissing] = useState(true);
+  const [newContainerPorts, setNewContainerPorts] = useState([{ host: "", container: "" }]);
+  const [newContainerVolumes, setNewContainerVolumes] = useState([{ source: "", target: "" }]);
   const [newContainerMemory, setNewContainerMemory] = useState("");
-  const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
-  const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
+  const [newContainerCpus, setNewContainerCpus] = useState("");
   const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
   const [registryUsername, setRegistryUsername] = useState("");
   const [registryPassword, setRegistryPassword] = useState("");
@@ -784,16 +788,21 @@ function App(): JSX.Element {
     setRunDialogError(null);
     setActionLabel("Container Run");
     try {
+      const options = buildRunContainerOptions({ command: newContainerCommand, ports: newContainerPorts, volumes: newContainerVolumes, memoryMb: newContainerMemory, cpus: newContainerCpus });
       const result = await invoke<CommandResult>("run_new_container", {
         image: newContainerImage,
         name: newContainerName.trim() || null,
+        command: options.command,
+        ports: options.ports,
+        volumes: options.volumes,
+        pullIfMissing: newContainerPullMissing,
         environment: newContainerEnvironment
           .split("\n")
           .map((value) => value.trim())
           .filter(Boolean),
-        memory: parseOptionalLimit(newContainerMemory),
-        cpuQuota: parseOptionalLimit(newContainerCpuQuota),
-        cpuPeriod: parseOptionalLimit(newContainerCpuPeriod),
+        memory: options.memory,
+        cpuQuota: options.cpuQuota,
+        cpuPeriod: options.cpuPeriod,
       });
       setLastAction(result);
       if (!result.ok) {
@@ -802,6 +811,7 @@ function App(): JSX.Element {
       }
       setRunDialogOpen(false);
       setNewContainerName("");
+      setNewContainerCommand("");
       setNewContainerEnvironment("");
       await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
     } catch (err) {
@@ -1534,7 +1544,15 @@ function App(): JSX.Element {
       ) : null}
 
       {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>{runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog run-container-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid">
+          <label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
+          <label className="detail-span"><span>Command (optional)</span><input value={newContainerCommand} onChange={(event) => setNewContainerCommand(event.target.value)} placeholder="sh -c echo ready" /></label>
+          <label className="detail-span checkbox-row"><input type="checkbox" checked={newContainerPullMissing} onChange={(event) => setNewContainerPullMissing(event.target.checked)} />Pull image if it is not available locally</label>
+          <fieldset className="detail-span mapping-fieldset"><legend>Ports</legend>{newContainerPorts.map((row, index) => <div className="mapping-row" key={`port-${index}`}><input aria-label={`Host port ${index + 1}`} value={row.host} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, host: event.target.value } : value))} placeholder="Host port" /><span>→</span><input aria-label={`Container port ${index + 1}`} value={row.container} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, container: event.target.value } : value))} placeholder="Container port" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerPorts((rows) => [...rows, { host: "", container: "" }])}>Add port</button></fieldset>
+          <fieldset className="detail-span mapping-fieldset"><legend>Volumes</legend>{newContainerVolumes.map((row, index) => <div className="mapping-row" key={`volume-${index}`}><input aria-label={`Volume source ${index + 1}`} value={row.source} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, source: event.target.value } : value))} placeholder="Host path or volume" /><span>→</span><input aria-label={`Container path ${index + 1}`} value={row.target} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, target: event.target.value } : value))} placeholder="Container path" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerVolumes((rows) => [...rows, { source: "", target: "" }])}>Add volume</button></fieldset>
+          <label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={5} /></label>
+          <details className="detail-span advanced-fields"><summary>Advanced resources</summary><div className="editor-grid"><label><span>Memory (MB)</span><input inputMode="decimal" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="Unlimited" /></label><label><span>CPUs</span><input inputMode="decimal" value={newContainerCpus} onChange={(event) => setNewContainerCpus(event.target.value)} placeholder="Unlimited" /></label></div></details>
+          {runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
       ) : null}
 
       <ResourceCreateDialog

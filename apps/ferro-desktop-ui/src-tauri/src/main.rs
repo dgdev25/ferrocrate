@@ -1087,6 +1087,9 @@ fn container_update_command(
 fn run_container_bridge_command(
     image: &str,
     name: Option<&str>,
+    command_args: &[String],
+    ports: &[String],
+    volumes: &[String],
     environment: &[String],
     memory: Option<u64>,
     cpu_quota: Option<u64>,
@@ -1102,6 +1105,28 @@ fn run_container_bridge_command(
         .collect::<Vec<_>>();
     if let Some(name) = name.map(str::trim).filter(|value| !value.is_empty()) {
         command.extend(["--name".to_string(), name.to_string()]);
+    }
+    for port in ports
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if !port.contains(':') {
+            return Err(format!("port mapping must use host:container: {port}"));
+        }
+        command.extend(["--publish".to_string(), port.to_string()]);
+    }
+    for volume in volumes
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if !volume.contains(':') {
+            return Err(format!(
+                "volume mapping must use source:container: {volume}"
+            ));
+        }
+        command.extend(["--volume".to_string(), volume.to_string()]);
     }
     for value in environment
         .iter()
@@ -1123,7 +1148,20 @@ fn run_container_bridge_command(
         }
     }
     command.push(image.to_string());
+    command.extend(command_args.iter().cloned());
     Ok(command)
+}
+
+fn image_list_contains(stdout: &str, image: &str) -> bool {
+    parse_nullable_json_list::<JsonValue>(stdout).is_ok_and(|records| {
+        records.iter().any(|record| {
+            record
+                .get("RepoTags")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some(image)))
+                || record.get("reference").and_then(JsonValue::as_str) == Some(image)
+        })
+    })
 }
 
 fn registry_login_command(registry: &str, username: &str) -> Result<Vec<String>, String> {
@@ -2324,16 +2362,41 @@ fn update_container_resources(
 fn run_new_container(
     image: String,
     name: Option<String>,
+    command: Vec<String>,
+    ports: Vec<String>,
+    volumes: Vec<String>,
+    pull_if_missing: bool,
     environment: Vec<String>,
     memory: Option<u64>,
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
 ) -> Result<CommandResult, String> {
+    if pull_if_missing {
+        let images = run_owned_command(
+            "ferro-desktop",
+            &ferrocrate_proxy_command(&["images", "--format", "json"]),
+        );
+        if !images.ok {
+            return Ok(images);
+        }
+        if !image_list_contains(&images.stdout, image.trim()) {
+            let pull = run_owned_command(
+                "ferro-desktop",
+                &ferrocrate_proxy_command(&["pull", image.trim()]),
+            );
+            if !pull.ok {
+                return Ok(pull);
+            }
+        }
+    }
     Ok(run_owned_command(
         "ferro-desktop",
         &run_container_bridge_command(
             &image,
             name.as_deref(),
+            &command,
+            &ports,
+            &volumes,
             &environment,
             memory,
             cpu_quota,
@@ -3204,6 +3267,9 @@ mod tests {
             run_container_bridge_command(
                 "alpine:latest",
                 Some("web"),
+                &["sh".to_string(), "-c".to_string(), "echo ready".to_string()],
+                &["8080:80".to_string()],
+                &["data:/data".to_string()],
                 &["MODE=dev".to_string(), "TOKEN=secret".to_string()],
                 Some(67_108_864),
                 Some(25_000),
@@ -3218,6 +3284,10 @@ mod tests {
                 "--detach",
                 "--name",
                 "web",
+                "--publish",
+                "8080:80",
+                "--volume",
+                "data:/data",
                 "--env",
                 "MODE=dev",
                 "--env",
@@ -3229,6 +3299,9 @@ mod tests {
                 "--cpu-period",
                 "100000",
                 "alpine:latest",
+                "sh",
+                "-c",
+                "echo ready",
             ]
         );
     }

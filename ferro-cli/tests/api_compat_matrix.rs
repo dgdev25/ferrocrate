@@ -1104,6 +1104,27 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
     assert!(body.contains("\"timeNano\":"), "{body}");
 }
 
+#[test]
+fn docker_api_create_retains_anonymous_volume_targets() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request(
+        "POST",
+        "/containers/create?name=anonymous-volume-target",
+        r#"{"Image":"busybox","Volumes":{"/data":{}}}"#,
+    );
+    assert_eq!(status, 201, "create response: {body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create JSON")["Id"]
+        .as_str()
+        .expect("created ID")
+        .to_string();
+
+    let (status, body) = harness.request("GET", &format!("/containers/{id}/json"), "");
+    assert_eq!(status, 200, "inspect response: {body}");
+    let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("inspect JSON");
+    assert_eq!(inspect["Config"]["Volumes"], serde_json::json!({"/data": {}}));
+}
+
 /// Docker clients read `/events` as newline-delimited JSON where each frame
 /// carries the documented scalar fields with fixed JSON types, and the actor
 /// attributes use Docker's canonical lowercase keys (`name`, `image`,

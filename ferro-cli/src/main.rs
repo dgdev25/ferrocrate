@@ -12360,6 +12360,8 @@ struct DockerCreateRequest {
     user: Option<String>,
     #[serde(rename = "Labels")]
     labels: Option<HashMap<String, String>>,
+    #[serde(rename = "Volumes")]
+    volumes: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "Healthcheck")]
     healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "Tty", default)]
@@ -12509,6 +12511,8 @@ struct DockerCreateSpec {
     env: Vec<String>,
     labels: Vec<String>,
     binds: Vec<String>,
+    #[serde(default)]
+    image_volumes: Vec<String>,
     publish: Vec<String>,
     workdir: Option<String>,
     user: Option<String>,
@@ -16741,6 +16745,12 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>();
+    let mut image_volumes = request
+        .volumes
+        .unwrap_or_default()
+        .into_keys()
+        .collect::<Vec<_>>();
+    image_volumes.sort();
     let host_config = request.host_config.unwrap_or(DockerHostConfig {
         binds: None,
         port_bindings: None,
@@ -16776,6 +16786,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         env,
         labels,
         binds: host_config.binds.unwrap_or_default(),
+        image_volumes,
         publish,
         workdir,
         user,
@@ -17349,6 +17360,7 @@ fn docker_pending_inspect_payload(
             "Image": spec.image,
             "Env": spec.env,
             "Cmd": spec.cmd,
+            "Volumes": spec.image_volumes.iter().map(|target| (target.clone(), serde_json::json!({}))).collect::<serde_json::Map<_, _>>(),
             "Tty": spec.tty,
             "AttachStdin": false,
             "AttachStdout": true,

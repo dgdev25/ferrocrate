@@ -5,6 +5,8 @@ edition = "2021"
 
 [features]
 test-console = []
+journald = ["ferro-core/journald"]
+syslog = ["ferro-core/syslog"]
 
 [dependencies]
 clap = { workspace = true }

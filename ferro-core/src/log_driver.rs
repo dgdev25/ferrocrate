@@ -2,6 +2,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use ed25519_dalek::VerifyingKey;
+use serde::Serialize;
+
+use crate::plugin_contract::{PluginKind, PluginManifest};
+use crate::plugin_runtime::execute_plugin;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStream {
     Stdout,
@@ -54,6 +61,335 @@ pub trait LogDriver: Send + Sync {
             ),
         ))
     }
+}
+
+#[cfg(feature = "journald")]
+#[derive(Debug, Clone)]
+pub struct JournaldLogDriver {
+    socket_path: PathBuf,
+}
+
+#[cfg(feature = "journald")]
+impl JournaldLogDriver {
+    pub fn system() -> Self {
+        Self::new("/run/systemd/journal/socket")
+    }
+
+    pub fn new(socket_path: impl AsRef<Path>) -> Self {
+        Self {
+            socket_path: socket_path.as_ref().to_path_buf(),
+        }
+    }
+}
+
+#[cfg(feature = "journald")]
+impl LogDriver for JournaldLogDriver {
+    fn name(&self) -> &str {
+        "journald"
+    }
+
+    fn supports_read(&self) -> bool {
+        false
+    }
+
+    fn open(&self, context: &ContainerLogContext) -> io::Result<Box<dyn ContainerLogWriter>> {
+        use std::os::unix::net::UnixDatagram;
+        let socket = UnixDatagram::unbound()?;
+        socket.connect(&self.socket_path)?;
+        Ok(Box::new(JournaldLogWriter {
+            socket,
+            container_id: safe_identity(&context.container_id),
+            closed: false,
+        }))
+    }
+}
+
+#[cfg(feature = "journald")]
+struct JournaldLogWriter {
+    socket: std::os::unix::net::UnixDatagram,
+    container_id: String,
+    closed: bool,
+}
+
+#[cfg(feature = "journald")]
+impl ContainerLogWriter for JournaldLogWriter {
+    fn write(&mut self, entry: &LogEntry) -> io::Result<()> {
+        if self.closed {
+            return Err(closed_writer_error());
+        }
+        let message = trim_line_end(&entry.bytes);
+        let priority = match entry.stream {
+            LogStream::Stdout => 6,
+            LogStream::Stderr => 3,
+        };
+        let stream = stream_name(entry.stream);
+        let mut payload = format!(
+            "CONTAINER_ID={}\nCONTAINER_NAME={}\nSYSLOG_IDENTIFIER=ferrocrate\nPRIORITY={priority}\nFERROCRATE_STREAM={stream}\nFERROCRATE_TIMESTAMP_NANOS={}\n",
+            self.container_id, self.container_id, entry.timestamp_nanos
+        )
+        .into_bytes();
+        if message.contains(&b'\n') {
+            payload.extend_from_slice(b"MESSAGE\n");
+            payload.extend_from_slice(&(message.len() as u64).to_le_bytes());
+            payload.extend_from_slice(message);
+            payload.push(b'\n');
+        } else {
+            payload.extend_from_slice(b"MESSAGE=");
+            payload.extend_from_slice(message);
+            payload.push(b'\n');
+        }
+        self.socket.send(&payload).map(|_| ())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.closed = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "syslog")]
+#[derive(Debug, Clone)]
+pub struct SyslogLogDriver {
+    socket_path: PathBuf,
+}
+
+#[cfg(feature = "syslog")]
+impl SyslogLogDriver {
+    pub fn system() -> Self {
+        Self::new("/dev/log")
+    }
+
+    pub fn new(socket_path: impl AsRef<Path>) -> Self {
+        Self {
+            socket_path: socket_path.as_ref().to_path_buf(),
+        }
+    }
+}
+
+#[cfg(feature = "syslog")]
+impl LogDriver for SyslogLogDriver {
+    fn name(&self) -> &str {
+        "syslog"
+    }
+
+    fn supports_read(&self) -> bool {
+        false
+    }
+
+    fn open(&self, context: &ContainerLogContext) -> io::Result<Box<dyn ContainerLogWriter>> {
+        use std::os::unix::net::UnixDatagram;
+        let socket = UnixDatagram::unbound()?;
+        socket.connect(&self.socket_path)?;
+        Ok(Box::new(SyslogLogWriter {
+            socket,
+            container_id: safe_identity(&context.container_id),
+            closed: false,
+        }))
+    }
+}
+
+#[cfg(feature = "syslog")]
+struct SyslogLogWriter {
+    socket: std::os::unix::net::UnixDatagram,
+    container_id: String,
+    closed: bool,
+}
+
+#[cfg(feature = "syslog")]
+impl ContainerLogWriter for SyslogLogWriter {
+    fn write(&mut self, entry: &LogEntry) -> io::Result<()> {
+        if self.closed {
+            return Err(closed_writer_error());
+        }
+        let priority = match entry.stream {
+            LogStream::Stdout => 14,
+            LogStream::Stderr => 11,
+        };
+        let message =
+            String::from_utf8_lossy(trim_line_end(&entry.bytes)).replace(['\r', '\n'], " ");
+        let payload = format!(
+            "<{priority}>1 - ferrocrate {} {} - {message}",
+            self.container_id,
+            stream_name(entry.stream)
+        );
+        self.socket.send(payload.as_bytes()).map(|_| ())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.closed = true;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct ExternalLogDriver {
+    manifest: PluginManifest,
+    trust_root: VerifyingKey,
+}
+
+impl ExternalLogDriver {
+    pub fn new(manifest: PluginManifest, trust_root: VerifyingKey) -> io::Result<Self> {
+        if manifest.kind != PluginKind::LogDriver {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "plugin manifest is not a log driver",
+            ));
+        }
+        if !manifest
+            .permissions
+            .iter()
+            .any(|permission| permission == "write_logs")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "log driver plugin must declare write_logs",
+            ));
+        }
+        Ok(Self {
+            manifest,
+            trust_root,
+        })
+    }
+
+    fn call(&self, envelope: &ExternalLogEnvelope) -> io::Result<()> {
+        let input = serde_json::to_vec(envelope)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let result = execute_plugin(
+            &self.manifest,
+            &self.trust_root,
+            "write_logs",
+            &["log-driver".to_string()],
+            &input,
+        )
+        .map_err(io::Error::other)?;
+        if result.exit_code != 0 || result.timed_out {
+            return Err(io::Error::other(format!(
+                "log driver plugin exited with status {}: {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl LogDriver for ExternalLogDriver {
+    fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    fn supports_read(&self) -> bool {
+        false
+    }
+
+    fn open(&self, context: &ContainerLogContext) -> io::Result<Box<dyn ContainerLogWriter>> {
+        let writer = ExternalLogWriter {
+            driver: self.clone(),
+            container_id: context.container_id.clone(),
+            closed: false,
+        };
+        writer.call("open", None)?;
+        Ok(Box::new(writer))
+    }
+}
+
+struct ExternalLogWriter {
+    driver: ExternalLogDriver,
+    container_id: String,
+    closed: bool,
+}
+
+impl ExternalLogWriter {
+    fn call(&self, operation: &str, entry: Option<&LogEntry>) -> io::Result<()> {
+        self.driver.call(&ExternalLogEnvelope {
+            operation,
+            container_id: &self.container_id,
+            stream: entry.map(|entry| stream_name(entry.stream)),
+            timestamp_nanos: entry.map(|entry| entry.timestamp_nanos),
+            data_base64: entry
+                .map(|entry| base64::engine::general_purpose::STANDARD.encode(&entry.bytes)),
+        })
+    }
+}
+
+impl ContainerLogWriter for ExternalLogWriter {
+    fn write(&mut self, entry: &LogEntry) -> io::Result<()> {
+        if self.closed {
+            return Err(closed_writer_error());
+        }
+        self.call("write", Some(entry))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.closed {
+            return Err(closed_writer_error());
+        }
+        self.call("flush", None)
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        if !self.closed {
+            self.call("close", None)?;
+            self.closed = true;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct ExternalLogEnvelope<'a> {
+    operation: &'a str,
+    container_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_nanos: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_base64: Option<String>,
+}
+
+fn stream_name(stream: LogStream) -> &'static str {
+    match stream {
+        LogStream::Stdout => "stdout",
+        LogStream::Stderr => "stderr",
+    }
+}
+
+#[cfg(any(feature = "journald", feature = "syslog"))]
+fn trim_line_end(mut bytes: &[u8]) -> &[u8] {
+    while bytes
+        .last()
+        .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+    {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+#[cfg(any(feature = "journald", feature = "syslog"))]
+fn safe_identity(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn closed_writer_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "log writer is closed")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -406,7 +742,10 @@ mod tests {
         let count = receiver.recv(&mut buffer).expect("syslog datagram");
         let entry = String::from_utf8_lossy(&buffer[..count]);
         assert!(entry.starts_with("<11>1 "), "{entry}");
-        assert!(entry.contains(" ferrocrate syslog-container stderr - "), "{entry}");
+        assert!(
+            entry.contains(" ferrocrate syslog-container stderr - "),
+            "{entry}"
+        );
         assert!(entry.ends_with("syslog warning"), "{entry}");
         assert!(!driver.supports_read());
     }
@@ -418,7 +757,6 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let capture = temp.path().join("capture.jsonl");
         let entrypoint = temp.path().join("fixture-log-driver.sh");
@@ -429,7 +767,10 @@ mod tests {
         .expect("fixture entrypoint");
         std::fs::set_permissions(&entrypoint, std::fs::Permissions::from_mode(0o700))
             .expect("executable fixture");
-        unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
+        {
+            let _guard = crate::test_support::acquire_env_lock();
+            unsafe { std::env::set_var("FERROCRATE_LOG_DRIVER_CAPTURE", &capture) };
+        }
 
         let mut manifest = parse_plugin_manifest(include_bytes!(
             "../../tests/fixtures/plugins/log-driver-v1.json"
@@ -439,10 +780,7 @@ mod tests {
         manifest.signature.clear();
         let key = SigningKey::from_bytes(&[17_u8; 32]);
         let unsigned = serde_json::to_vec(&manifest).expect("canonical manifest");
-        manifest.signature = format!(
-            "ed25519:{}",
-            hex::encode(key.sign(&unsigned).to_bytes())
-        );
+        manifest.signature = format!("ed25519:{}", hex::encode(key.sign(&unsigned).to_bytes()));
 
         let context = ContainerLogContext {
             container_id: "plugin-container".into(),
@@ -460,7 +798,10 @@ mod tests {
             .expect("write");
         writer.flush().expect("flush");
         writer.close().expect("close");
-        unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
+        {
+            let _guard = crate::test_support::acquire_env_lock();
+            unsafe { std::env::remove_var("FERROCRATE_LOG_DRIVER_CAPTURE") };
+        }
 
         let records = std::fs::read_to_string(capture).expect("plugin capture");
         let operations = records

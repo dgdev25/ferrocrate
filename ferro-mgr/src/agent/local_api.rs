@@ -1,10 +1,10 @@
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use nix::sys::socket::{
     getsockopt, recvmsg, sockopt::PeerCredentials, ControlMessageOwned, MsgFlags,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::{
     fs,
     io::Write,
@@ -559,7 +559,7 @@ impl LocalApi {
             .ok_or(LocalApiError::UnknownOverlay)
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub fn serve_unix(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         if path.exists() {
@@ -667,7 +667,7 @@ impl LocalApi {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct AuthenticatedPeer {
     _pidfd: OwnedFd,
     pid: i32,
@@ -675,7 +675,7 @@ struct AuthenticatedPeer {
     start_time: String,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl AuthenticatedPeer {
     fn still_valid(&self) -> bool {
         read_peer_identity(self.pid).is_ok_and(|(executable, start)| {
@@ -684,7 +684,7 @@ impl AuthenticatedPeer {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn authenticate_peer_process(pid: i32, expected: &Path) -> Result<AuthenticatedPeer, ()> {
     let process = rustix::process::Pid::from_raw(pid).ok_or(())?;
     let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())
@@ -701,7 +701,7 @@ fn authenticate_peer_process(pid: i32, expected: &Path) -> Result<AuthenticatedP
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_peer_identity(pid: i32) -> Result<(std::path::PathBuf, String), ()> {
     let executable = fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| ())?;
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
@@ -714,7 +714,7 @@ fn read_peer_identity(pid: i32) -> Result<(std::path::PathBuf, String), ()> {
     Ok((executable, start_time))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn receive_without_descriptors(
     stream: &std::os::unix::net::UnixStream,
     bytes: &mut [u8],

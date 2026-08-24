@@ -1,17 +1,8 @@
-use std::env;
+#[cfg(target_os = "linux")]
+include!("linux_main.rs");
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let raw_args = env::args().skip(1).collect::<Vec<_>>();
-    if raw_args.first().map(String::as_str) == Some("__ferrocrate_rootfs_launch") {
-        if let Err(err) = ferro_core::runtime::run_rootfs_launcher(&raw_args[1..]) {
-            eprintln!("rootfs launcher: {err}");
-            std::process::exit(125);
-        }
-        std::process::exit(125);
-    }
-    let socket = env::var("FERROCRATE_CRI_SOCKET")
-        .unwrap_or_else(|_| "/run/ferrocrate/cri.sock".to_string());
-    ferro_cri::server::serve(socket).await?;
-    Ok(())
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("ferro-cri is unsupported on this platform: Linux is required");
+    std::process::exit(125);
 }

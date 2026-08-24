@@ -186,6 +186,8 @@ function App(): JSX.Element {
   const [installerResult, setInstallerResult] = useState<InstallerRunSummary | null>(null);
   const [doctorResult, setDoctorResult] = useState<DoctorSummary | null>(null);
   const [doctorDialogOpen, setDoctorDialogOpen] = useState(false);
+  const doctorResultsTableRef = useRef<HTMLTableElement>(null);
+  const doctorResultsFocusPendingRef = useRef(false);
   const [settingsDialog, setSettingsDialog] = useState<"account" | "install" | null>(null);
 
   const [doctorFix, setDoctorFix] = useState(true);
@@ -207,6 +209,13 @@ function App(): JSX.Element {
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     setTheme(prefersDark ? "dark" : "light");
   }, []);
+
+  useEffect(() => {
+    if (!doctorDialogOpen && doctorResult && doctorResultsFocusPendingRef.current) {
+      doctorResultsFocusPendingRef.current = false;
+      doctorResultsTableRef.current?.focus();
+    }
+  }, [doctorDialogOpen, doctorResult]);
 
   useEffect(() => {
     let disposed = false;
@@ -1084,11 +1093,12 @@ function App(): JSX.Element {
         confirm: doctorConfirm,
       });
       setDoctorResult(result);
-      setDoctorDialogOpen(false);
+      doctorResultsFocusPendingRef.current = true;
       await refresh();
     } catch (err) {
       setError(String(err));
     } finally {
+      setDoctorDialogOpen(false);
       finishRuntimeAction();
     }
   }
@@ -1551,7 +1561,7 @@ function App(): JSX.Element {
               )
             ) : null}
 
-            {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
+            {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} resultsTableRef={doctorResultsTableRef} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
             {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} nativeLinux={snapshot?.daemon.platform === "linux-native"} daemonStatus={snapshot?.daemon} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 

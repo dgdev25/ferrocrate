@@ -2059,6 +2059,18 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
     Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
+fn doctor_platform_scope_message() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "doctor performs Linux current-host compatibility checks"
+    } else if cfg!(target_os = "macos") {
+        "doctor performs macOS current-host compatibility checks"
+    } else if cfg!(target_os = "windows") {
+        "doctor performs Windows current-host compatibility checks"
+    } else {
+        "doctor performs compatibility checks for the current host"
+    }
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2288,8 +2300,7 @@ fn handle_doctor(
         checks.push(DoctorCheck {
             id: "platform_scope".to_string(),
             ok: true,
-            message: "doctor currently performs full compatibility checks on macOS hosts"
-                .to_string(),
+            message: doctor_platform_scope_message().to_string(),
             hint: None,
             remediated: false,
             action: None,
@@ -21464,6 +21475,20 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn doctor_platform_scope_copy_names_the_current_host() {
+        let message = super::doctor_platform_scope_message();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(message, "doctor performs Linux current-host compatibility checks");
+        #[cfg(target_os = "macos")]
+        assert_eq!(message, "doctor performs macOS current-host compatibility checks");
+        #[cfg(target_os = "windows")]
+        assert_eq!(message, "doctor performs Windows current-host compatibility checks");
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        assert_eq!(message, "doctor performs compatibility checks for the current host");
     }
 
     #[cfg(target_os = "linux")]

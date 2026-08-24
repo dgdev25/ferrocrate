@@ -2,6 +2,11 @@
 set -euo pipefail
 
 userns_path="/proc/sys/kernel/unprivileged_userns_clone"
+apparmor_profile_name="usr.local.bin.ferrocrate"
+apparmor_profile_path="${FERROCRATE_APPARMOR_PROFILE_PATH:-/etc/apparmor.d/usr.local.bin.ferrocrate}"
+apparmor_profiles_path="${FERROCRATE_APPARMOR_PROFILES_PATH:-/sys/kernel/security/apparmor/profiles}"
+apparmor_userns_path="${FERROCRATE_APPARMOR_USERNS_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+apparmor_enabled_path="${FERROCRATE_APPARMOR_ENABLED_PATH:-/sys/module/apparmor/parameters/enabled}"
 strict="${FERROCRATE_ROOTLESS_STRICT:-0}"
 for argument in "$@"; do
   case "$argument" in
@@ -106,9 +111,9 @@ if command -v bwrap >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1; then
     # is created, producing only the generic uid_map EPERM from unshare. Read
     # the kernel policy knob when available so operators get a precise,
     # actionable diagnosis without weakening the policy automatically.
-    if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
-       [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]]; then
-      probe_reason="AppArmor restricts unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns=1); provide an approved profile or set the host policy to 0"
+    if [[ -r "$apparmor_userns_path" ]] &&
+       [[ "$(cat "$apparmor_userns_path")" == "1" ]]; then
+      probe_reason="AppArmor restricts this unprofiled helper probe (kernel.apparmor_restrict_unprivileged_userns=1); FerroCrate profile status is reported below"
     fi
     echo "rootless.bwrap_nested=missing"
     echo "rootless.bwrap_nested_reason=${probe_reason:-probe exited unsuccessfully}"
@@ -222,8 +227,8 @@ fi
 # Report the module, the sysctl, and (when restricted) whether an apparmor
 # parser is available to install a host profile.
 apparmor_enabled="no"
-if [[ -r /sys/module/apparmor/parameters/enabled ]]; then
-  apparmor_enabled="$(cat /sys/module/apparmor/parameters/enabled | tr -d '[:space:]')"
+if [[ -r "$apparmor_enabled_path" ]]; then
+  apparmor_enabled="$(tr -d '[:space:]' <"$apparmor_enabled_path")"
   [[ "$apparmor_enabled" == "Y" ]] && apparmor_enabled="yes" || apparmor_enabled="no"
 fi
 if [[ "$apparmor_enabled" == "yes" ]]; then
@@ -231,14 +236,25 @@ if [[ "$apparmor_enabled" == "yes" ]]; then
 else
   echo "rootless.apparmor=disabled-or-unavailable"
 fi
-if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
-  userns_restricted="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+if [[ -r "$apparmor_userns_path" ]]; then
+  userns_restricted="$(cat "$apparmor_userns_path")"
   echo "rootless.apparmor_restrict_unprivileged_userns=${userns_restricted}"
   if [[ "$userns_restricted" == "1" ]]; then
-    if command -v apparmor_parser >/dev/null 2>&1; then
-      echo "rootless.apparmor_note=unprivileged userns restricted; apparmor_parser available to install a bubblewrap profile"
+    if [[ -f "$apparmor_profile_path" ]] && [[ -r "$apparmor_profiles_path" ]] &&
+       awk -v name="$apparmor_profile_name" '$1 == name { found=1 } END { exit !found }' "$apparmor_profiles_path"; then
+      echo "rootless.apparmor_profile=loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
+      echo "rootless.apparmor_note=FerroCrate profile grants userns while the host-wide restriction remains active"
+    elif [[ -f "$apparmor_profile_path" ]] && [[ -r "$apparmor_profiles_path" ]]; then
+      echo "rootless.apparmor_profile=installed-not-loaded name=${apparmor_profile_name} path=${apparmor_profile_path}"
+      echo "rootless.apparmor_remedy=sudo apparmor_parser -r ${apparmor_profile_path}"
+      missing=1
+    elif [[ -f "$apparmor_profile_path" ]]; then
+      echo "rootless.apparmor_profile=installed-load-state-unreadable name=${apparmor_profile_name} path=${apparmor_profile_path}"
+      echo "rootless.apparmor_note=run sudo aa-status to confirm the FerroCrate profile is loaded"
     else
-      echo "rootless.apparmor_note=unprivileged userns restricted and apparmor_parser unavailable; bridge-mode rootless will fail closed on this host"
+      echo "rootless.apparmor_profile=absent name=${apparmor_profile_name} path=${apparmor_profile_path}"
+      echo "rootless.apparmor_remedy=install or reinstall the FerroCrate Debian package, then run sudo apparmor_parser -r ${apparmor_profile_path}"
+      missing=1
     fi
   fi
 fi

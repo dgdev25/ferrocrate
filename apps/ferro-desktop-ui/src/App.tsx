@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
@@ -14,6 +16,7 @@ const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
 type LogBatch = { text: string; truncated: boolean };
+type TerminalOutput = { data: number[]; stderr: boolean };
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
@@ -39,6 +42,14 @@ function App(): JSX.Element {
   const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
   const runtimeActionRef = useRef(false);
   const logFollowRef = useRef(false);
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const terminalActiveRef = useRef(false);
+  const [terminalActive, setTerminalActive] = useState(false);
+  const [terminalShell, setTerminalShell] = useState("sh");
+  const [terminalEnv, setTerminalEnv] = useState("TERM=xterm-256color");
+  const [terminalUser, setTerminalUser] = useState("");
+  const [terminalWorkdir, setTerminalWorkdir] = useState("");
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -62,6 +73,84 @@ function App(): JSX.Element {
     }
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     setTheme(prefersDark ? "dark" : "light");
+  }, []);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host || terminalRef.current) return;
+    const terminal = new Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+      fontSize: 13,
+      rows: 18,
+      theme: theme === "dark"
+        ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
+        : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" },
+    });
+    terminal.open(host);
+    terminal.onData((data) => {
+      if (!terminalActiveRef.current) return;
+      void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
+        setError(String(err));
+      });
+    });
+    terminal.writeln("Select a running container and open a shell.");
+    terminalRef.current = terminal;
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const columns = Math.max(20, Math.floor(entry.contentRect.width / 8.4));
+      const rows = Math.max(6, Math.floor(entry.contentRect.height / 17));
+      terminal.resize(columns, rows);
+    });
+    observer.observe(host);
+    return () => {
+      observer.disconnect();
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.theme = theme === "dark"
+      ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
+      : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" };
+  }, [theme]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlistenOutput: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+    let unlistenEnded: (() => void) | undefined;
+    void (async () => {
+      const stopOutput = await listen<TerminalOutput>("terminal-output", (event) => {
+        terminalRef.current?.write(new Uint8Array(event.payload.data));
+      });
+      const stopError = await listen<string>("terminal-error", (event) => setError(event.payload));
+      const stopEnded = await listen<boolean>("terminal-ended", (event) => {
+        terminalActiveRef.current = false;
+        setTerminalActive(false);
+        terminalRef.current?.writeln(event.payload ? "\r\n[exec exited]" : "\r\n[exec failed]");
+      });
+      if (disposed) {
+        stopOutput();
+        stopError();
+        stopEnded();
+        return;
+      }
+      unlistenOutput = stopOutput;
+      unlistenError = stopError;
+      unlistenEnded = stopEnded;
+    })();
+    return () => {
+      disposed = true;
+      unlistenOutput?.();
+      unlistenError?.();
+      unlistenEnded?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -142,8 +231,11 @@ function App(): JSX.Element {
     };
   }, []);
 
-  function beginRuntimeAction(allowWhileFollowing = false): boolean {
-    if (runtimeActionRef.current || (logFollowRef.current && !allowWhileFollowing)) {
+  function beginRuntimeAction(allowWhileStreaming = false): boolean {
+    if (
+      runtimeActionRef.current
+      || ((logFollowRef.current || terminalActiveRef.current) && !allowWhileStreaming)
+    ) {
       return false;
     }
     runtimeActionRef.current = true;
@@ -208,6 +300,42 @@ function App(): JSX.Element {
     }
     setPausedLogOutput(logOutput);
     setLogsPaused(true);
+  }
+
+  async function startTerminal(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    terminalRef.current?.clear();
+    try {
+      await invoke("start_terminal", {
+        target: containerTarget,
+        shell: terminalShell,
+        env: terminalEnv.split("\n").map((value) => value.trim()).filter(Boolean),
+        user: terminalUser.trim() || null,
+        workdir: terminalWorkdir.trim() || null,
+      });
+      terminalActiveRef.current = true;
+      setTerminalActive(true);
+      terminalRef.current?.focus();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function closeTerminal(): Promise<void> {
+    if (!terminalActiveRef.current || !beginRuntimeAction(true)) return;
+    try {
+      await invoke("close_terminal");
+      terminalActiveRef.current = false;
+      setTerminalActive(false);
+      terminalRef.current?.writeln("\r\n[detached; container left running]");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
   }
 
   async function saveBackendConfig(): Promise<void> {
@@ -308,7 +436,7 @@ function App(): JSX.Element {
       : visibleOutput;
   }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
 
-  const runtimeBusy = runtimeActionBusy || logsFollowing;
+  const runtimeBusy = runtimeActionBusy || logsFollowing || terminalActive;
 
   async function copyLogs(): Promise<void> {
     try {
@@ -568,6 +696,27 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           <pre>{visibleLogText || (logsFollowing ? "Waiting for log lines..." : EMPTY)}</pre>
           <pre>{snapshot?.containers.stdout || EMPTY}</pre>
           {snapshot?.containers.stderr ? <p className="muted">{snapshot.containers.stderr}</p> : null}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Exec Terminal</h2>
+          <div className="terminal-fields">
+            <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
+            <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
+            <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
+          </div>
+          <div className="field-row">
+            <input value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="environment, one KEY=value per line" />
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy}>
+              Open Shell
+            </button>
+            <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>
+              Detach
+            </button>
+          </div>
+          <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
         </article>
 
         <article className="panel">

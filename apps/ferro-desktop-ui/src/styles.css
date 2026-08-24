@@ -94,6 +94,32 @@ body {
   font-family: "Outfit", sans-serif;
 }
 
+.terminal-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.terminal-fields input {
+  min-width: 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  color: var(--text-primary);
+  padding: 0.5rem 0.7rem;
+  font-family: "Outfit", sans-serif;
+}
+
+.terminal-host {
+  height: 306px;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--bg-void);
+  padding: 0.45rem;
+}
+
 .field-row input::placeholder {
   color: var(--text-muted);
 }

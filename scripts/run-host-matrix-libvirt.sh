@@ -34,6 +34,7 @@ case "$row_id" in
   fedora-*) domain="ferro-fedora-01"; address="192.168.122.254" ;;
   rocky-*) domain="ferro-rocky-01"; address="192.168.122.56" ;;
   ubuntu-20.04-*) domain="ferro-ubuntu2004-01"; address="192.168.122.247" ;;
+  debian-13-*) domain="ferro-debian-01"; address="192.168.122.20" ;;
   alpine-*) domain="ferro-alpine322-01"; address="192.168.122.128" ;;
   aarch64-*) domain="ferro-arm-01-oracle"; address="132.145.25.108" ;;
   *) echo "no libvirt guest mapping for row: $row_id" >&2; exit 2 ;;

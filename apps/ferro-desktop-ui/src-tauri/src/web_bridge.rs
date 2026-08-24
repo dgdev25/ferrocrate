@@ -3,9 +3,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, Request, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
@@ -51,9 +53,25 @@ struct BridgeState {
     events: WebEventHub,
 }
 
+#[derive(Clone)]
+struct RequestGuard {
+    token: String,
+    allowed_hosts: [String; 2],
+}
+
+impl RequestGuard {
+    fn new(addr: SocketAddr, token: String) -> Self {
+        Self {
+            token,
+            allowed_hosts: [addr.to_string(), format!("localhost:{}", addr.port())],
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct WebBridgeHandle {
     addr: SocketAddr,
+    token: String,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -62,6 +80,10 @@ pub(crate) struct WebBridgeHandle {
 impl WebBridgeHandle {
     pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 
     pub(crate) async fn shutdown(mut self) {
@@ -84,7 +106,8 @@ pub(crate) async fn spawn_web_bridge(
         .local_addr()
         .map_err(|error| format!("failed to inspect web bridge address: {error}"))?;
     let (shutdown, shutdown_rx) = oneshot::channel();
-    let app = bridge_router(dist, WebEventHub::new());
+    let token = generate_session_token()?;
+    let app = bridge_router(dist, WebEventHub::new(), addr, token.clone());
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -94,6 +117,7 @@ pub(crate) async fn spawn_web_bridge(
     });
     Ok(WebBridgeHandle {
         addr,
+        token,
         shutdown: Some(shutdown),
         task,
     })
@@ -103,19 +127,97 @@ pub(crate) async fn run_web_bridge(addr: SocketAddr, dist: PathBuf) -> Result<()
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|error| format!("failed to bind web bridge at {addr}: {error}"))?;
-    let app = bridge_router(dist, WebEventHub::new());
+    let addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to inspect web bridge address: {error}"))?;
+    let token = generate_session_token()?;
+    let app = bridge_router(dist, WebEventHub::new(), addr, token.clone());
+    println!("web bridge ready at http://{addr}/#token={token}");
     axum::serve(listener, app)
         .await
         .map_err(|error| format!("web bridge failed: {error}"))
 }
 
-fn bridge_router(dist: PathBuf, events: WebEventHub) -> Router {
+fn bridge_router(dist: PathBuf, events: WebEventHub, addr: SocketAddr, token: String) -> Router {
     let index = dist.join("index.html");
+    let guard = RequestGuard::new(addr, token);
     Router::new()
         .route("/__tauri/stream/{event}", get(stream_event))
         .route("/__tauri/{command}", post(invoke_command))
+        .route_layer(from_fn_with_state(guard, validate_request))
         .fallback_service(ServeDir::new(dist).not_found_service(ServeFile::new(index)))
         .with_state(BridgeState { events })
+}
+
+fn generate_session_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("failed to generate web bridge session token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+async fn validate_request(
+    State(guard): State<RequestGuard>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let Some(host) = host.filter(|host| guard.allowed_hosts.iter().any(|item| item == *host))
+    else {
+        return StatusCode::MISDIRECTED_REQUEST.into_response();
+    };
+
+    if let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let expected = format!("http://{host}");
+        if origin != expected {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let stream_token = request
+        .uri()
+        .path()
+        .starts_with("/__tauri/stream/")
+        .then(|| request.uri().query())
+        .flatten()
+        .and_then(|query| {
+            query
+                .split('&')
+                .find_map(|part| part.strip_prefix("token="))
+        });
+    if !bearer
+        .or(stream_token)
+        .is_some_and(|candidate| constant_time_eq(candidate.as_bytes(), guard.token.as_bytes()))
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    next.run(request).await
+}
+
+fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
+    if candidate.len() != expected.len() {
+        return false;
+    }
+    candidate
+        .iter()
+        .zip(expected)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 async fn invoke_command(
@@ -505,9 +607,13 @@ mod tests {
             .expect("start bridge");
         let client = Client::new();
         let endpoint = |command: &str| format!("http://{}/__tauri/{command}", bridge.addr());
+        let authorized = |request: reqwest::RequestBuilder| {
+            request
+                .header("host", bridge.addr().to_string())
+                .bearer_auth(bridge.token())
+        };
 
-        let snapshot = client
-            .post(endpoint("get_desktop_snapshot"))
+        let snapshot = authorized(client.post(endpoint("get_desktop_snapshot")))
             .json(&json!({}))
             .send()
             .await
@@ -516,8 +622,7 @@ mod tests {
         let snapshot: Value = snapshot.json().await.expect("snapshot json");
         assert!(snapshot.get("runtime").is_some());
 
-        let action = client
-            .post(endpoint("run_desktop_action"))
+        let action = authorized(client.post(endpoint("run_desktop_action")))
             .json(&json!({ "action": "pull_image", "target": null }))
             .send()
             .await
@@ -526,8 +631,7 @@ mod tests {
         let action: Value = action.json().await.expect("action json");
         assert_eq!(action["ok"], false);
 
-        let terminal = client
-            .post(endpoint("start_terminal"))
+        let terminal = authorized(client.post(endpoint("start_terminal")))
             .json(&json!({ "target": "", "shell": "sh", "env": [], "user": null, "workdir": null }))
             .send()
             .await
@@ -535,6 +639,71 @@ mod tests {
         assert_eq!(terminal.status(), reqwest::StatusCode::BAD_REQUEST);
         let terminal: Value = terminal.json().await.expect("terminal error json");
         assert_eq!(terminal["error"], "target container is required");
+
+        bridge.shutdown().await;
+        fs::remove_dir_all(dist).ok();
+    }
+
+    #[tokio::test]
+    async fn bridge_rejects_unauthorized_and_untrusted_browser_requests() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dist = std::env::temp_dir().join(format!("ferro-web-bridge-auth-{suffix}"));
+        fs::create_dir_all(&dist).expect("create dist");
+        fs::write(dist.join("index.html"), "<main>Ferrocrate</main>").expect("write index");
+
+        let bridge = spawn_web_bridge("127.0.0.1:0".parse().unwrap(), dist.clone())
+            .await
+            .expect("start bridge");
+        let client = Client::new();
+        let endpoint = format!("http://{}/__tauri/get_desktop_snapshot", bridge.addr());
+        let host = bridge.addr().to_string();
+
+        let missing = client
+            .post(&endpoint)
+            .header("host", &host)
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("missing token request");
+        assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(missing.bytes().await.expect("empty response").len(), 0);
+
+        let wrong_host = client
+            .post(&endpoint)
+            .header("host", "attacker.example")
+            .bearer_auth(bridge.token())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("wrong host request");
+        assert_eq!(
+            wrong_host.status(),
+            reqwest::StatusCode::MISDIRECTED_REQUEST
+        );
+
+        let foreign_origin = client
+            .post(&endpoint)
+            .header("host", &host)
+            .header("origin", "https://attacker.example")
+            .bearer_auth(bridge.token())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("foreign origin request");
+        assert_eq!(foreign_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let valid = client
+            .post(&endpoint)
+            .header("host", &host)
+            .bearer_auth(bridge.token())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("valid request");
+        assert_eq!(valid.status(), reqwest::StatusCode::OK);
 
         bridge.shutdown().await;
         fs::remove_dir_all(dist).ok();

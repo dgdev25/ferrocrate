@@ -40,7 +40,7 @@ button:disabled { cursor: not-allowed; opacity: .5; transform: none !important; 
 .theme-toggle { width: 28px; height: 28px; border: 1px solid var(--ink-border); border-radius: var(--radius-sm); color: var(--ink-muted); background: var(--surface); cursor: pointer; }
 .theme-toggle:hover { color: var(--brand); border-color: var(--brand); }
 .daemon-pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 12px; font-weight: 650; }
-.daemon-pill.is-running { color: var(--ok); } .daemon-pill.is-stopped { color: var(--error); }
+.daemon-pill.is-running { color: var(--ok); } .daemon-pill.is-starting { color: var(--warn); } .daemon-pill.is-stopped, .daemon-pill.is-failed { color: var(--error); }
 .daemon-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 15%, transparent); }
 .registry-account { min-height: 28px; max-width: 160px; display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; border: 1px solid var(--ink-border); border-radius: 99px; color: var(--ink); background: var(--surface); font-size: 12px; font-weight: 650; cursor: pointer; transition: color var(--transition), border-color var(--transition), background var(--transition); }
 .registry-account:hover { color: var(--brand); border-color: var(--brand); background: var(--brand-light); }

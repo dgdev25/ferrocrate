@@ -135,5 +135,23 @@ export function shellKeyboardCommand(event) {
 }
 
 export function daemonIsAvailable(snapshot) {
+  if (snapshot?.daemon) return snapshot.daemon.state === "running";
   return snapshot?.containers?.ok === true && snapshot?.images?.ok === true;
+}
+
+export function daemonStatusPresentation(status) {
+  const state = status?.state || "stopped";
+  const labels = {
+    starting: "daemon starting",
+    running: "daemon running",
+    stopped: "daemon stopped",
+    failed: "daemon failed",
+  };
+  const titles = {
+    starting: "Ferrocrate API daemon is starting",
+    running: status?.socket_path ? `Ferrocrate API daemon at ${status.socket_path}` : "Ferrocrate API daemon is running",
+    stopped: status?.reason || "Ferrocrate API daemon is stopped",
+    failed: status?.reason || "Ferrocrate API daemon failed",
+  };
+  return { label: labels[state] || labels.stopped, tone: state, title: titles[state] || titles.stopped };
 }

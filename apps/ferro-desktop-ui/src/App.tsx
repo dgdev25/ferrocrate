@@ -55,6 +55,7 @@ import {
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   daemonIsAvailable,
+  daemonStatusPresentation,
   filterContainers,
   filterContainersByStatus,
   groupContainers,
@@ -1069,6 +1070,7 @@ function App(): JSX.Element {
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
+  const daemonPresentation = daemonStatusPresentation(snapshot?.daemon);
   const containerViewState = containerContentState(
     containerRows.length,
     visibleContainers.length,
@@ -1122,8 +1124,8 @@ function App(): JSX.Element {
         <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
-        <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
-          <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
+        <div className={`daemon-pill is-${daemonPresentation.tone}`} title={daemonPresentation.title}>
+          <span className="daemon-dot" /> {daemonPresentation.label}
         </div>
         <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
         {showGlobalRunAction(activeSection) ? <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>

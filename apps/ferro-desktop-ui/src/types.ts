@@ -7,6 +7,11 @@ export type CommandResult = {
 };
 
 export type DesktopSnapshot = {
+  daemon: {
+    state: "starting" | "running" | "stopped" | "failed";
+    socket_path: string;
+    reason: string | null;
+  };
   runtime: CommandResult;
   containers: CommandResult;
   images: CommandResult;

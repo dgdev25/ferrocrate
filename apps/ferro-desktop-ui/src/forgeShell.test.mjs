@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   daemonIsAvailable,
+  daemonStatusPresentation,
   filterContainers,
   filterContainersByStatus,
   formatContainerPorts,
@@ -168,8 +169,14 @@ test("shellKeyboardCommand maps Escape and the advertised search shortcut", () =
   assert.equal(shellKeyboardCommand({ key: "k", metaKey: false, ctrlKey: false }), null);
 });
 
-test("daemonIsAvailable reflects successful runtime data commands, not optional VM status", () => {
-  assert.equal(daemonIsAvailable({ containers: { ok: true }, images: { ok: true } }), true);
-  assert.equal(daemonIsAvailable({ containers: { ok: false }, images: { ok: true } }), false);
+test("daemonIsAvailable reflects the real API health state", () => {
+  assert.equal(daemonIsAvailable({ daemon: { state: "running" } }), true);
+  assert.equal(daemonIsAvailable({ daemon: { state: "starting" } }), false);
+  assert.equal(daemonIsAvailable({ daemon: { state: "failed", reason: "exit 1" } }), false);
   assert.equal(daemonIsAvailable(null), false);
+});
+
+test("daemon status presentation preserves lifecycle state and failure reason", () => {
+  assert.deepEqual(daemonStatusPresentation({ state: "starting", reason: null }), { label: "daemon starting", tone: "starting", title: "Ferrocrate API daemon is starting" });
+  assert.deepEqual(daemonStatusPresentation({ state: "failed", reason: "exit status 1" }), { label: "daemon failed", tone: "failed", title: "exit status 1" });
 });

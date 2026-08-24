@@ -23,6 +23,7 @@ const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
 static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
+static DESKTOP_DAEMON_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 struct TerminalProcess {
     child: Child,
@@ -156,9 +157,120 @@ fn ferrocrate_proxy_command(args: &[&str]) -> Vec<String> {
 
 #[derive(Debug, Serialize)]
 struct DesktopSnapshot {
+    daemon: DaemonStatus,
     runtime: CommandResult,
     containers: CommandResult,
     images: CommandResult,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonStatus {
+    state: String,
+    socket_path: String,
+    reason: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_socket_path() -> Result<PathBuf, String> {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(PathBuf::from)
+        .map(|path| path.join("ferrocrate.sock"))
+        .ok_or_else(|| "FERROCRATE_RUNTIME_DIR or XDG_RUNTIME_DIR is not set".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn ping_daemon(socket: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|error| format!("cannot connect to {}: {error}", socket.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(b"GET /_ping HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\n\r\n")
+        .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+    if response.starts_with("HTTP/1.1 200") && response.ends_with("OK") {
+        Ok(())
+    } else {
+        Err("Ferrocrate API health check returned an unexpected response".to_string())
+    }
+}
+
+fn daemon_status() -> DaemonStatus {
+    #[cfg(target_os = "linux")]
+    {
+        return match desktop_socket_path() {
+            Ok(socket) => match ping_daemon(&socket) {
+                Ok(()) => DaemonStatus {
+                    state: "running".to_string(),
+                    socket_path: socket.display().to_string(),
+                    reason: None,
+                },
+                Err(reason) => DaemonStatus {
+                    state: "stopped".to_string(),
+                    socket_path: socket.display().to_string(),
+                    reason: Some(reason),
+                },
+            },
+            Err(reason) => DaemonStatus {
+                state: "failed".to_string(),
+                socket_path: String::new(),
+                reason: Some(reason),
+            },
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    DaemonStatus {
+        state: "running".to_string(),
+        socket_path: "desktop bridge".to_string(),
+        reason: None,
+    }
+}
+
+fn start_desktop_daemon() -> Result<(), String> {
+    if std::net::TcpStream::connect("127.0.0.1:4288").is_ok() {
+        return Ok(());
+    }
+    let mut slot = DESKTOP_DAEMON_PROCESS
+        .lock()
+        .map_err(|_| "desktop daemon state is unavailable".to_string())?;
+    if slot
+        .as_mut()
+        .is_some_and(|child| child.try_wait().ok().flatten().is_none())
+    {
+        return Ok(());
+    }
+    let child = Command::new("ferro-desktop")
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("failed to start desktop daemon supervisor: {error}"))?;
+    *slot = Some(child);
+    drop(slot);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect("127.0.0.1:4288").is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err("desktop daemon supervisor did not become ready".to_string())
+}
+
+fn stop_desktop_daemon() {
+    if let Ok(mut slot) = DESKTOP_DAEMON_PROCESS.lock() {
+        if let Some(mut child) = slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -828,12 +940,7 @@ fn container_detail_from_native_json(value: &JsonValue) -> Result<ContainerDetai
     let (restart_name, maximum_retry_count) = match restart_value {
         Some(JsonValue::String(policy)) => policy
             .split_once(':')
-            .map(|(name, count)| {
-                (
-                    name.to_string(),
-                    count.parse::<u64>().unwrap_or_default(),
-                )
-            })
+            .map(|(name, count)| (name.to_string(), count.parse::<u64>().unwrap_or_default()))
             .unwrap_or_else(|| (policy.clone(), 0)),
         Some(JsonValue::Object(policy)) => policy
             .get("on-failure-with-retries")
@@ -1945,7 +2052,23 @@ fn query_entitlement_from_session(
 
 #[tauri::command]
 fn get_desktop_snapshot() -> DesktopSnapshot {
-    let runtime = run_command("ferro-desktop", &["vm", "status", "--json"]);
+    let daemon = daemon_status();
+    let runtime = if daemon.state == "running" {
+        CommandResult {
+            ok: true,
+            code: 0,
+            stdout: daemon.socket_path.clone(),
+            stderr: String::new(),
+            message: String::new(),
+        }
+    } else {
+        command_input_failure(
+            daemon
+                .reason
+                .as_deref()
+                .unwrap_or("Ferrocrate daemon is stopped"),
+        )
+    };
     let mut containers = run_owned_command(
         "ferro-desktop",
         &ferrocrate_proxy_command(&["containers", "--all", "--format", "json"]),
@@ -1978,6 +2101,7 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
     normalize_nullable_list_output(&mut images);
 
     DesktopSnapshot {
+        daemon,
         runtime,
         containers,
         images,
@@ -2452,8 +2576,26 @@ fn run_doctor_action(
 fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandResult {
     let target = target.unwrap_or_default().trim().to_string();
     match action {
-        DesktopAction::VmStart => run_command("ferro-desktop", &["vm", "start"]),
-        DesktopAction::VmStop => run_command("ferro-desktop", &["vm", "stop"]),
+        DesktopAction::VmStart => match start_desktop_daemon() {
+            Ok(()) => CommandResult {
+                ok: true,
+                code: 0,
+                stdout: daemon_status().socket_path,
+                stderr: String::new(),
+                message: String::new(),
+            },
+            Err(error) => command_input_failure(&error),
+        },
+        DesktopAction::VmStop => {
+            stop_desktop_daemon();
+            CommandResult {
+                ok: true,
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                message: String::new(),
+            }
+        }
         DesktopAction::PullImage => {
             if target.is_empty() {
                 return command_input_failure("target image is required");
@@ -2507,8 +2649,12 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|_| {
+            start_desktop_daemon().map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
             get_volumes,
@@ -2539,8 +2685,16 @@ fn main() {
             run_paid_full_stack_install,
             run_doctor_action
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+        ) {
+            stop_desktop_daemon();
+        }
+    });
 }
 
 #[cfg(test)]

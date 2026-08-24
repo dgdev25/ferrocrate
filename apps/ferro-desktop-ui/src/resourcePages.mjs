@@ -77,6 +77,7 @@ export function isDaemonUnavailable(error) {
 
 export function shouldShowFirstRun(snapshot, activeSection) {
   if (!snapshot || activeSection === "doctor" || activeSection === "settings") return false;
+  if (snapshot.daemon && snapshot.daemon.state !== "running") return true;
   return [snapshot.containers, snapshot.images].some((command) => (
     command?.ok === false && isDaemonUnavailable(command.stderr)
   ));

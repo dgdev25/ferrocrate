@@ -62,13 +62,17 @@ export function parseContainerRows(output) {
 
 export function parseContainerStats(response) {
   if (!response || !Array.isArray(response.samples)) return [];
-  return response.samples.map((sample) => ({
-    id: String(sample.id || ""),
-    available: sample.available === true,
-    cpuPercent: sample.cpu_percent != null && Number.isFinite(Number(sample.cpu_percent)) ? Number(sample.cpu_percent) : null,
-    memoryUsage: sample.memory_usage != null && Number.isFinite(Number(sample.memory_usage)) ? Number(sample.memory_usage) : null,
-    memoryLimit: sample.memory_limit != null && Number.isFinite(Number(sample.memory_limit)) ? Number(sample.memory_limit) : null,
-  }));
+  return response.samples.map((sample) => {
+    const cpuPercent = sample.cpu_percent != null && Number.isFinite(Number(sample.cpu_percent)) ? Number(sample.cpu_percent) : null;
+    const memoryUsage = sample.memory_usage != null && Number.isFinite(Number(sample.memory_usage)) ? Number(sample.memory_usage) : null;
+    return {
+      id: String(sample.id || ""),
+      available: sample.available === true && cpuPercent != null && memoryUsage != null,
+      cpuPercent,
+      memoryUsage,
+      memoryLimit: sample.memory_limit != null && Number.isFinite(Number(sample.memory_limit)) ? Number(sample.memory_limit) : null,
+    };
+  });
 }
 
 export function mergeContainerStats(rows, samples) {

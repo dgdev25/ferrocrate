@@ -568,12 +568,13 @@ fn aggregate_container_stats(
                 .map(|(before, after, elapsed_usec)| {
                     after.saturating_sub(before) as f64 / elapsed_usec * 100.0
                 });
+            let memory_usage = pair
+                .as_ref()
+                .and_then(|(_, current)| current.stats.memory_current);
             ContainerStatsSample {
                 id: id.clone(),
-                available: pair.is_some(),
-                memory_usage: pair
-                    .as_ref()
-                    .and_then(|(_, current)| current.stats.memory_current),
+                available: cpu_percent.is_some() && memory_usage.is_some(),
+                memory_usage,
                 memory_limit: pair
                     .as_ref()
                     .and_then(|(_, current)| current.stats.memory_max),
@@ -3202,6 +3203,28 @@ mod tests {
         assert_eq!(samples[1].cpu_percent, Some(12.5));
         assert_eq!(samples[2].id, "missing");
         assert!(!samples[2].available);
+
+        let empty_stats = NativeContainerStats::default();
+        let empty_first = BTreeMap::from([(
+            "no-cgroup".to_string(),
+            TimedNativeContainerStats {
+                sampled_at: base,
+                stats: empty_stats.clone(),
+            },
+        )]);
+        let empty_second = BTreeMap::from([(
+            "no-cgroup".to_string(),
+            TimedNativeContainerStats {
+                sampled_at: base + std::time::Duration::from_millis(100),
+                stats: empty_stats,
+            },
+        )]);
+        let empty_samples = aggregate_container_stats(
+            &["no-cgroup".to_string()],
+            &empty_first,
+            &empty_second,
+        );
+        assert!(!empty_samples[0].available);
     }
 
     #[cfg(target_os = "linux")]

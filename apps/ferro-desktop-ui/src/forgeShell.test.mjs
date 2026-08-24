@@ -134,6 +134,14 @@ test("live stats parse and merge usage, limits, and availability by container id
   assert.equal(merged[1].memory, "");
 });
 
+test("a nominal sample with no live metrics is treated as unavailable", () => {
+  const [sample] = parseContainerStats({
+    samples: [{ id: "abc123", available: true, cpu_percent: null, memory_usage: null, memory_limit: null }],
+  });
+
+  assert.equal(sample.available, false);
+});
+
 test("container stats polling only runs for a visible Containers section", () => {
   assert.equal(shouldPollContainerStats("containers", "visible"), true);
   assert.equal(shouldPollContainerStats("images", "visible"), false);

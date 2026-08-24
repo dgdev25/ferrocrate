@@ -2607,6 +2607,25 @@ fn run_doctor_action(
     dry_run: bool,
     confirm: bool,
 ) -> Result<DoctorSummary, String> {
+    let args = doctor_command(fix, bootstrap, dry_run, confirm);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = run_command("ferrocrate", &args);
+    let payload = serde_json::from_str::<JsonValue>(&result.stdout).unwrap_or_else(|_| {
+        serde_json::json!({
+            "healthy": false,
+            "error": "invalid doctor json output",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "checks": []
+        })
+    });
+    Ok(DoctorSummary {
+        ok: result.ok,
+        raw: payload,
+    })
+}
+
+fn doctor_command(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool) -> Vec<String> {
     let mut args = vec!["doctor", "--json"];
     if fix {
         args.push("--fix");
@@ -2618,21 +2637,9 @@ fn run_doctor_action(
         args.push("--dry-run");
     }
     if confirm {
-        args.push("--yes");
+        args.push("--confirm");
     }
-    let result = run_command("ferrocrate", &args);
-    let payload = serde_json::from_str::<JsonValue>(&result.stdout).unwrap_or_else(|_| {
-        serde_json::json!({
-            "healthy": false,
-            "error": "invalid doctor json output",
-            "stdout": result.stdout,
-            "stderr": result.stderr
-        })
-    });
-    Ok(DoctorSummary {
-        ok: result.ok,
-        raw: payload,
-    })
+    args.into_iter().map(str::to_string).collect()
 }
 
 #[tauri::command]
@@ -2767,15 +2774,15 @@ mod tests {
     use super::{
         actionable_error, attach_container_resource_usage, build_bridge_command, command_failure,
         compose_bridge_command, compose_service_rows, container_detail_from_json,
-        container_inspect_command, container_update_command, ferrocrate_proxy_command, log_channel,
-        log_follow_command, network_proxy_command, network_summaries,
-        normalize_nullable_list_output, parse_nullable_json_list, parse_terminal_exec_id,
-        registry_login_command, registry_logout_command, run_container_bridge_command,
-        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
-        CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
-        ContainerPortRecord, ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction,
-        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction,
-        VolumeListResponse,
+        container_inspect_command, container_update_command, doctor_command,
+        ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
+        network_summaries, normalize_nullable_list_output, parse_nullable_json_list,
+        parse_terminal_exec_id, registry_login_command, registry_logout_command,
+        run_container_bridge_command, terminal_exec_command, terminal_resize_command,
+        volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
+        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
+        ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction, NetworkInspectRecord,
+        NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction, VolumeListResponse,
     };
 
     #[test]
@@ -2983,6 +2990,14 @@ mod tests {
         assert_eq!(
             command_failure("container restart", &result),
             "restart: demo: io error: Permission denied"
+        );
+    }
+
+    #[test]
+    fn doctor_options_use_the_real_cli_flags() {
+        assert_eq!(
+            doctor_command(true, true, false, true),
+            vec!["doctor", "--json", "--fix", "--bootstrap", "--confirm"]
         );
     }
 

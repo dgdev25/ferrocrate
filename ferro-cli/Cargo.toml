@@ -11,6 +11,7 @@ clap = { workspace = true }
 clap_complete = "4.5"
 serde_json = { workspace = true }
 serde = { workspace = true }
+serde_yaml = "0.9"
 owo-colors = "4.0"
 tempfile = { workspace = true }
 tracing = { workspace = true }

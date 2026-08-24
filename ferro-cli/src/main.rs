@@ -972,6 +972,8 @@ pub enum ComposeCommands {
         /// `restart:` supervision in CLI Compose.
         #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
+        /// Limit the operation to these services and their declared dependencies.
+        services: Vec<String>,
     },
     /// Watch a Compose project and reconcile drift.
     Watch {
@@ -980,8 +982,26 @@ pub enum ComposeCommands {
         #[arg(long, default_value = "2")]
         interval: u64,
     },
-    /// Stop and remove a Compose project.
-    Down,
+    /// Stop a Compose project's services without removing them.
+    Stop {
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+        services: Vec<String>,
+    },
+    /// Start previously stopped Compose services.
+    Start { services: Vec<String> },
+    /// Restart Compose services in dependency order.
+    Restart {
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+        services: Vec<String>,
+    },
+    /// Pull images used by Compose services.
+    Pull { services: Vec<String> },
+    /// Print the parsed, interpolated Compose model as YAML.
+    Config,
+    /// Stop and remove a Compose project, optionally limited to services.
+    Down { services: Vec<String> },
     /// List containers of a Compose project.
     Ps,
     /// Read logs of Compose services.
@@ -11065,7 +11085,11 @@ fn handle_compose(
     let default_network =
         compose_default_network_name_with_declared(&project_dir, project.compose.name.as_deref())?;
     match command {
-        ComposeCommands::Up { profile, detach } => {
+        ComposeCommands::Up {
+            profile,
+            detach,
+            services,
+        } => {
             // Compose is a detached CLI operation: services must outlive the
             // short-lived `compose up` launcher just like Docker daemon
             // workloads. Without this lease override, the parent-death
@@ -11074,9 +11098,10 @@ fn handle_compose(
             unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
             let order = compose_up(&project).map_err(|err| err.to_string())?;
             let enabled = build_compose_enabled_set(&project, &profile)?;
+            let requested = compose_service_selection(&project, &services)?;
             let selected_services: Vec<_> = order
                 .into_iter()
-                .filter(|name| enabled.contains(name))
+                .filter(|name| enabled.contains(name) && requested.contains(name))
                 .collect();
             let selected: Vec<(String, String)> = selected_services
                 .into_iter()
@@ -11402,6 +11427,7 @@ fn handle_compose(
                     ComposeCommands::Up {
                         profile: profile.clone(),
                         detach: true,
+                        services: Vec::new(),
                     },
                 )?;
                 loop {
@@ -11412,14 +11438,51 @@ fn handle_compose(
                         break;
                     }
                 }
-                handle_compose(runtime, store, volume_store, file, ComposeCommands::Down)?;
+                handle_compose(
+                    runtime,
+                    store,
+                    volume_store,
+                    file,
+                    ComposeCommands::Down { services: Vec::new() },
+                )?;
             }
         }
-        ComposeCommands::Down => {
+        ComposeCommands::Stop { timeout, services } => {
+            let order = compose_down(&project).map_err(|err| err.to_string())?;
+            compose_lifecycle_records(runtime, &order, &services, |id| {
+                handle_stop(runtime, id, timeout)
+            })?;
+        }
+        ComposeCommands::Start { services } => {
+            let order = compose_up(&project).map_err(|err| err.to_string())?;
+            compose_lifecycle_records(runtime, &order, &services, |id| handle_start(runtime, id))?;
+        }
+        ComposeCommands::Restart { timeout, services } => {
+            let order = compose_up(&project).map_err(|err| err.to_string())?;
+            compose_lifecycle_records(runtime, &order, &services, |id| {
+                handle_restart(runtime, id, timeout)
+            })?;
+        }
+        ComposeCommands::Pull { services } => {
+            let order = compose_up(&project).map_err(|err| err.to_string())?;
+            let requested = compose_explicit_service_selection(&project, &services)?;
+            let authorization = runtime.surface_authorization().map_err(|error| error.to_string())?;
+            for name in order.into_iter().filter(|name| requested.contains(name)) {
+                let service = project.compose.services.get(&name).expect("service from graph");
+                let image = service.image.as_deref().ok_or_else(|| format!("compose: service {name} has no image"))?;
+                handle_pull(store, image, false, &authorization)?;
+            }
+        }
+        ComposeCommands::Config => {
+            print!("{}", serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?);
+        }
+        ComposeCommands::Down { services } => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
             let containers = runtime.list().map_err(|err| err.to_string())?;
+            let requested = compose_explicit_service_selection(&project, &services)?;
             let selected: Vec<_> = order
                 .into_iter()
+                .filter(|name| requested.contains(name))
                 .flat_map(|name| {
                     containers
                         .iter()
@@ -11598,13 +11661,15 @@ fn handle_compose(
                     failures.join("; ")
                 ));
             }
-            remove_owned_compose_networks(
-                &project,
-                &runtime_dir(),
-                runtime,
-                &parent_origin,
-                &surface_authorization,
-            )?;
+            if services.is_empty() {
+                remove_owned_compose_networks(
+                    &project,
+                    &runtime_dir(),
+                    runtime,
+                    &parent_origin,
+                    &surface_authorization,
+                )?;
+            }
         }
         ComposeCommands::Ps => {
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
@@ -11651,6 +11716,80 @@ fn build_compose_enabled_set(
     }
 
     Ok(enabled)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_service_selection(
+    project: &ComposeProject,
+    services: &[String],
+) -> Result<HashSet<String>, String> {
+    if services.is_empty() {
+        return Ok(project.compose.services.keys().cloned().collect());
+    }
+    let mut selected = HashSet::new();
+    let mut pending = services.to_vec();
+    while let Some(name) = pending.pop() {
+        if !selected.insert(name.clone()) {
+            continue;
+        }
+        let service = project
+            .compose
+            .services
+            .get(&name)
+            .ok_or_else(|| format!("compose: unknown service {name}"))?;
+        if let Some(depends_on) = &service.depends_on {
+            pending.extend(depends_on.iter().cloned());
+        }
+    }
+    Ok(selected)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_explicit_service_selection(
+    project: &ComposeProject,
+    services: &[String],
+) -> Result<HashSet<String>, String> {
+    if services.is_empty() {
+        return Ok(project.compose.services.keys().cloned().collect());
+    }
+    let selected: HashSet<_> = services.iter().cloned().collect();
+    for service in &selected {
+        if !project.compose.services.contains_key(service) {
+            return Err(format!("compose: unknown service {service}"));
+        }
+    }
+    Ok(selected)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_lifecycle_records(
+    runtime: &ContainerRuntime,
+    order: &[String],
+    services: &[String],
+    mut operation: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let requested: HashSet<_> = services.iter().map(String::as_str).collect();
+    let records = runtime.list().map_err(|error| error.to_string())?;
+    let mut failures = Vec::new();
+    for service in order {
+        if !requested.is_empty() && !requested.contains(service.as_str()) {
+            continue;
+        }
+        for record in records.iter().filter(|record| {
+            record.name.as_deref().is_some_and(|name| {
+                name == service || name.starts_with(&format!("{service}-"))
+            })
+        }) {
+            if let Err(error) = operation(&record.id) {
+                failures.push(format!("{}: {error}", record.id));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("compose lifecycle partial result: {}", failures.join("; ")))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -19707,9 +19846,24 @@ volumes:
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
                 assert!(
-                    matches!(command, ComposeCommands::Up { profile, detach } if profile.is_empty() && detach)
+                    matches!(command, ComposeCommands::Up { profile, detach, services } if profile.is_empty() && detach && services.is_empty())
                 );
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compose_lifecycle_subcommands_with_timeout_and_services() {
+        let cli = Cli::parse_from([
+            "ferrocrate", "compose", "stop", "--timeout", "7", "web", "worker",
+        ]);
+        match cli.command {
+            Commands::Compose { command, .. } => assert!(matches!(
+                command,
+                ComposeCommands::Stop { timeout: 7, services }
+                    if services == ["web", "worker"]
+            )),
             other => panic!("unexpected command: {other:?}"),
         }
     }

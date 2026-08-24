@@ -149,6 +149,34 @@ struct ComposeSnapshot {
     services: Vec<ComposeServiceSummary>,
 }
 
+#[derive(Clone, Serialize)]
+struct BuildProgressFrame {
+    stream: String,
+    text: String,
+}
+
+fn build_bridge_command(context: &str, tag: &str) -> Result<Vec<String>, String> {
+    let context = context.trim();
+    let tag = tag.trim();
+    if context.is_empty() {
+        return Err("build context directory is required".to_string());
+    }
+    if tag.is_empty() {
+        return Err("image tag is required".to_string());
+    }
+    let dockerfile = PathBuf::from(context).join("Dockerfile");
+    Ok(vec![
+        "exec".to_string(),
+        "--".to_string(),
+        "ferrocrate".to_string(),
+        "build".to_string(),
+        "--dockerfile".to_string(),
+        dockerfile.to_string_lossy().to_string(),
+        "--tag".to_string(),
+        tag.to_string(),
+    ])
+}
+
 fn compose_bridge_command(file: &str, action: ComposeAction) -> Result<Vec<String>, String> {
     let file = file.trim();
     if file.is_empty() {
@@ -1060,6 +1088,76 @@ fn run_compose_action(file: String, action: ComposeAction) -> Result<CommandResu
 }
 
 #[tauri::command]
+fn build_image(
+    app: tauri::AppHandle,
+    context: String,
+    tag: String,
+) -> Result<CommandResult, String> {
+    let args = build_bridge_command(&context, &tag)?;
+    let mut child = Command::new("ferro-desktop")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start image build: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "image build stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "image build stderr unavailable".to_string())?;
+    let (sender, receiver) = mpsc::channel::<BuildProgressFrame>();
+    for (stream, reader) in [
+        ("stdout", Box::new(stdout) as Box<dyn Read + Send>),
+        ("stderr", Box::new(stderr) as Box<dyn Read + Send>),
+    ] {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(reader).lines() {
+                match line {
+                    Ok(text) => {
+                        let _ = sender.send(BuildProgressFrame {
+                            stream: stream.to_string(),
+                            text,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = sender.send(BuildProgressFrame {
+                            stream: "stderr".to_string(),
+                            text: format!("failed to read build output: {error}"),
+                        });
+                    }
+                }
+            }
+        });
+    }
+    drop(sender);
+    let mut stdout_text = String::new();
+    let mut stderr_text = String::new();
+    for frame in receiver {
+        let destination = if frame.stream == "stderr" {
+            &mut stderr_text
+        } else {
+            &mut stdout_text
+        };
+        destination.push_str(&frame.text);
+        destination.push('\n');
+        let _ = app.emit("image-build-progress", frame);
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("failed to wait for image build: {error}"))?;
+    Ok(CommandResult {
+        ok: status.success(),
+        code: status.code().unwrap_or(1),
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
+}
+
+#[tauri::command]
 fn run_volume_action(
     action: VolumeAction,
     target: Option<String>,
@@ -1309,6 +1407,7 @@ fn main() {
             get_desktop_snapshot,
             get_volumes,
             get_compose_snapshot,
+            build_image,
             run_desktop_action,
             run_compose_action,
             run_volume_action,
@@ -1333,10 +1432,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_bridge_command, compose_service_rows, log_channel, log_follow_command,
-        parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
+        build_bridge_command, compose_bridge_command, compose_service_rows, log_channel,
+        log_follow_command, parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
         volume_proxy_command, ComposeAction, ComposeContainerRecord, LogBuffer, VolumeAction,
     };
+
+    #[test]
+    fn image_build_uses_selected_context_through_desktop_bridge() {
+        assert_eq!(
+            build_bridge_command("/tmp/build context", "demo/app:dev").expect("build command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "build",
+                "--dockerfile",
+                "/tmp/build context/Dockerfile",
+                "--tag",
+                "demo/app:dev",
+            ]
+        );
+        assert!(build_bridge_command(" ", "demo:latest").is_err());
+        assert!(build_bridge_command("/tmp/context", " ").is_err());
+    }
 
     #[test]
     fn compose_actions_use_the_desktop_exec_bridge() {

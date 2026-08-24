@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
+  BuildProgressFrame,
   ComposeAction,
   ComposeServiceSummary,
   ComposeSnapshot,
@@ -18,6 +19,7 @@ import type {
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
+import { buildStepText } from "./imageBuild.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -69,6 +71,9 @@ function App(): JSX.Element {
   const [composeFile, setComposeFile] = useState("");
   const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
   const [composeLoading, setComposeLoading] = useState(false);
+  const [buildContext, setBuildContext] = useState("");
+  const [buildTag, setBuildTag] = useState("local/build:latest");
+  const [buildSteps, setBuildSteps] = useState<BuildProgressFrame[]>([]);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -92,6 +97,17 @@ function App(): JSX.Element {
     }
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     setTheme(prefersDark ? "dark" : "light");
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<BuildProgressFrame>("image-build-progress", (event) => {
+      setBuildSteps((steps) => [...steps, event.payload]);
+    }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   useEffect(() => {
@@ -244,6 +260,15 @@ function App(): JSX.Element {
       setComposeFile(selected);
       setError(null);
       await readComposeSnapshot(selected);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function chooseBuildContext(): Promise<void> {
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (typeof selected === "string") setBuildContext(selected);
     } catch (err) {
       setError(String(err));
     }
@@ -470,6 +495,26 @@ function App(): JSX.Element {
     const target = composeLogTarget(service);
     setContainerTarget(target);
     await startLogFollow(target);
+  }
+
+  async function buildImage(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Image Build");
+    setBuildSteps([]);
+    try {
+      const result = await invoke<CommandResult>("build_image", {
+        context: buildContext,
+        tag: buildTag,
+      });
+      setLastAction(result);
+      if (!result.ok) setError(result.stderr || `Image build failed with status ${result.code}`);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
   }
 
   async function saveBackendConfig(): Promise<void> {
@@ -883,6 +928,26 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           </div>
           <pre>{snapshot?.images.stdout || EMPTY}</pre>
           {snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Build Image</h2>
+          <p className="muted">Choose a directory containing a Dockerfile and watch each build frame as it arrives.</p>
+          <div className="field-row build-fields">
+            <input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" aria-label="Build context directory" />
+            <button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose Directory</button>
+            <input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" aria-label="Build image tag" />
+            <button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build</button>
+          </div>
+          {buildSteps.length ? (
+            <ol className="build-steps">
+              {buildSteps.map((step, index) => (
+                <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}>
+                  <span>{step.stream}</span><code>{buildStepText(step.text)}</code>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="muted">Build progress will appear here.</p>}
         </article>
 
         <article className="panel panel-wide">

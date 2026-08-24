@@ -128,6 +128,50 @@ body {
   gap: 0.5rem;
 }
 
+.build-fields {
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.build-fields input:first-child {
+  flex: 2 1 280px;
+}
+
+.build-fields input {
+  flex: 1 1 180px;
+}
+
+.build-steps {
+  margin: 0;
+  padding-left: 1.6rem;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.build-steps li {
+  display: grid;
+  grid-template-columns: 4rem 1fr;
+  gap: 0.6rem;
+  padding: 0.35rem 0;
+  color: var(--text-secondary);
+}
+
+.build-steps span {
+  color: var(--aurora-cyan);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.build-steps code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.build-steps .build-step-error,
+.build-step-error span {
+  color: var(--status-error);
+}
+
 .compose-file-row .btn {
   flex: 0 0 auto;
 }

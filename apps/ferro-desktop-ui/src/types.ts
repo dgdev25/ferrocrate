@@ -51,6 +51,11 @@ export type ComposeSnapshot = {
   services: ComposeServiceSummary[];
 };
 
+export type BuildProgressFrame = {
+  stream: "stdout" | "stderr";
+  text: string;
+};
+
 export type PaidBackendConfig = {
   release_base_url: string;
   token_endpoint: string;

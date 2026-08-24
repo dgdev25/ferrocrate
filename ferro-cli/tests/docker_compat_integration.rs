@@ -695,7 +695,9 @@ fn docker_compat_bounded_on_failure_restarts_exactly_the_configured_count() {
 fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/bounded-recovery:latest");
-    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; sleep 5; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    // Scratch images contain the BusyBox binary but no applet symlinks, so
+    // invoke sleep through BusyBox instead of relying on PATH resolution.
+    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; /bin/busybox sleep 5; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
     let (status, response) = harness.request_bytes(
         "POST",
         "/v1.45/containers/create?name=bounded-recovery",

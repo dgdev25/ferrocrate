@@ -4177,6 +4177,16 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        // The supervisor can publish a natural exit after the Docker handler
+        // inspects `running` but before this mutation acquires its reservation.
+        // For force-kill, that terminal observation already proves there is no
+        // live workload left to signal; publish only the operator-stop intent.
+        if signal == Some(nix::sys::signal::Signal::SIGKILL)
+            && matches!(record.status.as_str(), "stopped" | "killed" | "exited")
+        {
+            self.persist_user_stopped(proof, id, true)?;
+            return Ok(());
+        }
         if let Some(signal) = signal {
             // Host-PID-namespace execution makes the container's whole
             // process tree the signal target for SIGKILL (nothing may be
@@ -16146,6 +16156,23 @@ mod tests {
                 .expect("inspect killed record")
                 .user_stopped
         );
+    }
+
+    #[test]
+    fn kill_is_idempotent_when_exit_publisher_wins_before_reservation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let exited = fixture_container_record("already-exited-before-kill", "exited");
+        runtime.store.put(&exited).expect("seed exited record");
+
+        runtime
+            .kill(&exited.id)
+            .expect("an already-observed exit satisfies the kill effect");
+
+        let stored = runtime.inspect(&exited.id).expect("inspect exited record");
+        assert_eq!(stored.status, "exited");
+        assert!(stored.user_stopped);
+        assert!(stored.pending_mutation.is_none());
     }
 
     #[test]

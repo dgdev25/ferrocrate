@@ -96,6 +96,10 @@ test("missing build binary routes to Doctor through the centralized failure voca
   assert.match(markup, /Open Doctor/);
 });
 
+test("unknown build failures use the central fallback title", () => {
+  assert.equal(imageBuild.buildFailurePresentation("unexpected build response").message, "Something went wrong");
+});
+
 test("build progress frames update only the history row with the matching build ID", () => {
   assert.equal(typeof imageBuild.appendBuildProgress, "function");
   const history = [{

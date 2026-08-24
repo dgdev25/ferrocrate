@@ -30,7 +30,6 @@ export function formatImageCreated(value) {
 export function pullFailurePresentation(error) {
   return failurePresentation(error, {
     license: "Your current plan doesn't include image pulls.",
-    generic: "We couldn't pull this image.",
   });
 }
 

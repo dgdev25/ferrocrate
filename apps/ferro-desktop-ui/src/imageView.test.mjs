@@ -77,7 +77,7 @@ test("rendered pull dialog exposes progress and accessible recovery actions", ()
     failure: imageView.pullFailurePresentation("registry timed out"),
     onImageTargetChange: () => {},
   }));
-  assert.match(unknown, /We couldn&#x27;t pull this image\./);
+  assert.match(unknown, /Something went wrong/);
   assert.doesNotMatch(unknown, />Start<\/button>/);
   assert.doesNotMatch(unknown, /Review licensing/);
 

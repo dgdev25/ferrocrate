@@ -22,7 +22,6 @@ export function formatBuildDuration(durationMs) {
 export function buildFailurePresentation(error) {
   return failurePresentation(error, {
     license: "Your current plan doesn't include image builds.",
-    generic: "We couldn't build this image.",
   });
 }
 

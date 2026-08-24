@@ -3579,18 +3579,22 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
-        copy_interactive_input, create_terminal_exec, daemon_health_response_ok,
-        exec_mode_from_env, ferrocrate_daemon_command, ferrocrate_socket_candidates,
-        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
-        load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
-        open_terminal_exec, parse_exec_mode, read_exec_request, registry_login_request,
-        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
-        resize_terminal_exec, run_request, save_forward_entries, save_vm_state,
-        select_terminal_socket, should_route_to_macos_guest, terminal_exec_create_path,
+        copy_interactive_input, exec_mode_from_env, gather_phase0_check,
+        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
+        load_forward_entries, load_vm_state, network_proxy_request, parse_exec_mode,
+        read_exec_request, registry_login_request, render_macos_launch_agent_plist,
+        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
+        save_vm_state, should_route_to_macos_guest, terminal_exec_create_path,
         terminal_exec_create_payload, terminal_resize_path, upsert_forward_entry,
         validate_daemon_addr, vm_state_running, volume_proxy_request, write_follow_frame, Cli,
         Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
         VmCommands, VmConfig, VmState,
+    };
+    #[cfg(target_os = "linux")]
+    use super::{
+        create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
+        ferrocrate_socket_candidates, open_terminal_exec, resize_terminal_exec,
+        select_terminal_socket,
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};

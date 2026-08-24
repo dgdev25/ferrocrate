@@ -1709,7 +1709,9 @@ fn docker_compat_exec_resize_updates_live_tty() {
         204
     );
 
-    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Cmd":["/bin/busybox","sh","-c","stty size; read line; stty size"]}"#;
+    // Scratch images contain no applet symlinks, so invoke BusyBox utilities
+    // explicitly rather than relying on shell PATH lookup.
+    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Cmd":["/bin/busybox","sh","-c","/bin/busybox stty size; read line; /bin/busybox stty size"]}"#;
     let exec_request = format!(
         "POST /v1.45/containers/exec-resize/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         exec_body.len(),
@@ -1748,10 +1750,11 @@ fn docker_compat_exec_resize_updates_live_tty() {
         let read = match stream.read(&mut buffer) {
             Ok(read) => read,
             Err(error)
-                if matches!(
+                if (matches!(
                     error.kind(),
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) && Instant::now() < initial_size_deadline =>
+                ) || error.raw_os_error() == Some(nix::libc::EAGAIN))
+                    && Instant::now() < initial_size_deadline =>
             {
                 continue;
             }

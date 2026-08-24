@@ -30,6 +30,18 @@ export function ResourceEmptyState(props: {
   disabled?: boolean;
   onAction?: MouseEventHandler<HTMLButtonElement>;
 }): ReactElement | null;
+export function hostPathError(value: string, kind?: "file" | "directory" | "path"): string | null;
+export function HostPathField(props: {
+  label: string;
+  kind?: "file" | "directory" | "path";
+  value?: string;
+  dialogAvailable?: boolean;
+  busy?: boolean;
+  submitLabel?: string;
+  onChange?: ChangeEventHandler<HTMLInputElement>;
+  onChoose?: MouseEventHandler<HTMLButtonElement>;
+  onSubmit?: MouseEventHandler<HTMLButtonElement>;
+}): ReactElement;
 export function failurePresentation(error: unknown, messages?: Partial<Record<"daemon" | "license" | "generic", string>>): {
   kind: "daemon" | "license" | "binary" | "generic";
   message: string;

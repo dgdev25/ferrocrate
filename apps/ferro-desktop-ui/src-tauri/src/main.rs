@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod web_bridge;
+
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,6 +9,7 @@ use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +18,23 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
+
+#[derive(Clone)]
+enum EventSink {
+    Tauri(tauri::AppHandle),
+    Web(web_bridge::WebEventHub),
+}
+
+impl EventSink {
+    fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
+        match self {
+            Self::Tauri(app) => {
+                let _ = app.emit(event, payload);
+            }
+            Self::Web(events) => events.emit(event, payload),
+        }
+    }
+}
 
 const KEYRING_SERVICE: &str = "ferrocrate-desktop-ui";
 const KEYRING_ACCOUNT: &str = "paid_session_token";
@@ -304,12 +324,36 @@ fn daemon_status() -> DaemonStatus {
     }
 }
 
-fn start_desktop_daemon() -> Result<(), String> {
-    if std::net::TcpStream::connect("127.0.0.1:4288").is_ok()
-        && desktop_socket_path()
+#[cfg(target_os = "linux")]
+fn desktop_daemon_transport_ready(_tcp_ready: bool, socket_ready: bool) -> bool {
+    socket_ready
+}
+
+#[cfg(not(target_os = "linux"))]
+fn desktop_daemon_transport_ready(tcp_ready: bool, _socket_ready: bool) -> bool {
+    tcp_ready
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_daemon_ready() -> bool {
+    desktop_daemon_transport_ready(
+        false,
+        desktop_socket_path()
             .and_then(|socket| ping_daemon(&socket))
-            .is_ok()
-    {
+            .is_ok(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn desktop_daemon_ready() -> bool {
+    desktop_daemon_transport_ready(
+        std::net::TcpStream::connect("127.0.0.1:4288").is_ok(),
+        false,
+    )
+}
+
+fn start_desktop_daemon() -> Result<(), String> {
+    if desktop_daemon_ready() {
         DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
         if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
             *failure = None;
@@ -357,11 +401,7 @@ fn start_desktop_daemon() -> Result<(), String> {
     drop(slot);
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
-        if std::net::TcpStream::connect("127.0.0.1:4288").is_ok()
-            && desktop_socket_path()
-                .and_then(|socket| ping_daemon(&socket))
-                .is_ok()
-        {
+        if desktop_daemon_ready() {
             DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
             return Ok(());
         }
@@ -508,7 +548,7 @@ struct EntitlementSummary {
     message: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DoctorSummary {
     ok: bool,
     raw: JsonValue,
@@ -1592,18 +1632,18 @@ fn parse_terminal_exec_id(line: &str) -> Result<String, String> {
     Ok(exec_id.to_string())
 }
 
-fn emit_terminal_output<R: Read>(mut reader: R, app: tauri::AppHandle, stderr: bool) {
+fn emit_terminal_output<R: Read>(mut reader: R, events: EventSink, stderr: bool) {
     let mut buffer = [0_u8; 8192];
     loop {
         let bytes = match reader.read(&mut buffer) {
             Ok(0) => return,
             Ok(bytes) => bytes,
             Err(err) => {
-                let _ = app.emit("terminal-error", err.to_string());
+                events.emit("terminal-error", err.to_string());
                 return;
             }
         };
-        let _ = app.emit(
+        events.emit(
             "terminal-output",
             TerminalOutput {
                 data: buffer[..bytes].to_vec(),
@@ -1613,9 +1653,8 @@ fn emit_terminal_output<R: Read>(mut reader: R, app: tauri::AppHandle, stderr: b
     }
 }
 
-#[tauri::command]
-fn start_terminal(
-    app: tauri::AppHandle,
+fn start_terminal_impl(
+    events: EventSink,
     target: String,
     shell: String,
     env: Vec<String>,
@@ -1684,10 +1723,10 @@ fn start_terminal(
             return Err(format!("failed to start exec terminal: {err}"));
         }
     };
-    let stdout_app = app.clone();
-    thread::spawn(move || emit_terminal_output(stdout, stdout_app, false));
-    let stderr_app = app.clone();
-    thread::spawn(move || emit_terminal_output(stderr, stderr_app, true));
+    let stdout_events = events.clone();
+    thread::spawn(move || emit_terminal_output(stdout, stdout_events, false));
+    let stderr_events = events.clone();
+    thread::spawn(move || emit_terminal_output(stderr, stderr_events, true));
     *current = Some(TerminalProcess {
         child,
         stdin,
@@ -1711,19 +1750,31 @@ fn start_terminal(
                 }
                 Ok(None) => None,
                 Err(err) => {
-                    let _ = app.emit("terminal-error", err.to_string());
+                    events.emit("terminal-error", err.to_string());
                     *process = None;
                     return;
                 }
             }
         };
         if let Some(status) = status {
-            let _ = app.emit("terminal-ended", status.success());
+            events.emit("terminal-ended", status.success());
             return;
         }
         thread::sleep(Duration::from_millis(50));
     });
     Ok(())
+}
+
+#[tauri::command]
+fn start_terminal(
+    app: tauri::AppHandle,
+    target: String,
+    shell: String,
+    env: Vec<String>,
+    user: Option<String>,
+    workdir: Option<String>,
+) -> Result<(), String> {
+    start_terminal_impl(EventSink::Tauri(app), target, shell, env, user, workdir)
 }
 
 #[tauri::command]
@@ -1849,8 +1900,8 @@ struct LogBatch {
     truncated: bool,
 }
 
-fn emit_log_batch(app: &tauri::AppHandle, buffer: &LogBuffer) {
-    let _ = app.emit(
+fn emit_log_batch(events: &EventSink, buffer: &LogBuffer) {
+    events.emit(
         "container-log-batch",
         LogBatch {
             text: buffer.text(),
@@ -1863,7 +1914,7 @@ fn log_channel(capacity: usize) -> (SyncSender<String>, Receiver<String>) {
     mpsc::sync_channel(capacity)
 }
 
-fn publish_log_batches(app: tauri::AppHandle, receiver: Receiver<String>) {
+fn publish_log_batches(events: EventSink, receiver: Receiver<String>) {
     let mut buffer = LogBuffer::new(MAX_LOG_LINES, MAX_LOG_BYTES);
     let mut changed = false;
     let mut last_publish = Instant::now();
@@ -1876,20 +1927,20 @@ fn publish_log_batches(app: tauri::AppHandle, receiver: Receiver<String>) {
                     buffer.push(entry);
                 }
                 if last_publish.elapsed() >= Duration::from_millis(100) {
-                    emit_log_batch(&app, &buffer);
+                    emit_log_batch(&events, &buffer);
                     changed = false;
                     last_publish = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Timeout) if changed => {
-                emit_log_batch(&app, &buffer);
+                emit_log_batch(&events, &buffer);
                 changed = false;
                 last_publish = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 if changed {
-                    emit_log_batch(&app, &buffer);
+                    emit_log_batch(&events, &buffer);
                 }
                 return;
             }
@@ -1914,20 +1965,19 @@ fn queue_log_lines<R: std::io::Read>(reader: R, sender: SyncSender<String>) {
     }
 }
 
-fn emit_log_errors<R: std::io::Read>(reader: R, app: tauri::AppHandle) {
+fn emit_log_errors<R: std::io::Read>(reader: R, events: EventSink) {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     while let Ok(bytes) = reader.read_line(&mut line) {
         if bytes == 0 {
             break;
         }
-        let _ = app.emit("container-log-error", line.clone());
+        events.emit("container-log-error", line.clone());
         line.clear();
     }
 }
 
-#[tauri::command]
-fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String> {
+fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String> {
     let target = target.trim();
     if target.is_empty() {
         return Err("target container is required".to_string());
@@ -1962,11 +2012,11 @@ fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String>
         .take()
         .ok_or_else(|| "container log stream stderr missing".to_string())?;
     let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
-    let stdout_app = app.clone();
-    thread::spawn(move || publish_log_batches(stdout_app, log_receiver));
+    let stdout_events = events.clone();
+    thread::spawn(move || publish_log_batches(stdout_events, log_receiver));
     thread::spawn(move || queue_log_lines(stdout, log_sender));
-    let stderr_app = app.clone();
-    thread::spawn(move || emit_log_errors(stderr, stderr_app));
+    let stderr_events = events.clone();
+    thread::spawn(move || emit_log_errors(stderr, stderr_events));
     *current = Some(child);
     drop(current);
 
@@ -1986,19 +2036,24 @@ fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String>
                 }
                 Ok(None) => None,
                 Err(err) => {
-                    let _ = app.emit("container-log-error", err.to_string());
+                    events.emit("container-log-error", err.to_string());
                     *process = None;
                     return;
                 }
             }
         };
         if let Some(status) = status {
-            let _ = app.emit("container-log-ended", status.success());
+            events.emit("container-log-ended", status.success());
             return;
         }
         thread::sleep(Duration::from_millis(250));
     });
     Ok(())
+}
+
+#[tauri::command]
+fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String> {
+    start_log_follow_impl(EventSink::Tauri(app), target)
 }
 
 #[tauri::command]
@@ -2364,9 +2419,8 @@ fn run_compose_action(file: String, action: ComposeAction) -> Result<CommandResu
     ))
 }
 
-#[tauri::command]
-fn build_image(
-    app: tauri::AppHandle,
+fn build_image_impl(
+    events: EventSink,
     context: String,
     tag: String,
     build_id: String,
@@ -2429,7 +2483,7 @@ fn build_image(
         };
         destination.push_str(&frame.text);
         destination.push('\n');
-        let _ = app.emit("image-build-progress", frame);
+        events.emit("image-build-progress", frame);
     }
     let status = child
         .wait()
@@ -2441,6 +2495,16 @@ fn build_image(
         message: actionable_error(&stderr_text),
         stderr: stderr_text,
     })
+}
+
+#[tauri::command]
+fn build_image(
+    app: tauri::AppHandle,
+    context: String,
+    tag: String,
+    build_id: String,
+) -> Result<CommandResult, String> {
+    build_image_impl(EventSink::Tauri(app), context, tag, build_id)
 }
 
 #[tauri::command]
@@ -2839,7 +2903,89 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WebModeOptions {
+    listen: SocketAddr,
+    insecure_bind: bool,
+}
+
+fn parse_web_mode<I, S>(args: I) -> Result<Option<WebModeOptions>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut args = args.into_iter().map(Into::into);
+    let _program = args.next();
+    let mut web = false;
+    let mut insecure_bind = false;
+    let mut listen = "127.0.0.1:4190"
+        .parse::<SocketAddr>()
+        .expect("default bind");
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--web" => web = true,
+            "--insecure-bind" => insecure_bind = true,
+            "--listen" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--listen requires an IP:PORT value".to_string())?;
+                listen = value
+                    .parse()
+                    .map_err(|error| format!("invalid --listen address {value:?}: {error}"))?;
+            }
+            _ => return Err(format!("unknown argument: {argument}")),
+        }
+    }
+    if !web {
+        if insecure_bind || listen != "127.0.0.1:4190".parse().expect("default bind") {
+            return Err("--listen and --insecure-bind require --web".to_string());
+        }
+        return Ok(None);
+    }
+    if !listen.ip().is_loopback() && !insecure_bind {
+        return Err(format!(
+            "refusing non-loopback web bridge bind {listen}; pass --insecure-bind to override"
+        ));
+    }
+    Ok(Some(WebModeOptions {
+        listen,
+        insecure_bind,
+    }))
+}
+
 fn main() {
+    let web_mode = match parse_web_mode(std::env::args()) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("ferro-desktop-ui: {error}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(options) = web_mode {
+        let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist");
+        if !dist.join("index.html").is_file() {
+            eprintln!(
+                "ferro-desktop-ui: frontend build missing at {}; run npm run build first",
+                dist.display()
+            );
+            std::process::exit(2);
+        }
+        if options.insecure_bind {
+            eprintln!("WARNING: --insecure-bind exposes container control to the network");
+        }
+        if let Err(error) = start_desktop_daemon() {
+            eprintln!("ferro-desktop-ui: {error}");
+            std::process::exit(1);
+        }
+        let runtime = tokio::runtime::Runtime::new().expect("create web bridge runtime");
+        let result = runtime.block_on(web_bridge::run_web_bridge(options.listen, dist));
+        stop_desktop_daemon();
+        if let Err(error) = result {
+            eprintln!("ferro-desktop-ui: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|_| {
@@ -2898,7 +3044,7 @@ mod tests {
         container_inspect_command, container_update_command, doctor_command,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_nullable_json_list,
-        parse_terminal_exec_id, registry_login_command, registry_logout_command,
+        parse_terminal_exec_id, parse_web_mode, registry_login_command, registry_logout_command,
         run_container_bridge_command, terminal_exec_command, terminal_resize_command,
         volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
         ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
@@ -2907,7 +3053,9 @@ mod tests {
     };
 
     #[cfg(target_os = "linux")]
-    use super::{daemon_health_response_ok, unavailable_daemon_state};
+    use super::{
+        daemon_health_response_ok, desktop_daemon_transport_ready, unavailable_daemon_state,
+    };
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2930,6 +3078,37 @@ mod tests {
             unavailable_daemon_state(false, false, None),
             ("stopped", None)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_daemon_readiness_depends_on_the_unix_socket_not_legacy_tcp() {
+        assert!(desktop_daemon_transport_ready(false, true));
+        assert!(!desktop_daemon_transport_ready(true, false));
+    }
+
+    #[test]
+    fn web_mode_defaults_to_loopback_and_rejects_remote_bind_without_override() {
+        let options = parse_web_mode(["ferro-desktop-ui", "--web"]).expect("web mode");
+        assert_eq!(
+            options.expect("web options").listen.to_string(),
+            "127.0.0.1:4190"
+        );
+
+        let error = parse_web_mode(["ferro-desktop-ui", "--web", "--listen", "0.0.0.0:4190"])
+            .expect_err("remote bind must be refused");
+        assert!(error.contains("--insecure-bind"));
+
+        let options = parse_web_mode([
+            "ferro-desktop-ui",
+            "--web",
+            "--listen",
+            "0.0.0.0:4190",
+            "--insecure-bind",
+        ])
+        .expect("explicit remote bind")
+        .expect("web options");
+        assert_eq!(options.listen.to_string(), "0.0.0.0:4190");
     }
 
     #[test]

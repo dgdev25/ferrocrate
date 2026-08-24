@@ -7,7 +7,7 @@ ui="$root/apps/ferro-desktop-ui"
 lic_dir="$HOME/.ferrocrate/dev"
 mode="${1:-native}"
 if [[ "$mode" != "native" && "$mode" != "--web" ]]; then
-  say "usage: scripts/dev-desktop.sh [--web]"
+  echo "usage: $0 [--web]" >&2
   exit 2
 fi
 export FERROCRATE_RUNTIME_DIR="${FERROCRATE_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-$root/target/desktop-runtime}}"
@@ -56,9 +56,26 @@ if [[ "$mode" == "--web" ]]; then
   "$root/target/debug/ferro-desktop" daemon &
   daemon_pid=$!
   trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+  daemon_ready=false
+  for _ in $(seq 1 120); do
+    if curl -fsS --unix-socket "$FERROCRATE_RUNTIME_DIR/ferrocrate.sock" http://d/_ping >/dev/null 2>&1; then
+      daemon_ready=true
+      break
+    fi
+    if ! kill -0 "$daemon_pid" 2>/dev/null; then
+      wait "$daemon_pid" || true
+      say "desktop supervisor exited before the Ferrocrate socket became ready"
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [[ "$daemon_ready" != true ]]; then
+    say "desktop supervisor did not make the Ferrocrate socket ready"
+    exit 1
+  fi
   say "launching Ferrocrate Desktop web UI"
-  (cd "$ui" && npm run dev -- --host 127.0.0.1)
+  "$ui/src-tauri/target/debug/ferro-desktop-ui" --web --listen 127.0.0.1:4190
 else
   say "launching Ferrocrate Desktop (Ferrocrate socket: $FERROCRATE_RUNTIME_DIR/ferrocrate.sock)"
-  "$ui/src-tauri/target/debug/ferro-desktop-ui"
+  exec "$ui/src-tauri/target/debug/ferro-desktop-ui"
 fi

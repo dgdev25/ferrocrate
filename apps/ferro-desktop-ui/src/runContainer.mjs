@@ -1,3 +1,40 @@
+export function parseCommandWords(command) {
+  const words = [];
+  let current = "";
+  let quote = null;
+  let escaped = false;
+  let started = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      started = true;
+    } else if (character === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+    } else if (quote) {
+      if (character === quote) quote = null;
+      else current += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+    } else if (/\s/.test(character)) {
+      if (started) {
+        words.push(current);
+        current = "";
+        started = false;
+      }
+    } else {
+      current += character;
+      started = true;
+    }
+  }
+  if (escaped) throw new Error("Command cannot end with an escape character");
+  if (quote) throw new Error("Unterminated quote in command");
+  if (started) words.push(current);
+  return words;
+}
+
 export function buildRunContainerOptions({ command, ports, volumes, memoryMb, cpus }) {
   const memoryNumber = memoryMb.trim() ? Number(memoryMb) : null;
   const cpuNumber = cpus.trim() ? Number(cpus) : null;
@@ -5,7 +42,7 @@ export function buildRunContainerOptions({ command, ports, volumes, memoryMb, cp
   if (cpuNumber != null && (!Number.isFinite(cpuNumber) || cpuNumber <= 0)) throw new Error("CPUs must be a positive number");
   const cpuPeriod = cpuNumber == null ? null : 100000;
   return {
-    command: command.trim() ? command.trim().split(/\s+/) : [],
+    command: parseCommandWords(command),
     ports: ports.filter((row) => row.host.trim() && row.container.trim()).map((row) => `${row.host.trim()}:${row.container.trim()}`),
     volumes: volumes.filter((row) => row.source.trim() && row.target.trim()).map((row) => `${row.source.trim()}:${row.target.trim()}`),
     memory: memoryNumber == null ? null : Math.round(memoryNumber * 1024 * 1024),

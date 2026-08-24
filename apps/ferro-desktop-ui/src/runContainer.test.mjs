@@ -44,3 +44,20 @@ test("run invocation forwards the entered name and parsed command", () => {
     cpuPeriod: null,
   });
 });
+
+test("run command parsing preserves quotes, escaped spaces, and empty arguments", () => {
+  assert.deepEqual(buildRunContainerOptions({
+    command: 'sh -c "echo ready" hello\\ world \'\'',
+    ports: [],
+    volumes: [],
+    memoryMb: "",
+    cpus: "",
+  }).command, ["sh", "-c", "echo ready", "hello world", ""]);
+  assert.throws(() => buildRunContainerOptions({
+    command: 'sh -c "unterminated',
+    ports: [],
+    volumes: [],
+    memoryMb: "",
+    cpus: "",
+  }), /Unterminated quote/);
+});

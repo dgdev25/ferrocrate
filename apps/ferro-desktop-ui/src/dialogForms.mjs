@@ -110,7 +110,7 @@ export function RunContainerDialog({ open, draft, busy, error, onDraftChange, on
     h("div", { className: "editor-grid" },
       field("run-container-image", "Image", { value: image, onChange: (event) => change("image", event.target.value), placeholder: "alpine:latest" }),
       field("run-container-name", "Name", { value: name, onChange: (event) => change("name", event.target.value), placeholder: "optional name" }),
-      field("run-container-command", "Command (optional)", { value: command, onChange: (event) => change("command", event.target.value), placeholder: "sh -c echo ready" }, "detail-span"),
+      field("run-container-command", "Command (optional)", { value: command, onChange: (event) => change("command", event.target.value), placeholder: 'sh -c "echo ready"' }, "detail-span"),
       h("label", { className: "detail-span checkbox-row", htmlFor: "run-container-pull-missing" }, h("input", { id: "run-container-pull-missing", type: "checkbox", checked: pullIfMissing, onChange: (event) => change("pullIfMissing", event.target.checked) }), h("span", null, "Pull image if it is not available locally")),
       mapping("port", ports), mapping("volume", volumes),
       field("run-container-environment", "Environment (one KEY=value per line)", { value: environment, onChange: (event) => change("environment", event.target.value), rows: 5 }, "detail-span", "textarea"),

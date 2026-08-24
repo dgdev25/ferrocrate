@@ -1,5 +1,6 @@
 export type MappingRow = { source: string; target: string };
 export type PortRow = { host: string; container: string };
+export function parseCommandWords(command: string): string[];
 export function buildRunContainerOptions(input: {
   command: string;
   ports: PortRow[];

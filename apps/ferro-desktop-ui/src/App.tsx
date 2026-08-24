@@ -30,12 +30,19 @@ import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import {
   ActionErrorNotice,
+  applyRuntimeSurfaceTransition,
+  containerContentState,
+  EmptyResourcePage,
   FirstRunState,
-  nextResourceDialog,
+  LicensingDialog,
   ResourceCreateDialog,
-  ResourceEmptyState,
+  ResourceToolbar,
+  resourceDialogTransition,
   resourcePageState,
-  shouldShowFirstRun,
+  runFirstRunRecovery,
+  RuntimeLoadingState,
+  runtimeSurfaceState,
+  snapshotFailureDetail,
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import {
@@ -74,6 +81,8 @@ function App(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [licensingDialogOpen, setLicensingDialogOpen] = useState(false);
+  const [licensingDetail, setLicensingDetail] = useState("");
   const [theme, setTheme] = useState<ThemeMode>("dark");
   const [activeSection, setActiveSection] = useState<AppSection>("containers");
   const [detailTab, setDetailTab] = useState<DetailTab>("logs");
@@ -126,7 +135,9 @@ function App(): JSX.Element {
   const [detailCpuQuota, setDetailCpuQuota] = useState("");
   const [detailCpuPeriod, setDetailCpuPeriod] = useState("");
   const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [runDialogError, setRunDialogError] = useState<string | null>(null);
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
+  const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
   const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
   const [newContainerName, setNewContainerName] = useState("");
   const [newContainerEnvironment, setNewContainerEnvironment] = useState("");

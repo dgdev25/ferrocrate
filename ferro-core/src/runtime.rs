@@ -3690,16 +3690,8 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        let stdout = if Path::new(&record.stdout_path).exists() {
-            fs::read_to_string(&record.stdout_path)?
-        } else {
-            String::new()
-        };
-        let stderr = if Path::new(&record.stderr_path).exists() {
-            fs::read_to_string(&record.stderr_path)?
-        } else {
-            String::new()
-        };
+        let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
+        let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))
     }
 
@@ -3720,7 +3712,7 @@ impl ContainerRuntime {
             if !log_path.exists() || !log_journal_path(&log_path).exists() {
                 return None;
             }
-            let lines = timestamped_lines_from(&log_path);
+            let lines = timestamped_lines_from_rotated(&log_path);
             if lines.iter().any(|(nanos, _)| nanos.is_none()) {
                 return None;
             }
@@ -6784,6 +6776,7 @@ fn spawn_child_with_logs(
     append: bool,
     tty: bool,
 ) -> Result<(u32, Child, OwnedFd), RuntimeError> {
+    let rotation = log_rotation_from_env();
     let stdout_file = if append {
         OpenOptions::new()
             .create(true)
@@ -6862,7 +6855,7 @@ fn spawn_child_with_logs(
             }
         });
         child
-    } else if std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some() {
+    } else if std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some() || rotation.is_some() {
         // Long-lived callers (the Docker-compatible daemon) opt into pipe
         // capture so every output line gets a sidecar timestamp journal
         // (`<stream>.log.ts`: `<offset> <nanos>` per line). The raw log file
@@ -6878,12 +6871,12 @@ fn spawn_child_with_logs(
         if let Some(mut pipe) = child.stdout.take() {
             let mut log = stdout_file;
             let journal = log_journal_path(stdout_path);
-            thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
+            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
         }
         if let Some(mut pipe) = child.stderr.take() {
             let mut log = stderr_file;
             let journal = log_journal_path(stderr_path);
-            thread::spawn(move || copy_line_journaled(&mut pipe, &mut log, &journal));
+            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
         }
         child
     } else {
@@ -6920,11 +6913,110 @@ fn log_journal_path(log_path: &Path) -> PathBuf {
     log_path.with_file_name(name)
 }
 
+/// Move an active log and its timestamp journal into the numbered rotation
+/// set. `max_files` includes the active file, matching Docker's json-file
+/// `max-file` option. Keeping the two files as a pair is essential: a moved
+/// log without its sidecar would make `since`/`until` silently misclassify
+/// historical output.
+fn rotate_log_pair(log_path: &Path, max_files: u32) -> io::Result<()> {
+    if max_files < 2 {
+        return Ok(());
+    }
+    let oldest = max_files - 1;
+    let oldest_path = rotated_log_path(log_path, oldest);
+    let oldest_journal = log_journal_path(&oldest_path);
+    let _ = fs::remove_file(&oldest_path);
+    let _ = fs::remove_file(&oldest_journal);
+    for index in (1..oldest).rev() {
+        let source = rotated_log_path(log_path, index);
+        let destination = rotated_log_path(log_path, index + 1);
+        let source_journal = log_journal_path(&source);
+        let destination_journal = log_journal_path(&destination);
+        if source.exists() {
+            fs::rename(&source, &destination)?;
+        }
+        if source_journal.exists() {
+            fs::rename(&source_journal, &destination_journal)?;
+        }
+    }
+    if log_path.exists() {
+        fs::rename(log_path, rotated_log_path(log_path, 1))?;
+    }
+    let journal = log_journal_path(log_path);
+    if journal.exists() {
+        fs::rename(journal, log_journal_path(&rotated_log_path(log_path, 1)))?;
+    }
+    Ok(())
+}
+
+fn rotated_log_path(log_path: &Path, index: u32) -> PathBuf {
+    let mut name = log_path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{index}"));
+    log_path.with_file_name(name)
+}
+
+fn read_rotated_log(log_path: &Path) -> io::Result<String> {
+    let mut output = String::new();
+    // The bounded rotation set has no manifest. Read the largest suffix first
+    // so callers see historical output in chronological order.
+    for index in (1..=64).rev() {
+        let path = rotated_log_path(log_path, index);
+        if path.exists() {
+            output.push_str(&fs::read_to_string(path)?);
+        }
+    }
+    if log_path.exists() {
+        output.push_str(&fs::read_to_string(log_path)?);
+    }
+    Ok(output)
+}
+
 /// Copy a container output pipe into the plain log file line by line, recording
 /// `<start-offset> <unix-nanos>` per line in the sidecar journal. The journal
 /// entry is written after the data so a crash can only lag, never lead, the
 /// raw file.
+#[derive(Debug, Clone, Copy)]
+struct LogRotation {
+    max_size: u64,
+    max_files: u32,
+}
+
+fn log_rotation_from_env() -> Option<LogRotation> {
+    let max_size = std::env::var("FERROCRATE_LOG_MAX_SIZE")
+        .ok()
+        .and_then(|value| parse_log_size(&value))?;
+    let max_files = std::env::var("FERROCRATE_LOG_MAX_FILE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+}
+
+fn parse_log_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value.find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    number.parse::<u64>().ok()?.checked_mul(multiplier).filter(|size| *size > 0)
+}
+
 fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_path: &Path) {
+    copy_line_journaled_with_rotation(pipe, log, journal_path, None);
+}
+
+fn copy_line_journaled_with_rotation(
+    pipe: &mut impl io::Read,
+    log: &mut fs::File,
+    journal_path: &Path,
+    rotation: Option<LogRotation>,
+) {
     let mut journal = match OpenOptions::new()
         .create(true)
         .append(true)
@@ -6942,9 +7034,37 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
     let mut pending: Vec<u8> = Vec::new();
     let mut buffer = [0_u8; 8192];
 
-    fn flush(log: &mut fs::File, journal: &mut fs::File, offset: &mut u64, bytes: &[u8]) -> bool {
+    fn flush(
+        log: &mut fs::File,
+        journal: &mut fs::File,
+        journal_path: &Path,
+        offset: &mut u64,
+        bytes: &[u8],
+        rotation: Option<LogRotation>,
+    ) -> bool {
         if bytes.is_empty() {
             return true;
+        }
+        if let Some(rotation) = rotation {
+            let current = log.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            if current > 0 && current.saturating_add(bytes.len() as u64) > rotation.max_size {
+                if log.sync_all().is_err() || journal.sync_all().is_err() {
+                    return false;
+                }
+                let log_path = journal_path.with_extension("");
+                if rotate_log_pair(&log_path, rotation.max_files).is_err() {
+                    return false;
+                }
+                match OpenOptions::new().create(true).append(true).open(&log_path) {
+                    Ok(file) => *log = file,
+                    Err(_) => return false,
+                }
+                match OpenOptions::new().create(true).append(true).open(journal_path) {
+                    Ok(file) => *journal = file,
+                    Err(_) => return false,
+                }
+                *offset = 0;
+            }
         }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -6974,7 +7094,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
                     };
                     pending.extend_from_slice(&buffer[start..end]);
                     if newline.is_some() || pending.len() >= MAX_LINE_BYTES {
-                        if !flush(log, &mut journal, &mut offset, &pending) {
+                        if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
                             let _ = journal.sync_all();
                             return;
                         }
@@ -6985,7 +7105,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
             }
         }
     }
-    if !flush(log, &mut journal, &mut offset, &pending) {
+    if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
         let _ = journal.sync_all();
         return;
     }
@@ -7024,6 +7144,20 @@ fn timestamped_lines_from(log_path: &Path) -> Vec<(Option<u128>, Vec<u8>)> {
         offset += line.len() as u64;
     }
     out
+}
+
+fn timestamped_lines_from_rotated(log_path: &Path) -> Vec<(Option<u128>, Vec<u8>)> {
+    let mut lines = Vec::new();
+    for index in (1..=64).rev() {
+        let path = rotated_log_path(log_path, index);
+        if path.exists() {
+            lines.extend(timestamped_lines_from(&path));
+        }
+    }
+    if log_path.exists() {
+        lines.extend(timestamped_lines_from(log_path));
+    }
+    lines
 }
 
 fn stdin_fifo_path(stdout_path: &Path) -> PathBuf {
@@ -12967,7 +13101,7 @@ mod tests {
     use super::{
         adaptive_restart_delay, associated_network_name, copy_line_journaled,
         immutable_image_manifest_reference, immutable_image_reference, log_journal_path,
-        timestamped_lines_from, validate_archive_target, BindMount, ContainerRuntime,
+        rotate_log_pair, timestamped_lines_from, validate_archive_target, BindMount, ContainerRuntime,
         KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
         NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
     };
@@ -13559,6 +13693,30 @@ mod tests {
         assert_eq!(lines.len(), 1, "one newline means one reader line");
         assert_eq!(lines[0].0, Some(lines[0].0.unwrap_or(0)));
         assert_eq!(lines[0].1.len(), 3 * 1024 * 1024 + 1);
+    }
+
+    #[test]
+    fn rotating_log_pair_keeps_newest_files_and_timestamp_journals_together() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("stdout.log");
+        std::fs::write(&log_path, b"active\n").expect("active log");
+        std::fs::write(log_journal_path(&log_path), b"0 300\n").expect("active journal");
+        std::fs::write(log_path.with_file_name("stdout.log.1"), b"one\n").expect("old log");
+        std::fs::write(log_path.with_file_name("stdout.log.1.ts"), b"0 200\n")
+            .expect("old journal");
+        std::fs::write(log_path.with_file_name("stdout.log.2"), b"two\n").expect("oldest log");
+        std::fs::write(log_path.with_file_name("stdout.log.2.ts"), b"0 100\n")
+            .expect("oldest journal");
+
+        rotate_log_pair(&log_path, 3).expect("rotate");
+
+        assert!(!log_path.exists());
+        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1")).unwrap(), b"active\n");
+        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1.ts")).unwrap(), b"0 300\n");
+        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2")).unwrap(), b"one\n");
+        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2.ts")).unwrap(), b"0 200\n");
+        assert!(!log_path.with_file_name("stdout.log.3").exists());
+        assert!(!log_path.with_file_name("stdout.log.3.ts").exists());
     }
 
     #[test]

@@ -15,15 +15,18 @@ Status vocabulary (extends `docs/compatibility/reference-index.md`):
 - **Host-blocked** — proof requires a host capability this repository's
   current hosts do not provide; the exact blocker is recorded.
 
-Snapshot: 2026-08-24, `feat/log-drivers`.
+Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 
 ## Host tiers
 
 | Tier | Status | Evidence |
 |---|---|---|
 | Rootful Ubuntu 26.04 x86_64 (qualified baseline) | Supported | [`host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md`](evidence/host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md) |
-| Debian 13 / Fedora 42 / Rocky 9.8 rootful network rows | Supported | same four-distro rerun witness above |
-| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: Rocky is gated on `SO_PEERPIDFD`; the packaged Ubuntu 24.04+ AppArmor mechanism passes with `kernel.apparmor_restrict_unprivileged_userns=1` | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu |
+| Debian 12 / Fedora 42 / Rocky 9 rootful network rows | Supported | same four-distro rerun witness above |
+| Alpine 3.22, Linux 6.12, x86_64 (musl) | Supported | [`host-matrix/alpine-3.22-kernel-6.12/README.md`](evidence/host-matrix/alpine-3.22-kernel-6.12/README.md) |
+| Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
+| Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md) |
+| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed; the packaged Ubuntu 24.04+ AppArmor mechanism passes with `kernel.apparmor_restrict_unprivileged_userns=1` | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; the Ubuntu 20.04 boundary is recorded above |
 | Native Windows/macOS runtimes | Unsupported (deferred) | [`verification/2026-08-21-cross-target-current-head-0d0bdf3f.md`](evidence/verification/2026-08-21-cross-target-current-head-0d0bdf3f.md) |
 
 ## Product areas
@@ -35,10 +38,12 @@ Snapshot: 2026-08-24, `feat/log-drivers`.
 | Registry auth/TLS, transient retry (429/5xx/timeout) | Supported (local fixture scope) | [`verification/2026-08-21-registry-transient-retry-current-head.md`](evidence/verification/2026-08-21-registry-transient-retry-current-head.md) |
 | External live-registry exchange (pull/push beyond fixture) | Experimental | not claimed by any current evidence; boundary recorded in registry retry evidence |
 | Dockerfile build, cache identity, provenance | Supported | [`build/2026-08-22-parallel-build-graphs.md`](evidence/build/2026-08-22-parallel-build-graphs.md) |
+| BuildKit session builds | Unsupported: `/session` and `/build?version=2` fail cleanly and direct clients to `DOCKER_BUILDKIT=0`; implementation is sized at 17–29 engineering days | [`docker-client-conformance/2026-08-24-buildkit-fallback.md`](evidence/docker-client-conformance/2026-08-24-buildkit-fallback.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md), merge `c59f6e2a` |
 | Dockerfile secrets/SSH mounts | Supported (root-qualified on this host) | [`build/2026-08-21-build-secrets-ssh-mounts.md`](evidence/build/2026-08-21-build-secrets-ssh-mounts.md) |
 | Container lifecycle (create/start/stop/kill/wait/restart) | Supported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) |
 | Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
 | Container log drivers | `json-file` supported; `journald` and `syslog` experimental behind crate features; signed manifest plugins experimental. Readback is supported only for `json-file`. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
+| Docker-client classic-builder conformance | Supported: 47/47 pass | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), merge `363a7b24` |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
 | Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |
@@ -61,6 +66,7 @@ Snapshot: 2026-08-24, `feat/log-drivers`.
 | AI assist (monitoring, predictive signals, adaptive restart) | Experimental: `FERROCRATE_AI=0` disables; `FERROCRATE_AI_ACT=1` gates autonomous actions | [`ai/2026-08-22-multi-container-lifecycle-qualification.md`](evidence/ai/2026-08-22-multi-container-lifecycle-qualification.md) |
 | RVF image launcher/QEMU | Experimental (dry-run default) | [`rvf/2026-08-22-launcher-interop.md`](evidence/rvf/2026-08-22-launcher-interop.md) |
 | Node/reconciliation supervisor | Experimental (single-node, no live cluster claim) | [`manager/2026-08-22-node-reconciliation-lifecycle.md`](evidence/manager/2026-08-22-node-reconciliation-lifecycle.md) |
+| Desktop loopback web bridge and daemon-owned UX/API lifecycle | Implemented; native runtime support remains bounded by the host-tier rows above | [`desktop/WEB-CONTROL-PLANE.md`](desktop/WEB-CONTROL-PLANE.md), merges `29e1ddcb`, `7fec156e`, `7e35b18b` |
 
 ## Explicitly unsupported (fail-closed)
 

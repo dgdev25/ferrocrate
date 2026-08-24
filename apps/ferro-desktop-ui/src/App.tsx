@@ -25,6 +25,8 @@ import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
+import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
+import type { RunContainerDraft, RunContainerInvokeArgs } from "./dialogForms.mjs";
 import { Icon } from "./iconSystem.mjs";
 import { errorForSection, navigationTransientState, resourceActionStartState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
@@ -51,7 +53,6 @@ import {
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import { runtimeActionAvailability } from "./runtimeActions.mjs";
-import { buildRunContainerInvokeArgs } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -172,15 +173,17 @@ function App(): JSX.Element {
   const [runDialogError, setRunDialogError] = useState<string | null>(null);
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
   const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
-  const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
-  const [newContainerName, setNewContainerName] = useState("");
-  const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
-  const [newContainerCommand, setNewContainerCommand] = useState("");
-  const [newContainerPullMissing, setNewContainerPullMissing] = useState(true);
-  const [newContainerPorts, setNewContainerPorts] = useState([{ host: "", container: "" }]);
-  const [newContainerVolumes, setNewContainerVolumes] = useState([{ source: "", target: "" }]);
-  const [newContainerMemory, setNewContainerMemory] = useState("");
-  const [newContainerCpus, setNewContainerCpus] = useState("");
+  const [newContainerDraft, setNewContainerDraft] = useState<RunContainerDraft>({
+    image: "alpine:latest",
+    name: "",
+    command: "",
+    pullIfMissing: true,
+    ports: [{ host: "", container: "" }],
+    volumes: [{ source: "", target: "" }],
+    environment: "",
+    memoryMb: "",
+    cpus: "",
+  });
   const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
   const [registryUsername, setRegistryUsername] = useState("");
   const [registryPassword, setRegistryPassword] = useState("");
@@ -857,32 +860,20 @@ function App(): JSX.Element {
     }
   }
 
-  async function runNewContainer(): Promise<void> {
+  async function runNewContainer(payload: RunContainerInvokeArgs): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
     setRunDialogError(null);
     setActionLabel("Container Run");
     try {
-      const result = await invoke<CommandResult>("run_new_container", buildRunContainerInvokeArgs({
-        image: newContainerImage,
-        name: newContainerName,
-        command: newContainerCommand,
-        ports: newContainerPorts,
-        volumes: newContainerVolumes,
-        pullIfMissing: newContainerPullMissing,
-        environment: newContainerEnvironment,
-        memoryMb: newContainerMemory,
-        cpus: newContainerCpus,
-      }));
+      const result = await invoke<CommandResult>("run_new_container", payload);
       setLastAction(result);
       if (!result.ok) {
         setRunDialogError(commandMessage(result, `Container run failed with status ${result.code}`));
         return;
       }
       setRunDialogOpen(false);
-      setNewContainerName("");
-      setNewContainerCommand("");
-      setNewContainerEnvironment("");
+      setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
       await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
     } catch (err) {
       setRunDialogError(String(err));
@@ -1644,47 +1635,13 @@ function App(): JSX.Element {
         <div className="status-right">{resourceUsage.cpu ? <span>CPU <b>{resourceUsage.cpu}</b></span> : null}{resourceUsage.memory ? <span>MEM <b>{resourceUsage.memory}</b></span> : null}<span>v0.1.0</span></div>
       </footer>
 
-      {doctorDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="doctor-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Guided diagnostics</p><h2 id="doctor-dialog-title">Run Doctor</h2></div><button className="btn btn-secondary" onClick={() => setDoctorDialogOpen(false)}>Cancel</button></div>
-          <div className="dialog-content"><p className="muted">Choose how Ferrocrate should check this installation.</p><div className="dialog-options">
-            <label htmlFor="doctor-fix"><input id="doctor-fix" type="checkbox" checked={doctorFix} onChange={(event) => setDoctorFix(event.target.checked)} /><span>Apply safe fixes</span></label>
-            <label htmlFor="doctor-bootstrap"><input id="doctor-bootstrap" type="checkbox" checked={doctorBootstrap} onChange={(event) => setDoctorBootstrap(event.target.checked)} /><span>Prepare missing components</span></label>
-            <label htmlFor="doctor-dry-run"><input id="doctor-dry-run" type="checkbox" checked={doctorDryRun} onChange={(event) => setDoctorDryRun(event.target.checked)} /><span>Preview changes only</span></label>
-            <label htmlFor="doctor-confirm"><input id="doctor-confirm" type="checkbox" checked={doctorConfirm} onChange={(event) => setDoctorConfirm(event.target.checked)} /><span>Allow changes that need confirmation</span></label>
-          </div></div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runDoctor()} disabled={runtimeBusy}><Icon name="pulse" size={16} />{runtimeBusy ? "Checking…" : "Run Doctor"}</button></div>
-        </section></div>
-      ) : null}
+      <DoctorDialog open={doctorDialogOpen} fix={doctorFix} bootstrap={doctorBootstrap} dryRun={doctorDryRun} confirm={doctorConfirm} busy={runtimeBusy} onFixChange={(event) => setDoctorFix(event.target.checked)} onBootstrapChange={(event) => setDoctorBootstrap(event.target.checked)} onDryRunChange={(event) => setDoctorDryRun(event.target.checked)} onConfirmChange={(event) => setDoctorConfirm(event.target.checked)} onCancel={() => setDoctorDialogOpen(false)} onRun={() => void runDoctor()} />
 
-      {settingsDialog === "account" ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Account connection</p><h2 id="account-dialog-title">Account and plan</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
-          <div className="dialog-content form-stack"><label htmlFor="account-release-service-url"><span>Release service URL</span><input id="account-release-service-url" value={releaseBaseUrl} onChange={(event) => setReleaseBaseUrl(event.target.value)} placeholder="https://releases.example.com" /></label><label htmlFor="account-token-service-url"><span>Token service URL</span><input id="account-token-service-url" value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} placeholder="https://accounts.example.com/token" /></label><label htmlFor="account-session-service-url"><span>Session service URL</span><input id="account-session-service-url" value={issuanceEndpoint} onChange={(event) => setIssuanceEndpoint(event.target.value)} placeholder="https://accounts.example.com/session" /></label><button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>Save service connection</button><label htmlFor="account-customer-id"><span>Customer ID</span><input id="account-customer-id" value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="Customer ID" /></label><label htmlFor="account-access-token"><span>Access token (optional)</span><input id="account-access-token" type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="Access token" /></label><button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>Connect account</button><label htmlFor="account-session-token"><span>Session token</span><input id="account-session-token" type="password" value={sessionTokenInput} onChange={(event) => setSessionTokenInput(event.target.value)} placeholder="Paste session token" /></label></div>
-          <div className="account-summary"><strong>{sessionSummary?.token_present ? "Account connected" : "No account connected"}</strong><span>{sessionSummary?.plan ? `Plan: ${sessionSummary.plan}` : "Plan information unavailable"}</span><span>{sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : "No active session expiry"}</span><details><summary>Plan diagnostics</summary><pre>{JSON.stringify(authState?.entitlement ?? {}, null, 2)}</pre></details></div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-danger" onClick={() => void clearSessionToken()}>Disconnect</button><button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>{authLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-primary" onClick={() => void saveSessionToken()} disabled={!sessionTokenInput.trim()}>Save session</button></div>
-        </section></div>
-      ) : null}
+      <AccountDialog open={settingsDialog === "account"} releaseBaseUrl={releaseBaseUrl} tokenEndpoint={tokenEndpoint} issuanceEndpoint={issuanceEndpoint} customerId={customerId} accessToken={accessToken} sessionToken={sessionTokenInput} authLoading={authLoading} accountConnected={Boolean(sessionSummary?.token_present)} plan={sessionSummary?.plan ?? null} expiresText={sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : null} entitlement={authState?.entitlement ?? {}} onReleaseBaseUrlChange={(event) => setReleaseBaseUrl(event.target.value)} onTokenEndpointChange={(event) => setTokenEndpoint(event.target.value)} onIssuanceEndpointChange={(event) => setIssuanceEndpoint(event.target.value)} onCustomerIdChange={(event) => setCustomerId(event.target.value)} onAccessTokenChange={(event) => setAccessToken(event.target.value)} onSessionTokenChange={(event) => setSessionTokenInput(event.target.value)} onClose={() => setSettingsDialog(null)} onSaveBackend={() => void saveBackendConfig()} onConnect={() => void acquireSessionToken()} onDisconnect={() => void clearSessionToken()} onRefresh={() => void refreshAuthState()} onSaveSession={() => void saveSessionToken()} />
 
-      {settingsDialog === "install" ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Local setup</p><h2 id="install-dialog-title">Install and bootstrap</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
-          <div className="dialog-content"><p>Prepare the local Ferrocrate stack with the saved account connection.</p>{installerResult ? <details><summary>Last install details</summary><pre>{JSON.stringify(installerResult, null, 2)}</pre></details> : <p className="muted">No install has run in this session.</p>}</div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>Preview install</button><button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>Run full install</button></div>
-        </section></div>
-      ) : null}
+      <InstallDialog open={settingsDialog === "install"} installerResult={installerResult} busy={runtimeBusy} onClose={() => setSettingsDialog(null)} onPreview={() => void runInstaller(true, false)} onInstall={() => void runInstaller(false, true)} />
 
-      {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog run-container-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid">
-          <label htmlFor="run-container-image"><span>Image</span><input id="run-container-image" value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label htmlFor="run-container-name"><span>Name</span><input id="run-container-name" value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
-          <label className="detail-span" htmlFor="run-container-command"><span>Command (optional)</span><input id="run-container-command" value={newContainerCommand} onChange={(event) => setNewContainerCommand(event.target.value)} placeholder="sh -c echo ready" /></label>
-          <label className="detail-span checkbox-row" htmlFor="run-container-pull-missing"><input id="run-container-pull-missing" type="checkbox" checked={newContainerPullMissing} onChange={(event) => setNewContainerPullMissing(event.target.checked)} /><span>Pull image if it is not available locally</span></label>
-          <fieldset className="detail-span mapping-fieldset"><legend>Ports</legend>{newContainerPorts.map((row, index) => <div className="mapping-row" key={`port-${index}`}><input aria-label={`Host port ${index + 1}`} value={row.host} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, host: event.target.value } : value))} placeholder="Host port" /><span>→</span><input aria-label={`Container port ${index + 1}`} value={row.container} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, container: event.target.value } : value))} placeholder="Container port" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerPorts((rows) => [...rows, { host: "", container: "" }])}>Add port</button></fieldset>
-          <fieldset className="detail-span mapping-fieldset"><legend>Volumes</legend>{newContainerVolumes.map((row, index) => <div className="mapping-row" key={`volume-${index}`}><input aria-label={`Volume source ${index + 1}`} value={row.source} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, source: event.target.value } : value))} placeholder="Host path or volume" /><span>→</span><input aria-label={`Container path ${index + 1}`} value={row.target} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, target: event.target.value } : value))} placeholder="Container path" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerVolumes((rows) => [...rows, { source: "", target: "" }])}>Add volume</button></fieldset>
-          <label className="detail-span" htmlFor="run-container-environment"><span>Environment (one KEY=value per line)</span><textarea id="run-container-environment" value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={5} /></label>
-          <details className="detail-span advanced-fields"><summary>Advanced resources</summary><div className="editor-grid"><label htmlFor="run-container-memory"><span>Memory (MB)</span><input id="run-container-memory" inputMode="decimal" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="Unlimited" /></label><label htmlFor="run-container-cpus"><span>CPUs</span><input id="run-container-cpus" inputMode="decimal" value={newContainerCpus} onChange={(event) => setNewContainerCpus(event.target.value)} placeholder="Unlimited" /></label></div></details>
-          {runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
-      ) : null}
+      <RunContainerDialog open={runDialogOpen} draft={newContainerDraft} busy={runtimeBusy} error={runDialogError} onDraftChange={setNewContainerDraft} onCancel={() => { setRunDialogError(null); setRunDialogOpen(false); }} onRun={(payload) => void runNewContainer(payload)} onInvalid={(error) => setRunDialogError(String(error))} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} />
 
       <ResourceCreateDialog
         kind={resourceDialog}
@@ -1706,9 +1663,7 @@ function App(): JSX.Element {
         <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
 
-      {buildImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><HostPathField label="Build context directory" kind="directory" value={buildContext} dialogAvailable={dialogAvailable} busy={runtimeBusy} onChange={(event) => setBuildContext(event.target.value)} onChoose={() => void chooseBuildContext()} /><label className="detail-span" htmlFor="build-image-reference"><span>Image reference</span><input id="build-image-reference" value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || Boolean(hostPathError(buildContext, "directory")) || !buildTag.trim()}>Start build</button></div></section></div>
-      ) : null}
+      <BuildImageDialog open={buildImageDialogOpen} context={buildContext} tag={buildTag} dialogAvailable={dialogAvailable} busy={runtimeBusy} onContextChange={(event) => setBuildContext(event.target.value)} onChooseContext={() => void chooseBuildContext()} onTagChange={(event) => setBuildTag(event.target.value)} onCancel={() => setBuildImageDialogOpen(false)} onBuild={() => void buildImage()} />
 
       <BuildLicensingDialog
         open={buildLicensingDialogOpen}
@@ -1724,9 +1679,7 @@ function App(): JSX.Element {
         onOpenSettings={() => { setLicensingDialogOpen(false); setActiveSection("settings"); }}
       />
 
-      {registryDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span" htmlFor="registry-server"><span>Registry server</span><input id="registry-server" value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label htmlFor="registry-username"><span>Username</span><input id="registry-username" value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label htmlFor="registry-password"><span>Password or token</span><input id="registry-password" type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatus.logged_in ? `Signed in to ${registryStatus.registry} as ${registryAccountName}` : `Not signed in to ${registryStatus.registry}` : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>
-      ) : null}
+      <RegistryDialog open={registryDialogOpen} target={registryTarget} username={registryUsername} password={registryPassword} status={registryStatus} accountName={registryAccountName} busy={runtimeBusy} loading={registryLoading} onTargetChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} onUsernameChange={(event) => setRegistryUsername(event.target.value)} onPasswordChange={(event) => setRegistryPassword(event.target.value)} onCancel={() => setRegistryDialogOpen(false)} onCheck={() => void refreshRegistryAuth()} onLogout={() => void logoutRegistry()} onLogin={() => void loginRegistry()} />
     </div>
   );
 

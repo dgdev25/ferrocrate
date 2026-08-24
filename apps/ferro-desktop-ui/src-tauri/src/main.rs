@@ -3777,8 +3777,8 @@ mod tests {
         assert_eq!(
             run_container_bridge_command(
                 "alpine:latest",
-                Some("web"),
-                &["sh".to_string(), "-c".to_string(), "echo ready".to_string()],
+                Some("sentinel-worker"),
+                &["printf".to_string(), "sentinel-command".to_string()],
                 &["8080:80".to_string()],
                 &["data:/data".to_string()],
                 &["MODE=dev".to_string(), "TOKEN=secret".to_string()],
@@ -3794,7 +3794,7 @@ mod tests {
                 "run",
                 "--detach",
                 "--name",
-                "web",
+                "sentinel-worker",
                 "--publish",
                 "8080:80",
                 "--volume",
@@ -3810,9 +3810,8 @@ mod tests {
                 "--cpu-period",
                 "100000",
                 "alpine:latest",
-                "sh",
-                "-c",
-                "echo ready",
+                "printf",
+                "sentinel-command",
             ]
         );
     }

@@ -816,8 +816,8 @@ mod tests {
     fn run_new_container_bridge_decodes_every_native_argument() {
         let args = decode::<NewContainerArgs>(json!({
             "image": "alpine:latest",
-            "name": "demo",
-            "command": ["echo", "ready"],
+            "name": "sentinel-worker",
+            "command": ["printf", "sentinel-command"],
             "ports": ["8080:80"],
             "volumes": ["data:/data"],
             "pullIfMissing": true,
@@ -828,8 +828,8 @@ mod tests {
         }))
         .expect("browser payload");
 
-        assert_eq!(args.name.as_deref(), Some("demo"));
-        assert_eq!(args.command, ["echo", "ready"]);
+        assert_eq!(args.name.as_deref(), Some("sentinel-worker"));
+        assert_eq!(args.command, ["printf", "sentinel-command"]);
         assert_eq!(args.ports, ["8080:80"]);
         assert_eq!(args.volumes, ["data:/data"]);
         assert!(args.pull_if_missing);

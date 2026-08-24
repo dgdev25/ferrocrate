@@ -1,74 +1,83 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
+import { BuildLicensingDialog } from "./imageBuild.mjs";
 import { PullImageDialog } from "./imageView.mjs";
-import { HostPathField, ResourceCreateDialog } from "./resourcePages.mjs";
+import { LicensingDialog, ResourceCreateDialog } from "./resourcePages.mjs";
 
-const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const noop = () => {};
 
-function assertExplicitLabels(markup) {
+function assertRenderedControlsAreExplicitlyNamed(markup) {
   const controls = [...markup.matchAll(/<(input|textarea|select)\b([^>]*)>/g)];
-  assert.ok(controls.length > 0, "expected at least one form control");
+  const ids = [...markup.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length, "every rendered control id must be unique");
   for (const [, element, attributes] of controls) {
     const id = attributes.match(/\bid="([^"]+)"/)?.[1];
     const ariaLabel = attributes.match(/\baria-label="([^"]+)"/)?.[1];
-    assert.ok(
-      ariaLabel || (id && markup.includes(`for="${id}"`)),
-      `${element} must have aria-label or a stable id with a matching label`,
-    );
+    if (ariaLabel) continue;
+    assert.ok(id, `${element} must have aria-label or an id`);
+    const labels = [...markup.matchAll(new RegExp(`<label\\b[^>]*for="${id}"[^>]*>([\\s\\S]*?)<\\/label>`, "g"))];
+    assert.equal(labels.length, 1, `${id} must resolve to exactly one label`);
+    assert.ok(labels[0][1].replace(/<[^>]+>/g, "").trim(), `${id} label must contain text`);
   }
 }
 
-test("every App dialog control has a stable explicit accessible name", () => {
-  const dialogRegion = appSource.slice(appSource.indexOf("{doctorDialogOpen ?"));
-  const controls = [...dialogRegion.matchAll(/<(input|textarea|select)\b([^>]*)>/g)];
-  assert.equal(controls.length, 25, "update the dialog inventory when controls are added or removed");
-  for (const [, element, attributes] of controls) {
-    assert.match(attributes, /\b(?:id|aria-label)=/, `${element} must have a stable id or aria-label`);
-  }
+function appDialogProps() {
+  return {
+    doctor: { open: true, fix: true, bootstrap: false, dryRun: true, confirm: false, busy: false, onFixChange: noop, onBootstrapChange: noop, onDryRunChange: noop, onConfirmChange: noop, onCancel: noop, onRun: noop },
+    account: { open: true, releaseBaseUrl: "", tokenEndpoint: "", issuanceEndpoint: "", customerId: "", accessToken: "", sessionToken: "", authLoading: false, accountConnected: false, plan: null, expiresAt: null, entitlement: {}, onReleaseBaseUrlChange: noop, onTokenEndpointChange: noop, onIssuanceEndpointChange: noop, onCustomerIdChange: noop, onAccessTokenChange: noop, onSessionTokenChange: noop, onClose: noop, onSaveBackend: noop, onConnect: noop, onDisconnect: noop, onRefresh: noop, onSaveSession: noop },
+    run: { open: true, draft: { image: "alpine:latest", name: "", command: "", pullIfMissing: true, ports: [{ host: "", container: "" }], volumes: [{ source: "", target: "" }], environment: "", memoryMb: "", cpus: "" }, busy: false, error: null, onDraftChange: noop, onCancel: noop, onRun: noop },
+    build: { open: true, context: "/tmp/build", tag: "local/build:latest", dialogAvailable: false, busy: false, onContextChange: noop, onChooseContext: noop, onTagChange: noop, onCancel: noop, onBuild: noop },
+    registry: { open: true, target: "registry.example.com", username: "", password: "", status: null, accountName: "", busy: false, loading: false, onTargetChange: noop, onUsernameChange: noop, onPasswordChange: noop, onCancel: noop, onCheck: noop, onLogout: noop, onLogin: noop },
+  };
+}
 
-  const expectedAssociations = [
-    ["doctor-fix", "Apply safe fixes"],
-    ["doctor-bootstrap", "Prepare missing components"],
-    ["doctor-dry-run", "Preview changes only"],
-    ["doctor-confirm", "Allow changes that need confirmation"],
-    ["account-release-service-url", "Release service URL"],
-    ["account-token-service-url", "Token service URL"],
-    ["account-session-service-url", "Session service URL"],
-    ["account-customer-id", "Customer ID"],
-    ["account-access-token", "Access token (optional)"],
-    ["account-session-token", "Session token"],
-    ["run-container-image", "Image"],
-    ["run-container-name", "Name"],
-    ["run-container-command", "Command (optional)"],
-    ["run-container-pull-missing", "Pull image if it is not available locally"],
-    ["run-container-environment", "Environment (one KEY=value per line)"],
-    ["run-container-memory", "Memory (MB)"],
-    ["run-container-cpus", "CPUs"],
-    ["build-image-reference", "Image reference"],
-    ["registry-server", "Registry server"],
-    ["registry-username", "Username"],
-    ["registry-password", "Password or token"],
-  ];
-
-  for (const [id, label] of expectedAssociations) {
-    assert.match(appSource, new RegExp(`<label[^>]*htmlFor="${id}"[^>]*>`));
-    assert.match(appSource, new RegExp(`<span>${label.replace(/[()]/g, "\\$&")}</span>`));
-    assert.match(appSource, new RegExp(`<(?:input|textarea)[^>]*id="${id}"`));
-  }
-});
-
-test("shared dialog components explicitly label every rendered control", () => {
-  const noop = () => {};
-  const surfaces = [
+test("every rendered dialog control has one stable explicit accessible name", () => {
+  const props = appDialogProps();
+  const markup = renderToStaticMarkup(createElement("div", null,
+    createElement(DoctorDialog, props.doctor),
+    createElement(AccountDialog, props.account),
+    createElement(RunContainerDialog, props.run),
+    createElement(BuildImageDialog, props.build),
+    createElement(InstallDialog, { open: true, installerResult: null, busy: false, onClose: noop, onPreview: noop, onInstall: noop }),
+    createElement(RegistryDialog, props.registry),
     createElement(PullImageDialog, { open: true, imageTarget: "alpine", progress: "", failure: null, busy: false, onCancel: noop, onImageTargetChange: noop, onPull: noop }),
     createElement(ResourceCreateDialog, { kind: "network", name: "app", subnet: "", onNameChange: noop, onSubnetChange: noop, onCancel: noop, onCreate: noop }),
     createElement(ResourceCreateDialog, { kind: "volume", name: "data", onNameChange: noop, onCancel: noop, onCreate: noop }),
-    createElement(HostPathField, { label: "Build context directory", kind: "directory", value: "/tmp", onChange: noop }),
-  ];
+    createElement(BuildLicensingDialog, { open: true, detail: "detail", onClose: noop, onOpenSettings: noop }),
+    createElement(LicensingDialog, { open: true, detail: "detail", onClose: noop, onOpenSettings: noop }),
+  ));
+  assertRenderedControlsAreExplicitlyNamed(markup);
+  assert.equal([...markup.matchAll(/<(?:input|textarea|select)\b/g)].length, 30);
+});
 
-  for (const surface of surfaces) assertExplicitLabels(renderToStaticMarkup(surface));
+function findElement(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (predicate(node)) return node;
+  const children = Array.isArray(node.props?.children) ? node.props.children : [node.props?.children];
+  for (const child of children) {
+    const match = findElement(child, predicate);
+    if (match) return match;
+  }
+  return null;
+}
+
+test("Run container edits forward the entered name and parsed command on click", () => {
+  const props = appDialogProps().run;
+  let submitted;
+  props.onDraftChange = (draft) => { props.draft = draft; };
+  props.onRun = (payload) => { submitted = payload; };
+
+  let tree = RunContainerDialog(props);
+  findElement(tree, (node) => node.props?.id === "run-container-name").props.onChange({ target: { value: "sentinel-worker" } });
+  tree = RunContainerDialog(props);
+  findElement(tree, (node) => node.props?.id === "run-container-command").props.onChange({ target: { value: "printf sentinel-command" } });
+  tree = RunContainerDialog(props);
+  findElement(tree, (node) => node.props?.id === "run-container-submit").props.onClick();
+
+  assert.equal(submitted.name, "sentinel-worker");
+  assert.deepEqual(submitted.command, ["printf", "sentinel-command"]);
 });

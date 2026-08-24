@@ -3361,7 +3361,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 max_entries,
                 format,
             } => handle_build_cache_prune(&runtime_dir, max_entries, &format),
-            Commands::Images { format, filters, quiet } => handle_images(&image_store, &format, &filters, quiet),
+            Commands::Images { format, filters, quiet } => handle_images(&runtime_dir, &image_store, &format, &filters, quiet),
             Commands::Search { term } => {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
@@ -3424,7 +3424,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
             Commands::ImageInspect { image, format } => {
-                handle_image_inspect(&image_store, &image, &format)
+                handle_image_inspect(&runtime_dir, &image_store, &image, &format)
             }
             Commands::Tag { source, target } => {
                 handle_tag(&image_store, &source, &target, &surface_authorization)
@@ -3752,7 +3752,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         let image_store = LocalImageStore::open(image_store_path).map_err(|err| err.to_string())?;
 
         match command {
-            Commands::Images { format, filters, quiet } => handle_images(&image_store, &format, &filters, quiet),
+            Commands::Images { format, filters, quiet } => handle_images(&runtime_dir, &image_store, &format, &filters, quiet),
             Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image)
             }),
@@ -7996,7 +7996,66 @@ fn color_status(status: &str) -> String {
     }
 }
 
+fn docker_image_metadata(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    reference: &ferro_core::image_store::ImageRecord,
+) -> Result<(serde_json::Value, ImageManifest), String> {
+    let manifest = parse_image_manifest(&reference.manifest_json)
+        .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
+    let config_path = resolve_config_path_with_store(runtime_dir, &reference.reference, store)
+        .map_err(|error| format!("docker: image config unavailable: {error}"))?
+        .ok_or_else(|| "docker: image config blob is unavailable".to_string())?;
+    let config = serde_json::from_slice(&std::fs::read(config_path)
+        .map_err(|error| format!("docker: read image config: {error}"))?)
+        .map_err(|error| format!("docker: invalid image config: {error}"))?;
+    Ok((config, manifest))
+}
+
+fn docker_image_list_entry(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    reference: &ferro_core::image_store::ImageRecord,
+) -> Result<serde_json::Value, String> {
+    let (config, _) = docker_image_metadata(runtime_dir, store, reference)?;
+    Ok(serde_json::json!({
+        "Id": reference.digest,
+        "RepoTags": [reference.reference],
+        "Created": reference.created_at_unix,
+        "Size": docker_manifest_layer_size(&reference.manifest_json),
+        "Labels": config.get("config").and_then(|value| value.get("Labels")).cloned().unwrap_or_else(|| serde_json::json!({})),
+        "ParentId": "",
+        "SharedSize": 0,
+        "Containers": 0,
+        "RepoDigests": docker_image_repo_digests(reference),
+        "VirtualSize": docker_manifest_layer_size(&reference.manifest_json),
+    }))
+}
+
+fn docker_image_inspect_payload(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    reference: &ferro_core::image_store::ImageRecord,
+) -> Result<serde_json::Value, String> {
+    let (config, manifest) = docker_image_metadata(runtime_dir, store, reference)?;
+    Ok(serde_json::json!({
+        "Id": reference.digest,
+        "RepoTags": [reference.reference],
+        "Created": docker_timestamp(reference.created_at_unix),
+        "Size": docker_manifest_layer_size(&reference.manifest_json),
+        "VirtualSize": docker_manifest_layer_size(&reference.manifest_json),
+        "Config": config.get("config").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "RootFS": {
+            "Type": config.get("rootfs").and_then(|value| value.get("type")).cloned().unwrap_or_else(|| serde_json::json!("layers")),
+            "Layers": manifest.layers.iter().map(|layer| layer.digest.clone()).collect::<Vec<_>>(),
+        },
+        "Architecture": config.get("architecture").cloned().unwrap_or_else(|| serde_json::json!(host_build_arch())),
+        "Os": config.get("os").cloned().unwrap_or_else(|| serde_json::json!("linux")),
+    }))
+}
+
 fn handle_images(
+    runtime_dir: &Path,
     store: &LocalImageStore,
     format: &str,
     filter_values: &[String],
@@ -8014,7 +8073,11 @@ fn handle_images(
         &filters,
     )?;
     if format == "json" {
-        let json = serde_json::to_string_pretty(&records).map_err(|err| err.to_string())?;
+        let entries = records
+            .iter()
+            .map(|record| docker_image_list_entry(runtime_dir, store, record))
+            .collect::<Result<Vec<_>, _>>()?;
+        let json = serde_json::to_string_pretty(&entries).map_err(|err| err.to_string())?;
         println!("{json}");
         return Ok(());
     }
@@ -8027,7 +8090,8 @@ fn handle_images(
         return Ok(());
     }
     for record in records {
-        println!("{} {}", record.reference.cyan(), record.digest);
+        let size = docker_manifest_layer_size(&record.manifest_json);
+        println!("{} {} {}", record.reference.cyan(), record.digest, size);
     }
     Ok(())
 }
@@ -8080,18 +8144,12 @@ fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<
     Ok(())
 }
 
-fn handle_image_inspect(store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
+fn handle_image_inspect(runtime_dir: &Path, store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
     let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
     let reference = resolve_reference(store, &canonical)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("image inspect: not found {canonical}"))?;
-    let payload = serde_json::json!({
-        "Id": reference.digest,
-        "RepoTags": [reference.reference],
-        "Created": reference.created_at_unix,
-        "Size": 0,
-        "VirtualSize": 0,
-    });
+    let payload = docker_image_inspect_payload(runtime_dir, store, &reference)?;
     if format == "json" {
         println!(
             "{}",
@@ -14977,27 +15035,15 @@ fn handle_docker_compat_connection(
                         .then_with(|| right.reference.cmp(&left.reference))
                 });
                 let entries: Vec<serde_json::Value> = images
-                    .into_iter()
+                    .iter()
                     .map(|record| {
-                        let mut entry = serde_json::Map::new();
-                        entry.insert("Id".to_string(), serde_json::json!(record.digest));
-                        entry.insert(
-                            "RepoTags".to_string(),
-                            serde_json::json!([record.reference]),
-                        );
-                        entry.insert(
-                            "Created".to_string(),
-                            serde_json::json!(record.created_at_unix),
-                        );
-                        if include_digests {
-                            entry.insert(
-                                "RepoDigests".to_string(),
-                                serde_json::json!(docker_image_repo_digests(&record)),
-                            );
+                        let mut entry = docker_image_list_entry(runtime_dir.as_ref(), &store, record)?;
+                        if !include_digests {
+                            entry.as_object_mut().expect("image list entry is an object").remove("RepoDigests");
                         }
-                        serde_json::Value::Object(entry)
+                        Ok::<_, String>(entry)
                     })
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 let json = serde_json::to_string(&entries)
                     .unwrap_or_else(|e| format!(r#"{{"error": "json serialize failed: {e}"}}"#));
                 http_response(200, json.as_bytes(), "application/json")
@@ -15282,13 +15328,7 @@ fn handle_docker_compat_connection(
                 let reference = resolve_reference(&store, &name)
                     .map_err(|err| err.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;
-                let body = serde_json::json!({
-                    "Id": reference.digest,
-                    "RepoTags": vec![reference.reference],
-                    "Created": docker_timestamp(reference.created_at_unix),
-                    "Size": docker_manifest_layer_size(&reference.manifest_json),
-                    "VirtualSize": docker_manifest_layer_size(&reference.manifest_json)
-                });
+                let body = docker_image_inspect_payload(runtime_dir.as_ref(), &store, &reference)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", path) if path.starts_with("/images/") && path.ends_with("/history") => {
@@ -21804,7 +21844,7 @@ volumes:
     fn images_handler_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
-        handle_images(&store, "text", &[], false).expect("images handler should succeed");
+        handle_images(temp.path(), &store, "text", &[], false).expect("images handler should succeed");
     }
 
     #[test]

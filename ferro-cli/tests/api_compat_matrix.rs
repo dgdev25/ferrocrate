@@ -972,6 +972,32 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         inspect["Size"].as_u64().is_some_and(|size| size > 0),
         "Size={inspect}"
     );
+    assert_eq!(inspect["Architecture"], "amd64", "inspect={inspect}");
+    assert_eq!(inspect["Os"], "linux", "inspect={inspect}");
+    assert!(inspect["Config"].is_object(), "inspect={inspect}");
+    assert_eq!(inspect["RootFS"]["Type"], "layers", "inspect={inspect}");
+    assert!(
+        inspect["RootFS"]["Layers"]
+            .as_array()
+            .is_some_and(|layers| !layers.is_empty()),
+        "inspect={inspect}"
+    );
+
+    let (status, body) = harness.request("GET", "/images/json", "");
+    assert_eq!(status, 200, "image list response: {body}");
+    let images = serde_json::from_str::<Vec<serde_json::Value>>(&body).expect("image list JSON");
+    let listed = images
+        .iter()
+        .find(|image| {
+            image["RepoTags"] == serde_json::json!(["registry-1.docker.io/matrix/build:latest"])
+        })
+        .expect("built image appears in image list");
+    assert!(
+        listed["Size"].as_u64().is_some_and(|size| size > 0),
+        "image={listed}"
+    );
+    assert_eq!(listed["Labels"], serde_json::json!({}), "image={listed}");
+    assert_eq!(listed["ParentId"], "", "image={listed}");
     let (status, body) = harness.request("GET", "/images/matrix%2Fbuild%3Alatest/history", "");
     assert_eq!(status, 200, "image history response: {body}");
     let history = serde_json::from_str::<serde_json::Value>(&body).expect("image history JSON");
@@ -1003,7 +1029,7 @@ fn docker_api_build_accepts_a_valid_tar_context() {
         .any(|path| path == std::path::Path::new("repositories")));
     assert!(entries
         .iter()
-        .any(|path| path.to_string_lossy().ends_with("/layer.tar")));
+        .any(|path| path.to_string_lossy().ends_with(".tar")));
 }
 
 #[test]

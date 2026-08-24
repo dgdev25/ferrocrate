@@ -25,7 +25,7 @@ import type {
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
-import { parseImageRows, pullFailurePresentation } from "./imageView.mjs";
+import { ImageEmptyState, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { registryStatusText } from "./registryAuth.mjs";
 import {
@@ -1025,7 +1025,7 @@ function App(): JSX.Element {
                   <button className="btn btn-primary" onClick={() => setRunDialogOpen(true)} disabled={runtimeBusy}>▶ Run container</button>
                 </>
               ) : activeSection === "images" ? (
-                imageRows.length ? <button className="btn btn-primary" onClick={openPullImageDialog} disabled={runtimeBusy}>Pull image</button> : null
+                <ImagePagePullAction hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
                   {loading ? "Refreshing…" : "↻ Refresh runtime"}
@@ -1169,7 +1169,7 @@ function App(): JSX.Element {
                       ))}</tbody>
                     </table>
                   </div>
-                ) : <div className="empty-state"><strong>There are no local images.</strong><span>Pull an image to run or build containers.</span><button className="btn btn-primary" onClick={openPullImageDialog} disabled={runtimeBusy}>Pull image</button></div>}
+                ) : <ImageEmptyState hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />}
               </section>
             ) : null}
 
@@ -1200,7 +1200,7 @@ function App(): JSX.Element {
       ) : null}
 
       {pullImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="pull-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Image library</p><h2 id="pull-image-dialog-title">Pull image</h2></div><button className="btn btn-secondary" onClick={() => setPullImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Image reference</span><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="alpine:latest" autoFocus /></label>{pullProgress ? <p className="pull-progress detail-span" role="status"><strong>Pull progress</strong>{pullProgress}</p> : null}{pullFailure ? <section className="pull-failure detail-span" role="alert"><strong>{pullFailure.message}</strong>{pullFailure.kind === "daemon" ? <button className="btn btn-secondary" onClick={() => void startFerrocrate()} disabled={runtimeBusy}>Start</button> : null}{pullFailure.kind === "license" ? <button className="btn btn-secondary" onClick={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }}>Review licensing</button> : null}<details><summary>Technical details</summary><pre>{pullFailure.detail}</pre></details></section> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void pullImage()} disabled={runtimeBusy || !imageTarget.trim()}>{runtimeBusy ? "Pulling…" : "Pull image"}</button></div></section></div>
+        <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} />
       ) : null}
 
       {buildImageDialogOpen ? (

@@ -3148,6 +3148,7 @@ impl ContainerRuntime {
             tmpfs_mounts.to_vec(),
             readonly_rootfs,
             self.runtime_dir.clone(),
+            log_rotation_from_annotations(annotations),
         )
         .inspect_err(|_e| {
             // Kill any partially spawned process on error
@@ -4483,6 +4484,7 @@ impl ContainerRuntime {
                 .collect(),
             record.readonly_rootfs,
             self.runtime_dir.clone(),
+            log_rotation_from_annotations(&record.annotations),
         )?;
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -6086,6 +6088,7 @@ fn spawn_process_with_logs(
     tmpfs_mounts: Vec<TmpfsMount>,
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
+    rotation: Option<LogRotation>,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -6103,7 +6106,7 @@ fn spawn_process_with_logs(
         readonly_rootfs,
     )?;
     let (child_id, child, pidfd) =
-        spawn_child_with_logs(command, stdout_path, stderr_path, append, tty)?;
+        spawn_child_with_logs(command, stdout_path, stderr_path, append, tty, rotation)?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -6141,6 +6144,7 @@ fn spawn_process_with_logs(
             tmpfs_mounts,
             readonly_rootfs,
             runtime_dir,
+            rotation,
             oom_kills,
         );
     });
@@ -6775,8 +6779,9 @@ fn spawn_child_with_logs(
     stderr_path: &Path,
     append: bool,
     tty: bool,
+    rotation: Option<LogRotation>,
 ) -> Result<(u32, Child, OwnedFd), RuntimeError> {
-    let rotation = log_rotation_from_env();
+    let rotation = rotation.or_else(log_rotation_from_env);
     let stdout_file = if append {
         OpenOptions::new()
             .create(true)
@@ -6987,6 +6992,17 @@ fn log_rotation_from_env() -> Option<LogRotation> {
         .and_then(|value| parse_log_size(&value))?;
     let max_files = std::env::var("FERROCRATE_LOG_MAX_FILE")
         .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1);
+    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+}
+
+fn log_rotation_from_annotations(annotations: &HashMap<String, String>) -> Option<LogRotation> {
+    let max_size = annotations
+        .get("io.ferrocrate.log.max-size")
+        .and_then(|value| parse_log_size(value))?;
+    let max_files = annotations
+        .get("io.ferrocrate.log.max-file")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
     (max_files >= 2).then_some(LogRotation { max_size, max_files })
@@ -7250,6 +7266,7 @@ fn supervise_child(
     tmpfs_mounts: Vec<TmpfsMount>,
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
+    rotation: Option<LogRotation>,
     mut oom_kills: u64,
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
@@ -7479,7 +7496,7 @@ fn supervise_child(
             }
         };
         let (pid, new_child, new_pidfd) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty) {
+            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty, rotation) {
                 Ok(tuple) => tuple,
                 Err(error) => {
                     warn!(

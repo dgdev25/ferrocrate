@@ -12670,6 +12670,8 @@ struct DockerCreateSpec {
     #[serde(default)]
     tty: bool,
     #[serde(default)]
+    log_options: HashMap<String, String>,
+    #[serde(default)]
     auto_remove: bool,
     health: Option<DockerHealthSpec>,
     #[serde(default)]
@@ -14917,6 +14919,11 @@ fn handle_docker_compat_connection(
                     .cloned()
                     .partition(|entry| entry.starts_with('/'));
                 volume_binds.extend(spec.image_volumes.iter().cloned());
+                let log_annotations = spec
+                    .log_options
+                    .iter()
+                    .map(|(key, value)| format!("io.ferrocrate.log.{key}={value}"))
+                    .collect::<Vec<_>>();
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -14927,7 +14934,7 @@ fn handle_docker_compat_connection(
                     &spec.network_mode,
                     &network_backend,
                     &path_binds,
-                    &[],
+                    &log_annotations,
                     &volume_binds,
                     false,
                     false,
@@ -16931,6 +16938,11 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         name,
         network_mode,
         tty: request.tty,
+        log_options: host_config
+            .log_config
+            .as_ref()
+            .map(|config| config.options.clone())
+            .unwrap_or_default(),
         auto_remove: host_config.auto_remove,
         health,
         memory_max,
@@ -22587,6 +22599,7 @@ volumes:
             name: None,
             network_mode: "bridge".to_string(),
             tty: false,
+            log_options: HashMap::new(),
             auto_remove: false,
             health: Some(DockerHealthSpec {
                 cmd: vec!["/bin/sh".to_string(), "-c".to_string(), "test -f /ready".to_string()],
@@ -22760,6 +22773,7 @@ volumes:
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
                 tty: false,
+                log_options: HashMap::new(),
                 auto_remove: false,
                 health: None,
                 memory_max: None,
@@ -22805,6 +22819,7 @@ volumes:
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
             tty: false,
+            log_options: HashMap::new(),
             auto_remove: false,
             health: None,
             memory_max: None,
@@ -22942,6 +22957,7 @@ volumes:
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
             tty: false,
+            log_options: HashMap::new(),
             auto_remove: false,
             health: None,
             memory_max: None,

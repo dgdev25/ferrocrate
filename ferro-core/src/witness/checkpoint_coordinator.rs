@@ -635,7 +635,7 @@ fn secure_read(path: &Path, bound: usize) -> Result<Option<Vec<u8>>, CheckpointE
 }
 #[cfg(target_os = "linux")]
 fn secure_write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), CheckpointError> {
-    use nix::fcntl::{openat, renameat, renameat2, OFlag, RenameFlags};
+    use nix::fcntl::{openat, renameat, OFlag};
     use nix::sys::stat::Mode;
     use nix::unistd::{unlinkat, UnlinkatFlags};
     let parent = path.parent().ok_or(CheckpointError::InvalidArtifact)?;
@@ -655,13 +655,7 @@ fn secure_write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Checkpoi
     let result = if replace {
         renameat(&dir, tmp.as_str(), &dir, target)
     } else {
-        renameat2(
-            &dir,
-            tmp.as_str(),
-            &dir,
-            target,
-            RenameFlags::RENAME_NOREPLACE,
-        )
+        renameat_noreplace(&dir, tmp.as_str(), &dir, target)
     };
     if let Err(error) = result {
         let _ = unlinkat(&dir, tmp.as_str(), UnlinkatFlags::NoRemoveDir);
@@ -673,6 +667,56 @@ fn secure_write(path: &Path, bytes: &[u8], replace: bool) -> Result<(), Checkpoi
     }
     File::from(dir).sync_all()?;
     Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn renameat_noreplace(
+    olddir: &std::os::fd::OwnedFd,
+    oldpath: &str,
+    newdir: &std::os::fd::OwnedFd,
+    newpath: &std::ffi::OsStr,
+) -> Result<(), nix::errno::Errno> {
+    use nix::fcntl::{renameat2, RenameFlags};
+
+    renameat2(
+        olddir,
+        oldpath,
+        newdir,
+        newpath,
+        RenameFlags::RENAME_NOREPLACE,
+    )
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+fn renameat_noreplace(
+    olddir: &std::os::fd::OwnedFd,
+    oldpath: &str,
+    newdir: &std::os::fd::OwnedFd,
+    newpath: &std::ffi::OsStr,
+) -> Result<(), nix::errno::Errno> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+
+    let oldpath = CString::new(oldpath).map_err(|_| nix::errno::Errno::EINVAL)?;
+    let newpath = CString::new(newpath.as_bytes()).map_err(|_| nix::errno::Errno::EINVAL)?;
+    // SAFETY: the descriptors and NUL-terminated path components stay valid for the syscall.
+    let result = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_renameat2,
+            olddir.as_raw_fd(),
+            oldpath.as_ptr(),
+            newdir.as_raw_fd(),
+            newpath.as_ptr(),
+            nix::libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == -1 {
+        Err(nix::errno::Errno::last())
+    } else {
+        Ok(())
+    }
 }
 #[cfg(target_os = "linux")]
 fn secure_unlink(path: &Path) -> Result<(), CheckpointError> {

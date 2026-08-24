@@ -5,6 +5,16 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 ui="$root/apps/ferro-desktop-ui"
 lic_dir="$HOME/.ferrocrate/dev"
+web=false
+
+case "${1:-}" in
+  "") ;;
+  --web) web=true ;;
+  *)
+    echo "usage: $0 [--web]" >&2
+    exit 2
+    ;;
+esac
 
 say() { printf '\033[1;33m[dev-desktop]\033[0m %s\n' "$*"; }
 
@@ -49,5 +59,11 @@ say "starting daemon"
 daemon_pid=$!
 trap 'kill "$daemon_pid" 2>/dev/null || true' EXIT
 sleep 1
-say "launching Ferrocrate Desktop"
-exec "$ui/src-tauri/target/debug/ferro-desktop-ui"
+if [[ "$web" == true ]]; then
+  url="http://127.0.0.1:4190"
+  say "web bridge ready at $url"
+  "$ui/src-tauri/target/debug/ferro-desktop-ui" --web --listen 127.0.0.1:4190
+else
+  say "launching Ferrocrate Desktop"
+  exec "$ui/src-tauri/target/debug/ferro-desktop-ui"
+fi

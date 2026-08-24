@@ -12,7 +12,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tower_http::services::{ServeDir, ServeFile};
 
 use super::*;
@@ -49,12 +51,14 @@ struct BridgeState {
     events: WebEventHub,
 }
 
+#[cfg(test)]
 pub(crate) struct WebBridgeHandle {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(test)]
 impl WebBridgeHandle {
     pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
@@ -68,6 +72,7 @@ impl WebBridgeHandle {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn spawn_web_bridge(
     addr: SocketAddr,
     dist: PathBuf,

@@ -154,7 +154,7 @@ run_killed_create() {
   fault_name="${net_name}-${phase,,}"
   fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
   fault_bridge="fc-${fault_bridge_suffix}"
-  journal="$fault_runtime/network-operations.journal"
+  journal="$fault_runtime/.ferrocrate/network-operations.journal"
 
   ip netns exec "$ns_name" env \
     FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
@@ -312,7 +312,7 @@ run_killed_delete() {
   fault_name="${net_name}-removed"
   fault_bridge_suffix="$(printf 'ferro-net-bridge-v1%s' "$fault_name" | sha256sum | awk '{print substr($1,1,12)}')"
   fault_bridge="fc-${fault_bridge_suffix}"
-  journal="$fault_runtime/network-operations.journal"
+  journal="$fault_runtime/.ferrocrate/network-operations.journal"
   ip netns exec "$ns_name" env FERROCRATE_RUNTIME_DIR="$fault_runtime" HOME="$fault_runtime" \
     "$ferro_cli" network create --subnet "$subnet" "$fault_name" >/dev/null \
     || fail "checkpoint delete fixture create failed"

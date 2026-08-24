@@ -26,6 +26,10 @@ export function resourceActionState(action, result, detail) {
   };
 }
 
+export function resourceActionStartState(action, actionResult) {
+  return { actionResult: action === "create" ? null : actionResult };
+}
+
 export function navigationTransientState(sectionErrors) {
   return {
     actionLabel: "",

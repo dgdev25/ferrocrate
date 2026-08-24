@@ -10,6 +10,9 @@ export function setSectionError(errors: SectionErrors, section: AppSection, erro
 export function errorForSection(errors: SectionErrors, section: AppSection): string | null;
 export function clearErrorsForNavigation(errors: SectionErrors): SectionErrors;
 export function resourceActionState(action: NetworkAction | VolumeAction, result: CommandResult, detail: string): ResourceActionState;
+export function resourceActionStartState(action: NetworkAction | VolumeAction, actionResult: CommandResult | null): {
+  actionResult: CommandResult | null;
+};
 export function navigationTransientState(sectionErrors: SectionErrors): {
   actionLabel: "";
   actionResult: null;

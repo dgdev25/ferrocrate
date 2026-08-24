@@ -42,3 +42,15 @@ test("network-create failures stay in their dialog and navigation clears transie
     pageError: "Network Create did not complete",
   });
 });
+
+test("a rejected resource create cannot relabel a previous action result", async () => {
+  assert.equal(typeof errorScopes.resourceActionStartState, "function");
+
+  const previous = { ok: true, code: 0, stdout: "removed", stderr: "", message: "" };
+  let actionResult = previous;
+  actionResult = errorScopes.resourceActionStartState("create", actionResult).actionResult;
+
+  await assert.rejects(Promise.reject(new Error("invoke rejected")), /invoke rejected/);
+  assert.equal(actionResult, null);
+  assert.equal(errorScopes.resourceActionStartState("remove", previous).actionResult, previous);
+});

@@ -25,7 +25,7 @@ import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./c
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
-import { errorForSection, navigationTransientState, resourceActionState, setSectionError } from "./errorScopes.mjs";
+import { errorForSection, navigationTransientState, resourceActionStartState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
@@ -715,6 +715,7 @@ function App(): JSX.Element {
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
+    setLastAction((current) => resourceActionStartState(action, current).actionResult);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
@@ -745,6 +746,7 @@ function App(): JSX.Element {
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
+    setLastAction((current) => resourceActionStartState(action, current).actionResult);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_network_action", {

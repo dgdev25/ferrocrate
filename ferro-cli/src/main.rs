@@ -19625,7 +19625,7 @@ mod tests {
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         image_config_volume_targets,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
-        docker_pending_inspect_payload, docker_pending_matches_filters,
+        docker_pending_inspect_payload, docker_pending_matches_filters, docker_start_run_inputs,
         docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
         docker_volume_mount_usage,
@@ -23973,6 +23973,23 @@ volumes:
         assert_eq!(
             super::ensure_docker_log_readback_supported(&journald.log_driver).unwrap_err(),
             "configured logging driver does not support reading"
+        );
+    }
+
+    #[test]
+    fn docker_start_projects_log_driver_into_runtime_annotations() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Binds":["/host:/guest"],"LogConfig":{"Type":"journald"}}}"#,
+            None,
+        )
+        .expect("journald create spec");
+
+        let inputs = docker_start_run_inputs(&spec);
+        assert_eq!(inputs.path_binds, vec!["/host:/guest"]);
+        assert!(inputs.volume_binds.is_empty());
+        assert_eq!(
+            inputs.annotations,
+            vec!["io.ferrocrate.log.driver=journald"]
         );
     }
 

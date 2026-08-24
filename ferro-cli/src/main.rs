@@ -3323,6 +3323,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 pids_max,
                 ai_model,
             } => {
+                let attached_run_trace_started = std::env::var_os(
+                    "FERROCRATE_ATTACHED_RUN_TRACE",
+                )
+                .map(|_| Instant::now());
+                let spawn_started = Instant::now();
                 let detach_keys = parse_detach_keys(&detach_keys)?;
                 let _detach_guard = ScopedEnv::set(
                     "FERROCRATE_DETACH_WORKLOAD",
@@ -3379,11 +3384,29 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     None,
                     None,
                 )?;
+                trace_attached_run_phase(
+                    attached_run_trace_started,
+                    "spawn",
+                    spawn_started.elapsed(),
+                );
                 if !detach {
-                    attach_local_container(&runtime_dir, &id, interactive, tty, &detach_keys)?;
+                    attach_local_container(
+                        &runtime_dir,
+                        &id,
+                        interactive,
+                        tty,
+                        &detach_keys,
+                        attached_run_trace_started,
+                    )?;
                 }
                 if rm {
+                    let exit_confirm_started = Instant::now();
                     wait_for_container_exit(&runtime, &id)?;
+                    trace_attached_run_phase(
+                        attached_run_trace_started,
+                        "exit_confirm",
+                        exit_confirm_started.elapsed(),
+                    );
                     runtime.remove(&id).map_err(|error| error.to_string())?;
                 }
                 Ok(())
@@ -3582,7 +3605,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let id = resolve_container_id(&runtime, &container)?;
                 let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
                 let detach_keys = parse_detach_keys(&detach_keys)?;
-                attach_local_container(&runtime_dir, &id, !no_stdin, record.tty, &detach_keys)
+                attach_local_container(
+                    &runtime_dir,
+                    &id,
+                    !no_stdin,
+                    record.tty,
+                    &detach_keys,
+                    None,
+                )
             }
             #[cfg(target_os = "linux")]
             Commands::Info => {
@@ -5768,7 +5798,9 @@ fn attach_local_container(
     stdin_requested: bool,
     tty: bool,
     detach_keys: &[u8],
+    trace_started: Option<Instant>,
 ) -> Result<(), String> {
+    let setup_started = Instant::now();
     let (client, mut server) = UnixStream::pair()
         .map_err(|error| format!("run: failed to create attach channel: {error}"))?;
     let runtime_dir = runtime_dir.to_path_buf();
@@ -5778,7 +5810,9 @@ fn attach_local_container(
         .name(format!("ferro-run-attach-{id}"))
         .spawn(move || {
             let runtime = ContainerRuntime::new(&runtime_dir).map_err(|error| error.to_string())?;
-            stream_docker_attach(
+            trace_attached_run_phase(trace_started, "attach_setup", setup_started.elapsed());
+            let stream_started = Instant::now();
+            let result = stream_docker_attach(
                 &mut server,
                 &runtime,
                 &id,
@@ -5789,7 +5823,9 @@ fn attach_local_container(
                 true,
                 &[],
                 &worker_detach_keys,
-            )
+            );
+            trace_attached_run_phase(trace_started, "stream_loop", stream_started.elapsed());
+            result
         })
         .map_err(|error| format!("run: failed to start attach worker: {error}"))?;
     let client_result = proxy_docker_hijacked_stream(client, stdin_requested, tty, detach_keys);
@@ -7210,6 +7246,25 @@ fn handle_migrate_compose_report(file: &Path, output: Option<&Path>) -> Result<(
 struct ScopedEnv {
     key: String,
     original: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn attached_run_trace_line(phase: &str, elapsed: Duration, total: Duration) -> String {
+    format!(
+        "ferrocrate-attached-run phase={phase} elapsed_us={} total_us={}",
+        elapsed.as_micros(),
+        total.as_micros()
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn trace_attached_run_phase(trace_started: Option<Instant>, phase: &str, elapsed: Duration) {
+    if let Some(trace_started) = trace_started {
+        eprintln!(
+            "{}",
+            attached_run_trace_line(phase, elapsed, trace_started.elapsed())
+        );
+    }
 }
 
 impl ScopedEnv {
@@ -18898,6 +18953,18 @@ mod tests {
     use std::time::Duration;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn attached_run_trace_line_reports_phase_and_relative_timing() {
+        assert_eq!(
+            super::attached_run_trace_line(
+                "stream_loop",
+                Duration::from_micros(250_125),
+                Duration::from_micros(275_832),
+            ),
+            "ferrocrate-attached-run phase=stream_loop elapsed_us=250125 total_us=275832"
+        );
+    }
 
     #[test]
     fn detach_keys_use_docker_control_key_syntax() {

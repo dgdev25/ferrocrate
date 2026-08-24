@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   beginContainerStatsPoll,
@@ -37,35 +42,8 @@ test("footer totals are invalid outside the visible Containers surface", () => {
   assert.deepEqual(resourceTotalsForSurface(rows, "containers", "hidden"), { cpu: null, memory: null });
 });
 
-const records = JSON.stringify([
-  {
-    id: "abc123",
-    name: "web-frontend",
-    image: "nginx:1.27-alpine",
-    status: "running",
-    health_status: "healthy",
-    last_exit_code: null,
-    created_at_unix: 1_700_000_000,
-    cpu_percent: 0.4,
-    labels: {
-      "com.docker.compose.project": "storefront",
-      "com.docker.compose.service": "web",
-    },
-    ports: [{ host_port: 8080, container_port: 80, protocol: "tcp" }],
-    memory_usage: 67_108_864,
-  },
-  {
-    id: "def456",
-    name: null,
-    image: "worker:latest",
-    status: "exited",
-    health_status: "none",
-    last_exit_code: 137,
-    created_at_unix: 1_699_900_000,
-    labels: {},
-    ports: [],
-  },
-]);
+const here = dirname(fileURLToPath(import.meta.url));
+const records = await readFile(join(here, "fixtures/ferrocrate-containers.json"), "utf8");
 
 test("parseContainerRows preserves runtime identity and derives table labels", () => {
   const rows = parseContainerRows(records);
@@ -77,24 +55,24 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       image: "nginx:1.27-alpine",
       state: "running",
       status: "Running",
-      health: "healthy",
+      health: "none",
       ports: "8080→80/tcp",
       composeProject: "storefront",
       composeService: "web",
       startedAt: 1_700_000_000,
-      cpu: "0.4%",
-      cpuPercent: 0.4,
-      memory: "64.0 MiB",
-      memoryUsage: 67_108_864,
+      cpu: "",
+      cpuPercent: null,
+      memory: "",
+      memoryUsage: null,
       memoryLimit: null,
       statsAvailable: null,
     },
     {
       id: "def456",
-      name: "def456",
+      name: "worker",
       image: "worker:latest",
       state: "exited",
-      status: "Exited (137)",
+      status: "Exited",
       health: "none",
       ports: "—",
       composeProject: null,
@@ -150,7 +128,7 @@ test("container stats polling only runs for a visible Containers section", () =>
 
 test("unavailable live stats use one explicit human message instead of placeholder cells", () => {
   assert.equal(containerStatsUnavailableMessage(), "Live resource stats unavailable for one or more running containers.");
-  const [running] = parseContainerRows('[{"id":"live","status":"running"}]');
+  const [running] = parseContainerRows('[{"Id":"live","Names":["/live"],"State":"running"}]');
   assert.equal(running.cpu, "");
   assert.equal(running.memory, "");
 });
@@ -175,15 +153,42 @@ test("running containers explain why removal is unavailable", () => {
 });
 
 test("resourceTotals aggregates available live samples and hides absent metrics", () => {
-  const rows = parseContainerRows(records);
-  assert.deepEqual(resourceTotals(rows), {
-    cpu: "0.4%",
-    memory: "64.0 MiB / Unlimited",
-  });
+  assert.deepEqual(resourceTotals(parseContainerRows(records)), { cpu: null, memory: null });
   assert.deepEqual(resourceTotals([{ cpuPercent: null, memoryUsage: null }]), {
     cpu: null,
     memory: null,
   });
+});
+
+test("release ferro-cli Docker list output decodes into actionable desktop rows", { timeout: 15_000 }, async (t) => {
+  if (process.platform !== "linux") return t.skip("the release daemon fixture is Linux-only");
+  const repo = resolve(here, "../../..");
+  const binary = join(repo, "target/release/ferro-cli");
+  assert.equal(spawnSync(binary, ["--version"]).status, 0, "build release ferro-cli before running desktop contracts");
+  const root = await mkdtemp(join(tmpdir(), "ferrocrate-desktop-contract-"));
+  const home = join(root, "home");
+  const runtime = join(root, "run");
+  const state = join(root, "state");
+  await Promise.all([mkdir(home), mkdir(runtime), mkdir(state)]);
+  const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: runtime, FERROCRATE_HOME: state, FERROCRATE_RUNTIME_DIR: runtime, FERROCRATE_DESKTOP_FORWARD: "0", FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE: "desktop-shape", FERROCRATE_NETWORK_BACKEND: "iptables" };
+  for (const key of ["FERROCRATE_ENTITLEMENT_TOKEN", "FERROCRATE_LICENSE_TOKEN", "FERROCRATE_ENTITLEMENT_FILE", "FERROCRATE_ENTITLEMENT_PUBKEY"]) delete env[key];
+  const daemon = spawn(binary, ["daemon", "--docker-compat", "--socket", join(runtime, "ferrocrate.sock")], { env, stdio: "ignore" });
+  t.after(async () => { daemon.kill(); await rm(root, { recursive: true, force: true }); });
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const ping = spawnSync(binary, ["version"], { env });
+    if (ping.status === 0) break;
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  const create = spawnSync(binary, ["create", "--name", "desktop-contract", "busybox", "true"], { env, encoding: "utf8" });
+  assert.equal(create.status, 0, create.stderr);
+  const list = spawnSync(binary, ["containers", "--all", "--format", "json"], { env, encoding: "utf8" });
+  assert.equal(list.status, 0, list.stderr);
+  const [row] = parseContainerRows(list.stdout);
+  assert.ok(row.id);
+  assert.equal(row.name, "desktop-contract");
+  assert.equal(row.image, "busybox");
+  assert.equal(row.state, "created");
+  assert.ok(row.status);
 });
 
 test("parseContainerRows safely rejects non-array or malformed snapshots", () => {
@@ -205,7 +210,7 @@ test("formatContainerPorts joins mappings and supplies an em dash when absent", 
 test("filterContainers searches names, images, status, and ports case-insensitively", () => {
   const rows = parseContainerRows(records);
   assert.deepEqual(filterContainers(rows, "NGINX").map((row) => row.id), ["abc123"]);
-  assert.deepEqual(filterContainers(rows, "137").map((row) => row.id), ["def456"]);
+  assert.deepEqual(filterContainers(rows, "worker").map((row) => row.id), ["def456"]);
   assert.deepEqual(filterContainers(rows, "8080").map((row) => row.id), ["abc123"]);
 });
 
@@ -217,6 +222,17 @@ test("statusTone distinguishes running, unhealthy, and stopped rows", () => {
   assert.equal(statusLabel({ state: "running", health: "starting", status: "Running" }), "Degraded");
   assert.equal(statusLabel({ state: "running", health: "unhealthy", status: "Running" }), "Unhealthy");
   assert.equal(statusLabel({ state: "exited", health: "none", status: "Exited (3)" }), "Exited (3)");
+});
+
+test("Docker status text retains exit codes and health state", () => {
+  const [exited, unhealthy, starting] = parseContainerRows(JSON.stringify([
+    { Id: "exit", Names: ["/exit"], State: "exited", Status: "Exited (137) 3 hours ago" },
+    { Id: "bad", Names: ["/bad"], State: "running", Status: "Up 1 minute (unhealthy)" },
+    { Id: "warm", Names: ["/warm"], State: "running", Status: "Up 1 second (starting)" },
+  ]));
+  assert.equal(exited.status, "Exited (137)");
+  assert.equal(statusLabel(unhealthy), "Unhealthy");
+  assert.equal(statusLabel(starting), "Degraded");
 });
 
 test("status filters use the binding All, Running, Degraded, Unhealthy, and Exited vocabulary", () => {

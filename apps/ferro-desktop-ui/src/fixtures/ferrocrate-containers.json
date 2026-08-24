@@ -1,0 +1,33 @@
+[
+  {
+    "Command": "sleep 60",
+    "Created": 1700000000,
+    "Id": "abc123",
+    "Image": "nginx:1.27-alpine",
+    "ImageID": "sha256:image123",
+    "Labels": {
+      "com.docker.compose.project": "storefront",
+      "com.docker.compose.service": "web"
+    },
+    "Mounts": [],
+    "Names": ["/web-frontend"],
+    "NetworkSettings": {"Networks": {"bridge": {"NetworkID": "bridge"}}},
+    "Ports": [{"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 8080, "Type": "tcp"}],
+    "State": "running",
+    "Status": "running"
+  },
+  {
+    "Command": "run-worker",
+    "Created": 1699900000,
+    "Id": "def456",
+    "Image": "worker:latest",
+    "ImageID": "sha256:image456",
+    "Labels": {},
+    "Mounts": [],
+    "Names": ["/worker"],
+    "NetworkSettings": {"Networks": {}},
+    "Ports": [],
+    "State": "exited",
+    "Status": "exited"
+  }
+]

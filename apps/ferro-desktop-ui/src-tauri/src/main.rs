@@ -231,18 +231,8 @@ fn daemon_capabilities_from_info_response(response: &str) -> Result<DaemonCapabi
         .get("FerrocrateCapabilities")
         .and_then(|value| value.get("CustomNetworks"))
         .and_then(JsonValue::as_bool);
-    let rootless = info
-        .get("SecurityOptions")
-        .and_then(JsonValue::as_array)
-        .is_some_and(|options| {
-            options.iter().any(|option| {
-                option
-                    .as_str()
-                    .is_some_and(|value| value == "rootless" || value == "name=rootless")
-            })
-        });
     Ok(DaemonCapabilities {
-        custom_networks: explicit.unwrap_or(!rootless),
+        custom_networks: explicit.unwrap_or(false),
     })
 }
 
@@ -3173,6 +3163,23 @@ mod tests {
         )
         .expect("rootful info");
         assert!(rootful.custom_networks);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_daemon_info_without_capability_evidence_fails_closed() {
+        let legacy = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+        )
+        .expect("legacy info response");
+
+        assert!(!legacy.custom_networks);
+
+        let standard_rootless = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[\"name=rootless\"]}",
+        )
+        .expect("standard rootless info response");
+        assert!(!standard_rootless.custom_networks);
     }
 
     #[cfg(target_os = "linux")]

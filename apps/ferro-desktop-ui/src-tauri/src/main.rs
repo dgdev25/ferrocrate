@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,7 @@ const KEYRING_ACCOUNT: &str = "paid_session_token";
 const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
+const LOG_CHANNEL_CAPACITY: usize = 128;
 static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 #[derive(Debug, Serialize)]
@@ -216,6 +217,10 @@ fn emit_log_batch(app: &tauri::AppHandle, buffer: &LogBuffer) {
     );
 }
 
+fn log_channel(capacity: usize) -> (SyncSender<String>, Receiver<String>) {
+    mpsc::sync_channel(capacity)
+}
+
 fn publish_log_batches(app: tauri::AppHandle, receiver: Receiver<String>) {
     let mut buffer = LogBuffer::new(MAX_LOG_LINES, MAX_LOG_BYTES);
     let mut changed = false;
@@ -250,7 +255,7 @@ fn publish_log_batches(app: tauri::AppHandle, receiver: Receiver<String>) {
     }
 }
 
-fn queue_log_lines<R: std::io::Read>(reader: R, sender: mpsc::Sender<String>) {
+fn queue_log_lines<R: std::io::Read>(reader: R, sender: SyncSender<String>) {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
@@ -314,7 +319,7 @@ fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String>
         .stderr
         .take()
         .ok_or_else(|| "container log stream stderr missing".to_string())?;
-    let (log_sender, log_receiver) = mpsc::channel();
+    let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
     let stdout_app = app.clone();
     thread::spawn(move || publish_log_batches(stdout_app, log_receiver));
     thread::spawn(move || queue_log_lines(stdout, log_sender));
@@ -786,7 +791,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_follow_command, LogBuffer};
+    use super::{log_channel, log_follow_command, LogBuffer};
 
     #[test]
     fn log_follow_uses_the_desktop_exec_bridge() {
@@ -815,5 +820,16 @@ mod tests {
             buffer.text(),
             "[Earlier log output truncated]\nsecond\nthird\n"
         );
+    }
+
+    #[test]
+    fn log_channel_applies_backpressure_at_its_capacity() {
+        let (sender, receiver) = log_channel(1);
+        sender
+            .send("first\n".to_string())
+            .expect("first entry fits");
+        assert!(sender.try_send("second\n".to_string()).is_err());
+        assert_eq!(receiver.recv().expect("first entry"), "first\n");
+        sender.send("second\n".to_string()).expect("capacity freed");
     }
 }

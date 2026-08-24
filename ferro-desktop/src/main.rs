@@ -242,11 +242,20 @@ enum FollowChannel {
 enum FollowFrame {
     Data {
         channel: FollowChannel,
-        data: String,
+        data: Vec<u8>,
     },
     Terminal {
         status: i32,
     },
+}
+
+impl FollowFrame {
+    fn data(channel: FollowChannel, data: &[u8]) -> Self {
+        Self::Data {
+            channel,
+            data: data.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -618,14 +627,14 @@ fn replay_follow_frames<R: BufRead, O: Write, E: Write>(
                 channel: FollowChannel::Stdout,
                 data,
             } => {
-                stdout.write_all(data.as_bytes())?;
+                stdout.write_all(&data)?;
                 stdout.flush()?;
             }
             FollowFrame::Data {
                 channel: FollowChannel::Stderr,
                 data,
             } => {
-                stderr.write_all(data.as_bytes())?;
+                stderr.write_all(&data)?;
                 stderr.flush()?;
             }
             FollowFrame::Terminal { status } if status == 0 => return Ok(()),
@@ -663,7 +672,7 @@ fn forward_follow_output<R: Read>(
         };
         let frame = FollowFrame::Data {
             channel: channel.clone(),
-            data: String::from_utf8_lossy(&buffer[..bytes]).to_string(),
+            data: buffer[..bytes].to_vec(),
         };
         if send_follow_frame(&stream, &frame).is_err() {
             if let Ok(mut child) = child.lock() {
@@ -684,7 +693,7 @@ fn proxy_follow_request(
             stream,
             &FollowFrame::Data {
                 channel: FollowChannel::Stderr,
-                data: "follow requests must invoke ferrocrate logs --follow\n".to_string(),
+                data: b"follow requests must invoke ferrocrate logs --follow\n".to_vec(),
             },
         )?;
         write_follow_frame(stream, &FollowFrame::Terminal { status: 2 })?;
@@ -701,7 +710,7 @@ fn proxy_follow_request(
                 stream,
                 &FollowFrame::Data {
                     channel: FollowChannel::Stderr,
-                    data: format!("{err}\n"),
+                    data: format!("{err}\n").into_bytes(),
                 },
             )?;
             write_follow_frame(stream, &FollowFrame::Terminal { status: 1 })?;
@@ -2550,7 +2559,7 @@ mod tests {
             &mut wire,
             &FollowFrame::Data {
                 channel: FollowChannel::Stdout,
-                data: "ready\n".to_string(),
+                data: b"ready\n".to_vec(),
             },
         )
         .expect("stdout frame");
@@ -2558,7 +2567,7 @@ mod tests {
             &mut wire,
             &FollowFrame::Data {
                 channel: FollowChannel::Stderr,
-                data: "warning\n".to_string(),
+                data: b"warning\n".to_vec(),
             },
         )
         .expect("stderr frame");
@@ -2573,6 +2582,31 @@ mod tests {
         assert_eq!(stdout, b"ready\n");
         assert_eq!(stderr, b"warning\n");
         assert!(err.to_string().contains("status 17"));
+    }
+
+    #[test]
+    fn follow_frames_preserve_multibyte_utf8_split_across_reads() {
+        let mut wire = Vec::new();
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::data(FollowChannel::Stdout, b"cost: \xe2"),
+        )
+        .expect("first byte frame");
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::data(FollowChannel::Stdout, b"\x82\xac\n"),
+        )
+        .expect("second byte frame");
+        write_follow_frame(&mut wire, &FollowFrame::Terminal { status: 0 })
+            .expect("terminal frame");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        replay_follow_frames(BufReader::new(Cursor::new(wire)), &mut stdout, &mut stderr)
+            .expect("successful terminal status");
+
+        assert_eq!(stdout, b"cost: \xe2\x82\xac\n");
+        assert!(stderr.is_empty());
     }
 
     #[test]

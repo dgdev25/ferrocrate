@@ -49,6 +49,9 @@ fn lifecycle_exec_command_builder_targets_process() {
 
     assert_eq!(args[0], "-t");
     assert_eq!(args[1], proc.pid().to_string());
+    #[cfg(target_env = "musl")]
+    assert_eq!(&args[2..7], ["-m", "-u", "-i", "-n", "-p"]);
+    #[cfg(not(target_env = "musl"))]
     assert_eq!(args[2], "-a");
 
     proc.stop(Duration::from_millis(200))

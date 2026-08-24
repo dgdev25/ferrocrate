@@ -423,6 +423,9 @@ struct RegistryAuthStatus {
 }
 
 fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary, String> {
+    if value.get("id").is_some() {
+        return container_detail_from_native_json(&value);
+    }
     let string = |path: &[&str]| {
         path.iter()
             .try_fold(&value, |current, key| current.get(*key))
@@ -549,16 +552,192 @@ fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary
     })
 }
 
+fn container_detail_from_native_json(value: &JsonValue) -> Result<ContainerDetailSummary, String> {
+    let string = |key: &str| {
+        value
+            .get(key)
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let id = string("id");
+    if id.is_empty() {
+        return Err("container inspect response omitted id".to_string());
+    }
+    let mut mounts = value
+        .get("mounts")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mount| ContainerMountSummary {
+            kind: "bind".to_string(),
+            source: mount
+                .get("source")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            destination: format!(
+                "/{}",
+                mount
+                    .get("target")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .trim_start_matches('/')
+            ),
+            access: if mount
+                .get("read_only")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false)
+            {
+                "ro".to_string()
+            } else {
+                "rw".to_string()
+            },
+        })
+        .collect::<Vec<_>>();
+    mounts.extend(
+        value
+            .get("tmpfs_mounts")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .map(|mount| ContainerMountSummary {
+                kind: "tmpfs".to_string(),
+                source: String::new(),
+                destination: format!(
+                    "/{}",
+                    mount
+                        .get("target")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                        .trim_start_matches('/')
+                ),
+                access: "rw".to_string(),
+            }),
+    );
+    let limits = value
+        .get("resource_limits")
+        .filter(|limits| !limits.is_null());
+    let restart_value = value.get("restart_policy");
+    let (restart_name, maximum_retry_count) = match restart_value {
+        Some(JsonValue::String(policy)) => policy
+            .split_once(':')
+            .map(|(name, count)| {
+                (
+                    name.to_string(),
+                    count.parse::<u64>().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_else(|| (policy.clone(), 0)),
+        Some(JsonValue::Object(policy)) => policy
+            .get("on-failure-with-retries")
+            .and_then(JsonValue::as_u64)
+            .map(|count| ("on-failure".to_string(), count))
+            .unwrap_or_else(|| ("no".to_string(), 0)),
+        _ => ("no".to_string(), 0),
+    };
+    let health_status = string("health_status");
+    let health = (health_status != "none").then(|| ContainerHealthSummary {
+        status: health_status,
+        failing_streak: value
+            .get("health_failures")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or_default(),
+        log: value
+            .get("health_log")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| ContainerHealthLogSummary {
+                start: entry
+                    .get("start_unix")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or_default()
+                    .to_string(),
+                end: entry
+                    .get("end_unix")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or_default()
+                    .to_string(),
+                exit_code: entry
+                    .get("exit_code")
+                    .and_then(JsonValue::as_i64)
+                    .unwrap_or_default(),
+                output: entry
+                    .get("output")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect(),
+    });
+    Ok(ContainerDetailSummary {
+        id: id.clone(),
+        name: value
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or(&id)
+            .to_string(),
+        image: string("image"),
+        status: string("status"),
+        command: value
+            .get("command")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .map(str::to_string)
+            .collect(),
+        environment: value
+            .get("env")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .map(str::to_string)
+            .collect(),
+        working_dir: string("workdir"),
+        user: string("user"),
+        mounts,
+        health,
+        resources: ContainerResourceSummary {
+            memory: limits
+                .and_then(|limits| limits.get("memory_max"))
+                .and_then(JsonValue::as_u64)
+                .unwrap_or_default(),
+            cpu_quota: limits
+                .and_then(|limits| limits.get("cpu_quota"))
+                .and_then(JsonValue::as_u64)
+                .unwrap_or_default(),
+            cpu_period: limits
+                .and_then(|limits| limits.get("cpu_period"))
+                .and_then(JsonValue::as_u64)
+                .unwrap_or_default(),
+        },
+        restart_policy: ContainerRestartPolicySummary {
+            name: restart_name,
+            maximum_retry_count,
+        },
+    })
+}
+
 fn container_inspect_command(target: &str) -> Result<Vec<String>, String> {
     let target = target.trim();
     if target.is_empty() {
         return Err("container name or id is required".to_string());
     }
-    Ok(vec![
-        "container-proxy".to_string(),
-        "inspect".to_string(),
-        target.to_string(),
-    ])
+    Ok([
+        "exec",
+        "--",
+        "ferrocrate",
+        "inspect",
+        target,
+        "--format",
+        "json",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect())
 }
 
 fn container_update_command(
@@ -783,6 +962,21 @@ fn network_proxy_command(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "network name is required".to_string())?;
+            if matches!(action, NetworkAction::Inspect) {
+                return Ok([
+                    "exec",
+                    "--",
+                    "ferrocrate",
+                    "network",
+                    "inspect",
+                    target,
+                    "--format",
+                    "json",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect());
+            }
             command.push("network-proxy".to_string());
             command.push(
                 match action {
@@ -2404,6 +2598,20 @@ mod tests {
             ]
         );
         assert_eq!(
+            network_proxy_command(NetworkAction::Inspect, Some("frontend"), None)
+                .expect("inspect command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "network",
+                "inspect",
+                "frontend",
+                "--format",
+                "json",
+            ]
+        );
+        assert_eq!(
             network_proxy_command(
                 NetworkAction::Create,
                 Some("frontend"),
@@ -2424,6 +2632,58 @@ mod tests {
             vec!["network-proxy", "remove", "frontend"]
         );
         assert!(network_proxy_command(NetworkAction::Create, Some(" "), None).is_err());
+    }
+
+    #[test]
+    fn container_detail_uses_native_json_through_exec_bridge() {
+        assert_eq!(
+            container_inspect_command("web").expect("inspect command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "inspect",
+                "web",
+                "--format",
+                "json",
+            ]
+        );
+
+        let detail = container_detail_from_json(serde_json::json!({
+            "id": "container-1",
+            "name": "web",
+            "image": "alpine:latest",
+            "status": "running",
+            "command": ["sleep", "60"],
+            "env": ["MODE=test"],
+            "workdir": "/workspace",
+            "user": "1000:1000",
+            "mounts": [{
+                "source": "/var/lib/data",
+                "target": "data",
+                "read_only": true
+            }],
+            "health": null,
+            "health_status": "none",
+            "health_failures": 0,
+            "health_log": [],
+            "resource_limits": {
+                "memory_max": 1024,
+                "cpu_quota": 50000,
+                "cpu_period": 100000,
+                "pids_max": null
+            },
+            "restart_policy": "on-failure:3"
+        }))
+        .expect("native inspect projection");
+
+        assert_eq!(detail.id, "container-1");
+        assert_eq!(detail.name, "web");
+        assert_eq!(detail.mounts[0].destination, "/data");
+        assert_eq!(detail.mounts[0].access, "ro");
+        assert_eq!(detail.resources.memory, 1024);
+        assert_eq!(detail.restart_policy.name, "on-failure");
+        assert_eq!(detail.restart_policy.maximum_retry_count, 3);
     }
 
     #[test]
@@ -2490,7 +2750,15 @@ mod tests {
     fn container_detail_commands_preserve_resource_and_new_container_options() {
         assert_eq!(
             container_inspect_command("web").expect("inspect command"),
-            vec!["container-proxy", "inspect", "web"]
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "inspect",
+                "web",
+                "--format",
+                "json",
+            ]
         );
         assert_eq!(
             container_update_command("web", Some(134_217_728), Some(50_000), Some(100_000))

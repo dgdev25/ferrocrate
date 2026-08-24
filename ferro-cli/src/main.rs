@@ -1709,6 +1709,68 @@ struct DoctorAction {
     requires_confirmation: bool,
 }
 
+#[cfg(target_os = "linux")]
+const FERROCRATE_APPARMOR_PROFILE_NAME: &str = "usr.local.bin.ferrocrate";
+#[cfg(target_os = "linux")]
+const FERROCRATE_APPARMOR_PROFILE_PATH: &str =
+    "/etc/apparmor.d/usr.local.bin.ferrocrate";
+
+#[cfg(target_os = "linux")]
+fn doctor_apparmor_userns_check(
+    restriction: Option<&str>,
+    profile_installed: bool,
+    loaded_profiles: Option<&str>,
+) -> DoctorCheck {
+    let restricted = restriction.is_some_and(|value| value.trim() == "1");
+    if !restricted {
+        return DoctorCheck {
+            id: "rootless_apparmor_userns".to_string(),
+            ok: true,
+            message: "AppArmor unprivileged-userns restriction is inactive or unavailable"
+                .to_string(),
+            hint: None,
+            remediated: false,
+            action: None,
+        };
+    }
+
+    let profile_loaded = loaded_profiles.map(|profiles| {
+        profiles.lines().any(|line| {
+            line.split_whitespace().next() == Some(FERROCRATE_APPARMOR_PROFILE_NAME)
+        })
+    });
+    let ok = profile_installed && profile_loaded.unwrap_or(true);
+    let message = if !profile_installed {
+        "kernel.apparmor_restrict_unprivileged_userns=1 and the FerroCrate AppArmor profile is absent"
+            .to_string()
+    } else {
+        match profile_loaded {
+            Some(true) => format!(
+                "AppArmor unprivileged-userns restriction is active and profile {FERROCRATE_APPARMOR_PROFILE_NAME} is loaded"
+            ),
+            Some(false) => format!(
+                "kernel.apparmor_restrict_unprivileged_userns=1 and profile {FERROCRATE_APPARMOR_PROFILE_NAME} is installed but not loaded"
+            ),
+            None => format!(
+                "AppArmor unprivileged-userns restriction is active; profile {FERROCRATE_APPARMOR_PROFILE_NAME} is installed (kernel profile set is unreadable)"
+            ),
+        }
+    };
+
+    DoctorCheck {
+        id: "rootless_apparmor_userns".to_string(),
+        ok,
+        message,
+        hint: (!ok).then(|| {
+            format!(
+                "install or reinstall the FerroCrate Debian package, then run `sudo apparmor_parser -r {FERROCRATE_APPARMOR_PROFILE_PATH}`"
+            )
+        }),
+        remediated: false,
+        action: None,
+    }
+}
+
 #[allow(dead_code)]
 fn run_command_status(mut cmd: std::process::Command) -> bool {
     cmd.status().map(|status| status.success()).unwrap_or(false)
@@ -2231,6 +2293,20 @@ fn handle_doctor(
 
         #[cfg(target_os = "linux")]
         {
+            let apparmor_restriction = std::fs::read_to_string(
+                "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+            )
+            .ok();
+            let apparmor_profile_installed =
+                Path::new(FERROCRATE_APPARMOR_PROFILE_PATH).is_file();
+            let apparmor_loaded_profiles =
+                std::fs::read_to_string("/sys/kernel/security/apparmor/profiles").ok();
+            checks.push(doctor_apparmor_userns_check(
+                apparmor_restriction.as_deref(),
+                apparmor_profile_installed,
+                apparmor_loaded_profiles.as_deref(),
+            ));
+
             let rootless = ferro_core::rootless::RootlessConfig::from_system();
             let user_namespace = ferro_core::rootless::user_namespace_diagnostic();
             let user_namespace_ok = user_namespace.is_ok();
@@ -21003,6 +21079,47 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_rejects_restricted_userns_without_ferrocrate_profile() {
+        let check = super::doctor_apparmor_userns_check(Some("1"), false, Some(""));
+        assert!(!check.ok);
+        assert_eq!(check.id, "rootless_apparmor_userns");
+        assert!(check.message.contains("profile is absent"));
+        assert_eq!(
+            check.hint.as_deref(),
+            Some(
+                "install or reinstall the FerroCrate Debian package, then run `sudo apparmor_parser -r /etc/apparmor.d/usr.local.bin.ferrocrate`"
+            )
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_accepts_loaded_ferrocrate_profile_under_restricted_userns() {
+        let profiles = "usr.local.bin.ferrocrate (unconfined)\nother-profile (enforce)\n";
+        let check = super::doctor_apparmor_userns_check(Some("1"), true, Some(profiles));
+        assert!(check.ok, "{}", check.message);
+        assert!(check.message.contains("loaded"));
+        assert!(check.hint.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_accepts_installed_profile_when_kernel_profile_set_is_unreadable() {
+        let check = super::doctor_apparmor_userns_check(Some("1"), true, None);
+        assert!(check.ok, "{}", check.message);
+        assert!(check.message.contains("installed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_does_not_require_profile_when_userns_restriction_is_inactive() {
+        let check = super::doctor_apparmor_userns_check(Some("0"), false, Some(""));
+        assert!(check.ok, "{}", check.message);
+        assert!(check.message.contains("inactive"));
     }
 
     #[test]

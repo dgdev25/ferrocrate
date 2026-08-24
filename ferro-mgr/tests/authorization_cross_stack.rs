@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(unix)]
 
 use std::{

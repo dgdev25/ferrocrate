@@ -23,7 +23,12 @@ fn compose_project(root: &std::path::Path) -> std::path::PathBuf {
 /// crate-private.
 fn start_time_of(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 fn live_web_record(

@@ -891,7 +891,9 @@ fn docker_compat_attach_detach_keys_leave_verified_workload_running() {
         .write_all(&[0x01, 0x02])
         .expect("send custom detach sequence");
     let mut tail = Vec::new();
-    stream.read_to_end(&mut tail).expect("read detached attach close");
+    stream
+        .read_to_end(&mut tail)
+        .expect("read detached attach close");
 
     let after = inspect_container(&harness, &id);
     assert_eq!(after["State"]["Status"], "running", "inspect={after}");
@@ -3271,8 +3273,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
         create_body.as_bytes(),
     );
     assert_eq!(status, 201, "create response: {body}");
-    let id = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("create response JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create response JSON")["Id"]
         .as_str()
         .expect("container ID")
         .to_string();
@@ -3282,8 +3283,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     let (status, body) = harness.request("GET", "/v1.45/volumes");
     assert_eq!(status, 200, "volume list response: {body}");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body)
-            .expect("volume list JSON")["Volumes"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("volume list JSON")["Volumes"]
             .as_array()
             .expect("volume array")
             .len(),
@@ -3296,8 +3296,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     let (status, body) = harness.request("GET", "/v1.45/volumes");
     assert_eq!(status, 200, "volume list response: {body}");
     assert!(
-        serde_json::from_str::<serde_json::Value>(&body)
-            .expect("volume list JSON")["Volumes"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("volume list JSON")["Volumes"]
             .as_array()
             .expect("volume array")
             .is_empty(),

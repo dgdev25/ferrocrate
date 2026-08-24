@@ -1113,8 +1113,7 @@ fn docker_api_create_retains_anonymous_volume_targets() {
         r#"{"Image":"busybox","Volumes":{"/data":{}}}"#,
     );
     assert_eq!(status, 201, "create response: {body}");
-    let id = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create JSON")["Id"]
         .as_str()
         .expect("created ID")
         .to_string();
@@ -1122,7 +1121,10 @@ fn docker_api_create_retains_anonymous_volume_targets() {
     let (status, body) = harness.request("GET", &format!("/containers/{id}/json"), "");
     assert_eq!(status, 200, "inspect response: {body}");
     let inspect = serde_json::from_str::<serde_json::Value>(&body).expect("inspect JSON");
-    assert_eq!(inspect["Config"]["Volumes"], serde_json::json!({"/data": {}}));
+    assert_eq!(
+        inspect["Config"]["Volumes"],
+        serde_json::json!({"/data": {}})
+    );
 }
 
 /// Docker clients read `/events` as newline-delimited JSON where each frame

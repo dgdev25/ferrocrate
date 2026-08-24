@@ -559,7 +559,218 @@ mod tests {
     use reqwest::Client;
     use serde_json::{json, Value};
 
-    use super::spawn_web_bridge;
+    use super::*;
+
+    fn skip_space(source: &str, mut cursor: usize) -> usize {
+        while source.as_bytes().get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        cursor
+    }
+
+    fn skip_balanced(source: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+        let bytes = source.as_bytes();
+        let mut cursor = start;
+        let mut depth = 0_u32;
+        let mut quote = None;
+        let mut escaped = false;
+        while let Some(&byte) = bytes.get(cursor) {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
+                }
+            } else if matches!(byte, b'\'' | b'"' | b'`') {
+                quote = Some(byte);
+            } else if byte == open {
+                depth += 1;
+            } else if byte == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cursor + 1);
+                }
+            }
+            cursor += 1;
+        }
+        None
+    }
+
+    fn literal_object_keys(source: &str, start: usize, end: usize) -> Vec<String> {
+        let bytes = source.as_bytes();
+        let mut keys = Vec::new();
+        let mut cursor = start + 1;
+        let mut segment_start = cursor;
+        let mut braces = 0_u32;
+        let mut brackets = 0_u32;
+        let mut parentheses = 0_u32;
+        let mut quote = None;
+        let mut escaped = false;
+
+        while cursor < end - 1 {
+            let byte = bytes[cursor];
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
+                }
+            } else {
+                match byte {
+                    b'\'' | b'"' | b'`' => quote = Some(byte),
+                    b'{' => braces += 1,
+                    b'}' => braces -= 1,
+                    b'[' => brackets += 1,
+                    b']' => brackets -= 1,
+                    b'(' => parentheses += 1,
+                    b')' => parentheses -= 1,
+                    b',' if braces == 0 && brackets == 0 && parentheses == 0 => {
+                        if let Some(key) = literal_object_key(&source[segment_start..cursor]) {
+                            keys.push(key);
+                        }
+                        segment_start = cursor + 1;
+                    }
+                    _ => {}
+                }
+            }
+            cursor += 1;
+        }
+        if let Some(key) = literal_object_key(&source[segment_start..end - 1]) {
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn literal_object_key(segment: &str) -> Option<String> {
+        let segment = segment.trim();
+        if segment.is_empty() || segment.starts_with("...") {
+            return None;
+        }
+        let end = segment
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(segment.len());
+        (end > 0).then(|| segment[..end].to_string())
+    }
+
+    fn app_literal_invoke_payloads(source: &str) -> Vec<(String, Vec<String>)> {
+        let bytes = source.as_bytes();
+        let mut payloads = Vec::new();
+        let mut search_from = 0;
+        while let Some(offset) = source[search_from..].find("invoke") {
+            let invoke_start = search_from + offset;
+            let mut cursor = skip_space(source, invoke_start + "invoke".len());
+            if bytes.get(cursor) == Some(&b'<') {
+                cursor = skip_balanced(source, cursor, b'<', b'>').expect("balanced invoke generic");
+                cursor = skip_space(source, cursor);
+            }
+            if bytes.get(cursor) != Some(&b'(') {
+                search_from = invoke_start + "invoke".len();
+                continue;
+            }
+            cursor = skip_space(source, cursor + 1);
+            let Some(&quote @ (b'\'' | b'"')) = bytes.get(cursor) else {
+                search_from = invoke_start + "invoke".len();
+                continue;
+            };
+            let command_start = cursor + 1;
+            cursor = command_start;
+            while bytes.get(cursor) != Some(&quote) {
+                cursor += 1;
+            }
+            let command = source[command_start..cursor].to_string();
+            cursor = skip_space(source, cursor + 1);
+            let keys = if bytes.get(cursor) == Some(&b',') {
+                cursor = skip_space(source, cursor + 1);
+                if bytes.get(cursor) == Some(&b'{') {
+                    let end = skip_balanced(source, cursor, b'{', b'}')
+                        .expect("balanced invoke argument object");
+                    literal_object_keys(source, cursor, end)
+                } else {
+                    search_from = cursor + 1;
+                    continue;
+                }
+            } else if bytes.get(cursor) == Some(&b')') {
+                Vec::new()
+            } else {
+                search_from = cursor + 1;
+                continue;
+            };
+            payloads.push((command, keys));
+            search_from = cursor + 1;
+        }
+        payloads
+    }
+
+    fn representative_payload(command: &str, keys: &[String]) -> Value {
+        let mut payload = serde_json::Map::new();
+        for key in keys {
+            let value = match key.as_str() {
+                "action" => match command {
+                    "run_volume_action" => json!("create"),
+                    "run_network_action" => json!("create"),
+                    "run_compose_action" => json!("up"),
+                    _ => json!("vm_start"),
+                },
+                "data" => json!([65]),
+                "columns" | "rows" | "memory" | "cpuQuota" | "cpuPeriod" => json!(1),
+                "env" | "environment" => json!([]),
+                "fix" | "bootstrap" | "dry_run" | "confirm" => json!(false),
+                "user" | "workdir" | "name" | "subnet" | "issuance_endpoint"
+                | "access_token" => Value::Null,
+                _ => json!("test-value"),
+            };
+            payload.insert(key.clone(), value);
+        }
+        Value::Object(payload)
+    }
+
+    fn assert_bridge_args_decode(command: &str, args: Value) -> Result<(), String> {
+        match command {
+            "get_desktop_snapshot" | "get_volumes" | "get_networks" | "stop_log_follow"
+            | "close_terminal" | "get_paid_auth_state" | "clear_paid_session" => {
+                decode::<EmptyArgs>(args).map(drop)
+            }
+            "get_container_detail" | "start_log_follow" => decode::<TargetArgs>(args).map(drop),
+            "get_compose_snapshot" => decode::<ComposeArgs>(args).map(drop),
+            "build_image" => decode::<BuildImageArgs>(args).map(drop),
+            "run_desktop_action" => decode::<DesktopActionArgs>(args).map(drop),
+            "run_compose_action" => decode::<ComposeActionArgs>(args).map(drop),
+            "run_volume_action" => decode::<VolumeActionArgs>(args).map(drop),
+            "run_network_action" => decode::<NetworkActionArgs>(args).map(drop),
+            "update_container_resources" => decode::<ContainerResourcesArgs>(args).map(drop),
+            "run_new_container" => decode::<NewContainerArgs>(args).map(drop),
+            "get_registry_auth_status" | "logout_registry" => {
+                decode::<RegistryArgs>(args).map(drop)
+            }
+            "login_registry" => decode::<RegistryLoginArgs>(args).map(drop),
+            "start_terminal" => decode::<TerminalArgs>(args).map(drop),
+            "write_terminal" => decode::<TerminalWriteArgs>(args).map(drop),
+            "resize_terminal" => decode::<TerminalResizeArgs>(args).map(drop),
+            "save_paid_backend_config" => decode::<PaidConfigArgs>(args).map(drop),
+            "set_paid_session_token" => decode::<SessionTokenArgs>(args).map(drop),
+            "acquire_paid_session" => decode::<AcquireSessionArgs>(args).map(drop),
+            "run_paid_full_stack_install" => decode::<InstallArgs>(args).map(drop),
+            "run_doctor_action" => decode::<DoctorArgs>(args).map(drop),
+            _ => Err(format!("missing bridge argument decoder for {command}")),
+        }
+    }
+
+    #[test]
+    fn every_app_literal_invoke_payload_decodes_for_its_bridge_command() {
+        let app = include_str!("../../src/App.tsx");
+        let payloads = app_literal_invoke_payloads(app);
+        assert!(payloads.len() >= 30, "expected all App.tsx invoke sites");
+        for (command, keys) in payloads {
+            let payload = representative_payload(&command, &keys);
+            assert_bridge_args_decode(&command, payload.clone()).unwrap_or_else(|error| {
+                panic!("{command} payload with keys {keys:?} did not decode: {error}; {payload}")
+            });
+        }
+    }
 
     #[tokio::test]
     async fn multiplexed_stream_does_not_block_eight_concurrent_posts() {

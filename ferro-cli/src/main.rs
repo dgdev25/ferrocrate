@@ -468,7 +468,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Block until a container stops and print its exit code.
     Wait {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
         #[arg(long, default_value = "not-running")]
         condition: String,
         #[arg(long)]
@@ -486,12 +487,14 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Freeze a running container.
     Pause {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
     },
     #[cfg(target_os = "linux")]
     /// Resume a paused container.
     Unpause {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
     },
     #[cfg(target_os = "linux")]
     /// Stop a running container.
@@ -504,7 +507,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Send a signal to a container.
     Kill {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
         #[arg(long, default_value = "SIGKILL")]
         signal: String,
     },
@@ -534,7 +538,8 @@ pub enum Commands {
     #[cfg(target_os = "linux")]
     /// Restart a container.
     Restart {
-        container: String,
+        #[arg(required = true)]
+        containers: Vec<String>,
         #[arg(long, default_value = "10")]
         timeout: u64,
     },
@@ -3496,15 +3501,21 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Top { container, format } => handle_top(&runtime, &container, &format),
             #[cfg(target_os = "linux")]
             Commands::Wait {
-                container,
+                containers,
                 condition,
                 timeout,
                 format,
-            } => handle_wait(&runtime, &container, &condition, timeout, &format),
+            } => handle_multiple_containers(&containers, "wait", |container| {
+                handle_wait(&runtime, container, &condition, timeout, &format)
+            }),
             #[cfg(target_os = "linux")]
-            Commands::Pause { container } => handle_pause(&runtime, &container),
+            Commands::Pause { containers } => handle_multiple_containers(&containers, "pause", |container| {
+                handle_pause(&runtime, container)
+            }),
             #[cfg(target_os = "linux")]
-            Commands::Unpause { container } => handle_unpause(&runtime, &container),
+            Commands::Unpause { containers } => handle_multiple_containers(&containers, "unpause", |container| {
+                handle_unpause(&runtime, container)
+            }),
             #[cfg(target_os = "linux")]
             Commands::Stop { containers, timeout } => handle_multiple_containers(
                 &containers,
@@ -3512,7 +3523,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 |container| handle_stop(&runtime, container, timeout),
             ),
             #[cfg(target_os = "linux")]
-            Commands::Kill { container, signal } => handle_kill(&runtime, &container, &signal),
+            Commands::Kill { containers, signal } => handle_multiple_containers(&containers, "kill", |container| {
+                handle_kill(&runtime, container, &signal)
+            }),
             #[cfg(target_os = "linux")]
             Commands::Rm { force, volumes, containers } => {
                 if volumes {
@@ -3532,9 +3545,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 })
             }
             #[cfg(target_os = "linux")]
-            Commands::Restart { container, timeout } => {
+            Commands::Restart { containers, timeout } => {
                 unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
-                handle_restart(&runtime, &container, timeout)
+                handle_multiple_containers(&containers, "restart", |container| {
+                    handle_restart(&runtime, container, timeout)
+                })
             }
             #[cfg(target_os = "linux")]
             Commands::Exec {
@@ -6212,11 +6227,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         )
         .and_then(|body| print_json(body, format)),
         Commands::Wait {
-            container,
+            containers,
             condition,
             timeout,
             format,
-        } => (|| -> Result<(), String> {
+        } => handle_multiple_containers(containers, "wait", |container| (|| -> Result<(), String> {
             validate_wait_condition(condition)?;
             let mut path = format!(
                 "/containers/{}/wait?condition={}",
@@ -6238,23 +6253,23 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 .unwrap_or_default();
             println!("wait: container={} status_code={status}", container);
             Ok(())
-        })(),
-        Commands::Pause { container } => request(
+        })()),
+        Commands::Pause { containers } => handle_multiple_containers(containers, "pause", |container| request(
             "POST",
             format!(
                 "/containers/{}/pause",
                 percent_encode_path_component(container)
             ),
         )
-        .map(|_| ()),
-        Commands::Unpause { container } => request(
+        .map(|_| ())),
+        Commands::Unpause { containers } => handle_multiple_containers(containers, "unpause", |container| request(
             "POST",
             format!(
                 "/containers/{}/unpause",
                 percent_encode_path_component(container)
             ),
         )
-        .map(|_| ()),
+        .map(|_| ())),
         Commands::Stop { containers, timeout } => handle_multiple_containers(
             containers,
             "stop",
@@ -6267,7 +6282,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             )
             .map(|_| ()),
         ),
-        Commands::Kill { container, signal } => request(
+        Commands::Kill { containers, signal } => handle_multiple_containers(containers, "kill", |container| request(
             "POST",
             format!(
                 "/containers/{}/kill?signal={}",
@@ -6275,15 +6290,15 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                 percent_encode_path_component(signal)
             ),
         )
-        .map(|_| ()),
-        Commands::Restart { container, timeout } => request(
+        .map(|_| ())),
+        Commands::Restart { containers, timeout } => handle_multiple_containers(containers, "restart", |container| request(
             "POST",
             format!(
                 "/containers/{}/restart?t={timeout}",
                 percent_encode_path_component(container)
             ),
         )
-        .map(|_| ()),
+        .map(|_| ())),
         Commands::Start { containers } => handle_multiple_containers(containers, "start", |container| {
             request(
                 "POST",
@@ -19968,10 +19983,10 @@ volumes:
 
     #[test]
     fn parses_kill_command() {
-        let cli = Cli::parse_from(["ferrocrate", "kill", "abc123"]);
+        let cli = Cli::parse_from(["ferrocrate", "kill", "first", "second"]);
         match cli.command {
-            Commands::Kill { container, signal } => {
-                assert_eq!(container, "abc123");
+            Commands::Kill { containers, signal } => {
+                assert_eq!(containers, vec!["first", "second"]);
                 assert_eq!(signal, "SIGKILL");
             }
             other => panic!("unexpected command: {other:?}"),
@@ -19980,18 +19995,18 @@ volumes:
 
     #[test]
     fn parses_pause_command() {
-        let cli = Cli::parse_from(["ferrocrate", "pause", "abc123"]);
+        let cli = Cli::parse_from(["ferrocrate", "pause", "first", "second"]);
         match cli.command {
-            Commands::Pause { container } => assert_eq!(container, "abc123"),
+            Commands::Pause { containers } => assert_eq!(containers, vec!["first", "second"]),
             other => panic!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
     fn parses_unpause_command() {
-        let cli = Cli::parse_from(["ferrocrate", "unpause", "abc123"]);
+        let cli = Cli::parse_from(["ferrocrate", "unpause", "first", "second"]);
         match cli.command {
-            Commands::Unpause { container } => assert_eq!(container, "abc123"),
+            Commands::Unpause { containers } => assert_eq!(containers, vec!["first", "second"]),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -20048,10 +20063,10 @@ volumes:
 
     #[test]
     fn parses_restart_command() {
-        let cli = Cli::parse_from(["ferrocrate", "restart", "abc123"]);
+        let cli = Cli::parse_from(["ferrocrate", "restart", "first", "second"]);
         match cli.command {
-            Commands::Restart { container, timeout } => {
-                assert_eq!(container, "abc123");
+            Commands::Restart { containers, timeout } => {
+                assert_eq!(containers, vec!["first", "second"]);
                 assert_eq!(timeout, 10);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -23310,7 +23325,7 @@ volumes:
         let cli = Cli::try_parse_from([
             "ferrocrate",
             "wait",
-            "c1",
+            "c1", "c2",
             "--condition",
             "next-exit",
             "--timeout",
@@ -23321,12 +23336,12 @@ volumes:
         .expect("parse wait");
         match cli.command {
             Commands::Wait {
-                container,
+                containers,
                 condition,
                 timeout,
                 format,
             } => {
-                assert_eq!(container, "c1");
+                assert_eq!(containers, vec!["c1", "c2"]);
                 assert_eq!(condition, "next-exit");
                 assert_eq!(timeout, Some(3));
                 assert_eq!(format, "json");

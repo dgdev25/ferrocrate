@@ -16,6 +16,7 @@ import type {
   DoctorSummary,
   InstallerRunSummary,
   PaidAuthState,
+  RegistryAuthStatus,
   NetworkAction,
   NetworkSummary,
   VolumeAction,
@@ -25,6 +26,7 @@ import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
+import { registryStatusText } from "./registryAuth.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -95,6 +97,11 @@ function App(): JSX.Element {
   const [newContainerMemory, setNewContainerMemory] = useState("");
   const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
   const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
+  const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
+  const [registryUsername, setRegistryUsername] = useState("");
+  const [registryPassword, setRegistryPassword] = useState("");
+  const [registryStatus, setRegistryStatus] = useState<RegistryAuthStatus | null>(null);
+  const [registryLoading, setRegistryLoading] = useState(false);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -250,6 +257,20 @@ function App(): JSX.Element {
     }
   }
 
+  async function refreshRegistryAuth(target = registryTarget): Promise<void> {
+    setRegistryLoading(true);
+    setError(null);
+    try {
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: target,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
+    }
+  }
+
   async function refreshVolumes(): Promise<void> {
     setVolumesLoading(true);
     try {
@@ -311,6 +332,7 @@ function App(): JSX.Element {
     void refreshAuthState();
     void refreshVolumes();
     void refreshNetworks();
+    void refreshRegistryAuth("registry-1.docker.io");
   }, []);
 
   useEffect(() => {
@@ -595,6 +617,60 @@ function App(): JSX.Element {
     } catch (err) {
       setError(String(err));
     } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function loginRegistry(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Registry Login");
+    setRegistryLoading(true);
+    try {
+      const result = await invoke<CommandResult>("login_registry", {
+        registry: registryTarget,
+        username: registryUsername,
+        password: registryPassword,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Registry login failed with status ${result.code}`);
+        return;
+      }
+      setRegistryPassword("");
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: registryTarget,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
+      finishRuntimeAction();
+    }
+  }
+
+  async function logoutRegistry(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Registry Logout");
+    setRegistryLoading(true);
+    try {
+      const result = await invoke<CommandResult>("logout_registry", {
+        registry: registryTarget,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Registry logout failed with status ${result.code}`);
+        return;
+      }
+      setRegistryPassword("");
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: registryTarget,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
       finishRuntimeAction();
     }
   }
@@ -1083,6 +1159,59 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>
               Prune
             </button>
+          </div>
+          <div className="registry-auth">
+            <h3>Registry authentication</h3>
+            <input
+              value={registryTarget}
+              onChange={(event) => {
+                setRegistryTarget(event.target.value);
+                setRegistryStatus(null);
+              }}
+              placeholder="registry.example.com"
+              aria-label="Registry server"
+            />
+            <input
+              value={registryUsername}
+              onChange={(event) => setRegistryUsername(event.target.value)}
+              placeholder="username"
+              aria-label="Registry username"
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              value={registryPassword}
+              onChange={(event) => setRegistryPassword(event.target.value)}
+              placeholder="password or token"
+              aria-label="Registry password or token"
+              autoComplete="current-password"
+            />
+            <p className={`registry-status ${registryStatus?.logged_in ? "status-running" : ""}`}>
+              {registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}
+            </p>
+            <div className="panel-actions">
+              <button
+                className="btn btn-primary"
+                onClick={() => void loginRegistry()}
+                disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}
+              >
+                {registryLoading ? "Working..." : "Login"}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void logoutRegistry()}
+                disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}
+              >
+                Logout
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => void refreshRegistryAuth()}
+                disabled={runtimeBusy || registryLoading || !registryTarget.trim()}
+              >
+                Check Status
+              </button>
+            </div>
           </div>
           <pre>{snapshot?.images.stdout || EMPTY}</pre>
           {snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}

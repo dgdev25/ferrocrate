@@ -97,6 +97,12 @@ export type ContainerDetailSummary = {
   };
 };
 
+export type RegistryAuthStatus = {
+  registry: string;
+  logged_in: boolean;
+  username: string | null;
+};
+
 export type ComposeAction = "up" | "down" | "stop" | "start";
 
 export type ComposeServiceSummary = {

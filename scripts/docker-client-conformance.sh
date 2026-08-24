@@ -455,13 +455,15 @@ fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 
-rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-1}"
+# The harness already runs inside a disposable root-mapped user+network
+# namespace, so exercise the real bridge/connect path there. Callers can still
+# opt into the rootless slirp path explicitly for targeted qualification.
+rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-0}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 setsid env \
   FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$daemon_process_token" \
   FERROCRATE_HOME="$state_dir" \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
-  FERROCRATE_NETWORK_KERNEL_STATE="$state_dir/network-kernel-state.json" \
   FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
   FERROCRATE_CGROUP_ROOT="$cgroup_root" \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \

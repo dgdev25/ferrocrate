@@ -152,12 +152,16 @@ if grep -Fqx 'apparmor.proof.verify_rootless=pass' "$tmp/success.out"; then
 fi
 test "$(cat "$tmp/sysctl-state")" = 0
 test "$(cat "$tmp/sysctl-log")" = $'write=1\nwrite=0'
-grep -Fq "FERROCRATE_NETWORK_CLI=$fixture_cli bash $fixture_root/scripts/verify-rootless.sh" "$tmp/command-log"
+grep -Fqx "dpkg -i $fixture_package" "$tmp/command-log"
+grep -Fqx "apparmor_parser -r $fixture_profile" "$tmp/command-log"
+verify_rootless_command="runuser -u proof -- env HOME=$fixture_home XDG_RUNTIME_DIR=$fixture_runtime FERROCRATE_NETWORK_CLI=$fixture_cli bash $fixture_root/scripts/verify-rootless.sh"
+published_port_command="runuser -u proof -- env HOME=$fixture_home XDG_RUNTIME_DIR=$fixture_runtime FERROCRATE_NETWORK_CLI=$fixture_cli bash $fixture_root/scripts/test-rootless-published-port.sh"
+grep -Fqx "$verify_rootless_command" "$tmp/command-log"
 if grep -Fq 'verify-rootless.sh --strict' "$tmp/command-log"; then
   echo 'host proof incorrectly made unprofiled helper probes a strict gate' >&2
   exit 1
 fi
-grep -Fq "FERROCRATE_NETWORK_CLI=$fixture_cli bash $fixture_root/scripts/test-rootless-published-port.sh" "$tmp/command-log"
+grep -Fqx "$published_port_command" "$tmp/command-log"
 
 printf '0\n' >"$tmp/sysctl-state"
 : >"$tmp/sysctl-log"

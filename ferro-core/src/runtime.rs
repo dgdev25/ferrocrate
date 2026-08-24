@@ -3840,13 +3840,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        if record
-            .annotations
-            .get("io.ferrocrate.log.driver")
-            .is_some_and(|driver| !driver.is_empty() && driver != "json-file")
-        {
-            return Err(RuntimeError::LogReadUnsupported);
-        }
+        ensure_log_readback_supported(&record)?;
         let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
         let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))
@@ -3864,6 +3858,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        ensure_log_readback_supported(&record)?;
         let split = |path: &str| -> Option<Vec<TimestampedLine>> {
             let log_path = PathBuf::from(path);
             if !log_path.exists() || !log_journal_path(&log_path).exists() {
@@ -5616,6 +5611,13 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn ensure_log_readback_supported(record: &ContainerRecord) -> Result<(), RuntimeError> {
+    if configured_log_driver(&record.annotations) != "json-file" {
+        return Err(RuntimeError::LogReadUnsupported);
+    }
+    Ok(())
 }
 
 fn validate_rootless_mount_capability(

@@ -83,6 +83,13 @@ enum Commands {
         #[arg(long)]
         rows: u16,
     },
+    #[command(hide = true)]
+    VolumeProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: VolumeProxyCommands,
+    },
     Doctor {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -111,6 +118,14 @@ enum Commands {
         #[command(subcommand)]
         command: AutostartCommands,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum VolumeProxyCommands {
+    List,
+    Create { name: String },
+    Remove { name: String },
+    Prune,
 }
 
 #[derive(Debug, Subcommand)]
@@ -575,6 +590,68 @@ fn run_terminal_resize(
     ))
 }
 
+fn volume_proxy_request(
+    command: &VolumeProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        VolumeProxyCommands::List => Ok(("GET", "/volumes".to_string(), Vec::new())),
+        VolumeProxyCommands::Create { name } => {
+            if name.trim().is_empty() {
+                return Err(DesktopError::Invalid("volume name is required".to_string()));
+            }
+            let body = serde_json::to_vec(&serde_json::json!({
+                "Name": name,
+                "Driver": "local",
+            }))?;
+            Ok(("POST", "/volumes/create".to_string(), body))
+        }
+        VolumeProxyCommands::Remove { name } => {
+            if name.trim().is_empty() {
+                return Err(DesktopError::Invalid("volume name is required".to_string()));
+            }
+            Ok((
+                "DELETE",
+                format!(
+                    "/volumes/{}",
+                    percent_encode_terminal_path_component(name)
+                ),
+                Vec::new(),
+            ))
+        }
+        VolumeProxyCommands::Prune => {
+            Ok(("POST", "/volumes/prune".to_string(), Vec::new()))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_volume_proxy(
+    socket: Option<&str>,
+    command: VolumeProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = volume_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_volume_proxy(
+    _socket: Option<&str>,
+    _command: VolumeProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "volume daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum FollowChannel {
@@ -896,6 +973,9 @@ fn main() {
             columns,
             rows,
         } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
+        Commands::VolumeProxy { socket, command } => {
+            run_volume_proxy(socket.as_deref(), command)
+        }
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -922,6 +1002,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
             | Commands::Exec { .. }
             | Commands::TerminalProxy { .. }
             | Commands::TerminalResize { .. }
+            | Commands::VolumeProxy { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -3010,7 +3091,8 @@ mod tests {
         render_windows_service_script, replay_follow_frames, resize_terminal_exec, run_request,
         save_forward_entries, save_vm_state, select_terminal_socket, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, write_follow_frame, Cli,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
+        write_follow_frame, Cli,
         Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
         VmCommands, VmConfig, VmState,
     };
@@ -3073,6 +3155,36 @@ mod tests {
             "40",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn volume_proxy_builds_bounded_daemon_requests() {
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::List).expect("list request"),
+            ("GET", "/volumes".to_string(), Vec::new())
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Create {
+                name: "data/blue".to_string()
+            })
+            .expect("create request"),
+            (
+                "POST",
+                "/volumes/create".to_string(),
+                br#"{"Driver":"local","Name":"data/blue"}"#.to_vec()
+            )
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Remove {
+                name: "data/blue".to_string()
+            })
+            .expect("remove request"),
+            ("DELETE", "/volumes/data%2Fblue".to_string(), Vec::new())
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Prune).expect("prune request"),
+            ("POST", "/volumes/prune".to_string(), Vec::new())
+        );
     }
 
     #[test]

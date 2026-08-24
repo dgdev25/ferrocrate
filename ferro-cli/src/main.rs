@@ -3309,7 +3309,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let detach_keys = parse_detach_keys(&detach_keys)?;
                 let _detach_guard = ScopedEnv::set(
                     "FERROCRATE_DETACH_WORKLOAD",
-                    detach.then_some("1"),
+                    (detach || interactive).then_some("1"),
                 );
                 let _tty_guard = ScopedEnv::set("FERROCRATE_RUN_TTY", tty.then_some("1"));
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
@@ -5600,7 +5600,7 @@ fn proxy_docker_hijacked_stream(
     stdin_requested: bool,
     tty: bool,
     detach_keys: &[u8],
-) -> Result<(), String> {
+) -> Result<AttachStreamOutcome, String> {
     let (detach_sender, detach_receiver) = std::sync::mpsc::channel();
     if stdin_requested {
         let mut input_stream = stream
@@ -5639,7 +5639,7 @@ fn proxy_docker_hijacked_stream(
     let mut chunk = [0_u8; 16 * 1024];
     loop {
         if detach_receiver.try_recv().is_ok() {
-            return Ok(());
+            return Ok(AttachStreamOutcome::Detached);
         }
         let size = match stream.read(&mut chunk) {
             Ok(size) => size,
@@ -5674,7 +5674,14 @@ fn proxy_docker_hijacked_stream(
             }
         }
     }
-    Ok(())
+    Ok(AttachStreamOutcome::Completed)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttachStreamOutcome {
+    Completed,
+    Detached,
 }
 
 #[cfg(target_os = "linux")]
@@ -5734,7 +5741,7 @@ fn remote_docker_hijack_with_body(
     if status != 101 {
         return Err(format!("remote context hijack returned HTTP {status}"));
     }
-    proxy_docker_hijacked_stream(stream, stdin_requested, tty, detach_keys)
+    proxy_docker_hijacked_stream(stream, stdin_requested, tty, detach_keys).map(|_| ())
 }
 
 #[cfg(target_os = "linux")]
@@ -5769,6 +5776,12 @@ fn attach_local_container(
         })
         .map_err(|error| format!("run: failed to start attach worker: {error}"))?;
     let client_result = proxy_docker_hijacked_stream(client, stdin_requested, tty, detach_keys);
+    if matches!(client_result, Ok(AttachStreamOutcome::Detached)) {
+        // Dropping the client end closes the hijack while deliberately leaving
+        // the independently supervised workload alone. The worker will see
+        // the closed socket; do not wait for the container lifecycle here.
+        return Ok(());
+    }
     let server_result = worker
         .join()
         .map_err(|_| "run: attach worker panicked".to_string())?;

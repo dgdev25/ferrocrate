@@ -4448,6 +4448,22 @@ impl ContainerRuntime {
                     &interface_name,
                 ],
             ))?;
+            // A prior detach leaves an unreachable route for this exact
+            // subnet so traffic cannot escape through another attached
+            // bridge's default gateway. The connected route now owns the
+            // subnet again, so remove that detach tombstone if present.
+            let _ = run_cmd_allow_missing(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "route",
+                    "del",
+                    "unreachable",
+                    &config.ipv4_subnet,
+                    "metric",
+                    "42760",
+                ],
+            ));
             let ipv6_address = if let Some(cidr) = config.ipv6_gateway_cidr.as_deref() {
                 let (gateway, prefix) = cidr.split_once('/').ok_or_else(|| {
                     RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
@@ -4583,12 +4599,46 @@ impl ContainerRuntime {
             ))
         })?;
         verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
-        run_cmd(&[
+        let netns_name = record.netns.as_deref().ok_or_else(|| {
+            RuntimeError::Network("container has no durable network namespace".into())
+        })?;
+        let source_cidr = ownership.source_cidr.as_deref().ok_or_else(|| {
+            RuntimeError::Network(format!(
+                "network endpoint {network_name} has no durable source subnet"
+            ))
+        })?;
+        run_cmd(&ip_netns_exec(
+            netns_name,
+            &[
+                "ip",
+                "route",
+                "add",
+                "unreachable",
+                source_cidr,
+                "metric",
+                "42760",
+            ],
+        ))?;
+        if let Err(error) = run_cmd(&[
             "ip".into(),
             "link".into(),
             "delete".into(),
             ownership.host_interface.clone(),
-        ])?;
+        ]) {
+            let _ = run_cmd_allow_missing(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "route",
+                    "del",
+                    "unreachable",
+                    source_cidr,
+                    "metric",
+                    "42760",
+                ],
+            ));
+            return Err(error);
+        }
         take_network_endpoint(&mut record, network_name).ok_or_else(|| {
             RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
         })?;

@@ -13389,7 +13389,7 @@ struct DockerExecCreateRequest {
     #[serde(rename = "Cmd")]
     cmd: Vec<String>,
     #[serde(rename = "Env", default)]
-    env: Vec<String>,
+    env: Option<Vec<String>>,
     #[serde(rename = "User")]
     user: Option<String>,
     #[serde(rename = "WorkingDir")]
@@ -15258,9 +15258,11 @@ fn handle_docker_compat_connection(
                         DockerExecSpec {
                             container: resolved_container,
                             cmd: request.cmd,
-                            env: request.env,
-                            user: request.user,
-                            working_dir: request.working_dir,
+                            env: request.env.unwrap_or_default(),
+                            user: request.user.filter(|value| !value.trim().is_empty()),
+                            working_dir: request
+                                .working_dir
+                                .filter(|value| !value.trim().is_empty()),
                             attach_stdin: request.attach_stdin,
                             running: false,
                             exit_code: None,
@@ -16114,7 +16116,7 @@ fn handle_docker_compat_connection(
             }
             ("POST", "/networks/create") => {
                 let spec = parse_docker_network_create_spec(&request.body)?;
-                if spec.driver.as_deref().unwrap_or("bridge") != "bridge" {
+                if !matches!(spec.driver.as_deref(), None | Some("") | Some("bridge")) {
                     return Err("docker: only bridge network driver is supported".to_string());
                 }
                 let configs = spec
@@ -17716,7 +17718,10 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         None | Some("default") | Some("bridge") => "bridge".to_string(),
         Some("host") => "host".to_string(),
         Some("none") => "none".to_string(),
-        Some(other) => return Err(format!("docker: unsupported network mode {other}")),
+        Some(other) => {
+            validate_network_name(other)?;
+            other.to_string()
+        }
     };
     let health = parse_docker_healthcheck(request.healthcheck)?;
     let memory_max = normalize_docker_limit(host_config.memory, "Memory")?;
@@ -23664,6 +23669,16 @@ volumes:
     }
 
     #[test]
+    fn docker_create_spec_preserves_named_network_for_start() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-backend"}}"#,
+            None,
+        )
+        .expect("named network should be resolved when the pending container starts");
+        assert_eq!(spec.network_mode, "app-backend");
+    }
+
+    #[test]
     fn docker_exec_start_accepts_tty_for_rootful_runtime_path() {
         assert!(validate_docker_exec_start(true).is_ok());
         assert!(validate_docker_exec_start(false).is_ok());
@@ -24340,12 +24355,17 @@ volumes:
             }))
                 .expect("exec request");
         assert_eq!(request.cmd, vec!["/bin/echo", "hello"]);
-        assert_eq!(request.env, vec!["COLOR=blue"]);
+        assert_eq!(
+            request.env.as_deref(),
+            Some(["COLOR=blue".to_string()].as_slice())
+        );
         assert_eq!(request.user.as_deref(), Some("1001:1002"));
         assert_eq!(request.working_dir.as_deref(), Some("/workspace"));
         let empty: DockerExecCreateRequest =
-            serde_json::from_value(serde_json::json!({"Cmd": []})).expect("empty request");
+            serde_json::from_value(serde_json::json!({"Cmd": [], "Env": null}))
+                .expect("empty request");
         assert!(empty.cmd.is_empty());
+        assert!(empty.env.is_none());
         assert!(validate_docker_exec_command(&request.cmd).is_ok());
         assert!(validate_docker_exec_command(&empty.cmd).is_err());
         let blank = vec!["".to_string()];

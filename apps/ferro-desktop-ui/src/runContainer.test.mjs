@@ -61,3 +61,13 @@ test("run command parsing preserves quotes, escaped spaces, and empty arguments"
     cpus: "",
   }), /Unterminated quote/);
 });
+
+test("double-quoted commands preserve ordinary backslashes", () => {
+  assert.deepEqual(buildRunContainerOptions({
+    command: String.raw`grep "\d+" file "a\"b" "c\\d"`,
+    ports: [],
+    volumes: [],
+    memoryMb: "",
+    cpus: "",
+  }).command, ["grep", String.raw`\d+`, "file", 'a"b', String.raw`c\d`]);
+});

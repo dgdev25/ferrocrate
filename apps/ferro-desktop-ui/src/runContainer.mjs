@@ -3,14 +3,20 @@ export function parseCommandWords(command) {
   let current = "";
   let quote = null;
   let escaped = false;
+  let escapeQuote = null;
   let started = false;
   for (const character of command) {
     if (escaped) {
-      current += character;
+      if (escapeQuote === '"' && !['"', "\\", "$", "`", "\n"].includes(character)) {
+        current += "\\";
+      }
+      if (character !== "\n") current += character;
       escaped = false;
+      escapeQuote = null;
       started = true;
     } else if (character === "\\" && quote !== "'") {
       escaped = true;
+      escapeQuote = quote;
       started = true;
     } else if (quote) {
       if (character === quote) quote = null;

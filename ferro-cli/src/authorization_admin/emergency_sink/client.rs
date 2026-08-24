@@ -9,9 +9,31 @@ use std::{
 
 pub struct UnixAppendOnlySink {
     socket: PathBuf,
-    socket_identity: (u64, u64),
+    socket_identity: SocketIdentity,
     server_uid: u32,
     key: VerifyingKey,
+}
+
+#[cfg(target_env = "gnu")]
+type SocketIdentity = (u64, u64);
+
+#[cfg(not(target_env = "gnu"))]
+type SocketIdentity = (u64, u64, i64, i64);
+
+fn socket_identity(metadata: &Metadata) -> SocketIdentity {
+    #[cfg(target_env = "gnu")]
+    {
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(target_env = "gnu"))]
+    {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
 }
 
 impl UnixAppendOnlySink {
@@ -20,7 +42,7 @@ impl UnixAppendOnlySink {
         validate_socket(&metadata, server_uid)?;
         Ok(Self {
             socket: socket.into(),
-            socket_identity: (metadata.dev(), metadata.ino()),
+            socket_identity: socket_identity(&metadata),
             server_uid,
             key,
         })
@@ -52,7 +74,7 @@ impl UnixAppendOnlySink {
     fn exchange(&self, request: &SinkRequest, query: bool) -> Result<SinkReceipt, String> {
         let metadata = std::fs::symlink_metadata(&self.socket).map_err(|e| e.to_string())?;
         validate_socket(&metadata, self.server_uid)?;
-        if (metadata.dev(), metadata.ino()) != self.socket_identity {
+        if socket_identity(&metadata) != self.socket_identity {
             return Err("emergency sink socket identity changed".into());
         }
         let mut stream = UnixStream::connect(&self.socket)

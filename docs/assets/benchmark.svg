@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" role="img" aria-labelledby="fc-bench-t">
+  <title id="fc-bench-t">Benchmark — median seconds per operation, ferrocrate versus Docker</title>
+  <defs>
+    <style>
+      :root{ --bg:#ffffff; --surface:#f6f8fa; --border:#d0d7de; --ink:#1f2328; --muted:#656d76;
+             --accent:#c2410c; --accent2:#f59e0b; --docker:#8b949e; }
+      @media (prefers-color-scheme: dark){
+        :root{ --bg:#0d1117; --surface:#161b22; --border:#30363d; --ink:#e6edf3; --muted:#8b949e;
+               --accent:#ea580c; --accent2:#fbbf24; --docker:#6e7681; } }
+      text{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+      .t{ fill:var(--ink); font-weight:700; } .lbl{ fill:var(--ink); font-weight:600; }
+      .val{ fill:var(--muted); } .cap{ fill:var(--muted); }
+      .win{ fill:var(--accent); font-weight:700; }
+    </style>
+    <linearGradient id="fc-bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="500" fill="var(--bg)"/>
+  <text class="t" x="60" y="56" font-size="26">Median seconds per operation — lower is better</text>
+  <text class="cap" x="60" y="82" font-size="14">Release build, alpine:3.20 fixture, three rounds, same host. Full method in docs/benchmarks/.</text>
+
+  <!-- legend -->
+  <rect x="880" y="44" width="14" height="14" rx="3" fill="var(--docker)"/><text class="val" x="902" y="56" font-size="14">Docker</text>
+  <rect x="990" y="44" width="14" height="14" rx="3" fill="url(#fc-bar)"/><text class="val" x="1012" y="56" font-size="14">ferrocrate</text>
+
+  <!-- rows: label x=60 (width 220); bars start x=300, max 560 -->
+  <!-- row 1: start detached -->
+  <text class="lbl" x="60" y="132" font-size="16">start (detached)</text>
+  <rect x="300" y="112" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="125" font-size="13">0.114 s</text>
+  <rect x="300" y="134" width="40"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="352" y="147" font-size="13">0.008 s</text>
+  <text class="win" x="1080" y="132" font-size="15">−93%</text>
+
+  <!-- row 2: stop -->
+  <text class="lbl" x="60" y="204" font-size="16">stop (t=1)</text>
+  <rect x="300" y="184" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="197" font-size="13">1.115 s</text>
+  <rect x="300" y="206" width="16"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="328" y="219" font-size="13">0.032 s</text>
+  <text class="win" x="1080" y="204" font-size="15">−97%</text>
+
+  <!-- row 3: exec -->
+  <text class="lbl" x="60" y="276" font-size="16">exec</text>
+  <rect x="300" y="256" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="269" font-size="13">0.064 s</text>
+  <rect x="300" y="278" width="140" height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="452" y="291" font-size="13">0.016 s</text>
+  <text class="win" x="1080" y="276" font-size="15">−75%</text>
+
+  <!-- row 4: ps -a -->
+  <text class="lbl" x="60" y="348" font-size="16">ps -a</text>
+  <rect x="300" y="328" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="341" font-size="13">0.032 s</text>
+  <rect x="300" y="350" width="122" height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="434" y="363" font-size="13">0.007 s</text>
+  <text class="win" x="1080" y="348" font-size="15">−76%</text>
+
+  <!-- row 5: cached build -->
+  <text class="lbl" x="60" y="420" font-size="16">build (cached)</text>
+  <rect x="300" y="400" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="413" font-size="13">0.765 s</text>
+  <rect x="300" y="422" width="12"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="324" y="435" font-size="13">0.007 s</text>
+  <text class="win" x="1080" y="420" font-size="15">−99%</text>
+
+  <line x1="60" y1="456" x2="1140" y2="456" stroke="var(--border)" stroke-width="1"/>
+  <text class="cap" x="60" y="482" font-size="14">Honest loss: attached run-to-exit is 0.364 s vs Docker's 0.164 s — the one operation Docker still wins.</text>
+</svg>

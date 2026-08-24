@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-labelledby="fc-banner-t">
+  <title id="fc-banner-t">Ferrocrate — the Docker-compatible container engine, written in Rust</title>
+  <defs>
+    <style>
+      :root{ --accent:#c2410c; --accent2:#f59e0b; --on:#ffffff; --chip:#ffffff22; --sub:#ffffffd9; }
+      @media (prefers-color-scheme: dark){ :root{ --accent:#9a3412; --accent2:#d97706; } }
+      text{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+    </style>
+    <linearGradient id="fc-hero" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="var(--accent)"/>
+      <stop offset="1" stop-color="var(--accent2)"/>
+    </linearGradient>
+    <radialGradient id="fc-glow" cx="0.85" cy="0.15" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="1200" height="360" rx="24" fill="url(#fc-hero)"/>
+  <rect x="0" y="0" width="1200" height="360" rx="24" fill="url(#fc-glow)"/>
+  <!-- crate glyph: stacked layer lines -->
+  <g stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M1015,105 L1075,75 L1135,105 L1075,135 Z"/>
+    <path d="M1015,140 L1075,110 L1135,140 L1075,170 Z"/>
+    <path d="M1015,175 L1075,145 L1135,175 L1075,205 Z"/>
+  </g>
+  <text x="80" y="148" font-size="62" font-weight="800" fill="#ffffff">Ferrocrate</text>
+  <text x="82" y="202" font-size="25" font-weight="400" fill="var(--sub)">The Docker-compatible container engine, written in Rust.</text>
+  <g font-size="15" font-weight="600" fill="#ffffff">
+    <rect x="80"  y="250" width="330" height="44" rx="22" fill="var(--chip)"/><text x="104" y="278">✅ 35/35 real Docker-client conformance</text>
+    <rect x="428" y="250" width="300" height="44" rx="22" fill="var(--chip)"/><text x="452" y="278">⚡ Faster on 10 of 11 operations</text>
+    <rect x="746" y="250" width="330" height="44" rx="22" fill="var(--chip)"/><text x="770" y="278">📦 One binary — daemon, compose, CRI</text>
+  </g>
+</svg>

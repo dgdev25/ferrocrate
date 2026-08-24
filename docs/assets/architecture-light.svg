@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ferroarch-title ferroarch-desc">
+      <title id="ferroarch-title">Ferrocrate architecture</title>
+      <desc id="ferroarch-desc">Four client surfaces — the native CLI, the Docker API socket, Compose, and CRI — feed one daemon, which drives the Rust container runtime, image store, and networking stack on top of Linux kernel primitives.</desc>
+      <defs>
+        <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- zones (before arrows and nodes) -->
+      <rect x="40" y="48" width="920" height="124" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <rect x="56" y="52" width="88" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="100" y="61" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">INTERFACES</text>
+
+      <rect x="40" y="220" width="920" height="232" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <rect x="56" y="224" width="56" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="84" y="233" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">ENGINE</text>
+
+      <rect x="40" y="500" width="920" height="108" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <rect x="56" y="504" width="96" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="104" y="513" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">LINUX KERNEL</text>
+
+      <!-- arrows (before nodes) -->
+      <!-- interface bottoms (y=148) to daemon top (y=256); daemon top attach points 428/476/524/572 -->
+      <path d="M164,148 V192 Q164,200 172,200 H420 Q428,200 428,208 V252" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <path d="M388,148 V176 Q388,184 396,184 H468 Q476,184 476,192 V252" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <path d="M612,148 V176 Q612,184 604,184 H532 Q524,184 524,192 V252" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <path d="M836,148 V192 Q836,200 828,200 H580 Q572,200 572,208 V252" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <!-- daemon bottom (y=320) to runtime top (y=356) -->
+      <path d="M500,320 V330 Q500,338 492,338 H224 Q216,338 216,346 V352" fill="none" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <!-- runtime bottom and networking bottom (y=420) into kernel top (y=536), attach 404/596 -->
+      <path d="M224,420 V500 Q224,508 232,508 H396 Q404,508 404,516 V532" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M760,420 V500 Q760,508 752,508 H604 Q596,508 596,516 V532" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+      <!-- arrow label: DISPATCH on the daemon->runtime horizontal (y=338), mask above with 6px gap -->
+      <rect x="332" y="316" width="44" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="354" y="325" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DISPATCH</text>
+
+      <!-- interface nodes: y=84 h=64 w=200; x 64/288/512/736 -->
+      <g>
+        <rect x="64" y="84" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="64" y="84" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <text x="164" y="112" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Native CLI</text>
+        <text x="164" y="130" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ferrocrate run …</text>
+      </g>
+      <g>
+        <rect x="288" y="84" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="288" y="84" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <text x="388" y="112" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Docker clients</text>
+        <text x="388" y="130" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">docker CLI · API</text>
+      </g>
+      <g>
+        <rect x="512" y="84" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="512" y="84" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <text x="612" y="112" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Compose</text>
+        <text x="612" y="130" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">multi-service apps</text>
+      </g>
+      <g>
+        <rect x="736" y="84" width="200" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="736" y="84" width="200" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <text x="836" y="112" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">CRI</text>
+        <text x="836" y="130" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Kubernetes socket</text>
+      </g>
+
+      <!-- daemon (focal): x=380 y=256 w=240 h=64 -->
+      <rect x="380" y="256" width="240" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="380" y="256" width="240" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <text x="500" y="284" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">ferrocrate daemon</text>
+      <text x="500" y="302" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">one binary · Docker-compatible API</text>
+
+      <!-- engine row 2: runtime x=104 w=224 / image store x=392 w=208 / networking x=648 w=224; y=356 h=64 -->
+      <g>
+        <rect x="104" y="356" width="224" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="104" y="356" width="224" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="216" y="384" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Container runtime</text>
+        <text x="216" y="402" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ferro-core · PID-identity safe</text>
+      </g>
+      <g>
+        <rect x="392" y="356" width="208" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="392" y="356" width="208" height="64" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <text x="496" y="384" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Image store</text>
+        <text x="496" y="402" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">OCI layers · build cache</text>
+      </g>
+      <g>
+        <rect x="648" y="356" width="224" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="648" y="356" width="224" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="760" y="384" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Networking</text>
+        <text x="760" y="402" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">bridge · DNS · WireGuard</text>
+      </g>
+
+      <!-- kernel: x=220 y=536 w=560 h=48 (external treatment) -->
+      <rect x="220" y="536" width="560" height="48" rx="6" fill="#f5f5f5"/>
+      <rect x="220" y="536" width="560" height="48" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="500" y="556" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Kernel primitives</text>
+      <text x="500" y="572" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">namespaces · cgroups · seccomp · netfilter/eBPF</text>
+    </svg>

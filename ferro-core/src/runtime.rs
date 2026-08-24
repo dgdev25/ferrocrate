@@ -17584,6 +17584,13 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 for record in reopened.list().unwrap() {
                     assert!(record.pending_mutation.is_none(), "{action} {phase}");
                     if action == "run" || matches!(*phase, "old-stopped" | "spawn" | "identity") {
+                        #[cfg(target_env = "musl")]
+                        for _ in 0..500 {
+                            if !super::process_exists(record.pid) {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
                         assert!(
                             !super::process_exists(record.pid),
                             "{action} {phase} orphan"

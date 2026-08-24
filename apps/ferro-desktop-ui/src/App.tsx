@@ -15,11 +15,14 @@ import type {
   DoctorSummary,
   InstallerRunSummary,
   PaidAuthState,
+  NetworkAction,
+  NetworkSummary,
   VolumeAction,
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { buildStepText } from "./imageBuild.mjs";
+import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -68,6 +71,10 @@ function App(): JSX.Element {
   const [volumes, setVolumes] = useState<VolumeSummary[]>([]);
   const [volumeName, setVolumeName] = useState("");
   const [volumesLoading, setVolumesLoading] = useState(false);
+  const [networks, setNetworks] = useState<NetworkSummary[]>([]);
+  const [networkName, setNetworkName] = useState("");
+  const [networkSubnet, setNetworkSubnet] = useState("");
+  const [networksLoading, setNetworksLoading] = useState(false);
   const [composeFile, setComposeFile] = useState("");
   const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
   const [composeLoading, setComposeLoading] = useState(false);
@@ -240,6 +247,17 @@ function App(): JSX.Element {
     }
   }
 
+  async function refreshNetworks(): Promise<void> {
+    setNetworksLoading(true);
+    try {
+      setNetworks(await invoke<NetworkSummary[]>("get_networks"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setNetworksLoading(false);
+    }
+  }
+
   async function readComposeSnapshot(file: string): Promise<void> {
     setComposeLoading(true);
     try {
@@ -278,6 +296,7 @@ function App(): JSX.Element {
     void refresh();
     void refreshAuthState();
     void refreshVolumes();
+    void refreshNetworks();
   }, []);
 
   useEffect(() => {
@@ -448,6 +467,37 @@ function App(): JSX.Element {
       }
       if (action === "create") setVolumeName("");
       await Promise.all([refreshVolumes(), refresh()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runNetworkAction(
+    action: NetworkAction,
+    label: string,
+    target: string,
+  ): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_network_action", {
+        action,
+        target,
+        subnet: action === "create" ? networkSubnet.trim() || null : null,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      if (action === "create") {
+        setNetworkName("");
+        setNetworkSubnet("");
+      }
+      await Promise.all([refreshNetworks(), refresh()]);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -646,7 +696,7 @@ function App(): JSX.Element {
           >
             Theme: {theme === "dark" ? "Dark" : "Light"}
           </button>
-          <button className="btn btn-primary" onClick={() => void Promise.all([refresh(), refreshVolumes()])} disabled={loading || volumesLoading}>
+          <button className="btn btn-primary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
             {loading ? "Refreshing..." : "Refresh Runtime"}
           </button>
           <button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>
@@ -1006,6 +1056,78 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
                     onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)}
                     disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}
                     title={volumeIsInUse(volume) ? "Detach this volume from all containers before removing it" : "Remove volume"}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Networks</h2>
+          <p className="muted">Create bridge networks and review each attached container, address, and published port.</p>
+          <div className="field-row network-fields">
+            <input
+              value={networkName}
+              onChange={(event) => setNetworkName(event.target.value)}
+              placeholder="network name"
+              aria-label="Network name"
+            />
+            <input
+              value={networkSubnet}
+              onChange={(event) => setNetworkSubnet(event.target.value)}
+              placeholder="subnet (optional, e.g. 172.30.0.0/16)"
+              aria-label="Network subnet"
+            />
+          </div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => void runNetworkAction("create", "Network Create", networkName)}
+              disabled={runtimeBusy || networksLoading || !networkName.trim()}
+            >
+              Create Bridge
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void refreshNetworks()}
+              disabled={runtimeBusy || networksLoading}
+            >
+              {networksLoading ? "Refreshing..." : "Refresh Networks"}
+            </button>
+          </div>
+          {networks.length === 0 ? <p className="muted">No networks.</p> : (
+            <div className="resource-list">
+              {networks.map((network) => (
+                <div className="resource-row" key={network.name}>
+                  <div>
+                    <strong>{network.name}</strong>
+                    <p className="muted">
+                      {network.driver} · {network.subnets.length ? network.subnets.join(", ") : "daemon-managed subnet"}
+                    </p>
+                    {network.containers.length === 0 ? (
+                      <p className="muted">No attached containers</p>
+                    ) : (
+                      <ul className="mount-list">
+                        {network.containers.map((attachment) => (
+                          <li key={`${network.name}:${attachment.container_id}`}>
+                            {formatNetworkAttachment(attachment)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => void runNetworkAction("remove", "Network Remove", network.name)}
+                    disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}
+                    title={!networkIsRemovable(network)
+                      ? "The built-in bridge network cannot be removed"
+                      : network.containers.length > 0
+                        ? "Detach all containers before removing this network"
+                        : "Remove network"}
                   >
                     Remove
                   </button>

@@ -38,6 +38,23 @@ export type VolumeSummary = {
   mounts: VolumeMountUsage[];
 };
 
+export type NetworkAction = "create" | "remove";
+
+export type NetworkContainerAttachment = {
+  container_id: string;
+  name: string;
+  ipv4_address: string;
+  ipv6_address: string;
+  ports: string[];
+};
+
+export type NetworkSummary = {
+  name: string;
+  driver: string;
+  subnets: string[];
+  containers: NetworkContainerAttachment[];
+};
+
 export type ComposeAction = "up" | "down" | "stop" | "start";
 
 export type ComposeServiceSummary = {

@@ -309,9 +309,9 @@ struct NetworkListRecord {
 #[serde(rename_all = "PascalCase")]
 struct NetworkInspectContainer {
     name: String,
-    #[serde(default)]
+    #[serde(rename = "IPv4Address", default)]
     ipv4_address: String,
-    #[serde(default)]
+    #[serde(rename = "IPv6Address", default)]
     ipv6_address: String,
 }
 
@@ -1663,8 +1663,8 @@ mod tests {
         log_follow_command, parse_terminal_exec_id, terminal_exec_command, terminal_resize_command,
         network_proxy_command, network_summaries, volume_proxy_command, ComposeAction,
         ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, LogBuffer,
-        NetworkAction, NetworkInspectContainer, NetworkInspectRecord, NetworkIpam,
-        NetworkIpamConfig, NetworkListRecord, VolumeAction,
+        NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
+        VolumeAction,
     };
 
     #[test]
@@ -1894,19 +1894,11 @@ mod tests {
                 }],
             },
         }];
-        let inspections = BTreeMap::from([(
-            "frontend".to_string(),
-            NetworkInspectRecord {
-                containers: BTreeMap::from([(
-                    "container-1".to_string(),
-                    NetworkInspectContainer {
-                        name: "/web".to_string(),
-                        ipv4_address: "172.30.0.2".to_string(),
-                        ipv6_address: String::new(),
-                    },
-                )]),
-            },
-        )]);
+        let inspection: NetworkInspectRecord = serde_json::from_str(
+            r#"{"Containers":{"container-1":{"Name":"/web","IPv4Address":"172.30.0.2","IPv6Address":""}}}"#,
+        )
+        .expect("daemon network inspect fixture");
+        let inspections = BTreeMap::from([("frontend".to_string(), inspection)]);
         let containers = vec![ContainerNetworkRecord {
             id: "container-1".to_string(),
             name: Some("web".to_string()),

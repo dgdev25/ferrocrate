@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};

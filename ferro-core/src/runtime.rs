@@ -11102,19 +11102,18 @@ fn cleanup_network(
         }
         return Ok(());
     }
-    if !record.network_endpoints.is_empty() {
-        let primary_host = record
-            .network_ownership
-            .as_ref()
-            .map(|ownership| ownership.host_interface.as_str());
-        for endpoint in &record.network_endpoints {
+    let endpoints = network_endpoints_for_container_cleanup(record);
+    if !endpoints.is_empty() {
+        // Detach every durable endpoint through one idempotent path.  The
+        // primary endpoint used to be skipped here and removed later by the
+        // legacy single-network cleanup.  If that later phase failed, retrying
+        // removal observed a mixture of deleted kernel links and still-live
+        // durable associations, leaving Compose networks permanently in use.
+        for endpoint in &endpoints {
             let Some(ownership) = endpoint.ownership.as_ref() else {
                 continue;
             };
-            if primary_host == Some(ownership.host_interface.as_str()) {
-                continue;
-            }
-            verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            verify_container_kernel_ownership(record.netns.as_deref(), ownership, false)?;
             run_cmd_allow_missing(&[
                 "ip".into(),
                 "link".into(),
@@ -11123,15 +11122,6 @@ fn cleanup_network(
             ])?;
         }
         if record.network_backend.is_none() {
-            if let Some(ownership) = record.network_ownership.as_ref() {
-                verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
-                run_cmd_allow_missing(&[
-                    "ip".into(),
-                    "link".into(),
-                    "delete".into(),
-                    ownership.host_interface.clone(),
-                ])?;
-            }
             if record.namespace_owned {
                 if let (Some(netns_name), Some(expected)) =
                     (record.netns.as_deref(), record.namespace_identity)
@@ -11224,6 +11214,13 @@ fn cleanup_network(
         record.network_ownership.as_ref(),
         remove_shared_ebpf,
     )
+}
+
+fn network_endpoints_for_container_cleanup(record: &ContainerRecord) -> Vec<NetworkEndpointRecord> {
+    // Only the explicit vector denotes the multi-network cleanup protocol.
+    // Legacy records are intentionally handled by the ownership-classification
+    // path below; projecting them here would bypass its fail-closed checks.
+    record.network_endpoints.clone()
 }
 
 fn cleanup_network_resources(
@@ -17705,6 +17702,36 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert_eq!(removed.network_name, "frontend");
         assert_eq!(record.network_endpoints.len(), 1);
         assert_eq!(record.network_endpoints[0].network_name, "backend");
+    }
+
+    #[test]
+    fn container_cleanup_selects_every_durable_network_endpoint() {
+        let mut record = fixture_container_record("multi-network-cleanup", "stopped");
+        record.network_endpoints = ["frontend", "backend"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, network_name)| NetworkEndpointRecord {
+                network_name: network_name.to_string(),
+                endpoint_id: format!("veth-{network_name}"),
+                interface_name: format!("eth{index}"),
+                ipv4_address: Some(format!("172.30.{index}.2")),
+                ipv6_address: None,
+                generation: 1,
+                namespace_identity: None,
+                network_backend: None,
+                ownership: None,
+            })
+            .collect();
+
+        let selected = super::network_endpoints_for_container_cleanup(&record);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|endpoint| endpoint.network_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["frontend", "backend"]
+        );
     }
 
     #[test]

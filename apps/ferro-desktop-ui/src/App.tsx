@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
   DesktopAction,
@@ -13,6 +13,7 @@ import type {
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
+type LogBatch = { text: string; truncated: boolean };
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
@@ -30,11 +31,14 @@ function App(): JSX.Element {
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
   const [actionLabel, setActionLabel] = useState("");
-  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logOutput, setLogOutput] = useState("");
   const [logFilter, setLogFilter] = useState("");
   const [logsFollowing, setLogsFollowing] = useState(false);
   const [logsPaused, setLogsPaused] = useState(false);
-  const [pausedLogCount, setPausedLogCount] = useState(0);
+  const [pausedLogOutput, setPausedLogOutput] = useState("");
+  const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
+  const runtimeActionRef = useRef(false);
+  const logFollowRef = useRef(false);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -102,68 +106,98 @@ function App(): JSX.Element {
 
   useEffect(() => {
     let disposed = false;
-    let unlistenLine: (() => void) | undefined;
+    let unlistenBatch: (() => void) | undefined;
     let unlistenError: (() => void) | undefined;
     let unlistenEnded: (() => void) | undefined;
 
     void (async () => {
-      const stopLine = await listen<string>("container-log-line", (event) => {
-        setLogLines((lines) => [...lines, event.payload]);
+      const stopBatch = await listen<LogBatch>("container-log-batch", (event) => {
+        setLogOutput(event.payload.text);
       });
       const stopError = await listen<string>("container-log-error", (event) => {
         setError(event.payload);
       });
       const stopEnded = await listen<boolean>("container-log-ended", (event) => {
+        logFollowRef.current = false;
         setLogsFollowing(false);
         setLogsPaused(false);
         if (!event.payload) setError("Container log stream ended unexpectedly");
       });
       if (disposed) {
-        stopLine();
+        stopBatch();
         stopError();
         stopEnded();
         return;
       }
-      unlistenLine = stopLine;
+      unlistenBatch = stopBatch;
       unlistenError = stopError;
       unlistenEnded = stopEnded;
     })();
 
     return () => {
       disposed = true;
-      unlistenLine?.();
+      unlistenBatch?.();
       unlistenError?.();
       unlistenEnded?.();
     };
   }, []);
 
+  function beginRuntimeAction(allowWhileFollowing = false): boolean {
+    if (runtimeActionRef.current || (logFollowRef.current && !allowWhileFollowing)) {
+      return false;
+    }
+    runtimeActionRef.current = true;
+    setRuntimeActionBusy(true);
+    return true;
+  }
+
+  function finishRuntimeAction(): void {
+    runtimeActionRef.current = false;
+    setRuntimeActionBusy(false);
+  }
+
   async function runAction(action: DesktopAction, label: string, target?: string): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setActionLabel(label);
-    const result = await invoke<CommandResult>("run_desktop_action", { action, target });
-    setLastAction(result);
-    await refresh();
+    try {
+      const result = await invoke<CommandResult>("run_desktop_action", { action, target });
+      setLastAction(result);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
   }
 
   async function startLogFollow(): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setError(null);
-    setLogLines([]);
+    setLogOutput("");
     setLogsPaused(false);
-    setPausedLogCount(0);
+    setPausedLogOutput("");
     try {
       await invoke("start_log_follow", { target: containerTarget });
+      logFollowRef.current = true;
       setLogsFollowing(true);
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
   async function stopLogFollow(): Promise<void> {
+    if (!logFollowRef.current || !beginRuntimeAction(true)) return;
     try {
       await invoke("stop_log_follow");
+      logFollowRef.current = false;
       setLogsFollowing(false);
       setLogsPaused(false);
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
@@ -172,7 +206,7 @@ function App(): JSX.Element {
       setLogsPaused(false);
       return;
     }
-    setPausedLogCount(logLines.length);
+    setPausedLogOutput(logOutput);
     setLogsPaused(true);
   }
 
@@ -226,6 +260,7 @@ function App(): JSX.Element {
   }
 
   async function runInstaller(dryRun: boolean, confirm: boolean): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setError(null);
     try {
       const result = await invoke<InstallerRunSummary>("run_paid_full_stack_install", {
@@ -237,10 +272,13 @@ function App(): JSX.Element {
       await refreshAuthState();
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
   async function runDoctor(): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setError(null);
     try {
       const result = await invoke<DoctorSummary>("run_doctor_action", {
@@ -253,15 +291,24 @@ function App(): JSX.Element {
       await refresh();
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
   const sessionSummary = useMemo(() => authState?.session, [authState]);
   const visibleLogText = useMemo(() => {
-    const visibleLines = logsPaused ? logLines.slice(0, pausedLogCount) : logLines;
+    const visibleOutput = logsPaused ? pausedLogOutput : logOutput;
     const filter = logFilter.trim();
-    return (filter ? visibleLines.filter((line) => line.includes(filter)) : visibleLines).join("");
-  }, [logFilter, logLines, logsPaused, pausedLogCount]);
+    return filter
+      ? visibleOutput
+          .split("\n")
+          .filter((line) => line.includes(filter))
+          .join("\n")
+      : visibleOutput;
+  }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
+
+  const runtimeBusy = runtimeActionBusy || logsFollowing;
 
   async function copyLogs(): Promise<void> {
     try {
@@ -390,10 +437,10 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             Full paid install path uses saved backend config and session token.
           </p>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runInstaller(true, false)}>
+            <button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>
               Dry-Run Install
             </button>
-            <button className="btn btn-primary" onClick={() => void runInstaller(false, true)}>
+            <button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>
               Run Full Install
             </button>
           </div>
@@ -437,7 +484,7 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             </label>
           </div>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runDoctor()}>
+            <button className="btn btn-secondary" onClick={() => void runDoctor()} disabled={runtimeBusy}>
               Run Doctor
             </button>
           </div>
@@ -447,10 +494,10 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
         <article className="panel">
           <h2>Runtime Status</h2>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")} disabled={runtimeBusy}>
               VM Start
             </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")} disabled={runtimeBusy}>
               VM Stop
             </button>
           </div>
@@ -471,28 +518,28 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("start_container", "Container Start", containerTarget)}
-              disabled={logsFollowing}
+              disabled={runtimeBusy}
             >
               Start
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("stop_container", "Container Stop", containerTarget)}
-              disabled={logsFollowing}
+              disabled={runtimeBusy}
             >
               Stop
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void startLogFollow()}
-              disabled={logsFollowing}
+              disabled={runtimeBusy}
             >
               {logsFollowing ? "Following Logs" : "Follow Logs"}
             </button>
             <button
               className="btn btn-danger"
               onClick={() => void runAction("remove_container", "Container Remove", containerTarget)}
-              disabled={logsFollowing}
+              disabled={runtimeBusy}
             >
               Remove
             </button>
@@ -514,7 +561,7 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button className="btn btn-secondary" onClick={exportLogs} disabled={!visibleLogText}>
               Export Logs
             </button>
-            <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing}>
+            <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>
               Stop Following
             </button>
           </div>
@@ -536,16 +583,18 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("pull_image", "Image Pull", imageTarget)}
+              disabled={runtimeBusy}
             >
               Pull
             </button>
             <button
               className="btn btn-danger"
               onClick={() => void runAction("remove_image", "Image Remove", imageTarget)}
+              disabled={runtimeBusy}
             >
               Remove
             </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>
               Prune
             </button>
           </div>

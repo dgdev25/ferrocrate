@@ -230,6 +230,25 @@ struct ExecResponse {
     stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FollowChannel {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FollowFrame {
+    Data {
+        channel: FollowChannel,
+        data: String,
+    },
+    Terminal {
+        status: i32,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Phase0CheckResult {
     host_os: String,
@@ -573,21 +592,122 @@ fn handle_client(
     Ok(())
 }
 
+fn write_follow_frame<W: Write>(writer: &mut W, frame: &FollowFrame) -> Result<(), DesktopError> {
+    serde_json::to_writer(&mut *writer, frame)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn replay_follow_frames<R: BufRead, O: Write, E: Write>(
+    mut reader: R,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<(), DesktopError> {
+    let mut raw = String::new();
+    loop {
+        raw.clear();
+        if reader.read_line(&mut raw)? == 0 {
+            return Err(DesktopError::Invalid(
+                "follow stream ended without terminal status".to_string(),
+            ));
+        }
+        let frame: FollowFrame = serde_json::from_str(raw.trim_end())?;
+        match frame {
+            FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data,
+            } => {
+                stdout.write_all(data.as_bytes())?;
+                stdout.flush()?;
+            }
+            FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data,
+            } => {
+                stderr.write_all(data.as_bytes())?;
+                stderr.flush()?;
+            }
+            FollowFrame::Terminal { status } if status == 0 => return Ok(()),
+            FollowFrame::Terminal { status } => {
+                return Err(DesktopError::Invalid(format!(
+                    "remote command exited with status {status}"
+                )));
+            }
+        }
+    }
+}
+
+fn send_follow_frame(
+    stream: &Arc<Mutex<TcpStream>>,
+    frame: &FollowFrame,
+) -> Result<(), DesktopError> {
+    let mut stream = stream
+        .lock()
+        .map_err(|_| DesktopError::Invalid("follow stream is unavailable".to_string()))?;
+    write_follow_frame(&mut *stream, frame)
+}
+
+fn forward_follow_output<R: Read>(
+    mut reader: R,
+    channel: FollowChannel,
+    stream: Arc<Mutex<TcpStream>>,
+    child: Arc<Mutex<std::process::Child>>,
+) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+        let frame = FollowFrame::Data {
+            channel: channel.clone(),
+            data: String::from_utf8_lossy(&buffer[..bytes]).to_string(),
+        };
+        if send_follow_frame(&stream, &frame).is_err() {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
+            return;
+        }
+    }
+}
+
 fn proxy_follow_request(
     stream: &mut TcpStream,
     mut request: ExecRequest,
     default_wsl_distro: Option<&str>,
 ) -> Result<(), DesktopError> {
     if !is_log_follow_command(&request.cmd) {
-        return Err(DesktopError::Invalid(
-            "follow requests must invoke ferrocrate logs --follow".to_string(),
-        ));
+        write_follow_frame(
+            stream,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: "follow requests must invoke ferrocrate logs --follow\n".to_string(),
+            },
+        )?;
+        write_follow_frame(stream, &FollowFrame::Terminal { status: 2 })?;
+        return Ok(());
     }
     if request.wsl_distro.is_none() {
         request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
     }
 
-    let mut child = run_follow_request(&request)?;
+    let mut child = match run_follow_request(&request) {
+        Ok(child) => child,
+        Err(err) => {
+            write_follow_frame(
+                stream,
+                &FollowFrame::Data {
+                    channel: FollowChannel::Stderr,
+                    data: format!("{err}\n"),
+                },
+            )?;
+            write_follow_frame(stream, &FollowFrame::Terminal { status: 1 })?;
+            return Ok(());
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -597,27 +717,16 @@ fn proxy_follow_request(
         .take()
         .ok_or_else(|| DesktopError::Invalid("follow command stderr missing".to_string()))?;
     let child = Arc::new(Mutex::new(child));
-    let stdout_stream = stream.try_clone()?;
+    let stream = Arc::new(Mutex::new(stream.try_clone()?));
+    let stdout_stream = Arc::clone(&stream);
     let stdout_child = Arc::clone(&child);
     let stdout_worker = thread::spawn(move || {
-        let result = std::io::copy(&mut BufReader::new(stdout), &mut &stdout_stream);
-        if result.is_err() {
-            if let Ok(mut child) = stdout_child.lock() {
-                let _ = child.kill();
-            }
-        }
-        result
+        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
     });
-    let stderr_stream = stream.try_clone()?;
+    let stderr_stream = Arc::clone(&stream);
     let stderr_child = Arc::clone(&child);
     let stderr_worker = thread::spawn(move || {
-        let result = std::io::copy(&mut BufReader::new(stderr), &mut &stderr_stream);
-        if result.is_err() {
-            if let Ok(mut child) = stderr_child.lock() {
-                let _ = child.kill();
-            }
-        }
-        result
+        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
     });
 
     let status = loop {
@@ -632,12 +741,12 @@ fn proxy_follow_request(
     };
     let _ = stdout_worker.join();
     let _ = stderr_worker.join();
-    if !status.success() {
-        return Err(DesktopError::Invalid(format!(
-            "follow command exited with status {}",
-            status.code().unwrap_or(-1)
-        )));
-    }
+    let _ = send_follow_frame(
+        &stream,
+        &FollowFrame::Terminal {
+            status: status.code().unwrap_or(-1),
+        },
+    );
     Ok(())
 }
 
@@ -712,8 +821,9 @@ fn run_client_exec(
     stream.write_all(payload.as_bytes())?;
 
     if follow {
-        std::io::copy(&mut stream, &mut std::io::stdout())?;
-        return Ok(());
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        return replay_follow_frames(BufReader::new(stream), &mut stdout, &mut stderr);
     }
 
     let mut response_raw = String::new();
@@ -2375,11 +2485,12 @@ mod tests {
         command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
         gather_phase0_check, is_log_follow_command, load_channel_manifest, load_forward_entries,
         load_vm_state, parse_exec_mode, render_macos_launch_agent_plist,
-        render_windows_service_script, run_request, save_forward_entries, save_vm_state,
-        should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr, vm_state_running,
-        Commands, ExecMode, ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig,
-        VmState,
+        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
+        save_vm_state, should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr,
+        vm_state_running, write_follow_frame, Commands, ExecMode, ExecRequest, FollowChannel,
+        FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
+    use std::io::{BufReader, Cursor};
     use std::path::PathBuf;
 
     #[test]
@@ -2430,6 +2541,38 @@ mod tests {
             "ps".to_string(),
             "--follow".to_string(),
         ]));
+    }
+
+    #[test]
+    fn framed_follow_replays_channels_and_fails_nonzero_terminal_status() {
+        let mut wire = Vec::new();
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data: "ready\n".to_string(),
+            },
+        )
+        .expect("stdout frame");
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: "warning\n".to_string(),
+            },
+        )
+        .expect("stderr frame");
+        write_follow_frame(&mut wire, &FollowFrame::Terminal { status: 17 })
+            .expect("terminal frame");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = replay_follow_frames(BufReader::new(Cursor::new(wire)), &mut stdout, &mut stderr)
+            .expect_err("nonzero terminal status must fail the client");
+
+        assert_eq!(stdout, b"ready\n");
+        assert_eq!(stderr, b"warning\n");
+        assert!(err.to_string().contains("status 17"));
     }
 
     #[test]

@@ -3,17 +3,22 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 const KEYRING_SERVICE: &str = "ferrocrate-desktop-ui";
 const KEYRING_ACCOUNT: &str = "paid_session_token";
+const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
+const MAX_LOG_LINES: usize = 2_000;
+const MAX_LOG_BYTES: usize = 512 * 1024;
 static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 #[derive(Debug, Serialize)]
@@ -143,21 +148,134 @@ fn log_follow_command(target: &str) -> Vec<String> {
     ]
 }
 
-fn emit_log_lines<R: std::io::Read>(reader: R, app: tauri::AppHandle, event: &str) {
+struct LogBuffer {
+    entries: VecDeque<String>,
+    bytes: usize,
+    max_lines: usize,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl LogBuffer {
+    fn new(max_lines: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            max_lines,
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, mut entry: String) {
+        if entry.len() > self.max_bytes {
+            let mut start = entry.len() - self.max_bytes;
+            while !entry.is_char_boundary(start) {
+                start += 1;
+            }
+            entry = entry[start..].to_string();
+            self.truncated = true;
+        }
+        self.bytes += entry.len();
+        self.entries.push_back(entry);
+        while self.entries.len() > self.max_lines || self.bytes > self.max_bytes {
+            if let Some(removed) = self.entries.pop_front() {
+                self.bytes -= removed.len();
+                self.truncated = true;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut text = String::new();
+        if self.truncated {
+            text.push_str(LOG_TRUNCATION_MARKER);
+        }
+        for entry in &self.entries {
+            text.push_str(entry);
+        }
+        text
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct LogBatch {
+    text: String,
+    truncated: bool,
+}
+
+fn emit_log_batch(app: &tauri::AppHandle, buffer: &LogBuffer) {
+    let _ = app.emit(
+        "container-log-batch",
+        LogBatch {
+            text: buffer.text(),
+            truncated: buffer.truncated,
+        },
+    );
+}
+
+fn publish_log_batches(app: tauri::AppHandle, receiver: Receiver<String>) {
+    let mut buffer = LogBuffer::new(MAX_LOG_LINES, MAX_LOG_BYTES);
+    let mut changed = false;
+    let mut last_publish = Instant::now();
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(entry) => {
+                buffer.push(entry);
+                changed = true;
+                while let Ok(entry) = receiver.try_recv() {
+                    buffer.push(entry);
+                }
+                if last_publish.elapsed() >= Duration::from_millis(100) {
+                    emit_log_batch(&app, &buffer);
+                    changed = false;
+                    last_publish = Instant::now();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) if changed => {
+                emit_log_batch(&app, &buffer);
+                changed = false;
+                last_publish = Instant::now();
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if changed {
+                    emit_log_batch(&app, &buffer);
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn queue_log_lines<R: std::io::Read>(reader: R, sender: mpsc::Sender<String>) {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                let _ = app.emit(event, line.clone());
+                if sender.send(line.clone()).is_err() {
+                    break;
+                }
                 line.clear();
             }
-            Err(err) => {
-                let _ = app.emit("container-log-error", err.to_string());
-                break;
-            }
+            Err(_) => break,
         }
+    }
+}
+
+fn emit_log_errors<R: std::io::Read>(reader: R, app: tauri::AppHandle) {
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    while let Ok(bytes) = reader.read_line(&mut line) {
+        if bytes == 0 {
+            break;
+        }
+        let _ = app.emit("container-log-error", line.clone());
+        line.clear();
     }
 }
 
@@ -196,10 +314,12 @@ fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String>
         .stderr
         .take()
         .ok_or_else(|| "container log stream stderr missing".to_string())?;
+    let (log_sender, log_receiver) = mpsc::channel();
     let stdout_app = app.clone();
-    thread::spawn(move || emit_log_lines(stdout, stdout_app, "container-log-line"));
+    thread::spawn(move || publish_log_batches(stdout_app, log_receiver));
+    thread::spawn(move || queue_log_lines(stdout, log_sender));
     let stderr_app = app.clone();
-    thread::spawn(move || emit_log_lines(stderr, stderr_app, "container-log-error"));
+    thread::spawn(move || emit_log_errors(stderr, stderr_app));
     *current = Some(child);
     drop(current);
 
@@ -666,7 +786,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::log_follow_command;
+    use super::{log_follow_command, LogBuffer};
 
     #[test]
     fn log_follow_uses_the_desktop_exec_bridge() {
@@ -681,6 +801,19 @@ mod tests {
                 "--follow",
                 "web",
             ]
+        );
+    }
+
+    #[test]
+    fn log_buffer_keeps_recent_entries_with_a_truncation_marker() {
+        let mut buffer = LogBuffer::new(2, 1024);
+        buffer.push("first\n".to_string());
+        buffer.push("second\n".to_string());
+        buffer.push("third\n".to_string());
+
+        assert_eq!(
+            buffer.text(),
+            "[Earlier log output truncated]\nsecond\nthird\n"
         );
     }
 }

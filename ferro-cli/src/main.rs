@@ -224,6 +224,8 @@ pub enum Commands {
         labels: Vec<String>,
         #[arg(long = "annotation")]
         annotations: Vec<String>,
+        #[arg(long = "log-driver", default_value = "json-file")]
+        log_driver: String,
         #[arg(long)]
         user: Option<String>,
         #[arg(long)]
@@ -3383,7 +3385,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 no_new_privs,
                 env,
                 labels,
-                annotations,
+                mut annotations,
+                log_driver,
                 cap_add,
                 profile,
                 user,
@@ -3422,6 +3425,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let _tty_guard = ScopedEnv::set("FERROCRATE_RUN_TTY", tty.then_some("1"));
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|err| err.to_string())?;
+                annotations.push(format!("io.ferrocrate.log.driver={log_driver}"));
                 let (cpu_quota, cpu_period) = docker_cpu_quota_period(
                     cpu_quota,
                     cpu_period,
@@ -5981,6 +5985,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             env,
             labels,
             annotations,
+            log_driver,
             user,
             workdir,
             entrypoint,
@@ -6123,6 +6128,10 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     "CpuQuota": cpu_quota.unwrap_or(0),
                     "CpuPeriod": cpu_period.unwrap_or(0),
                     "PidsLimit": pids_max.unwrap_or(0),
+                    "LogConfig": {
+                        "Type": log_driver,
+                        "Config": {},
+                    },
                 },
             });
             let payload = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
@@ -13327,8 +13336,12 @@ fn validate_docker_log_config(config: Option<&DockerLogConfig>) -> Result<(), St
     let Some(config) = config else {
         return Ok(());
     };
-    if !config.driver.is_empty() && config.driver != "json-file" {
-        return Err(format!("docker: unsupported log driver {}", config.driver));
+    let driver = if config.driver.is_empty() { "json-file" } else { &config.driver };
+    if driver != "json-file" && config.options.as_ref().is_some_and(|options| !options.is_empty()) {
+        return Err(format!("docker: log options are unsupported for log driver {driver}"));
+    }
+    if driver != "json-file" {
+        return Ok(());
     }
     for (key, value) in config.options.as_ref().into_iter().flatten() {
         match key.as_str() {
@@ -13384,6 +13397,8 @@ struct DockerCreateSpec {
     tty: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
+    #[serde(default = "default_log_driver")]
+    log_driver: String,
     #[serde(default)]
     auto_remove: bool,
     health: Option<DockerHealthSpec>,
@@ -13399,6 +13414,48 @@ struct DockerCreateSpec {
     restart_policy: String,
     #[serde(default)]
     created_at_unix: u64,
+}
+
+#[cfg(target_os = "linux")]
+struct DockerStartRunInputs {
+    path_binds: Vec<String>,
+    volume_binds: Vec<String>,
+    annotations: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
+    // Docker's Binds mixes host-path binds (absolute source) with named
+    // volumes. Keep each handle_run argument explicit here: these adjacent
+    // string slices are otherwise easy to transpose without a type error.
+    let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
+        .binds
+        .iter()
+        .cloned()
+        .partition(|entry| entry.starts_with('/'));
+    volume_binds.extend(spec.image_volumes.iter().cloned());
+
+    let mut annotations = spec
+        .log_options
+        .iter()
+        .map(|(key, value)| format!("io.ferrocrate.log.{key}={value}"))
+        .collect::<Vec<_>>();
+    annotations.sort();
+    annotations.push(format!(
+        "io.ferrocrate.log.driver={}",
+        spec.log_driver
+    ));
+
+    DockerStartRunInputs {
+        path_binds,
+        volume_binds,
+        annotations,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn default_log_driver() -> String {
+    "json-file".to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -14888,11 +14945,13 @@ fn handle_docker_compat_connection(
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                 let id = docker_resolve_id(&runtime, &pending, requested_id)?;
-                if pending.contains_key(&id) && runtime.inspect(&id).is_err() {
+                if let Some(spec) = pending.get(&id).filter(|_| runtime.inspect(&id).is_err()) {
+                    ensure_docker_log_readback_supported(&spec.log_driver)?;
                     // Docker exposes an empty log stream for a created
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
                 }
+                drop(pending);
                 let tty = runtime
                     .inspect(&id)
                     .map(|record| record.tty)
@@ -15707,20 +15766,7 @@ fn handle_docker_compat_connection(
                     "FERROCRATE_RUN_TTY",
                     spec.tty.then_some("1"),
                 );
-                // Docker's Binds mixes host-path binds (absolute source)
-                // with named volumes; named volumes resolve through the
-                // volume store, never as literal paths.
-                let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
-                    .binds
-                    .iter()
-                    .cloned()
-                    .partition(|entry| entry.starts_with('/'));
-                volume_binds.extend(spec.image_volumes.iter().cloned());
-                let log_annotations = spec
-                    .log_options
-                    .iter()
-                    .map(|(key, value)| format!("io.ferrocrate.log.{key}={value}"))
-                    .collect::<Vec<_>>();
+                let run_inputs = docker_start_run_inputs(&spec);
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -15730,14 +15776,14 @@ fn handle_docker_compat_connection(
                     &spec.cmd,
                     &spec.network_mode,
                     &network_backend,
-                    &path_binds,
-                    &log_annotations,
-                    &volume_binds,
+                    &run_inputs.path_binds,
+                    &[],
+                    &run_inputs.volume_binds,
                     false,
                     false,
                     &spec.env,
                     &spec.labels,
-                    &[],
+                    &run_inputs.annotations,
                     &[],
                     None,
                     spec.workdir.as_deref(),
@@ -16897,6 +16943,15 @@ fn docker_status_for_error(err: &str) -> u16 {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_docker_log_readback_supported(driver: &str) -> Result<(), String> {
+    if driver.is_empty() || driver == "json-file" {
+        Ok(())
+    } else {
+        Err("configured logging driver does not support reading".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn docker_tail_logs(logs: &str, tail: Option<&str>) -> Result<String, String> {
     let Some(tail) = tail else {
         return Ok(logs.to_string());
@@ -17805,6 +17860,18 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         .unwrap_or(ferro_core::container_store::RestartPolicy::No);
     let workdir = request.working_dir.filter(|value| !value.trim().is_empty());
     let user = request.user.filter(|value| !value.trim().is_empty());
+    let log_driver = host_config
+        .log_config
+        .as_ref()
+        .map(|config| config.driver.as_str())
+        .filter(|driver| !driver.is_empty())
+        .unwrap_or("json-file")
+        .to_string();
+    let log_options = host_config
+        .log_config
+        .as_ref()
+        .and_then(|config| config.options.clone())
+        .unwrap_or_default();
     Ok(DockerCreateSpec {
         image: request.image,
         cmd,
@@ -17818,11 +17885,8 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         name,
         network_mode,
         tty: request.tty,
-        log_options: host_config
-            .log_config
-            .as_ref()
-            .and_then(|config| config.options.clone())
-            .unwrap_or_default(),
+        log_options,
+        log_driver,
         auto_remove: host_config.auto_remove,
         health,
         memory_max,
@@ -18228,6 +18292,18 @@ fn docker_inspect_payload(
             "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
         "HostConfig": {
+            "LogConfig": {
+                "Type": record.annotations
+                    .get("io.ferrocrate.log.driver")
+                    .filter(|driver| !driver.is_empty())
+                    .map(String::as_str)
+                    .unwrap_or("json-file"),
+                "Config": record.annotations.iter()
+                    .filter_map(|(key, value)| key.strip_prefix("io.ferrocrate.log.")
+                        .filter(|option| *option != "driver")
+                        .map(|option| (option.to_string(), value.clone())))
+                    .collect::<BTreeMap<_, _>>(),
+            },
             "Memory": record
                 .resource_limits
                 .as_ref()
@@ -18465,6 +18541,10 @@ fn docker_pending_inspect_payload(
             "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
         },
         "HostConfig": {
+            "LogConfig": {
+                "Type": spec.log_driver,
+                "Config": spec.log_options,
+            },
             "Memory": spec.memory_max.unwrap_or(0),
             "CpuQuota": spec.cpu_quota.unwrap_or(0),
             "CpuPeriod": spec.cpu_period.unwrap_or(0),
@@ -19565,7 +19645,7 @@ mod tests {
         docker_image_repo_digests, docker_image_search_results, docker_inspect_payload,
         image_config_volume_targets,
         docker_manifest_layer_size, docker_network_ipv6_config, docker_network_matches_filters,
-        docker_pending_inspect_payload, docker_pending_matches_filters,
+        docker_pending_inspect_payload, docker_pending_matches_filters, docker_start_run_inputs,
         docker_pending_prune_matches_filters, docker_raw_stream, docker_runtime_healthcheck,
         docker_stats_payload, docker_tail_logs, docker_top_payload, docker_volume_matches_filters,
         docker_volume_mount_usage,
@@ -19894,6 +19974,22 @@ configs:
                 assert!(pids_max.is_none());
                 assert!(cap_add.is_empty());
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_log_driver_selection() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "--log-driver",
+            "journald",
+            "alpine:latest",
+        ])
+        .expect("log driver flag must parse");
+        match cli.command {
+            Commands::Run { log_driver, .. } => assert_eq!(log_driver, "journald"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -23878,19 +23974,43 @@ volumes:
     }
 
     #[test]
-    fn docker_create_log_config_accepts_json_file_and_rejects_other_drivers() {
-        parse_docker_create_spec(
+    fn docker_create_log_config_preserves_selected_driver() {
+        let json = parse_docker_create_spec(
             br#"{"Image":"busybox","HostConfig":{"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"3"}}}}"#,
             None,
         )
         .expect("json-file options are supported");
+        assert_eq!(json.log_driver, "json-file");
 
-        let error = parse_docker_create_spec(
+        let journald = parse_docker_create_spec(
             br#"{"Image":"busybox","HostConfig":{"LogConfig":{"Type":"journald"}}}"#,
             None,
         )
-        .expect_err("unknown log drivers must fail closed");
-        assert!(error.contains("unsupported log driver"), "{error}");
+        .expect("driver availability is resolved when the container starts");
+        assert_eq!(journald.log_driver, "journald");
+        let inspect = docker_pending_inspect_payload("pending", &journald, false);
+        assert_eq!(inspect["HostConfig"]["LogConfig"]["Type"], "journald");
+        assert_eq!(
+            super::ensure_docker_log_readback_supported(&journald.log_driver).unwrap_err(),
+            "configured logging driver does not support reading"
+        );
+    }
+
+    #[test]
+    fn docker_start_projects_log_driver_into_runtime_annotations() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Binds":["/host:/guest"],"LogConfig":{"Type":"journald"}}}"#,
+            None,
+        )
+        .expect("journald create spec");
+
+        let inputs = docker_start_run_inputs(&spec);
+        assert_eq!(inputs.path_binds, vec!["/host:/guest"]);
+        assert!(inputs.volume_binds.is_empty());
+        assert_eq!(
+            inputs.annotations,
+            vec!["io.ferrocrate.log.driver=journald"]
+        );
     }
 
     #[test]
@@ -23942,6 +24062,7 @@ volumes:
             network_mode: "bridge".to_string(),
             tty: false,
             log_options: HashMap::new(),
+            log_driver: "json-file".to_string(),
             auto_remove: false,
             health: Some(DockerHealthSpec {
                 cmd: vec!["/bin/sh".to_string(), "-c".to_string(), "test -f /ready".to_string()],
@@ -24169,6 +24290,7 @@ volumes:
                 network_mode: "bridge".to_string(),
                 tty: false,
                 log_options: HashMap::new(),
+                log_driver: "json-file".to_string(),
                 auto_remove: false,
                 health: None,
                 memory_max: None,
@@ -24215,6 +24337,7 @@ volumes:
             network_mode: "bridge".to_string(),
             tty: false,
             log_options: HashMap::new(),
+            log_driver: "json-file".to_string(),
             auto_remove: false,
             health: None,
             memory_max: None,
@@ -24353,6 +24476,7 @@ volumes:
             network_mode: "bridge".to_string(),
             tty: false,
             log_options: HashMap::new(),
+            log_driver: "json-file".to_string(),
             auto_remove: false,
             health: None,
             memory_max: None,

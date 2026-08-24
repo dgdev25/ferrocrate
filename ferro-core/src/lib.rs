@@ -67,6 +67,7 @@ pub mod installer;
 #[cfg(target_os = "linux")]
 pub mod layer_cache;
 pub mod layer_compression;
+pub mod log_driver;
 #[cfg(target_os = "linux")]
 pub mod layer_mount;
 pub mod mac_profiles;

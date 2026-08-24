@@ -51,6 +51,10 @@ use crate::image_config::{
 use crate::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
+use crate::log_driver::{
+    capture_stream, load_log_driver, ContainerLogContext, LogCapture,
+    LogRotation as DriverLogRotation, LogStream,
+};
 use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
 use crate::managed_overlay::{
@@ -110,7 +114,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Seek;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -1526,6 +1532,8 @@ pub enum RuntimeError {
     NetworkValidation(#[from] ferro_net::ValidationError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
+    #[error("configured logging driver does not support reading")]
+    LogReadUnsupported,
     #[error("command is required to run container")]
     MissingCommand,
     #[error("invalid command: {0}")]
@@ -3232,6 +3240,7 @@ impl ContainerRuntime {
             readonly_rootfs,
             self.runtime_dir.clone(),
             log_rotation_from_annotations(annotations),
+            configured_log_driver(annotations).to_string(),
         )
         .inspect_err(|_e| {
             // Kill any partially spawned process on error
@@ -3833,6 +3842,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        ensure_log_readback_supported(&record)?;
         let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
         let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))
@@ -3850,6 +3860,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        ensure_log_readback_supported(&record)?;
         let split = |path: &str| -> Option<Vec<TimestampedLine>> {
             let log_path = PathBuf::from(path);
             if !log_path.exists() || !log_journal_path(&log_path).exists() {
@@ -4983,6 +4994,7 @@ impl ContainerRuntime {
             record.readonly_rootfs,
             self.runtime_dir.clone(),
             log_rotation_from_annotations(&record.annotations),
+            configured_log_driver(&record.annotations).to_string(),
         )?;
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -5601,6 +5613,13 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn ensure_log_readback_supported(record: &ContainerRecord) -> Result<(), RuntimeError> {
+    if configured_log_driver(&record.annotations) != "json-file" {
+        return Err(RuntimeError::LogReadUnsupported);
+    }
+    Ok(())
 }
 
 fn validate_rootless_mount_capability(
@@ -6593,6 +6612,7 @@ fn spawn_process_with_logs(
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
     rotation: Option<LogRotation>,
+    log_driver: String,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -6609,8 +6629,17 @@ fn spawn_process_with_logs(
         &tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let (child_id, child, pidfd) =
-        spawn_child_with_logs(command, stdout_path, stderr_path, append, tty, rotation)?;
+    let (child_id, child, pidfd) = spawn_child_with_logs(
+        command,
+        stdout_path,
+        stderr_path,
+        append,
+        tty,
+        rotation,
+        &runtime_dir,
+        &container_id,
+        &log_driver,
+    )?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -6649,6 +6678,7 @@ fn spawn_process_with_logs(
             readonly_rootfs,
             runtime_dir,
             rotation,
+            log_driver,
             oom_kills,
         );
     });
@@ -7320,31 +7350,26 @@ fn spawn_child_with_logs(
     append: bool,
     tty: bool,
     rotation: Option<LogRotation>,
+    runtime_dir: &Path,
+    container_id: &str,
+    log_driver: &str,
 ) -> Result<(u32, Child, OwnedFd), RuntimeError> {
     let rotation = rotation.or_else(log_rotation_from_env);
-    let stdout_file = if append {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(stdout_path)?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(stdout_path)?
-    };
-    let stderr_file = if append {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(stderr_path)?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(stderr_path)?
+    let driver = load_log_driver(
+        log_driver,
+        runtime_dir,
+        rotation.map(|rotation| DriverLogRotation {
+            max_size: rotation.max_size,
+            max_files: rotation.max_files,
+        }),
+    )?;
+    let context = ContainerLogContext {
+        container_id: container_id.to_string(),
+        log_dir: stdout_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+        append,
     };
     let stdin_path = stdin_fifo_path(stdout_path);
     ensure_stdin_fifo(&stdin_path)?;
@@ -7366,9 +7391,9 @@ fn spawn_child_with_logs(
         let mut master_reader = std::fs::File::from(master);
         let mut master_writer = master_reader.try_clone()?;
         let slave = std::fs::File::from(slave);
-        let mut log = stdout_file;
+        let capture = LogCapture::new(driver.open(&context)?, 1);
         thread::spawn(move || {
-            let _ = io::copy(&mut master_reader, &mut log);
+            let _ = capture_stream(&mut master_reader, capture, LogStream::Stdout);
         });
         drop(stdin_file);
         let mut input = OpenOptions::new()
@@ -7400,7 +7425,10 @@ fn spawn_child_with_logs(
             }
         });
         child
-    } else if std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some() || rotation.is_some() {
+    } else if driver.name() != "json-file"
+        || std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some()
+        || rotation.is_some()
+    {
         // Long-lived callers (the Docker-compatible daemon) opt into pipe
         // capture so every output line gets a sidecar timestamp journal
         // (`<stream>.log.ts`: `<offset> <nanos>` per line). The raw log file
@@ -7408,23 +7436,49 @@ fn spawn_child_with_logs(
         // semantics derive from the journal. Short-lived CLI callers must not
         // use pipes: their copier threads would die with the process and drop
         // the detached container's output.
+        let capture = LogCapture::new(driver.open(&context)?, 2);
         let mut child = command
             .stdin(Stdio::from(stdin_file))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
         if let Some(mut pipe) = child.stdout.take() {
-            let mut log = stdout_file;
-            let journal = log_journal_path(stdout_path);
-            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
+            let stdout_capture = capture.clone();
+            thread::spawn(move || {
+                let _ = capture_stream(&mut pipe, stdout_capture, LogStream::Stdout);
+            });
         }
         if let Some(mut pipe) = child.stderr.take() {
-            let mut log = stderr_file;
-            let journal = log_journal_path(stderr_path);
-            thread::spawn(move || copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation));
+            thread::spawn(move || {
+                let _ = capture_stream(&mut pipe, capture, LogStream::Stderr);
+            });
         }
         child
     } else {
+        let stdout_file = if append {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(stdout_path)?
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(stdout_path)?
+        };
+        let stderr_file = if append {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(stderr_path)?
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(stderr_path)?
+        };
         command
             .stdin(Stdio::from(stdin_file))
             .stdout(Stdio::from(stdout_file))
@@ -7463,6 +7517,7 @@ fn log_journal_path(log_path: &Path) -> PathBuf {
 /// `max-file` option. Keeping the two files as a pair is essential: a moved
 /// log without its sidecar would make `since`/`until` silently misclassify
 /// historical output.
+#[cfg(test)]
 fn rotate_log_pair(log_path: &Path, max_files: u32) -> io::Result<()> {
     if max_files < 2 {
         return Ok(());
@@ -7526,6 +7581,14 @@ struct LogRotation {
     max_files: u32,
 }
 
+fn configured_log_driver(annotations: &HashMap<String, String>) -> &str {
+    annotations
+        .get("io.ferrocrate.log.driver")
+        .map(String::as_str)
+        .filter(|driver| !driver.is_empty())
+        .unwrap_or("json-file")
+}
+
 fn log_rotation_from_env() -> Option<LogRotation> {
     let max_size = std::env::var("FERROCRATE_LOG_MAX_SIZE")
         .ok()
@@ -7568,6 +7631,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
     copy_line_journaled_with_rotation(pipe, log, journal_path, None);
 }
 
+#[cfg(test)]
 fn copy_line_journaled_with_rotation(
     pipe: &mut impl io::Read,
     log: &mut fs::File,
@@ -7808,6 +7872,7 @@ fn supervise_child(
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
     rotation: Option<LogRotation>,
+    log_driver: String,
     mut oom_kills: u64,
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
@@ -8036,8 +8101,17 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty, rotation) {
+        let (pid, new_child, new_pidfd) = match spawn_child_with_logs(
+            command,
+            &stdout_path,
+            &stderr_path,
+            append,
+            tty,
+            rotation,
+            &runtime_dir,
+            &container_id,
+            &log_driver,
+        ) {
                 Ok(tuple) => tuple,
                 Err(error) => {
                     warn!(
@@ -14521,6 +14595,37 @@ mod tests {
     }
 
     #[test]
+    fn logs_rejects_driver_without_readback_using_docker_wording() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("write-only-logs", "exited");
+        let log_dir = temp.path().join("containers/write-only-logs/logs");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        record.stdout_path = log_dir.join("stdout.log").display().to_string();
+        record.stderr_path = log_dir.join("stderr.log").display().to_string();
+        record.annotations.insert(
+            "io.ferrocrate.log.driver".to_string(),
+            "journald".to_string(),
+        );
+        runtime.store.put(&record).expect("record");
+
+        let error = runtime
+            .logs_split(&record.id)
+            .expect_err("write-only driver must reject logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
+        let error = runtime
+            .logs_timestamped_split(&record.id)
+            .expect_err("write-only driver must reject timestamped logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
+    }
+
+    #[test]
     fn logs_returns_output() {
         if !can_run_containers() {
             eprintln!("SKIP: requires root privileges for container operations");
@@ -17858,8 +17963,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn supervised_launch_blocks_workload_until_parent_release() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("workload-ran");
-        let stdout = root.path().join("stdout");
-        let stderr = root.path().join("stderr");
+        let stdout = root.path().join("stdout.log");
+        let stderr = root.path().join("stderr.log");
         #[cfg(target_env = "musl")]
         let touch = "/bin/touch";
         #[cfg(not(target_env = "musl"))]
@@ -17880,8 +17985,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, false, None).unwrap();
+        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+            command,
+            &stdout,
+            &stderr,
+            false,
+            false,
+            None,
+            root.path(),
+            "launch-test",
+            "json-file",
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
             !marker.exists(),
@@ -17895,8 +18010,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     #[test]
     fn tty_spawn_uses_kernel_pty_and_merges_output_into_logs() {
         let root = tempfile::tempdir().expect("runtime");
-        let stdout = root.path().join("stdout");
-        let stderr = root.path().join("stderr");
+        let stdout = root.path().join("stdout.log");
+        let stderr = root.path().join("stderr.log");
         let command = super::build_command(
             &["/bin/sh".into(), "-c".into(), "printf tty-ready".into()],
             &[],
@@ -17913,9 +18028,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, true, None)
-                .expect("spawn PTY child");
+        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+            command,
+            &stdout,
+            &stderr,
+            false,
+            true,
+            None,
+            root.path(),
+            "tty-test",
+            "json-file",
+        )
+        .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
         for _ in 0..50 {
@@ -18082,11 +18206,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         .unwrap();
         let (pid, _child, _pidfd) = super::spawn_child_with_logs(
             command,
-            &root.path().join("stdout"),
-            &root.path().join("stderr"),
+            &root.path().join("stdout.log"),
+            &root.path().join("stderr.log"),
             false,
             false,
             None,
+            root.path(),
+            "launch-helper",
+            "json-file",
         )
         .unwrap();
         if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {

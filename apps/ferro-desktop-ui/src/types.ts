@@ -12,6 +12,7 @@ export type DesktopSnapshot = {
     socket_path: string;
     reason: string | null;
     platform: "linux-native" | "desktop-vm";
+    custom_networks: boolean;
   };
   runtime: CommandResult;
   containers: CommandResult;

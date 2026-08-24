@@ -28,7 +28,7 @@ import { Icon } from "./iconSystem.mjs";
 import { errorForSection, navigationTransientState, resourceActionStartState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
-import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
+import { customNetworkCreateAvailable, formatNetworkAttachment, NetworkCapabilityNotice, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import { completeDoctorRun, DoctorPage, SettingsPage } from "./systemPages.mjs";
 import {
@@ -752,6 +752,10 @@ function App(): JSX.Element {
     label: string,
     target: string,
   ): Promise<void> {
+    if (action === "create" && !customNetworkCreateAvailable(snapshot?.daemon)) {
+      setResourceDialogError("Custom networks need a privileged (rootful) daemon, or the Ferrocrate AppArmor profile. Open Doctor for guided setup.");
+      return;
+    }
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
@@ -1161,6 +1165,7 @@ function App(): JSX.Element {
   const imagePage = resourcePageState("images", imageRows.length);
   const volumePage = resourcePageState("volumes", volumes.length);
   const networkPage = resourcePageState("networks", networks.length);
+  const customNetworksAvailable = customNetworkCreateAvailable(snapshot?.daemon);
   const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
   const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
   const surfaceError = error ?? snapshotFailureDetail(snapshot, activeSection);
@@ -1272,7 +1277,7 @@ function App(): JSX.Element {
               ) : activeSection === "volumes" ? (
                 volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
               ) : activeSection === "networks" ? (
-                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} disabled={runtimeBusy || networksLoading}>Create network</button> : null
+                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} disabled={runtimeBusy || networksLoading || !customNetworksAvailable}>Create network</button> : null
               ) : activeSection === "compose" ? (
                 composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
@@ -1508,9 +1513,11 @@ function App(): JSX.Element {
             ) : null}
 
             {activeSection === "networks" ? (
-              networkPage.content === "empty" ? (
+              <>
+              <NetworkCapabilityNotice customNetworks={customNetworksAvailable} onDoctor={() => setActiveSection("doctor")} />
+              {networkPage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Networks">
-                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} />
+                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading || !customNetworksAvailable} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
@@ -1525,7 +1532,8 @@ function App(): JSX.Element {
                     {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
-              )
+              )}
+              </>
             ) : null}
 
             {activeSection === "compose" ? (

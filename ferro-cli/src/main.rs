@@ -17467,9 +17467,20 @@ fn docker_version_payload() -> serde_json::Value {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_info_capabilities(is_root: bool) -> serde_json::Value {
+    serde_json::json!({
+        "SecurityOptions": if is_root { Vec::<String>::new() } else { vec!["name=rootless".to_string()] },
+        "FerrocrateCapabilities": {
+            "CustomNetworks": is_root,
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> Result<serde_json::Value, String> {
     let containers = runtime.list().map_err(|error| error.to_string())?;
     let images = store.list_references().map_err(|error| error.to_string())?;
+    let capabilities = docker_info_capabilities(nix::unistd::Uid::effective().is_root());
     Ok(serde_json::json!({
         "ID": "ferrocrate", "Containers": containers.len(),
         "ContainersRunning": containers.iter().filter(|c| c.status == "running").count(),
@@ -17477,6 +17488,8 @@ fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> R
         "ContainersStopped": containers.iter().filter(|c| c.status == "exited" || c.status == "stopped").count(),
         "Images": images.len(), "Driver": "overlayfs", "OperatingSystem": std::env::consts::OS,
         "Architecture": std::env::consts::ARCH,
+        "SecurityOptions": capabilities["SecurityOptions"],
+        "FerrocrateCapabilities": capabilities["FerrocrateCapabilities"],
     }))
 }
 
@@ -19474,6 +19487,24 @@ mod tests {
     use std::time::Duration;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_info_capabilities_report_rootless_network_truth() {
+        let rootless = super::docker_info_capabilities(false);
+        assert_eq!(rootless["SecurityOptions"], serde_json::json!(["name=rootless"]));
+        assert_eq!(
+            rootless["FerrocrateCapabilities"]["CustomNetworks"],
+            false
+        );
+
+        let rootful = super::docker_info_capabilities(true);
+        assert_eq!(rootful["SecurityOptions"], serde_json::json!([]));
+        assert_eq!(
+            rootful["FerrocrateCapabilities"]["CustomNetworks"],
+            true
+        );
+    }
 
     #[test]
     fn attached_run_trace_line_reports_phase_and_relative_timing() {

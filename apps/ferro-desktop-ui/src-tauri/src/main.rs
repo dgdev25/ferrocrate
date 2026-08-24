@@ -192,6 +192,12 @@ struct DaemonStatus {
     socket_path: String,
     reason: Option<String>,
     platform: String,
+    custom_networks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonCapabilities {
+    custom_networks: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -209,6 +215,64 @@ fn daemon_health_response_ok(response: &str) -> bool {
         return false;
     };
     headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_capabilities_from_info_response(response: &str) -> Result<DaemonCapabilities, String> {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return Err("Ferrocrate API info response is malformed".to_string());
+    };
+    if !headers.starts_with("HTTP/1.1 200") {
+        return Err("Ferrocrate API info request failed".to_string());
+    }
+    let info: JsonValue = serde_json::from_str(body.trim())
+        .map_err(|error| format!("Ferrocrate API info response is invalid: {error}"))?;
+    let explicit = info
+        .get("FerrocrateCapabilities")
+        .and_then(|value| value.get("CustomNetworks"))
+        .and_then(JsonValue::as_bool);
+    let rootless = info
+        .get("SecurityOptions")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option
+                    .as_str()
+                    .is_some_and(|value| value == "rootless" || value == "name=rootless")
+            })
+        });
+    Ok(DaemonCapabilities {
+        custom_networks: explicit.unwrap_or(!rootless),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_capabilities(socket: &std::path::Path) -> Result<DaemonCapabilities, String> {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|error| format!("cannot connect to {}: {error}", socket.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(b"GET /info HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\n\r\n")
+        .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+    daemon_capabilities_from_info_response(&response)
+}
+
+#[cfg(target_os = "linux")]
+fn running_daemon_status(socket_path: &str, capabilities: DaemonCapabilities) -> DaemonStatus {
+    DaemonStatus {
+        state: "running".to_string(),
+        socket_path: socket_path.to_string(),
+        reason: None,
+        platform: "linux-native".to_string(),
+        custom_networks: capabilities.custom_networks,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -286,12 +350,12 @@ fn daemon_status() -> DaemonStatus {
     {
         return match desktop_socket_path() {
             Ok(socket) => match ping_daemon(&socket) {
-                Ok(()) => DaemonStatus {
-                    state: "running".to_string(),
-                    socket_path: socket.display().to_string(),
-                    reason: None,
-                    platform: "linux-native".to_string(),
-                },
+                Ok(()) => {
+                    let capabilities = daemon_capabilities(&socket).unwrap_or(DaemonCapabilities {
+                        custom_networks: false,
+                    });
+                    running_daemon_status(&socket.display().to_string(), capabilities)
+                }
                 Err(reason) => {
                     let (supervisor_running, supervisor_failure) = supervisor_process_state();
                     let (state, lifecycle_reason) = unavailable_daemon_state(
@@ -304,6 +368,7 @@ fn daemon_status() -> DaemonStatus {
                         socket_path: socket.display().to_string(),
                         reason: lifecycle_reason.or(Some(reason)),
                         platform: "linux-native".to_string(),
+                        custom_networks: false,
                     }
                 }
             },
@@ -312,6 +377,7 @@ fn daemon_status() -> DaemonStatus {
                 socket_path: String::new(),
                 reason: Some(reason),
                 platform: "linux-native".to_string(),
+                custom_networks: false,
             },
         };
     }
@@ -321,6 +387,7 @@ fn daemon_status() -> DaemonStatus {
         socket_path: "desktop bridge".to_string(),
         reason: None,
         platform: "desktop-vm".to_string(),
+        custom_networks: true,
     }
 }
 
@@ -2527,6 +2594,12 @@ fn run_network_action(
     if matches!(action, NetworkAction::List | NetworkAction::Inspect) {
         return Err("list is a read-only snapshot action".to_string());
     }
+    if matches!(action, NetworkAction::Create) && !daemon_status().custom_networks {
+        return Err(
+            "Custom networks need a privileged (rootful) daemon, or a host configured with the Ferrocrate AppArmor profile. Open Doctor for guided setup."
+                .to_string(),
+        );
+    }
     execute_network_proxy(action, target.as_deref(), subnet.as_deref())
 }
 
@@ -3054,7 +3127,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::{
-        daemon_health_response_ok, desktop_daemon_transport_ready, unavailable_daemon_state,
+        daemon_capabilities_from_info_response, daemon_health_response_ok,
+        desktop_daemon_transport_ready, running_daemon_status, unavailable_daemon_state,
     };
 
     #[cfg(target_os = "linux")]
@@ -3078,6 +3152,27 @@ mod tests {
             unavailable_daemon_state(false, false, None),
             ("stopped", None)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn daemon_info_propagates_custom_network_capability() {
+        let rootless = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[\"name=rootless\"],\"FerrocrateCapabilities\":{\"CustomNetworks\":false}}",
+        )
+        .expect("rootless info");
+        assert!(!rootless.custom_networks);
+        let status = running_daemon_status("/run/user/1000/ferrocrate.sock", rootless);
+        assert_eq!(
+            serde_json::to_value(status).expect("daemon status")["custom_networks"],
+            false
+        );
+
+        let rootful = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[],\"FerrocrateCapabilities\":{\"CustomNetworks\":true}}",
+        )
+        .expect("rootful info");
+        assert!(rootful.custom_networks);
     }
 
     #[cfg(target_os = "linux")]

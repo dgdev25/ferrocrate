@@ -3245,7 +3245,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/rm-volumes:latest");
 
-    let create_body = r#"{"Image":"compat/rm-volumes:latest","Cmd":["true"],"Volumes":{"/data":{}}}"#;
+    let create_body = r#"{"Image":"compat/rm-volumes:latest","Cmd":["true"],"Volumes":{"/data":{}},"HostConfig":{"NetworkMode":"none"}}"#;
     let (status, body) = harness.request_bytes(
         "POST",
         "/v1.45/containers/create?name=anonymous-volume-container",

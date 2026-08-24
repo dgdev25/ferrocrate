@@ -49,6 +49,9 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
     let mut archive = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut archive);
+        #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+        let dockerfile = b"FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\nCOPY --chmod=755 ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1\n";
+        #[cfg(not(all(target_env = "musl", target_arch = "x86_64")))]
         let dockerfile = b"FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n";
         let mut header = tar::Header::new_gnu();
         header.set_path("Dockerfile").expect("dockerfile path");
@@ -68,6 +71,25 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
         builder
             .append(&header, &busybox[..])
             .expect("append busybox");
+        #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+        {
+            // Alpine's BusyBox is dynamically linked, unlike the static
+            // BusyBox fixture used by the glibc test host. A scratch image
+            // therefore needs musl's loader as well for its command to run.
+            let loader = fs::read("/lib/ld-musl-x86_64.so.1").expect("host musl loader fixture");
+            let mut header = tar::Header::new_gnu();
+            header
+                .set_path("ld-musl-x86_64.so.1")
+                .expect("musl loader path");
+            header.set_size(loader.len() as u64);
+            header.set_mode(0o755);
+            header.set_uid(nix::unistd::geteuid().as_raw() as u64);
+            header.set_gid(nix::unistd::getegid().as_raw() as u64);
+            header.set_cksum();
+            builder
+                .append(&header, &loader[..])
+                .expect("append musl loader");
+        }
         builder.finish().expect("finish image context");
     }
     let encoded_tag = tag
@@ -77,6 +99,13 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
     let path = format!("/v1.45/build?dockerfile=Dockerfile&t={encoded_tag}");
     let (status, body) = harness.request_bytes("POST", &path, "application/x-tar", &archive);
     assert_eq!(status, 200, "local image build response={body}");
+}
+
+fn rootless_bwrap_available() -> bool {
+    Command::new("bwrap")
+        .args(["--unshare-user", "--ro-bind", "/", "/", "--", "true"])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 struct DaemonHarness {
@@ -666,7 +695,9 @@ fn docker_compat_bounded_on_failure_restarts_exactly_the_configured_count() {
 fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/bounded-recovery:latest");
-    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; sleep 2; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
+    // Scratch images contain the BusyBox binary but no applet symlinks, so
+    // invoke sleep through BusyBox instead of relying on PATH resolution.
+    let create_body = r#"{"Image":"compat/bounded-recovery:latest","Cmd":["/bin/busybox","sh","-c","echo attempt; /bin/busybox sleep 5; exit 1"],"HostConfig":{"NetworkMode":"none","RestartPolicy":{"Name":"on-failure","MaximumRetryCount":2}}}"#;
     let (status, response) = harness.request_bytes(
         "POST",
         "/v1.45/containers/create?name=bounded-recovery",
@@ -703,8 +734,7 @@ fn docker_compat_bounded_on_failure_does_not_gain_a_retry_after_daemon_recovery(
     let recovered_restart_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let inspect = inspect_container(&harness, &id);
-        if inspect["State"]["Status"] == "running"
-            && inspect["State"]["Pid"].as_i64() != Some(first_retry_pid)
+        if inspect["RestartCount"] == 2 && inspect["State"]["Pid"].as_i64() != Some(first_retry_pid)
         {
             assert_eq!(
                 inspect["RestartCount"], 2,
@@ -1659,6 +1689,10 @@ fn docker_compat_exec_resize_updates_live_tty() {
         eprintln!("skipping rootful exec-resize fixture: rootful image materialization is covered by the dedicated OCI lifecycle gate");
         return;
     }
+    if !rootless_bwrap_available() {
+        eprintln!("skipping exec-resize fixture: bwrap user namespaces are unavailable");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/exec-resize:latest");
     let create_body = r#"{"Image":"compat/exec-resize:latest","Cmd":["/bin/busybox","sleep","5"],"HostConfig":{"NetworkMode":"none"}}"#;
@@ -1675,7 +1709,9 @@ fn docker_compat_exec_resize_updates_live_tty() {
         204
     );
 
-    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Cmd":["/bin/busybox","sh","-c","stty size; read line; stty size"]}"#;
+    // Scratch images contain no applet symlinks, so invoke BusyBox utilities
+    // explicitly rather than relying on shell PATH lookup.
+    let exec_body = r#"{"AttachStdin":true,"AttachStdout":true,"AttachStderr":true,"Tty":true,"Cmd":["/bin/busybox","sh","-c","/bin/busybox stty size; read line; /bin/busybox stty size"]}"#;
     let exec_request = format!(
         "POST /v1.45/containers/exec-resize/exec HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         exec_body.len(),
@@ -1705,14 +1741,25 @@ fn docker_compat_exec_resize_updates_live_tty() {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .expect("set exec resize read timeout");
+    let initial_size_deadline = Instant::now() + Duration::from_secs(10);
     while !received
         .windows(b"24 80".len())
         .any(|window| window == b"24 80")
     {
         let mut buffer = [0_u8; 512];
-        let read = stream
-            .read(&mut buffer)
-            .expect("read initial exec TTY size");
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if (matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) || error.raw_os_error() == Some(nix::libc::EAGAIN))
+                    && Instant::now() < initial_size_deadline =>
+            {
+                continue;
+            }
+            Err(error) => panic!("read initial exec TTY size: {error}"),
+        };
         assert!(read > 0, "exec TTY closed before reporting its size");
         received.extend_from_slice(&buffer[..read]);
     }
@@ -3196,10 +3243,14 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
 #[test]
 fn docker_compat_rm_v_removes_only_anonymous_volumes() {
+    if !nix::unistd::geteuid().is_root() && !rootless_bwrap_available() {
+        eprintln!("skipping anonymous-volume fixture: bwrap user namespaces are unavailable");
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/rm-volumes:latest");
 
-    let create_body = r#"{"Image":"compat/rm-volumes:latest","Cmd":["true"],"Volumes":{"/data":{}}}"#;
+    let create_body = r#"{"Image":"compat/rm-volumes:latest","Cmd":["true"],"Volumes":{"/data":{}},"HostConfig":{"NetworkMode":"none"}}"#;
     let (status, body) = harness.request_bytes(
         "POST",
         "/v1.45/containers/create?name=anonymous-volume-container",

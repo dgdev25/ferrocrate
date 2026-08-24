@@ -2248,6 +2248,9 @@ mod review_tests {
         let pin = temporary.path().join("pin");
         fs::write(&pin, b"owned").unwrap();
         let owned = capture_owned_entry(root, "pin").unwrap();
+        #[cfg(target_env = "musl")]
+        fs::rename(&pin, temporary.path().join("retired-pin")).unwrap();
+        #[cfg(not(target_env = "musl"))]
         fs::remove_file(&pin).unwrap();
         fs::write(&pin, b"replacement").unwrap();
 

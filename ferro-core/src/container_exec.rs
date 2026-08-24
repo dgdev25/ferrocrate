@@ -289,8 +289,17 @@ pub fn build_nsenter_args_with_options(
         return Err(ContainerExecError::EmptyCommand);
     }
 
-    let mut args = vec!["-t".to_string(), target_pid.to_string(), "-a".to_string()];
+    let mut args = vec!["-t".to_string(), target_pid.to_string()];
+    // BusyBox's Alpine nsenter lacks util-linux's `-a` shorthand. Spell out
+    // the same namespace set there while leaving the glibc argv unchanged.
+    #[cfg(target_env = "musl")]
+    args.extend(["-m", "-u", "-i", "-n", "-p"].map(str::to_string));
+    #[cfg(not(target_env = "musl"))]
+    args.push("-a".to_string());
     if let Some(workdir) = workdir.filter(|value| !value.is_empty()) {
+        #[cfg(target_env = "musl")]
+        args.extend(["-w".to_string(), workdir.to_string()]);
+        #[cfg(not(target_env = "musl"))]
         args.extend(["--wd".to_string(), workdir.to_string()]);
     }
     if let Some(user) = user.filter(|value| !value.is_empty()) {
@@ -301,6 +310,9 @@ pub fn build_nsenter_args_with_options(
                 "exec user must be a numeric uid or uid:gid",
             )));
         }
+        #[cfg(target_env = "musl")]
+        args.extend(["-S".to_string(), uid.to_string()]);
+        #[cfg(not(target_env = "musl"))]
         args.extend(["--setuid".to_string(), uid.to_string()]);
         if let Some(gid) = gid {
             if gid.is_empty() || !gid.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -309,6 +321,9 @@ pub fn build_nsenter_args_with_options(
                     "exec user group must be numeric",
                 )));
             }
+            #[cfg(target_env = "musl")]
+            args.extend(["-G".to_string(), gid.to_string()]);
+            #[cfg(not(target_env = "musl"))]
             args.extend(["--setgid".to_string(), gid.to_string()]);
         }
     }
@@ -843,17 +858,11 @@ mod tests {
         )
         .expect("args should build");
 
-        assert_eq!(
-            args,
-            vec![
-                "-t".to_string(),
-                "1234".to_string(),
-                "-a".to_string(),
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "echo hi".to_string(),
-            ]
-        );
+        #[cfg(target_env = "musl")]
+        let expected = vec!["-t", "1234", "-m", "-u", "-i", "-n", "-p", "/bin/sh", "-c", "echo hi"];
+        #[cfg(not(target_env = "musl"))]
+        let expected = vec!["-t", "1234", "-a", "/bin/sh", "-c", "echo hi"];
+        assert_eq!(args, expected);
     }
 
     #[test]
@@ -867,13 +876,15 @@ mod tests {
         )
         .expect("exec arguments");
 
-        assert_eq!(
-            args,
-            vec![
-                "-t", "1234", "-a", "--wd", "/workspace", "--setuid", "1001",
-                "--setgid", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
-            ]
-        );
+        #[cfg(target_env = "musl")]
+        let expected = vec![
+            "-t", "1234", "-m", "-u", "-i", "-n", "-p", "-w", "/workspace", "-S", "1001", "-G", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
+        ];
+        #[cfg(not(target_env = "musl"))]
+        let expected = vec![
+            "-t", "1234", "-a", "--wd", "/workspace", "--setuid", "1001", "--setgid", "1002", "/usr/bin/env", "COLOR=blue", "/bin/sh", "-c", "id",
+        ];
+        assert_eq!(args, expected);
     }
 
     #[test]

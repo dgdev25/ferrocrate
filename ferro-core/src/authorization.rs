@@ -29,7 +29,7 @@ pub fn file_is_kernel_append_only(file: &std::fs::File) -> std::io::Result<bool>
     let mut flags: nix::libc::c_long = 0;
     // SAFETY: the ioctl only writes one machine word to the valid pointer and
     // operates on the caller's held regular-file descriptor.
-    let result = unsafe { nix::libc::ioctl(file.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) };
+    let result = unsafe { nix::libc::ioctl(file.as_raw_fd(), FS_IOC_GETFLAGS as _, &mut flags) };
     if result != 0 {
         return Err(std::io::Error::last_os_error());
     }

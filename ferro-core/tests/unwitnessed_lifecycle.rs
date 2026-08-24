@@ -9,6 +9,18 @@ use ferro_core::sqlite_container_store::SqliteContainerStore;
 use std::process::Command;
 use std::time::Duration;
 
+fn process_start_time(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat.rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 #[test]
 fn unwitnessed_lifecycle_consumes_its_durable_reservation() {
     let root = tempfile::tempdir().unwrap();
@@ -18,7 +30,7 @@ fn unwitnessed_lifecycle_consumes_its_durable_reservation() {
         let mut child = child;
         child.wait().unwrap()
     });
-    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+    let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
         "pid": pid,
@@ -31,6 +43,7 @@ fn unwitnessed_lifecycle_consumes_its_durable_reservation() {
         "mutation_generation": 1
     }))
     .unwrap();
+    record.process_start_time = Some(process_start_time(pid));
     SqliteContainerStore::open(root.path().join("containers.db"))
         .unwrap()
         .put(&record)

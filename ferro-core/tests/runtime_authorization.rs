@@ -26,12 +26,45 @@ fn runtime_test_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(target_env = "musl")]
+const HOST_BUSYBOX: &str = "/bin/busybox";
+#[cfg(not(target_env = "musl"))]
+const HOST_BUSYBOX: &str = "/usr/bin/busybox";
+
+fn provision_busybox_rootfs(rootfs: &std::path::Path) {
+    let bin = rootfs.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["busybox", "sh"] {
+        std::fs::copy(HOST_BUSYBOX, bin.join(name)).unwrap();
+    }
+    #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+    {
+        let lib = rootfs.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::copy(
+            "/lib/ld-musl-x86_64.so.1",
+            lib.join("ld-musl-x86_64.so.1"),
+        )
+        .unwrap();
+    }
+}
+
+fn live_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
 fn seed_alpine(root: &std::path::Path) {
     let store = LocalImageStore::open(root.join("images")).unwrap();
     let digest = format!("sha256:{}", "b".repeat(64));
     // Include the executable fixture so direct rootful chroot has the same
     // workload surface as the unprivileged bubblewrap path.
-    let busybox = std::fs::read("/usr/bin/busybox").expect("busybox fixture");
+    let busybox = std::fs::read(HOST_BUSYBOX).expect("busybox fixture");
     let mut layer = Vec::new();
     {
         let mut builder = Builder::new(&mut layer);
@@ -43,6 +76,21 @@ fn seed_alpine(root: &std::path::Path) {
             builder
                 .append_data(&mut header, path, Cursor::new(&busybox))
                 .expect("append executable fixture");
+        }
+        #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+        {
+            let loader = std::fs::read("/lib/ld-musl-x86_64.so.1").expect("musl loader fixture");
+            let mut loader_header = Header::new_gnu();
+            loader_header.set_size(loader.len() as u64);
+            loader_header.set_mode(0o755);
+            loader_header.set_cksum();
+            builder
+                .append_data(
+                    &mut loader_header,
+                    "lib/ld-musl-x86_64.so.1",
+                    Cursor::new(loader),
+                )
+                .expect("append musl loader fixture");
         }
         builder.finish().expect("finish executable layer");
     }
@@ -154,6 +202,7 @@ fn assert_abort_reopen_matrix(action: &str) {
                 "id":id,"pid":spawned.id(),"image":"example.invalid/app:latest","command":["true"],
                 "created_at_unix":1,"stdout_path":"","stderr_path":"","status": if action == "remove" { "stopped" } else { "running" }
             })).unwrap();
+            record.process_start_time = live_process_start_time(spawned.id());
             if action == "remove" {
                 let compact = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
                     .unwrap()
@@ -349,12 +398,13 @@ fn assert_post_effect_unknown_reconciles(action: &str) {
         .spawn()
         .unwrap();
     let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
-    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+    let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":id, "pid":child.id(), "image":"example.invalid/app:latest", "command":["true"],
         "created_at_unix":1, "stdout_path":"", "stderr_path":"",
         "status": if action == "resume" { "paused" } else { "running" }
     }))
     .unwrap();
+    record.process_start_time = live_process_start_time(child.id());
     store.put(&record).unwrap();
     drop(store);
     let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
@@ -454,12 +504,13 @@ fn exec_exposes_every_durable_crash_boundary_in_order() {
         .unwrap(),
     );
     let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
-    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+    let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id":"00112233445566778899aabbccddeeff", "pid":std::process::id(),
         "image":"example.invalid/app:latest", "command":["true"],
         "created_at_unix":1, "stdout_path":"", "stderr_path":"", "status":"running"
     }))
     .unwrap();
+    record.process_start_time = live_process_start_time(std::process::id());
     store.put(&record).unwrap();
     drop(store);
     let hook = Arc::new(RecordingPhaseHook::default());
@@ -656,15 +707,14 @@ fn every_lifecycle_method_denies_once_before_executor_side_effects() {
                 "status": if action == "resume" { "paused" } else { "running" }
             }))
             .unwrap();
+            record.process_start_time = live_process_start_time(std::process::id());
             record.mutation_generation = 1;
             store.put(&record).unwrap();
             drop(store);
             if action == "restart" {
-                let bin = root.path().join("containers").join(id).join("rootfs/bin");
-                std::fs::create_dir_all(&bin).unwrap();
-                for name in ["busybox", "sh"] {
-                    std::fs::copy("/usr/bin/busybox", bin.join(name)).unwrap();
-                }
+                provision_busybox_rootfs(
+                    &root.path().join("containers").join(id).join("rootfs"),
+                );
             }
         }
         let runtime =
@@ -793,6 +843,7 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
                 "stderr_path":root.path().join("containers").join(id).join("stderr.log").to_string_lossy(),
                 "status": if action == "resume" { "paused" } else if action == "restart" || action == "remove" { "stopped" } else { "running" }
             })).unwrap();
+            record.process_start_time = live_process_start_time(pid);
             if action == "remove" {
                 let compact = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
                     .unwrap()
@@ -815,11 +866,9 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             store.put(&record).unwrap();
             drop(store);
             if action == "restart" {
-                let bin = root.path().join("containers").join(id).join("rootfs/bin");
-                std::fs::create_dir_all(&bin).unwrap();
-                for name in ["busybox", "sh"] {
-                    std::fs::copy("/usr/bin/busybox", bin.join(name)).unwrap();
-                }
+                provision_busybox_rootfs(
+                    &root.path().join("containers").join(id).join("rootfs"),
+                );
             }
         }
         let runtime =

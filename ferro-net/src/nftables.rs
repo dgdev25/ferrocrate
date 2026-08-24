@@ -328,6 +328,7 @@ table ip nat {
         assert!(build_nft_add_rule_cmd(&rule).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn rule_application_and_deletion_fail_closed_without_root_privilege() {
         if nix::unistd::geteuid().as_raw() == 0 {

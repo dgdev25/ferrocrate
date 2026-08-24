@@ -197,6 +197,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn rule_application_and_deletion_fail_closed_without_root_privilege() {
         if nix::unistd::geteuid().as_raw() == 0 {

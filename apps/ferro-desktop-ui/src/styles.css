@@ -42,6 +42,10 @@ button:disabled { cursor: not-allowed; opacity: .5; transform: none !important; 
 .daemon-pill { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 12px; font-weight: 650; }
 .daemon-pill.is-running { color: var(--ok); } .daemon-pill.is-stopped { color: var(--error); }
 .daemon-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 15%, transparent); }
+.registry-account { min-height: 28px; max-width: 160px; display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; border: 1px solid var(--ink-border); border-radius: 99px; color: var(--ink); background: var(--surface); font-size: 12px; font-weight: 650; cursor: pointer; transition: color var(--transition), border-color var(--transition), background var(--transition); }
+.registry-account:hover { color: var(--brand); border-color: var(--brand); background: var(--brand-light); }
+.registry-account > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.registry-avatar { width: 20px; height: 20px; flex: 0 0 20px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--brand); font-size: 10px; font-weight: 750; }
 
 .workspace { flex: 1; min-height: 0; display: flex; }
 .sidebar { width: 200px; flex: 0 0 200px; display: flex; flex-direction: column; gap: 2px; padding: 14px 10px; border-right: 1px solid var(--ink-border); background: var(--surface); }

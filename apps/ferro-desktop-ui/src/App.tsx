@@ -27,7 +27,7 @@ import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { buildStepText } from "./imageBuild.mjs";
 import { ImageEmptyState, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
-import { registryStatusText } from "./registryAuth.mjs";
+import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -950,6 +950,7 @@ function App(): JSX.Element {
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
+  const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
     images: "Images",
@@ -982,6 +983,7 @@ function App(): JSX.Element {
         <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
           <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
         </div>
+        <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
       </header>
 
       <div className="workspace">
@@ -1150,7 +1152,6 @@ function App(): JSX.Element {
                       <button onClick={() => void refresh()} disabled={loading}>Refresh images</button>
                       <button onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune unused images</button>
                       <button onClick={() => setBuildImageDialogOpen(true)} disabled={runtimeBusy}>Build image</button>
-                      <button onClick={() => setRegistryDialogOpen(true)} disabled={runtimeBusy}>Registry access</button>
                     </div>
                   </details>
                 </div>
@@ -1208,7 +1209,7 @@ function App(): JSX.Element {
       ) : null}
 
       {registryDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Registry server</span><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label><span>Username</span><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label><span>Password or token</span><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Registry server</span><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label><span>Username</span><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label><span>Password or token</span><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatus.logged_in ? `Signed in to ${registryStatus.registry} as ${registryAccountName}` : `Not signed in to ${registryStatus.registry}` : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>
       ) : null}
     </div>
   );

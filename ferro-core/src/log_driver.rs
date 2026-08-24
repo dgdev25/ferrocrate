@@ -198,7 +198,7 @@ pub(crate) fn capture_stream(
         loop {
             let count = match reader.read(&mut buffer) {
                 Ok(count) => count,
-                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => 0,
+                Err(error) if is_pty_end_of_stream(&error) => 0,
                 Err(error) => return Err(error),
             };
             if count == 0 {
@@ -225,6 +225,16 @@ pub(crate) fn capture_stream(
     })();
     let finish = capture.finish();
     result.and(finish)
+}
+
+#[cfg(unix)]
+fn is_pty_end_of_stream(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(nix::libc::EIO)
+}
+
+#[cfg(not(unix))]
+fn is_pty_end_of_stream(_error: &io::Error) -> bool {
+    false
 }
 
 #[cfg(feature = "journald")]

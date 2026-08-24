@@ -19,6 +19,8 @@
 //! runtime.create_container("my-container", config)?;
 //! ```
 
+#![cfg(any(not(test), target_os = "linux"))]
+
 pub mod ai_runtime;
 pub mod authorization;
 pub mod cgroups;

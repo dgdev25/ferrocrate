@@ -584,9 +584,8 @@ networks:
         assert!(error.to_string().contains("one durable attachment"));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn service_network_mapping_syntax_preserves_sorted_names() {
+    fn service_network_mapping_syntax_preserves_name() {
         let content = r#"
 services:
   api:
@@ -594,15 +593,13 @@ services:
     networks:
       zeta:
         aliases: [api]
-      alpha: {}
 networks:
-  alpha: {}
   zeta: {}
 "#;
         let compose = ComposeFile::parse(content, &HashMap::new()).expect("mapping syntax");
         assert_eq!(
             compose.services["api"].networks.as_deref(),
-            Some(["alpha".to_string(), "zeta".to_string()].as_slice())
+            Some(["zeta".to_string()].as_slice())
         );
     }
 

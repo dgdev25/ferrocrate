@@ -3275,6 +3275,200 @@ fn dispatch_emergency(command: &EmergencyCommands, runtime_dir: &Path) -> Result
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+const ENGINE_LOCK_FILE: &str = "engine.lock";
+#[cfg(target_os = "linux")]
+const ENGINE_OWNER_FILE: &str = "engine-owner.json";
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize, Deserialize)]
+struct EngineOwnerRecord {
+    schema_version: u32,
+    pid: u32,
+    runtime_root: PathBuf,
+    socket: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct EngineLockGuard {
+    _file: std::fs::File,
+    owner_record: Option<PathBuf>,
+    runtime_root: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[allow(deprecated)]
+impl EngineLockGuard {
+    fn try_acquire(runtime_dir: &Path) -> Result<Option<Self>, String> {
+        use nix::errno::Errno;
+        use nix::fcntl::{flock, FlockArg};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::create_dir_all(runtime_dir)
+            .map_err(|error| format!("engine: create runtime directory: {error}"))?;
+        let runtime_root = runtime_dir
+            .canonicalize()
+            .map_err(|error| format!("engine: canonicalize runtime directory: {error}"))?;
+        let lock_path = runtime_root.join(ENGINE_LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|error| format!("engine: open owner lock: {error}"))?;
+        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Ok(()) => {
+                let owner_path = runtime_root.join(ENGINE_OWNER_FILE);
+                match std::fs::remove_file(&owner_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("engine: remove stale owner record: {error}"));
+                    }
+                }
+                Ok(Some(Self {
+                    _file: file,
+                    owner_record: None,
+                    runtime_root,
+                }))
+            }
+            Err(Errno::EWOULDBLOCK) => Ok(None),
+            Err(error) => Err(format!("engine: acquire owner lock: {error}")),
+        }
+    }
+
+    fn publish_daemon_owner(&mut self, socket: &Path) -> Result<(), String> {
+        if !socket.is_absolute() {
+            return Err("daemon: socket path must be absolute".to_string());
+        }
+        let metadata = std::fs::symlink_metadata(socket)
+            .map_err(|error| format!("daemon: inspect socket before publication: {error}"))?;
+        if !metadata.file_type().is_socket() {
+            return Err(format!(
+                "daemon: owner endpoint is not a Unix socket: {}",
+                socket.display()
+            ));
+        }
+        let record = EngineOwnerRecord {
+            schema_version: 1,
+            pid: std::process::id(),
+            runtime_root: self.runtime_root.clone(),
+            socket: socket.to_path_buf(),
+        };
+        let path = self.runtime_root.join(ENGINE_OWNER_FILE);
+        write_engine_owner_record(&path, &record)?;
+        self.owner_record = Some(path);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EngineLockGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.owner_record {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum EngineAccess {
+    Direct(EngineLockGuard),
+    Delegate(PathBuf),
+}
+
+#[cfg(target_os = "linux")]
+impl EngineAccess {
+    fn select(runtime_dir: &Path) -> Result<Self, String> {
+        if let Some(owner) = EngineLockGuard::try_acquire(runtime_dir)? {
+            return Ok(Self::Direct(owner));
+        }
+
+        let runtime_root = runtime_dir
+            .canonicalize()
+            .map_err(|error| format!("engine: canonicalize owned runtime directory: {error}"))?;
+        let owner_path = runtime_root.join(ENGINE_OWNER_FILE);
+        let bytes = std::fs::read(&owner_path).map_err(|error| {
+            format!(
+                "engine: owner lock is held but {} is unreadable: {error}",
+                owner_path.display()
+            )
+        })?;
+        let record: EngineOwnerRecord = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "engine: owner lock is held but {} is invalid: {error}",
+                owner_path.display()
+            )
+        })?;
+        if record.schema_version != 1 || record.runtime_root != runtime_root {
+            return Err("engine: active owner record does not match this runtime root".to_string());
+        }
+        let metadata = std::fs::symlink_metadata(&record.socket).map_err(|error| {
+            format!(
+                "engine: active owner socket {} is unavailable: {error}",
+                record.socket.display()
+            )
+        })?;
+        if !metadata.file_type().is_socket() {
+            return Err(format!(
+                "engine: active owner endpoint is not a Unix socket: {}",
+                record.socket.display()
+            ));
+        }
+        UnixStream::connect(&record.socket).map_err(|error| {
+            format!(
+                "engine: active owner socket {} is not connectable: {error}",
+                record.socket.display()
+            )
+        })?;
+        Ok(Self::Delegate(record.socket))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_engine_owner_record(path: &Path, record: &EngineOwnerRecord) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "engine: owner record has no parent directory".to_string())?;
+    let temporary = parent.join(format!(
+        ".engine-owner.{}.{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| format!("engine: create owner record: {error}"))?;
+        let bytes = serde_json::to_vec_pretty(record)
+            .map_err(|error| format!("engine: encode owner record: {error}"))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("engine: persist owner record: {error}"))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("engine: publish owner record: {error}"))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("engine: persist owner directory: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn dispatch(command: Commands) -> Result<(), String> {
     // Handle platform-agnostic commands that don't need runtime
     if let Commands::AiAudit {
@@ -3328,26 +3522,38 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Emergency { command } => return dispatch_emergency(command, &runtime_dir),
             _ => {}
         }
-        if let Some(result) = dispatch_remote_context(&command) {
-            return result;
-        }
-        authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
-        match &command {
-            Commands::Policy { command } => return dispatch_policy(command, &runtime_dir),
-            Commands::Witness { command } => return dispatch_witness(command, &runtime_dir),
-            _ => {}
-        }
 
-        // Handle Daemon command
+        // The daemon must become the exclusive engine owner before any
+        // runtime store is opened or reconciled.
         if let Commands::Daemon {
             ref socket,
             docker_compat,
             ref metrics_addr,
         } = command
         {
-            let image_store =
-                LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?;
-            return run_daemon(&image_store, socket, docker_compat, metrics_addr.as_deref());
+            return run_daemon(socket, docker_compat, metrics_addr.as_deref());
+        }
+
+        // An explicitly selected remote context takes precedence over the
+        // automatically discovered owner of the local runtime root.
+        if let Some(result) = dispatch_remote_context(&command) {
+            return result;
+        }
+
+        let _engine_owner = match EngineAccess::select(&runtime_dir)? {
+            EngineAccess::Direct(owner) => owner,
+            EngineAccess::Delegate(endpoint) => {
+                return dispatch_remote_endpoint(&command, &endpoint).unwrap_or_else(|| {
+                    Err("engine: command cannot be delegated to the active daemon".to_string())
+                });
+            }
+        };
+
+        authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
+        match &command {
+            Commands::Policy { command } => return dispatch_policy(command, &runtime_dir),
+            Commands::Witness { command } => return dispatch_witness(command, &runtime_dir),
+            _ => {}
         }
 
         ensure_context_routing_available()?;
@@ -5934,8 +6140,17 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         Ok(endpoint) => endpoint,
         Err(error) => return Some(Err(error)),
     }?;
+    dispatch_remote_endpoint(command, Path::new(&endpoint))
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_remote_endpoint(command: &Commands, endpoint: &Path) -> Option<Result<(), String>> {
+    let endpoint = match endpoint.to_str() {
+        Some(endpoint) => endpoint,
+        None => return Some(Err("remote context socket path is not valid UTF-8".to_string())),
+    };
     let request_with_body = |method: &str, path: String, payload: Option<Vec<u8>>| {
-        remote_docker_request(&endpoint, method, &path, payload.as_deref()).and_then(
+        remote_docker_request(endpoint, method, &path, payload.as_deref()).and_then(
             |(status, body)| {
                 if (200..300).contains(&status) {
                     Ok(body)
@@ -14155,7 +14370,6 @@ impl<T> Pipe for T {
 
 #[cfg(target_os = "linux")]
 fn run_daemon(
-    store: &LocalImageStore,
     socket: &str,
     docker_compat: bool,
     metrics_addr: Option<&str>,
@@ -14165,6 +14379,9 @@ fn run_daemon(
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
     }
+    let runtime_dir = runtime_dir();
+    let mut engine_owner = EngineLockGuard::try_acquire(&runtime_dir)?
+        .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
     // A daemon owns the request thread independently of each workload. Keep
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
@@ -14192,12 +14409,14 @@ fn run_daemon(
     let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
-    let runtime_dir = runtime_dir();
+    engine_owner.publish_daemon_owner(socket_path)?;
     let runtime_dir = Arc::new(runtime_dir);
     ContainerRuntime::new(runtime_dir.as_ref())
         .and_then(|runtime| runtime.reconcile_daemon_boot())
         .map_err(|error| format!("daemon boot reconciliation: {error}"))?;
-    let store = Arc::new(store.clone());
+    let store = Arc::new(
+        LocalImageStore::open(runtime_dir.join("images")).map_err(|err| err.to_string())?,
+    );
     let volume_store = Arc::new(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
     );
@@ -19294,11 +19513,61 @@ mod tests {
         validate_wait_condition, AiCommands, Cli, Commands, ComposeCommands, ConfigCommands,
         ContextCommands, DockerCompatState, DockerCreateSpec, DockerEvent, DockerEventStore,
         DockerExecCreateRequest, DockerHealthSpec, MigrateCommands, NetworkCommands, RvfCommands,
-        VolumeCommands, WitnessCommands,
+        VolumeCommands, WitnessCommands, EngineAccess, EngineLockGuard,
     };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
     use ferro_core::image_store::LocalImageStore;
+
+    #[test]
+    fn held_daemon_owner_lock_routes_to_published_socket() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let socket = runtime.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind daemon socket");
+        let mut daemon = EngineLockGuard::try_acquire(runtime.path())
+            .expect("acquire daemon owner lock")
+            .expect("unowned runtime");
+        daemon
+            .publish_daemon_owner(&socket)
+            .expect("publish daemon owner");
+
+        match EngineAccess::select(runtime.path()).expect("select engine access") {
+            EngineAccess::Delegate(endpoint) => assert_eq!(endpoint, socket),
+            EngineAccess::Direct(_) => panic!("held daemon owner must be delegated"),
+        }
+
+        assert!(runtime.path().join("engine-owner.json").is_file());
+        drop(daemon);
+        assert!(!runtime.path().join("engine-owner.json").exists());
+        drop(listener);
+    }
+
+    #[test]
+    fn unlocked_stale_owner_record_permits_direct_ownership() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
+        std::fs::write(
+            runtime.path().join("engine-owner.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "pid": u32::MAX,
+                "runtime_root": canonical_runtime,
+                "socket": runtime.path().join("missing.sock"),
+            }))
+            .expect("owner record JSON"),
+        )
+        .expect("write stale owner record");
+
+        let direct = EngineAccess::select(runtime.path()).expect("select direct engine access");
+        assert!(matches!(direct, EngineAccess::Direct(_)));
+        assert!(
+            !runtime.path().join("engine-owner.json").exists(),
+            "direct ownership must clear stale daemon metadata"
+        );
+        let competing = EngineLockGuard::try_acquire(runtime.path())
+            .expect("probe direct owner lock");
+        assert!(competing.is_none(), "direct access must retain the owner lock");
+    }
 
     #[test]
     fn volume_mount_usage_reports_container_destination_and_access_mode() {

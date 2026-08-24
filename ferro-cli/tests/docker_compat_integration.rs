@@ -372,6 +372,77 @@ fn docker_compat_routes_support_version_prefix() {
 }
 
 #[test]
+fn native_cli_automatically_delegates_to_active_daemon_owner() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=native-delegation HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={response}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run native CLI against daemon-owned runtime");
+    assert!(
+        output.status.success(),
+        "native CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("native container list JSON");
+    assert!(
+        containers
+            .iter()
+            .any(|container| container["Names"][0] == "/native-delegation"),
+        "native CLI did not delegate to daemon: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
+    std::fs::write(
+        runtime.path().join("engine-owner.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "pid": u32::MAX,
+            "runtime_root": canonical_runtime,
+            "socket": runtime.path().join("missing.sock"),
+        }))
+        .expect("owner record JSON"),
+    )
+    .expect("write stale owner record");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run native CLI with stale owner record");
+    assert!(
+        output.status.success(),
+        "stale owner record blocked direct ownership: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("container list JSON"),
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn docker_container_list_projects_identity_labels_ports_networks_and_mounts() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/list-wire:latest");

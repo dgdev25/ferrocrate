@@ -5,16 +5,17 @@
 Ferrocrate is a container engine you use exactly like Docker — same commands,
 same Dockerfiles, same images — implemented from scratch in Rust as a single
 binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 35 scenarios on every
-merge, and all 35 pass. Images are standard OCI, so anything Ferrocrate builds
-runs under Docker, podman, or Kubernetes, and the other way round.
+conformance suite drives a real Docker client through 47 classic-builder
+scenarios, and all 47 pass. Images are standard OCI, so anything Ferrocrate
+builds runs under Docker, podman, or Kubernetes, and the other way round.
 
 ## ✨ Highlights
 
-- **Docker-compatible, verified** — 35/35 conformance against the real
-  `docker` client: lifecycle, build, exec, logs, volumes, networks, events.
-- **Fast** — faster than Docker on 10 of 11 measured operations, most by
-  50–97% (see the benchmark below, including the one loss).
+- **Docker-compatible, verified** — 47/47 classic-builder conformance against
+  the real `docker` client, including multi-network connect/disconnect and
+  non-readable log-driver behavior.
+- **Fast** — the dated benchmark register records host-local paired results;
+  Round 9 closes the previously recorded attached-run loss.
 - **One binary** — daemon, native CLI, Compose, and a Kubernetes CRI endpoint
   in a single Rust executable. No shim stack.
 - **Safety engineering** — destructive operations verify process identity by
@@ -37,8 +38,9 @@ Build a project the way you always have — a Dockerfile and one command:
 ./target/release/ferro-cli run myapp:1.0
 ```
 
-Or point the real Docker CLI at Ferrocrate's daemon (classic build protocol;
-BuildKit is on the roadmap):
+Or point the real Docker CLI at Ferrocrate's daemon. The classic build protocol
+is supported; BuildKit session builds fail cleanly with an actionable
+`DOCKER_BUILDKIT=0` message while the protocol work remains unimplemented:
 
 ```bash
 export DOCKER_HOST=unix:///run/ferrocrate/docker.sock
@@ -70,12 +72,12 @@ speed comes from.
 ## 📊 How it performs
 
 <p align="center">
-  <img src="docs/assets/benchmark.svg" alt="Median seconds per operation: ferrocrate beats Docker on start, stop, exec, ps and cached build by 75 to 99 percent; Docker wins attached run-to-exit" width="100%">
+  <img src="docs/assets/benchmark.svg" alt="Dated host-local Docker and Ferrocrate operation medians; see the benchmark register for the current attached-run result" width="100%">
 </p>
 
-Ferrocrate wins 10 of the 11 measured operations. The honest loss: attached
-run-to-exit (`docker run` without `-d`) takes 0.364 s to Docker's 0.164 s —
-closing that gap is an open work order. Method, host details, and raw numbers:
+The Round 9 paired attached-run measurement records a 0.033192 s Ferrocrate
+median against Docker's 0.169436 s median on the qualification host. Method,
+host details, and raw numbers:
 [`docs/benchmarks/`](docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md) and
 the [benchmark register](docs/evidence/performance/benchmark-register.md).
 
@@ -98,11 +100,12 @@ can be developed and unit-tested there.
 
 | Platform | Status |
 |---|---|
-| Ubuntu 26.04 / 24.04, Debian 12, Fedora 42, Rocky 9 (x86_64, rootful) | Qualified with dated evidence per distro |
-| Rootless mode | Partial: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified with the restriction active; Rocky is gated on `SO_PEERPIDFD` |
+| Ubuntu 26.04 / 24.04, Debian 12, Fedora 42, Rocky 9, Alpine 3.22 (x86_64, rootful) | Qualified with dated evidence per distro |
+| Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
+| Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified with the restriction active; hosts without `SO_PEERPIDFD` fail closed |
 | Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |
 | macOS (Sonoma, Tahoe) | Builds and full test suite green — development platform, not a container host |
-| Ubuntu 20.04 (HWE 5.15), Alpine/musl | Qualification in progress; stock 20.04 kernel 5.4 is below the enforced 5.10 minimum |
+| Ubuntu 20.04 (HWE kernel 5.15) | Host-blocked: the kernel lacks `SO_PEERPIDFD`; stock kernel 5.4 is also below the enforced 5.10 minimum |
 
 The authoritative support contract is
 [`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md) — every claim there links
@@ -112,9 +115,9 @@ experimental or unsupported, the matrix says so explicitly.
 ## 🩺 Status
 
 Ferrocrate targets Linux-first local development, not (yet) a universal Docker
-replacement. Feature coverage against Docker's surface is measured at ~78%
-overall — strongest in lifecycle, images, and build; thinnest in multi-network
-and BuildKit, which are the current hard work orders
+replacement. Coverage is strongest in lifecycle, images, and classic builds.
+Multi-network containers and pluggable log drivers landed in Round 9; BuildKit remains an
+explicit session-protocol boundary with a sized 17–29 engineering-day design
 ([`docs/remediation/ROUND-9-HARD-ITEMS.md`](docs/remediation/ROUND-9-HARD-ITEMS.md)).
 AI-assisted restart/resource signals exist but are local, bounded, and off
 unless enabled (`FERROCRATE_AI=0` disables everything; automatic actions
@@ -125,7 +128,7 @@ need a separate operator gate).
 ```bash
 cargo test --workspace          # full suite
 cargo test -p ferro-core --lib  # runtime core
-bash scripts/docker-client-conformance.sh   # 35-scenario real-client gate
+bash scripts/docker-client-conformance.sh   # 47-scenario classic-builder gate
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and

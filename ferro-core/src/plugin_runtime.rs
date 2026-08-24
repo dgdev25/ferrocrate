@@ -239,7 +239,7 @@ fn plugin_command(
     manifest: &PluginManifest,
     args: &[String],
 ) -> Result<Command, PluginExecutionError> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         // `pre_exec` cannot be used here because ferrocrate forbids unsafe
         // code. util-linux's prlimit provides an RLIMIT_AS boundary without
@@ -260,11 +260,12 @@ fn plugin_command(
         Ok(command)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
-        let mut command = Command::new(&manifest.entrypoint);
-        command.args(args);
-        Ok(command)
+        let _ = (manifest, args);
+        Err(PluginExecutionError::ResourceLimits(
+            "unsupported platform: plugin resource limits require Linux".to_string(),
+        ))
     }
 }
 

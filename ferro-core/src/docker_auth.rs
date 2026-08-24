@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-#[cfg(target_os = "linux")]
 use tracing::warn;
 
 // SEC-02: Scoped environment variable guard for safe test environment manipulation

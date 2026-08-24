@@ -102,6 +102,7 @@ enum DesktopAction {
     StartContainer,
     StopContainer,
     RemoveContainer,
+    ContainerPrune,
     ImagePrune,
 }
 
@@ -1549,8 +1550,8 @@ fn query_entitlement_from_session(
 #[tauri::command]
 fn get_desktop_snapshot() -> DesktopSnapshot {
     let runtime = run_command("ferro-desktop", &["vm", "status", "--json"]);
-    let containers = run_command("ferrocrate", &["ps"]);
-    let images = run_command("ferrocrate", &["images"]);
+    let containers = run_command("ferrocrate", &["containers", "--all", "--format", "json"]);
+    let images = run_command("ferrocrate", &["images", "--format", "json"]);
 
     DesktopSnapshot {
         runtime,
@@ -2080,6 +2081,7 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
             }
             run_command("ferrocrate", &["rm", &target])
         }
+        DesktopAction::ContainerPrune => run_command("ferrocrate", &["container-prune"]),
         DesktopAction::ImagePrune => run_command("ferrocrate", &["image-prune"]),
     }
 }

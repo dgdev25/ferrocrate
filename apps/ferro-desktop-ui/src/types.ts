@@ -19,6 +19,7 @@ export type DesktopAction =
   | "start_container"
   | "stop_container"
   | "remove_container"
+  | "container_prune"
   | "image_prune";
 
 export type VolumeAction = "create" | "remove" | "prune";

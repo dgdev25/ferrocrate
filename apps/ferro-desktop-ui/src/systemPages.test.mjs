@@ -13,6 +13,17 @@ function buttons(element, found = []) {
   return found;
 }
 
+function findElement(element, type) {
+  if (!element || typeof element !== "object") return null;
+  if (element.type === type) return element;
+  if (typeof element.type === "function") return findElement(element.type(element.props), type);
+  for (const child of [element.props?.children].flat(Infinity)) {
+    const match = findElement(child, type);
+    if (match) return match;
+  }
+  return null;
+}
+
 test("Doctor is one empty state before a run and one checks table afterward", () => {
   assert.equal(typeof systemPages.DoctorPage, "function");
   const empty = renderToStaticMarkup(createElement(systemPages.DoctorPage, {
@@ -40,6 +51,55 @@ test("Doctor is one empty state before a run and one checks table afterward", ()
   assert.doesNotMatch(populated, /<input/);
 });
 
+test("Doctor results table accepts a focus ref and is programmatically focusable", () => {
+  const resultsTableRef = { current: null };
+  const page = systemPages.DoctorPage({
+    result: { ok: true, raw: { checks: [] } },
+    resultsTableRef,
+    onRun: () => {},
+    onStart: () => {},
+    onStop: () => {},
+  });
+
+  const table = findElement(page, "table");
+  assert.ok(table);
+  assert.equal(table.ref, resultsTableRef);
+  assert.equal(table.props.tabIndex, -1);
+});
+
+test("completed Doctor runs close before scheduling results focus", async () => {
+  const events = [];
+  const result = { ok: true, raw: { checks: [] } };
+
+  await systemPages.completeDoctorRun({
+    execute: async () => { events.push("execute"); return result; },
+    refresh: async () => { events.push("refresh"); },
+    setResult: (value) => { events.push(["result", value]); },
+    setError: (error) => { events.push(["error", error]); },
+    close: () => { events.push("close"); },
+    scheduleResultsFocus: () => { events.push("focus"); },
+    finish: () => { events.push("finish"); },
+  });
+
+  assert.deepEqual(events, ["execute", ["result", result], "refresh", "close", "focus", "finish"]);
+});
+
+test("failed Doctor runs close without scheduling results focus", async () => {
+  const events = [];
+
+  await systemPages.completeDoctorRun({
+    execute: async () => { events.push("execute"); throw new Error("doctor failed"); },
+    refresh: async () => { events.push("refresh"); },
+    setResult: (value) => { events.push(["result", value]); },
+    setError: (error) => { events.push(["error", error]); },
+    close: () => { events.push("close"); },
+    scheduleResultsFocus: () => { events.push("focus"); },
+    finish: () => { events.push("finish"); },
+  });
+
+  assert.deepEqual(events, ["execute", ["error", "Error: doctor failed"], "close", "finish"]);
+});
+
 test("Settings is a single capability table whose forms stay behind row actions", () => {
   assert.equal(typeof systemPages.SettingsPage, "function");
   const opened = [];
@@ -56,4 +116,15 @@ test("Settings is a single capability table whose forms stay behind row actions"
   assert.doesNotMatch(markup, /<input|<textarea/);
   for (const button of buttons(page)) button.props.onClick?.();
   assert.deepEqual(opened, ["account", "install"]);
+});
+
+test("native Linux settings show installed runtime truth and omit VM bootstrap", () => {
+  const markup = renderToStaticMarkup(createElement(systemPages.SettingsPage, {
+    authState: { session: { token_present: false } },
+    nativeLinux: true,
+    daemonStatus: { state: "running" },
+  }));
+  assert.match(markup, /Local Ferrocrate runtime/);
+  assert.match(markup, />Running</);
+  assert.doesNotMatch(markup, /Install and bootstrap|virtual machine/i);
 });

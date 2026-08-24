@@ -189,7 +189,7 @@ impl RecoveryRecipe {
                 WitnessResourceKind::Network,
                 WitnessAction::NetworkDelete
             ) | (
-                WitnessAction::NetworkAttach,
+                WitnessAction::NetworkAttach | WitnessAction::NetworkDetach,
                 WitnessResourceKind::Network,
                 WitnessAction::NetworkDetach
             ) | (

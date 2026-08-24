@@ -776,6 +776,8 @@ fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationE
         Action::VolumeRestore => WitnessAction::VolumeRestore,
         Action::NetworkCreate => WitnessAction::NetworkCreate,
         Action::NetworkDelete => WitnessAction::NetworkDelete,
+        Action::NetworkAttach => WitnessAction::NetworkAttach,
+        Action::NetworkDetach => WitnessAction::NetworkDetach,
         Action::CheckpointPublish => WitnessAction::CheckpointPublish,
         Action::CheckpointRecover => WitnessAction::CheckpointRecover,
         Action::KeyRotate => WitnessAction::KeyRotate,
@@ -811,6 +813,7 @@ fn recovery_action(action: WitnessAction) -> WitnessAction {
         // without ever deleting or replaying the volume.
         WitnessAction::VolumeBackup => WitnessAction::VolumeBackup,
         WitnessAction::NetworkCreate | WitnessAction::NetworkDelete => WitnessAction::NetworkDelete,
+        WitnessAction::NetworkAttach | WitnessAction::NetworkDetach => WitnessAction::NetworkDetach,
         WitnessAction::RootlessMapping => WitnessAction::RootlessMapping,
         WitnessAction::CheckpointPublish | WitnessAction::CheckpointRecover => {
             WitnessAction::CheckpointRecover
@@ -1120,6 +1123,20 @@ mod tests {
             recovery_action(WitnessAction::VolumeRestore),
             WitnessAction::VolumeDelete
         );
+    }
+
+    #[test]
+    fn network_endpoint_mutations_have_surface_witness_bindings() {
+        for (action, expected) in [
+            (Action::NetworkAttach, WitnessAction::NetworkAttach),
+            (Action::NetworkDetach, WitnessAction::NetworkDetach),
+        ] {
+            assert_eq!(witness_action(action).expect("endpoint witness action"), expected);
+            let permit = SurfaceAuthorization::compatibility()
+                .authorize_named(&origin(), action, ResourceKind::Network, "backend", 2)
+                .expect("endpoint surface authorization");
+            permit.finish(true).expect("complete endpoint permit");
+        }
     }
 
     #[test]

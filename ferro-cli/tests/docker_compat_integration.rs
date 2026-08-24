@@ -380,6 +380,23 @@ fn docker_compat_routes_support_version_prefix() {
         if route.ends_with("/_ping") || route == "/_ping" {
             assert_eq!(body, "OK\n", "route {route} should return ping body");
         }
+        if route.ends_with("/info") || route == "/info" {
+            let info: serde_json::Value =
+                serde_json::from_str(&body).expect("info response is JSON");
+            let is_root = nix::unistd::Uid::effective().is_root();
+            assert_eq!(
+                info["SecurityOptions"]
+                    .as_array()
+                    .is_some_and(|options| options.iter().any(|value| value == "name=rootless")),
+                !is_root,
+                "SecurityOptions must report daemon privilege: {info}"
+            );
+            assert_eq!(
+                info["FerrocrateCapabilities"]["CustomNetworks"],
+                is_root,
+                "custom network capability must match daemon privilege: {info}"
+            );
+        }
     }
 }
 
@@ -3025,6 +3042,26 @@ fn docker_compat_buildkit_routes_name_the_supported_classic_mode() {
         let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
         assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
     }
+}
+
+#[test]
+fn docker_compat_buildx_bootstrap_names_the_supported_classic_mode() {
+    const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
+    let harness = DaemonHarness::spawn();
+    let body = serde_json::json!({
+        "Image": "moby/buildkit:buildx-stable-1",
+        "HostConfig": {"Init": true, "Privileged": true}
+    })
+    .to_string();
+    let request = format!(
+        "POST /containers/create?name=buildx_buildkit_default HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 501, "buildx bootstrap response={response}");
+    let payload: serde_json::Value =
+        serde_json::from_str(&response).expect("BuildKit compatibility JSON");
+    assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
 }
 
 /// Decode a complete Docker multiplexed raw stream into (stream id, payload)

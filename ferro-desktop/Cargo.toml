@@ -22,6 +22,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Pipes",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

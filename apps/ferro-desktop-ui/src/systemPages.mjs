@@ -1,6 +1,22 @@
 import { createElement } from "react";
 import { Icon } from "./iconSystem.mjs";
 
+export async function completeDoctorRun({ execute, refresh, setResult, setError, close, scheduleResultsFocus, finish }) {
+  let receivedResult = false;
+  try {
+    const result = await execute();
+    setResult(result);
+    receivedResult = true;
+    await refresh();
+  } catch (error) {
+    setError(String(error));
+  } finally {
+    close();
+    if (receivedResult) scheduleResultsFocus();
+    finish();
+  }
+}
+
 function MoreMenu({ label, actions }) {
   return createElement("details", { className: "image-toolbar-overflow" },
     createElement("summary", { "aria-label": label }, createElement(Icon, { name: "more", size: 16 })),
@@ -14,7 +30,7 @@ function MoreMenu({ label, actions }) {
   );
 }
 
-export function DoctorPage({ result, busy = false, onRun, onStart, onStop }) {
+export function DoctorPage({ result, busy = false, resultsTableRef, onRun, onStart, onStop }) {
   if (!result) {
     return createElement("section", { className: "panel empty-page-panel", "aria-label": "Doctor" },
       createElement("div", { className: "empty-state resource-empty-state" },
@@ -34,7 +50,7 @@ export function DoctorPage({ result, busy = false, onRun, onStart, onStop }) {
         { label: "Stop Ferrocrate", icon: "stop", onClick: onStop, disabled: busy },
       ] }),
     ),
-    createElement("div", { className: "table-scroll" }, createElement("table", null,
+    createElement("div", { className: "table-scroll" }, createElement("table", { ref: resultsTableRef, tabIndex: -1 },
       createElement("thead", null, createElement("tr", null,
         createElement("th", null, "Check"),
         createElement("th", null, "Status"),
@@ -51,14 +67,16 @@ export function DoctorPage({ result, busy = false, onRun, onStart, onStop }) {
   );
 }
 
-export function SettingsPage({ authState, installerResult, onOpenAccount, onOpenInstall }) {
+export function SettingsPage({ authState, installerResult, nativeLinux = false, daemonStatus, onOpenAccount, onOpenInstall }) {
   const session = authState?.session;
   const accountStatus = session?.token_present ? `Connected${session.plan ? ` · ${session.plan}` : ""}` : "Not connected";
   const installStatus = installerResult ? (installerResult.ok ? "Last install completed" : "Last install needs attention") : "Not run in this session";
-  const rows = [
-    { key: "account", name: "Account and plan", description: "Backend connection, session, and plan access", status: accountStatus, action: onOpenAccount },
-    { key: "install", name: "Install and bootstrap", description: "Download and prepare the local Ferrocrate stack", status: installStatus, action: onOpenInstall },
-  ];
+  const rows = [{ key: "account", name: "Account and plan", description: "Backend connection, session, and plan access", status: accountStatus, action: onOpenAccount }];
+  if (nativeLinux) {
+    rows.push({ key: "runtime", name: "Local Ferrocrate runtime", description: "Installed native engine and rootless API daemon", status: daemonStatus?.state === "running" ? "Running" : "Installed · not running", action: null });
+  } else {
+    rows.push({ key: "install", name: "Install and bootstrap", description: "Download and prepare the local Ferrocrate stack", status: installStatus, action: onOpenInstall });
+  }
   return createElement("section", { className: "panel table-panel resource-table-panel", "aria-label": "Settings" },
     createElement("div", { className: "table-scroll" }, createElement("table", null,
       createElement("thead", null, createElement("tr", null,
@@ -71,7 +89,7 @@ export function SettingsPage({ authState, installerResult, onOpenAccount, onOpen
         createElement("td", { className: "container-name" }, row.name),
         createElement("td", { className: "muted" }, row.description),
         createElement("td", null, row.status),
-        createElement("td", { className: "row-actions" }, createElement("button", { className: "btn btn-secondary", onClick: row.action }, "Configure")),
+        createElement("td", { className: "row-actions" }, row.action ? createElement("button", { className: "btn btn-secondary", onClick: row.action }, "Configure") : null),
       ))),
     )),
   );

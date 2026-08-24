@@ -1,9 +1,11 @@
 use std::convert::Infallible;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
@@ -23,28 +25,67 @@ use super::*;
 
 #[derive(Clone, Debug)]
 struct WebEvent {
+    id: u64,
     name: String,
     payload: Value,
+}
+
+#[derive(Default)]
+struct WebEventReplay {
+    next_id: u64,
+    events: VecDeque<WebEvent>,
 }
 
 #[derive(Clone)]
 pub(crate) struct WebEventHub {
     sender: broadcast::Sender<WebEvent>,
+    replay: Arc<Mutex<WebEventReplay>>,
 }
 
 impl WebEventHub {
     fn new() -> Self {
         let (sender, _) = broadcast::channel(256);
-        Self { sender }
+        Self {
+            sender,
+            replay: Arc::new(Mutex::new(WebEventReplay::default())),
+        }
     }
 
     pub(crate) fn emit<T: Serialize>(&self, name: &str, payload: T) {
         if let Ok(payload) = serde_json::to_value(payload) {
-            let _ = self.sender.send(WebEvent {
+            let Ok(mut replay) = self.replay.lock() else {
+                return;
+            };
+            replay.next_id = replay.next_id.saturating_add(1);
+            let event = WebEvent {
+                id: replay.next_id,
                 name: name.to_string(),
                 payload,
-            });
+            };
+            replay.events.push_back(event.clone());
+            while replay.events.len() > 512 {
+                replay.events.pop_front();
+            }
+            let _ = self.sender.send(event);
         }
+    }
+
+    fn replay_after(&self, requested_id: u64) -> (Vec<WebEvent>, u64, bool) {
+        let Ok(replay) = self.replay.lock() else {
+            return (Vec::new(), requested_id, true);
+        };
+        let baseline = requested_id.min(replay.next_id);
+        let gap = replay
+            .events
+            .front()
+            .is_some_and(|first| baseline < replay.next_id && first.id > baseline.saturating_add(1));
+        let events = replay
+            .events
+            .iter()
+            .filter(|event| event.id > baseline)
+            .cloned()
+            .collect();
+        (events, baseline, gap)
     }
 }
 
@@ -74,6 +115,7 @@ pub(crate) struct WebBridgeHandle {
     token: String,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
+    events: WebEventHub,
 }
 
 #[cfg(test)]
@@ -84,6 +126,11 @@ impl WebBridgeHandle {
 
     pub(crate) fn token(&self) -> &str {
         &self.token
+    }
+
+
+    pub(crate) fn emit<T: Serialize>(&self, name: &str, payload: T) {
+        self.events.emit(name, payload);
     }
 
     pub(crate) async fn shutdown(mut self) {
@@ -107,7 +154,8 @@ pub(crate) async fn spawn_web_bridge(
         .map_err(|error| format!("failed to inspect web bridge address: {error}"))?;
     let (shutdown, shutdown_rx) = oneshot::channel();
     let token = generate_session_token()?;
-    let app = bridge_router(dist, WebEventHub::new(), addr, token.clone());
+    let events = WebEventHub::new();
+    let app = bridge_router(dist, events.clone(), addr, token.clone());
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -120,6 +168,7 @@ pub(crate) async fn spawn_web_bridge(
         token,
         shutdown: Some(shutdown),
         task,
+        events,
     })
 }
 
@@ -235,18 +284,65 @@ async fn invoke_command(
 
 async fn stream_events(
     State(state): State<BridgeState>,
+    headers: HeaderMap,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     let mut receiver = state.events.sender.subscribe();
+    let requested_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let hub = state.events.clone();
+    let (initial_replay, mut last_sent, initial_gap) = requested_id
+        .map(|id| hub.replay_after(id))
+        .unwrap_or_else(|| {
+            let (_, latest, _) = hub.replay_after(u64::MAX);
+            (Vec::new(), latest, false)
+        });
     let stream = async_stream::stream! {
+        if initial_gap {
+            yield Ok(Event::default()
+                .event("terminal-error")
+                .json_data("Terminal output continuity was lost; some buffered output is unavailable.")
+                .unwrap_or_else(|_| Event::default()));
+        }
+        for event in initial_replay {
+            last_sent = event.id;
+            yield Ok(Event::default()
+                .id(event.id.to_string())
+                .event(event.name)
+                .json_data(event.payload)
+                .unwrap_or_else(|_| Event::default()));
+        }
         loop {
             match receiver.recv().await {
                 Ok(event) => {
+                    if event.id <= last_sent {
+                        continue;
+                    }
+                    last_sent = event.id;
                     yield Ok(Event::default()
+                        .id(event.id.to_string())
                         .event(event.name)
                         .json_data(event.payload)
                         .unwrap_or_else(|_| Event::default()));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let (events, _, gap) = hub.replay_after(last_sent);
+                    if gap {
+                        yield Ok(Event::default()
+                            .event("terminal-error")
+                            .json_data("Terminal output continuity was lost; some buffered output is unavailable.")
+                            .unwrap_or_else(|_| Event::default()));
+                    }
+                    for event in events {
+                        last_sent = event.id;
+                        yield Ok(Event::default()
+                            .id(event.id.to_string())
+                            .event(event.name)
+                            .json_data(event.payload)
+                            .unwrap_or_else(|_| Event::default()));
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -272,6 +368,11 @@ struct EmptyArgs {}
 #[derive(Deserialize)]
 struct TargetArgs {
     target: String,
+}
+
+#[derive(Deserialize)]
+struct ContainerStatsArgs {
+    ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -349,6 +450,11 @@ struct ContainerResourcesArgs {
 struct NewContainerArgs {
     image: String,
     name: Option<String>,
+    command: Vec<String>,
+    ports: Vec<String>,
+    volumes: Vec<String>,
+    #[serde(alias = "pullIfMissing")]
+    pull_if_missing: bool,
     environment: Vec<String>,
     memory: Option<u64>,
     #[serde(alias = "cpuQuota")]
@@ -418,6 +524,10 @@ fn dispatch_command(command: &str, args: Value, events: WebEventHub) -> Result<V
             let _: EmptyArgs = decode(args)?;
             encode(get_desktop_snapshot())
         }
+        "get_container_stats" => {
+            let args: ContainerStatsArgs = decode(args)?;
+            encode(get_container_stats(args.ids))
+        }
         "get_volumes" => {
             let _: EmptyArgs = decode(args)?;
             encode_result(get_volumes())
@@ -473,6 +583,10 @@ fn dispatch_command(command: &str, args: Value, events: WebEventHub) -> Result<V
             encode_result(run_new_container(
                 args.image,
                 args.name,
+                args.command,
+                args.ports,
+                args.volumes,
+                args.pull_if_missing,
                 args.environment,
                 args.memory,
                 args.cpu_quota,
@@ -572,6 +686,89 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_prompt_reaches_a_subscriber_registered_before_startup() {
+        let hub = WebEventHub::new();
+        let mut subscriber = hub.sender.subscribe();
+
+        hub.emit(
+            "terminal-output",
+            json!({ "data": [47, 32, 35, 32], "stderr": false }),
+        );
+
+        let event = subscriber.recv().await.expect("terminal prompt event");
+        assert_eq!(event.name, "terminal-output");
+        assert_eq!(event.payload["data"], json!([47, 32, 35, 32]));
+    }
+
+    #[tokio::test]
+    async fn event_stream_replays_output_emitted_during_reconnect() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dist = std::env::temp_dir().join(format!("ferro-web-replay-{suffix}"));
+        fs::create_dir_all(&dist).expect("create dist");
+        fs::write(dist.join("index.html"), "<main>Ferrocrate</main>").expect("write index");
+        let bridge = spawn_web_bridge("127.0.0.1:0".parse().unwrap(), dist.clone())
+            .await
+            .expect("start bridge");
+        let client = Client::new();
+        let stream_url = format!(
+            "http://{}/__tauri/stream?token={}",
+            bridge.addr(),
+            bridge.token()
+        );
+        let first_request = {
+            let client = client.clone();
+            let stream_url = stream_url.clone();
+            let host = bridge.addr().to_string();
+            tokio::spawn(async move {
+                client.get(stream_url).header("host", host).send().await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bridge.emit("terminal-output", json!({ "data": [65], "stderr": false }));
+        let mut first = tokio::time::timeout(Duration::from_secs(2), first_request)
+            .await
+            .expect("first stream timeout")
+            .expect("first stream task")
+            .expect("first stream");
+        let first_chunk = tokio::time::timeout(Duration::from_secs(2), first.chunk())
+            .await
+            .expect("first event timeout")
+            .expect("first chunk")
+            .expect("first event body");
+        let first_text = String::from_utf8_lossy(&first_chunk);
+        assert!(first_text.contains("id: 1"));
+        drop(first);
+
+        bridge.emit("terminal-output", json!({ "data": [66], "stderr": false }));
+        let mut reconnected = tokio::time::timeout(
+            Duration::from_secs(2),
+            client
+                .get(&stream_url)
+                .header("host", bridge.addr().to_string())
+                .header("last-event-id", "1")
+                .send(),
+        )
+        .await
+        .expect("reconnected stream timeout")
+        .expect("reconnected stream");
+        let replay = tokio::time::timeout(Duration::from_secs(2), reconnected.chunk())
+            .await
+            .expect("replay timeout")
+            .expect("replay chunk")
+            .expect("replay body");
+        let replay = String::from_utf8_lossy(&replay);
+        assert!(replay.contains("id: 2"));
+        assert!(replay.contains("[66]"));
+
+        drop(reconnected);
+        bridge.shutdown().await;
+        fs::remove_dir_all(dist).ok();
+    }
 
     fn skip_space(source: &str, mut cursor: usize) -> usize {
         while source
@@ -734,8 +931,8 @@ mod tests {
                 },
                 "data" => json!([65]),
                 "columns" | "rows" | "memory" | "cpuQuota" | "cpuPeriod" => json!(1),
-                "env" | "environment" => json!([]),
-                "fix" | "bootstrap" | "dry_run" | "confirm" => json!(false),
+                "env" | "environment" | "command" | "ports" | "volumes" | "ids" => json!([]),
+                "fix" | "bootstrap" | "dry_run" | "confirm" | "pullIfMissing" => json!(false),
                 "user" | "workdir" | "name" | "subnet" | "issuance_endpoint" | "access_token" => {
                     Value::Null
                 }
@@ -755,6 +952,7 @@ mod tests {
             | "close_terminal"
             | "get_paid_auth_state"
             | "clear_paid_session" => decode::<EmptyArgs>(args).map(drop),
+            "get_container_stats" => decode::<ContainerStatsArgs>(args).map(drop),
             "get_container_detail" | "start_log_follow" => decode::<TargetArgs>(args).map(drop),
             "get_compose_snapshot" => decode::<ComposeArgs>(args).map(drop),
             "build_image" => decode::<BuildImageArgs>(args).map(drop),
@@ -794,6 +992,29 @@ mod tests {
     }
 
     #[test]
+    fn run_new_container_bridge_decodes_every_native_argument() {
+        let args = decode::<NewContainerArgs>(json!({
+            "image": "alpine:latest",
+            "name": "sentinel-worker",
+            "command": ["printf", "sentinel-command"],
+            "ports": ["8080:80"],
+            "volumes": ["data:/data"],
+            "pullIfMissing": true,
+            "environment": ["MODE=test"],
+            "memory": 1048576,
+            "cpuQuota": 50000,
+            "cpuPeriod": 100000
+        }))
+        .expect("browser payload");
+
+        assert_eq!(args.name.as_deref(), Some("sentinel-worker"));
+        assert_eq!(args.command, ["printf", "sentinel-command"]);
+        assert_eq!(args.ports, ["8080:80"]);
+        assert_eq!(args.volumes, ["data:/data"]);
+        assert!(args.pull_if_missing);
+    }
+
+    #[test]
     fn multiword_bridge_arguments_accept_native_snake_and_browser_camel_case() {
         let cases = [
             (
@@ -808,8 +1029,8 @@ mod tests {
             ),
             (
                 "run_new_container",
-                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpu_quota": 2, "cpu_period": 3 }),
-                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpuQuota": 2, "cpuPeriod": 3 }),
+                json!({ "image": "one", "name": null, "command": [], "ports": [], "volumes": [], "pull_if_missing": false, "environment": [], "memory": null, "cpu_quota": 2, "cpu_period": 3 }),
+                json!({ "image": "one", "name": null, "command": [], "ports": [], "volumes": [], "pullIfMissing": false, "environment": [], "memory": null, "cpuQuota": 2, "cpuPeriod": 3 }),
             ),
             (
                 "save_paid_backend_config",
@@ -922,7 +1143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_boots_and_dispatches_three_desktop_commands() {
+    async fn bridge_boots_and_dispatches_desktop_commands() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -950,6 +1171,15 @@ mod tests {
         assert!(snapshot.status().is_success());
         let snapshot: Value = snapshot.json().await.expect("snapshot json");
         assert!(snapshot.get("runtime").is_some());
+
+        let stats = authorized(client.post(endpoint("get_container_stats")))
+            .json(&json!({ "ids": [] }))
+            .send()
+            .await
+            .expect("stats request");
+        assert!(stats.status().is_success());
+        let stats: Value = stats.json().await.expect("stats json");
+        assert_eq!(stats["samples"], json!([]));
 
         let action = authorized(client.post(endpoint("run_desktop_action")))
             .json(&json!({ "action": "pull_image", "target": null }))

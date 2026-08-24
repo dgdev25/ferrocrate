@@ -9,6 +9,7 @@ import type {
   ComposeServiceSummary,
   ComposeSnapshot,
   ContainerDetailSummary,
+  ContainerStatsResponse,
   DesktopAction,
   DesktopSnapshot,
   DoctorSummary,
@@ -21,19 +22,23 @@ import type {
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
-import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
+import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
+import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
+import type { RunContainerDraft, RunContainerInvokeArgs } from "./dialogForms.mjs";
 import { Icon } from "./iconSystem.mjs";
+import { errorForSection, navigationTransientState, resourceActionStartState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
-import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
-import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
+import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
+import { customNetworkCreateAvailable, formatNetworkAttachment, NetworkCapabilityNotice, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
-import { DoctorPage, SettingsPage } from "./systemPages.mjs";
+import { completeDoctorRun, DoctorPage, SettingsPage } from "./systemPages.mjs";
 import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
   containerContentState,
+  filterNamedResources,
   FirstRunState,
   HostPathField,
   hostPathError,
@@ -47,20 +52,31 @@ import {
   snapshotFailureDetail,
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
+import { runtimeActionAvailability } from "./runtimeActions.mjs";
+import { submitRunContainer } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
+import { mountTerminalHost, writeTerminalOutput } from "./terminalLifecycle.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
+  beginContainerStatsPoll,
   daemonIsAvailable,
+  daemonStatusPresentation,
+  containerRemoveAvailability,
+  containerStatsUnavailableMessage,
   filterContainers,
   filterContainersByStatus,
+  formatBytes,
   groupContainers,
+  mergeContainerStats,
+  parseContainerStats,
   parseContainerRows,
-  resourceTotals,
+  resourceTotalsForSurface,
   shellKeyboardCommand,
+  shouldPollContainerStats,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
@@ -84,7 +100,7 @@ type BuildHistoryEntry = {
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
-  return new Date(value * 1000).toLocaleString();
+  return formatImageCreated(value);
 }
 
 function commandMessage(result: CommandResult, fallback: string): string {
@@ -93,10 +109,12 @@ function commandMessage(result: CommandResult, fallback: string): string {
 
 function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [containerStats, setContainerStats] = useState<ContainerStatsResponse | null>(null);
+  const [documentVisible, setDocumentVisible] = useState(document.visibilityState === "visible");
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [sectionErrors, setSectionErrors] = useState<Partial<Record<AppSection, string>>>({});
   const [licensingDialogOpen, setLicensingDialogOpen] = useState(false);
   const [licensingDetail, setLicensingDetail] = useState("");
   const [theme, setTheme] = useState<ThemeMode>("dark");
@@ -122,8 +140,9 @@ function App(): JSX.Element {
   const [pausedLogOutput, setPausedLogOutput] = useState("");
   const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
   const runtimeActionRef = useRef(false);
+  const containerStatsPollOwnerRef = useRef({ inFlight: false });
   const logFollowRef = useRef(false);
-  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const [terminalHost, setTerminalHost] = useState<HTMLDivElement | null>(null);
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const terminalActiveRef = useRef(false);
@@ -147,6 +166,7 @@ function App(): JSX.Element {
   const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
   const buildSequenceRef = useRef(0);
   const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [showEnvironment, setShowEnvironment] = useState(false);
   const [detailMemory, setDetailMemory] = useState("");
   const [detailCpuQuota, setDetailCpuQuota] = useState("");
@@ -155,12 +175,18 @@ function App(): JSX.Element {
   const [runDialogError, setRunDialogError] = useState<string | null>(null);
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
   const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
-  const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
-  const [newContainerName, setNewContainerName] = useState("");
-  const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
-  const [newContainerMemory, setNewContainerMemory] = useState("");
-  const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
-  const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
+  const resourceDialogGenerationRef = useRef(0);
+  const [newContainerDraft, setNewContainerDraft] = useState<RunContainerDraft>({
+    image: "alpine:latest",
+    name: "",
+    command: "",
+    pullIfMissing: true,
+    ports: [{ host: "", container: "" }],
+    volumes: [{ source: "", target: "" }],
+    environment: "",
+    memoryMb: "",
+    cpus: "",
+  });
   const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
   const [registryUsername, setRegistryUsername] = useState("");
   const [registryPassword, setRegistryPassword] = useState("");
@@ -176,12 +202,19 @@ function App(): JSX.Element {
   const [installerResult, setInstallerResult] = useState<InstallerRunSummary | null>(null);
   const [doctorResult, setDoctorResult] = useState<DoctorSummary | null>(null);
   const [doctorDialogOpen, setDoctorDialogOpen] = useState(false);
+  const doctorResultsTableRef = useRef<HTMLTableElement>(null);
+  const doctorResultsFocusPendingRef = useRef(false);
   const [settingsDialog, setSettingsDialog] = useState<"account" | "install" | null>(null);
 
   const [doctorFix, setDoctorFix] = useState(true);
   const [doctorBootstrap, setDoctorBootstrap] = useState(false);
   const [doctorDryRun, setDoctorDryRun] = useState(true);
   const [doctorConfirm, setDoctorConfirm] = useState(false);
+
+  const error = errorForSection(sectionErrors, activeSection);
+  function setError(next: unknown): void {
+    setSectionErrors((current) => setSectionError(current, activeSection, next));
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem(THEME_KEY);
@@ -192,6 +225,13 @@ function App(): JSX.Element {
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     setTheme(prefersDark ? "dark" : "light");
   }, []);
+
+  useEffect(() => {
+    if (!doctorDialogOpen && doctorResult && doctorResultsFocusPendingRef.current) {
+      doctorResultsFocusPendingRef.current = false;
+      doctorResultsTableRef.current?.focus();
+    }
+  }, [doctorDialogOpen, doctorResult]);
 
   useEffect(() => {
     let disposed = false;
@@ -205,47 +245,48 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const host = terminalHostRef.current;
-    if (!host || terminalRef.current) return;
-    const terminal = new Terminal({
-      cursorBlink: true,
-      convertEol: true,
-      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
-      fontSize: 13,
-      rows: 18,
-      theme: theme === "dark"
-        ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
-        : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" },
-    });
-    terminal.open(host);
-    terminal.onData((data) => {
-      if (!terminalActiveRef.current) return;
-      void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
-        setError(String(err));
+    return mountTerminalHost(terminalHost, terminalRef, (host) => {
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+        fontSize: 13,
+        rows: 18,
+        theme: theme === "dark"
+          ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
+          : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" },
       });
-    });
-    terminal.writeln("Select a running container and open a shell.");
-    terminalRef.current = terminal;
+      terminal.open(host);
+      terminal.onData((data) => {
+        if (!terminalActiveRef.current) return;
+        void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
+          setError(String(err));
+        });
+      });
+      terminal.writeln("Select a running container and open a shell.");
 
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      applyTerminalResize(
-        entry.contentRect.width,
-        entry.contentRect.height,
-        terminalActiveRef.current,
-        (columns, rows) => terminal.resize(columns, rows),
-        (columns, rows) => {
-          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+      const observer = new ResizeObserver(([entry]) => {
+        if (!entry) return;
+        applyTerminalResize(
+          entry.contentRect.width,
+          entry.contentRect.height,
+          terminalActiveRef.current,
+          (columns, rows) => terminal.resize(columns, rows),
+          (columns, rows) => {
+            void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+          },
+        );
+      });
+      observer.observe(host);
+      return {
+        terminal,
+        dispose() {
+          observer.disconnect();
+          terminal.dispose();
         },
-      );
+      };
     });
-    observer.observe(host);
-    return () => {
-      observer.disconnect();
-      terminal.dispose();
-      terminalRef.current = null;
-    };
-  }, []);
+  }, [terminalHost]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -262,7 +303,7 @@ function App(): JSX.Element {
     let unlistenEnded: (() => void) | undefined;
     void (async () => {
       const stopOutput = await listen<TerminalOutput>("terminal-output", (event) => {
-        terminalRef.current?.write(new Uint8Array(event.payload.data));
+        writeTerminalOutput(terminalRef, event.payload);
       });
       const stopError = await listen<string>("terminal-error", (event) => setError(event.payload));
       const stopEnded = await listen<boolean>("terminal-ended", (event) => {
@@ -294,23 +335,61 @@ function App(): JSX.Element {
   }, [theme]);
 
   useEffect(() => {
+    const onVisibilityChange = () => setDocumentVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    setSectionErrors((current) => navigationTransientState(current).sectionErrors);
+    setLastAction(null);
+    setActionLabel("");
+  }, [activeSection]);
+
+  function openResourceDialog(kind: Exclude<ResourceDialog, null>): void {
+    resourceDialogGenerationRef.current += 1;
+    setError(null);
+    setResourceDialogError(null);
+    setResourceDialog(kind);
+  }
+
+  function closeResourceDialog(): void {
+    resourceDialogGenerationRef.current += 1;
+    setResourceDialog(null);
+    setResourceDialogError(null);
+  }
+
+  function dismissDialogs(): void {
+    setRunDialogOpen(false);
+    setRunDialogError(null);
+    setPullImageDialogOpen(false);
+    setPullFailure(null);
+    setBuildImageDialogOpen(false);
+    setBuildLicensingDialogOpen(false);
+    setRegistryDialogOpen(false);
+    closeResourceDialog();
+    setLicensingDialogOpen(false);
+    setDoctorDialogOpen(false);
+    setSettingsDialog(null);
+  }
+
+  function selectSection(section: AppSection): void {
+    const next = navigationTransientState(sectionErrors);
+    setSectionErrors(next.sectionErrors);
+    setLastAction(next.actionResult);
+    setActionLabel(next.actionLabel);
+    if (next.dismissDialogs) dismissDialogs();
+    setActiveSection(section);
+  }
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const command = shellKeyboardCommand(event);
       if (command === "focus-search") {
         event.preventDefault();
         globalSearchRef.current?.focus();
       } else if (command === "close-dialog") {
-        setRunDialogOpen(false);
-        setRunDialogError(null);
-        setPullImageDialogOpen(false);
-        setBuildImageDialogOpen(false);
-        setBuildLicensingDialogOpen(false);
-        setRegistryDialogOpen(false);
-        setResourceDialog(null);
-        setResourceDialogError(null);
-        setLicensingDialogOpen(false);
-        setDoctorDialogOpen(false);
-        setSettingsDialog(null);
+        dismissDialogs();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -479,11 +558,14 @@ function App(): JSX.Element {
     };
   }, []);
 
-  function beginRuntimeAction(allowWhileStreaming = false): boolean {
-    if (
-      runtimeActionRef.current
-      || ((logFollowRef.current || terminalActiveRef.current) && !allowWhileStreaming)
-    ) {
+  function beginRuntimeAction(): boolean {
+    const availability = runtimeActionAvailability({
+      actionBusy: runtimeActionRef.current,
+      logsFollowing: logFollowRef.current,
+      terminalActive: terminalActiveRef.current,
+    });
+    if (!availability.allowed) {
+      setError(availability.reason);
       return false;
     }
     runtimeActionRef.current = true;
@@ -611,7 +693,7 @@ function App(): JSX.Element {
   }
 
   async function stopLogFollow(): Promise<void> {
-    if (!logFollowRef.current || !beginRuntimeAction(true)) return;
+    if (!logFollowRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("stop_log_follow");
       logFollowRef.current = false;
@@ -662,7 +744,7 @@ function App(): JSX.Element {
   }
 
   async function closeTerminal(): Promise<void> {
-    if (!terminalActiveRef.current || !beginRuntimeAction(true)) return;
+    if (!terminalActiveRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("close_terminal");
       terminalActiveRef.current = false;
@@ -680,25 +762,31 @@ function App(): JSX.Element {
     label: string,
     target?: string,
   ): Promise<void> {
+    const requestGeneration = action === "create" ? resourceDialogGenerationRef.current : null;
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
+    setLastAction((current) => resourceActionStartState(action, current).actionResult);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
-      setLastAction(result);
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`), requestGeneration ?? undefined, resourceDialogGenerationRef.current);
+      if (!next) return;
+      setLastAction(next.actionResult);
       if (!result.ok) {
-        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
-        if (action === "create") setResourceDialogError(detail); else setError(detail);
+        if (next.dialogError) setResourceDialogError(next.dialogError);
+        if (next.pageError) setError(next.pageError);
         return;
       }
       if (action === "create") {
         setVolumeName("");
-        setResourceDialog(null);
+        closeResourceDialog();
       }
       await Promise.all([refreshVolumes(), refresh()]);
     } catch (err) {
-      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
+      if (action === "create") {
+        if (requestGeneration === resourceDialogGenerationRef.current) setResourceDialogError(String(err));
+      } else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -709,9 +797,15 @@ function App(): JSX.Element {
     label: string,
     target: string,
   ): Promise<void> {
+    if (action === "create" && !customNetworkCreateAvailable(snapshot?.daemon)) {
+      setResourceDialogError("Custom networks need a privileged (rootful) daemon, or the Ferrocrate AppArmor profile. Open Doctor for guided setup.");
+      return;
+    }
+    const requestGeneration = action === "create" ? resourceDialogGenerationRef.current : null;
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
+    setLastAction((current) => resourceActionStartState(action, current).actionResult);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_network_action", {
@@ -719,38 +813,48 @@ function App(): JSX.Element {
         target,
         subnet: action === "create" ? networkSubnet.trim() || null : null,
       });
-      setLastAction(result);
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`), requestGeneration ?? undefined, resourceDialogGenerationRef.current);
+      if (!next) return;
+      setLastAction(next.actionResult);
       if (!result.ok) {
-        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
-        if (action === "create") setResourceDialogError(detail); else setError(detail);
+        if (next.dialogError) setResourceDialogError(next.dialogError);
+        if (next.pageError) setError(next.pageError);
         return;
       }
       if (action === "create") {
         setNetworkName("");
         setNetworkSubnet("");
-        setResourceDialog(null);
+        closeResourceDialog();
       }
       await Promise.all([refreshNetworks(), refresh()]);
     } catch (err) {
-      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
+      if (action === "create") {
+        if (requestGeneration === resourceDialogGenerationRef.current) setResourceDialogError(String(err));
+      } else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
   }
 
   async function inspectContainer(target = containerTarget): Promise<void> {
-    if (!beginRuntimeAction()) return;
-    setError(null);
+    const selectedTarget = target.trim();
+    if (!selectedTarget || !beginRuntimeAction()) return;
+    setContainerTarget(selectedTarget);
+    setContainerDetail(null);
+    setInspectorError(null);
     try {
-      const detail = await invoke<ContainerDetailSummary>("get_container_detail", { target });
-      setContainerTarget(target);
-      setContainerDetail(detail);
+      const selection = await loadContainerSelection(selectedTarget, (selected) => (
+        invoke<ContainerDetailSummary>("get_container_detail", { target: selected })
+      ));
+      setContainerTarget(selection.target);
+      setContainerDetail(selection.detail);
+      setInspectorError(selection.error);
+      if (!selection.detail) return;
+      const detail = selection.detail;
       setShowEnvironment(false);
       setDetailMemory(String(detail.resources.memory));
       setDetailCpuQuota(String(detail.resources.cpu_quota));
       setDetailCpuPeriod(String(detail.resources.cpu_period));
-    } catch (err) {
-      setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -786,37 +890,25 @@ function App(): JSX.Element {
     }
   }
 
-  async function runNewContainer(): Promise<void> {
-    if (!beginRuntimeAction()) return;
-    setError(null);
-    setRunDialogError(null);
-    setActionLabel("Container Run");
-    try {
-      const result = await invoke<CommandResult>("run_new_container", {
-        image: newContainerImage,
-        name: newContainerName.trim() || null,
-        environment: newContainerEnvironment
-          .split("\n")
-          .map((value) => value.trim())
-          .filter(Boolean),
-        memory: parseOptionalLimit(newContainerMemory),
-        cpuQuota: parseOptionalLimit(newContainerCpuQuota),
-        cpuPeriod: parseOptionalLimit(newContainerCpuPeriod),
-      });
-      setLastAction(result);
-      if (!result.ok) {
-        setRunDialogError(commandMessage(result, `Container run failed with status ${result.code}`));
-        return;
-      }
-      setRunDialogOpen(false);
-      setNewContainerName("");
-      setNewContainerEnvironment("");
-      await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
-    } catch (err) {
-      setRunDialogError(String(err));
-    } finally {
-      finishRuntimeAction();
-    }
+  async function runNewContainer(payload: RunContainerInvokeArgs): Promise<void> {
+    await submitRunContainer<CommandResult>({
+      invoke,
+      payload,
+      begin: beginRuntimeAction,
+      onBegin: () => {
+        setError(null);
+        setRunDialogError(null);
+        setActionLabel("Container Run");
+      },
+      onResult: setLastAction,
+      onError: setRunDialogError,
+      onSuccess: async () => {
+        setRunDialogOpen(false);
+        setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
+        await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
+      },
+      finish: finishRuntimeAction,
+    });
   }
 
   async function loginRegistry(): Promise<void> {
@@ -1028,21 +1120,20 @@ function App(): JSX.Element {
   async function runDoctor(): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
-    try {
-      const result = await invoke<DoctorSummary>("run_doctor_action", {
+    await completeDoctorRun({
+      execute: () => invoke<DoctorSummary>("run_doctor_action", {
         fix: doctorFix,
         bootstrap: doctorBootstrap,
         dry_run: doctorDryRun,
         confirm: doctorConfirm,
-      });
-      setDoctorResult(result);
-      setDoctorDialogOpen(false);
-      await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      finishRuntimeAction();
-    }
+      }),
+      refresh,
+      setResult: setDoctorResult,
+      setError,
+      close: () => setDoctorDialogOpen(false),
+      scheduleResultsFocus: () => { doctorResultsFocusPendingRef.current = true; },
+      finish: finishRuntimeAction,
+    });
   }
 
   const sessionSummary = useMemo(() => authState?.session, [authState]);
@@ -1057,7 +1148,7 @@ function App(): JSX.Element {
       : visibleOutput;
   }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
 
-  const runtimeBusy = runtimeActionBusy || logsFollowing || terminalActive;
+  const runtimeBusy = runtimeActionBusy;
 
   async function copyLogs(): Promise<void> {
     try {
@@ -1077,22 +1168,73 @@ function App(): JSX.Element {
     URL.revokeObjectURL(url);
   }
 
-  const containerRows = useMemo(
+  const snapshotContainerRows = useMemo(
     () => parseContainerRows(snapshot?.containers.stdout ?? ""),
     [snapshot?.containers.stdout],
   );
+  const containerRows = useMemo(
+    () => containerStats == null ? snapshotContainerRows : mergeContainerStats(snapshotContainerRows, parseContainerStats(containerStats)),
+    [containerStats, snapshotContainerRows],
+  );
+  const runningContainerIds = snapshotContainerRows.filter((row) => row.state === "running").map((row) => row.id);
+  const runningContainerKey = runningContainerIds.join("\u0000");
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const visibilityState = documentVisible ? "visible" : "hidden";
+
+    const schedule = () => {
+      if (!disposed && shouldPollContainerStats(activeSection, visibilityState)) {
+        timer = setTimeout(() => void poll(), 2000);
+      }
+    };
+    const poll = async () => {
+      if (disposed) return;
+      if (!beginContainerStatsPoll(containerStatsPollOwnerRef.current, activeSection, visibilityState)) {
+        schedule();
+        return;
+      }
+      try {
+        const response = await invoke<ContainerStatsResponse>("get_container_stats", { ids: runningContainerIds });
+        if (!disposed) setContainerStats(response);
+      } catch {
+        if (!disposed) {
+          setContainerStats({ samples: runningContainerIds.map((id) => ({ id, available: false, cpu_percent: null, memory_usage: null, memory_limit: null })) });
+        }
+      } finally {
+        containerStatsPollOwnerRef.current.inFlight = false;
+        schedule();
+      }
+    };
+
+    if (shouldPollContainerStats(activeSection, visibilityState)) {
+      void poll();
+    } else {
+      setContainerStats(null);
+    }
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeSection, documentVisible, runningContainerKey]);
   const visibleContainers = useMemo(() => filterContainersByStatus(
     filterContainers(containerRows, globalSearch),
     containerStatusFilter,
   ), [containerRows, containerStatusFilter, globalSearch]);
   const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
-  const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
+  const visibleImages = useMemo(() => filterNamedResources(imageRows, globalSearch, (image) => image.reference), [imageRows, globalSearch]);
+  const visibleVolumes = useMemo(() => filterNamedResources(volumes, globalSearch), [volumes, globalSearch]);
+  const visibleNetworks = useMemo(() => filterNamedResources(networks, globalSearch), [networks, globalSearch]);
+  const containerImageReferences = useMemo(() => containerRows.map((row) => row.image), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
-  const resourceUsage = resourceTotals(containerRows);
+  const resourceUsage = resourceTotalsForSurface(containerRows, activeSection, documentVisible ? "visible" : "hidden");
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
+  const liveStatsUnavailable = containerRows.some((row) => row.state === "running" && row.statsAvailable === false);
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
+  const daemonPresentation = daemonStatusPresentation(snapshot?.daemon);
   const containerViewState = containerContentState(
     containerRows.length,
     visibleContainers.length,
@@ -1101,9 +1243,10 @@ function App(): JSX.Element {
   const imagePage = resourcePageState("images", imageRows.length);
   const volumePage = resourcePageState("volumes", volumes.length);
   const networkPage = resourcePageState("networks", networks.length);
+  const customNetworksAvailable = customNetworkCreateAvailable(snapshot?.daemon);
   const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
   const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
-  const surfaceError = error ?? snapshotFailureDetail(snapshot);
+  const surfaceError = error ?? snapshotFailureDetail(snapshot, activeSection);
   const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
@@ -1122,7 +1265,7 @@ function App(): JSX.Element {
       closePull: () => setPullImageDialogOpen(false),
       closeBuild: () => { setBuildImageDialogOpen(false); setBuildLicensingDialogOpen(false); },
       closeRegistry: () => setRegistryDialogOpen(false),
-      closeResource: () => { setResourceDialog(null); setResourceDialogError(null); },
+      closeResource: closeResourceDialog,
       closeLicensing: () => setLicensingDialogOpen(false),
     });
   }, [runtimeSurface]);
@@ -1138,7 +1281,7 @@ function App(): JSX.Element {
             ref={globalSearchRef}
             value={globalSearch}
             onChange={(event) => setGlobalSearch(event.target.value)}
-            placeholder="Search containers, images, volumes…"
+            placeholder="Filter containers, images, volumes, networks…"
             aria-label="Global search"
           />
           <kbd>⌘K</kbd>
@@ -1146,8 +1289,8 @@ function App(): JSX.Element {
         <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
-        <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
-          <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
+        <div className={`daemon-pill is-${daemonPresentation.tone}`} title={daemonPresentation.title}>
+          <span className="daemon-dot" /> {daemonPresentation.label}
         </div>
         <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
         {showGlobalRunAction(activeSection) ? <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>
@@ -1166,7 +1309,7 @@ function App(): JSX.Element {
           networks: networks.length,
         }}
         doctorIssues={doctorResult?.raw.checks.filter((check) => !check.ok).length ?? 0}
-        onSelect={setActiveSection}
+        onSelect={selectSection}
       />
 
       <div className="workspace">
@@ -1210,9 +1353,9 @@ function App(): JSX.Element {
               ) : activeSection === "images" ? (
                 <ImagePagePullAction hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />
               ) : activeSection === "volumes" ? (
-                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
+                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => openResourceDialog("volume")} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
               ) : activeSection === "networks" ? (
-                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} disabled={runtimeBusy || networksLoading}>Create network</button> : null
+                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => openResourceDialog("network")} disabled={runtimeBusy || networksLoading || !customNetworksAvailable}>Create network</button> : null
               ) : activeSection === "compose" ? (
                 composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
@@ -1256,6 +1399,7 @@ function App(): JSX.Element {
                       </div>
                     </details>
                   </div>
+                  {liveStatsUnavailable ? <p className="muted" role="status">{containerStatsUnavailableMessage()}</p> : null}
                   <div className="mobile-target">
                     <input value={containerTarget} onChange={(event) => setContainerTarget(event.target.value)} placeholder="Container name or ID" />
                     <button className="btn btn-secondary" onClick={() => void inspectContainer()} disabled={runtimeBusy || !containerTarget.trim()}>Open</button>
@@ -1276,6 +1420,7 @@ function App(): JSX.Element {
                             {group.rows.map((row) => {
                               const tone = statusTone(row);
                               const selected = selectedRow?.id === row.id;
+                              const remove = containerRemoveAvailability(row);
                               return (
                                 <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
                                   <td><div className="container-name">{row.composeService || row.name}</div>{row.composeService ? <div className="container-runtime-name mono">{row.name}</div> : null}</td>
@@ -1292,7 +1437,7 @@ function App(): JSX.Element {
                                         <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}><Icon name={row.state === "running" ? "stop" : "play"} size={16} />{row.state === "running" ? "Stop container" : "Start container"}</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}><Icon name="terminal" size={16} />Follow logs</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); void inspectContainer(row.id); }}><Icon name="terminal" size={16} />Open terminal</button>
-                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)}><Icon name="trash" size={16} />Remove container</button>
+                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)} disabled={!remove.allowed} title={remove.reason || undefined}><Icon name="trash" size={16} />{remove.allowed ? "Remove container" : "Stop before removing"}</button>
                                       </div>
                                     </details>
                                   </td>
@@ -1317,13 +1462,14 @@ function App(): JSX.Element {
                       <button key={tab} role="tab" aria-selected={detailTab === tab} className={detailTab === tab ? "active" : ""} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>
                     ))}
                   </div>
+                  {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
                   <div className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
                     <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
                       <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
-                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy || logsFollowing}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
                       <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
                       <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
                       <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
@@ -1338,9 +1484,9 @@ function App(): JSX.Element {
                       <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
                       <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
                     </div>
-                    <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
+                    <div className="terminal-host" ref={setTerminalHost} aria-label="Interactive container terminal" />
                     <div className="detail-foot">
-                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || !containerTarget.trim()}>Open shell</button>
+                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || !containerTarget.trim()}>Open shell</button>
                       <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
                       <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
                     </div>
@@ -1364,7 +1510,7 @@ function App(): JSX.Element {
                   <div className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
                     {containerDetail ? (
                       <>
-                        <div className="stat-cards"><div><span>Memory limit</span><strong>{containerDetail.resources.memory || "Unlimited"}</strong></div><div><span>CPU quota</span><strong>{containerDetail.resources.cpu_quota || "Unlimited"}</strong></div><div><span>CPU period</span><strong>{containerDetail.resources.cpu_period || "Default"}</strong></div></div>
+                        {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}
                         <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
                         <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
                       </>
@@ -1383,7 +1529,7 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel image-table-panel" aria-label="Images">
                   <div className="table-toolbar">
-                    <span className="count-badge">{imageCount}</span>
+                    <span className="count-badge">{visibleImages.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More image actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1395,13 +1541,13 @@ function App(): JSX.Element {
                   <div className="table-scroll">
                     <table>
                       <thead><tr><th>Repository</th><th>Size</th><th>Created</th><th>In use</th><th aria-label="Actions" /></tr></thead>
-                      <tbody>{imageRows.map((image) => (
+                      <tbody>{visibleImages.map((image) => (
                         <tr key={image.id}>
-                          <td className="container-name mono">{image.reference}</td>
+                          <td className="container-name mono" title={image.fullReference}>{image.reference}</td>
                           <td className="muted">{image.size}</td>
                           <td className="muted">{image.created}</td>
-                          <td>{imagesInUse.has(image.reference) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
-                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
+                          <td>{imageIsUsed(image, containerImageReferences) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
+                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.fullReference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -1424,12 +1570,12 @@ function App(): JSX.Element {
             {activeSection === "volumes" ? (
               volumePage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Volumes">
-                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} />
+                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => openResourceDialog("volume")} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Volumes">
                   <div className="table-toolbar">
-                    <span className="count-badge">{volumes.length}</span>
+                    <span className="count-badge">{visibleVolumes.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More volume actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1439,31 +1585,34 @@ function App(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th>Usage</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {volumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
+                    {visibleVolumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
             ) : null}
 
             {activeSection === "networks" ? (
-              networkPage.content === "empty" ? (
+              <>
+              <NetworkCapabilityNotice customNetworks={customNetworksAvailable} onDoctor={() => setActiveSection("doctor")} />
+              {networkPage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Networks">
-                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} />
+                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading || !customNetworksAvailable} onAction={() => openResourceDialog("network")} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
                   <div className="table-toolbar">
-                    <span className="count-badge">{networks.length}</span>
+                    <span className="count-badge">{visibleNetworks.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More network actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu"><button onClick={() => void refreshNetworks()} disabled={runtimeBusy || networksLoading}>{networksLoading ? "Refreshing…" : "Refresh networks"}</button></div>
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th><th>Containers</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {networks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
+                    {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
-              )
+              )}
+              </>
             ) : null}
 
             {activeSection === "compose" ? (
@@ -1497,9 +1646,9 @@ function App(): JSX.Element {
               )
             ) : null}
 
-            {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
+            {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} resultsTableRef={doctorResultsTableRef} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
-            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
+            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} nativeLinux={snapshot?.daemon.platform === "linux-native"} daemonStatus={snapshot?.daemon} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 
             {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : "did not complete"}</span>{lastAction.stderr || !lastAction.ok ? <details><summary>Technical details</summary><pre>{`${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}`}</pre></details> : null}</section> : null}
           </div>
@@ -1515,39 +1664,13 @@ function App(): JSX.Element {
         <div className="status-right">{resourceUsage.cpu ? <span>CPU <b>{resourceUsage.cpu}</b></span> : null}{resourceUsage.memory ? <span>MEM <b>{resourceUsage.memory}</b></span> : null}<span>v0.1.0</span></div>
       </footer>
 
-      {doctorDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="doctor-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Guided diagnostics</p><h2 id="doctor-dialog-title">Run Doctor</h2></div><button className="btn btn-secondary" onClick={() => setDoctorDialogOpen(false)}>Cancel</button></div>
-          <div className="dialog-content"><p className="muted">Choose how Ferrocrate should check this installation.</p><div className="dialog-options">
-            <label><input type="checkbox" checked={doctorFix} onChange={(event) => setDoctorFix(event.target.checked)} />Apply safe fixes</label>
-            <label><input type="checkbox" checked={doctorBootstrap} onChange={(event) => setDoctorBootstrap(event.target.checked)} />Prepare missing components</label>
-            <label><input type="checkbox" checked={doctorDryRun} onChange={(event) => setDoctorDryRun(event.target.checked)} />Preview changes only</label>
-            <label><input type="checkbox" checked={doctorConfirm} onChange={(event) => setDoctorConfirm(event.target.checked)} />Allow changes that need confirmation</label>
-          </div></div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runDoctor()} disabled={runtimeBusy}><Icon name="pulse" size={16} />{runtimeBusy ? "Checking…" : "Run Doctor"}</button></div>
-        </section></div>
-      ) : null}
+      <DoctorDialog open={doctorDialogOpen} fix={doctorFix} bootstrap={doctorBootstrap} dryRun={doctorDryRun} confirm={doctorConfirm} busy={runtimeBusy} onFixChange={(event) => setDoctorFix(event.target.checked)} onBootstrapChange={(event) => setDoctorBootstrap(event.target.checked)} onDryRunChange={(event) => setDoctorDryRun(event.target.checked)} onConfirmChange={(event) => setDoctorConfirm(event.target.checked)} onCancel={() => setDoctorDialogOpen(false)} onRun={() => void runDoctor()} />
 
-      {settingsDialog === "account" ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Account connection</p><h2 id="account-dialog-title">Account and plan</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
-          <div className="dialog-content form-stack"><label><span>Release service URL</span><input value={releaseBaseUrl} onChange={(event) => setReleaseBaseUrl(event.target.value)} placeholder="https://releases.example.com" /></label><label><span>Token service URL</span><input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} placeholder="https://accounts.example.com/token" /></label><label><span>Session service URL</span><input value={issuanceEndpoint} onChange={(event) => setIssuanceEndpoint(event.target.value)} placeholder="https://accounts.example.com/session" /></label><button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>Save service connection</button><label><span>Customer ID</span><input value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="Customer ID" /></label><label><span>Access token (optional)</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="Access token" /></label><button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>Connect account</button><label><span>Session token</span><input type="password" value={sessionTokenInput} onChange={(event) => setSessionTokenInput(event.target.value)} placeholder="Paste session token" /></label></div>
-          <div className="account-summary"><strong>{sessionSummary?.token_present ? "Account connected" : "No account connected"}</strong><span>{sessionSummary?.plan ? `Plan: ${sessionSummary.plan}` : "Plan information unavailable"}</span><span>{sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : "No active session expiry"}</span><details><summary>Plan diagnostics</summary><pre>{JSON.stringify(authState?.entitlement ?? {}, null, 2)}</pre></details></div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-danger" onClick={() => void clearSessionToken()}>Disconnect</button><button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>{authLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-primary" onClick={() => void saveSessionToken()} disabled={!sessionTokenInput.trim()}>Save session</button></div>
-        </section></div>
-      ) : null}
+      <AccountDialog open={settingsDialog === "account"} releaseBaseUrl={releaseBaseUrl} tokenEndpoint={tokenEndpoint} issuanceEndpoint={issuanceEndpoint} customerId={customerId} accessToken={accessToken} sessionToken={sessionTokenInput} authLoading={authLoading} accountConnected={Boolean(sessionSummary?.token_present)} plan={sessionSummary?.plan ?? null} expiresText={sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : null} entitlement={authState?.entitlement ?? {}} onReleaseBaseUrlChange={(event) => setReleaseBaseUrl(event.target.value)} onTokenEndpointChange={(event) => setTokenEndpoint(event.target.value)} onIssuanceEndpointChange={(event) => setIssuanceEndpoint(event.target.value)} onCustomerIdChange={(event) => setCustomerId(event.target.value)} onAccessTokenChange={(event) => setAccessToken(event.target.value)} onSessionTokenChange={(event) => setSessionTokenInput(event.target.value)} onClose={() => setSettingsDialog(null)} onSaveBackend={() => void saveBackendConfig()} onConnect={() => void acquireSessionToken()} onDisconnect={() => void clearSessionToken()} onRefresh={() => void refreshAuthState()} onSaveSession={() => void saveSessionToken()} />
 
-      {settingsDialog === "install" ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title">
-          <div className="drawer-header"><div><p className="eyebrow">Local setup</p><h2 id="install-dialog-title">Install and bootstrap</h2></div><button className="btn btn-secondary" onClick={() => setSettingsDialog(null)}>Close</button></div>
-          <div className="dialog-content"><p>Prepare the local Ferrocrate stack with the saved account connection.</p>{installerResult ? <details><summary>Last install details</summary><pre>{JSON.stringify(installerResult, null, 2)}</pre></details> : <p className="muted">No install has run in this session.</p>}</div>
-          <div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>Preview install</button><button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>Run full install</button></div>
-        </section></div>
-      ) : null}
+      <InstallDialog open={settingsDialog === "install"} installerResult={installerResult} busy={runtimeBusy} onClose={() => setSettingsDialog(null)} onPreview={() => void runInstaller(true, false)} onInstall={() => void runInstaller(false, true)} />
 
-      {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>{runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
-      ) : null}
+      <RunContainerDialog open={runDialogOpen} draft={newContainerDraft} busy={runtimeBusy} error={runDialogError} onDraftChange={setNewContainerDraft} onCancel={() => { setRunDialogError(null); setRunDialogOpen(false); }} onRun={(payload) => void runNewContainer(payload)} onInvalid={(error) => setRunDialogError(String(error))} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} />
 
       <ResourceCreateDialog
         kind={resourceDialog}
@@ -1557,21 +1680,19 @@ function App(): JSX.Element {
         error={resourceDialogError}
         onNameChange={(event) => resourceDialog === "network" ? setNetworkName(event.target.value) : setVolumeName(event.target.value)}
         onSubnetChange={(event) => setNetworkSubnet(event.target.value)}
-        onCancel={() => { setResourceDialogError(null); setResourceDialog(null); }}
+        onCancel={closeResourceDialog}
         onCreate={() => resourceDialog === "network"
           ? void runNetworkAction("create", "Network Create", networkName)
           : void runVolumeAction("create", "Volume Create", volumeName)}
         onStart={() => void recoverFirstRun()}
-        onReviewLicensing={(detail) => { setResourceDialog(null); setLicensingDetail(detail); setLicensingDialogOpen(true); }}
+        onReviewLicensing={(detail) => { closeResourceDialog(); setLicensingDetail(detail); setLicensingDialogOpen(true); }}
       />
 
       {pullImageDialogOpen ? (
         <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
 
-      {buildImageDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><HostPathField label="Build context directory" kind="directory" value={buildContext} dialogAvailable={dialogAvailable} busy={runtimeBusy} onChange={(event) => setBuildContext(event.target.value)} onChoose={() => void chooseBuildContext()} /><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || Boolean(hostPathError(buildContext, "directory")) || !buildTag.trim()}>Start build</button></div></section></div>
-      ) : null}
+      <BuildImageDialog open={buildImageDialogOpen} context={buildContext} tag={buildTag} dialogAvailable={dialogAvailable} busy={runtimeBusy} onContextChange={(event) => setBuildContext(event.target.value)} onChooseContext={() => void chooseBuildContext()} onTagChange={(event) => setBuildTag(event.target.value)} onCancel={() => setBuildImageDialogOpen(false)} onBuild={() => void buildImage()} />
 
       <BuildLicensingDialog
         open={buildLicensingDialogOpen}
@@ -1587,9 +1708,7 @@ function App(): JSX.Element {
         onOpenSettings={() => { setLicensingDialogOpen(false); setActiveSection("settings"); }}
       />
 
-      {registryDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Registry server</span><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label><span>Username</span><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label><span>Password or token</span><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatus.logged_in ? `Signed in to ${registryStatus.registry} as ${registryAccountName}` : `Not signed in to ${registryStatus.registry}` : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>
-      ) : null}
+      <RegistryDialog open={registryDialogOpen} target={registryTarget} username={registryUsername} password={registryPassword} status={registryStatus} accountName={registryAccountName} busy={runtimeBusy} loading={registryLoading} onTargetChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} onUsernameChange={(event) => setRegistryUsername(event.target.value)} onPasswordChange={(event) => setRegistryPassword(event.target.value)} onCancel={() => setRegistryDialogOpen(false)} onCheck={() => void refreshRegistryAuth()} onLogout={() => void logoutRegistry()} onLogin={() => void loginRegistry()} />
     </div>
   );
 

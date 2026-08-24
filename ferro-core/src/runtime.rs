@@ -27,12 +27,22 @@ pub struct ExecOptions {
     pub working_dir: Option<String>,
     pub tty: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedNetworkEndpointConfig {
+    pub network_name: String,
+    pub generation: u64,
+    pub bridge_name: String,
+    pub ipv4_subnet: String,
+    pub ipv4_gateway: String,
+    pub ipv6_gateway_cidr: Option<String>,
+}
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
     ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
     EbpfPinOwnershipRecord, HealthConfig, KernelObjectIdentityRecord, LifecycleOperation,
-    LifecyclePhase, MutationReservation, NetworkOwnershipRecord, PortMappingRecord,
-    ResourceLimitRecord, RestartPolicy,
+    LifecyclePhase, MutationReservation, NetworkEndpointRecord, NetworkOwnershipRecord,
+    PortMappingRecord, ResourceLimitRecord, RestartPolicy,
 };
 use crate::image_config::{
     command_from_config, env_from_config, healthcheck_from_config, user_from_config,
@@ -41,6 +51,10 @@ use crate::image_config::{
 use crate::image_fetch::{resolve_config_path_with_store, resolve_layer_paths_with_store};
 use crate::image_security::verify_image_signature;
 use crate::image_store::LocalImageStore;
+use crate::log_driver::{
+    capture_stream, load_log_driver, ContainerLogContext, LogCapture,
+    LogRotation as DriverLogRotation, LogStream,
+};
 use crate::mac_profiles::generate_apparmor_profile;
 #[cfg(target_os = "linux")]
 use crate::managed_overlay::{
@@ -100,7 +114,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Seek;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -1516,6 +1532,8 @@ pub enum RuntimeError {
     NetworkValidation(#[from] ferro_net::ValidationError),
     #[error("container not found: {0}")]
     ContainerNotFound(String),
+    #[error("configured logging driver does not support reading")]
+    LogReadUnsupported,
     #[error("command is required to run container")]
     MissingCommand,
     #[error("invalid command: {0}")]
@@ -2271,7 +2289,10 @@ impl ContainerRuntime {
         let mut recoveries = Vec::new();
         for record in records.iter().filter(|record| {
             matches!(record.status.as_str(), "running" | "paused")
-                && record.network_name.as_deref() == Some("bridge")
+                && record
+                    .effective_network_endpoints()
+                    .iter()
+                    .any(|endpoint| endpoint.ownership.is_some())
         }) {
             recoveries.push((
                 record.id.clone(),
@@ -2303,11 +2324,29 @@ impl ContainerRuntime {
         records: &[ContainerRecord],
         reconciled_networks: &mut BTreeSet<String>,
     ) -> Result<(), RuntimeError> {
-        if record.network_name.as_deref() != Some("bridge") {
+        let endpoints = record.effective_network_endpoints();
+        for endpoint in &endpoints {
+            if let Some(ownership) = endpoint.ownership.as_ref() {
+                if endpoint.namespace_identity != ownership.namespace_identity {
+                    return Err(RuntimeError::Network(format!(
+                        "endpoint {} namespace identity does not match its ownership record",
+                        endpoint.endpoint_id
+                    )));
+                }
+                verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            }
+        }
+        if record.network_backend.is_none() && record.network_ownership.is_none() {
+            if record.network_name.as_deref() == Some("bridge") {
+                classify_legacy_network_record(record.network_name.as_deref(), false)?;
+            }
             return Ok(());
         }
         if record.network_backend.is_none() || record.network_ownership.is_none() {
-            classify_legacy_network_record(record.network_name.as_deref(), false)?;
+            return Err(RuntimeError::Network(format!(
+                "container {} has partial primary network ownership",
+                record.id
+            )));
         }
         let ownership = record.network_ownership.as_ref().ok_or_else(|| {
             RuntimeError::Network(format!(
@@ -3201,6 +3240,7 @@ impl ContainerRuntime {
             readonly_rootfs,
             self.runtime_dir.clone(),
             log_rotation_from_annotations(annotations),
+            configured_log_driver(annotations).to_string(),
         )
         .inspect_err(|_e| {
             // Kill any partially spawned process on error
@@ -3245,7 +3285,7 @@ impl ContainerRuntime {
             health
         };
 
-        let record = ContainerRecord {
+        let mut record = ContainerRecord {
             id: container_id.clone(),
             name: name.map(|val| val.to_string()),
             pid: child_id,
@@ -3302,6 +3342,7 @@ impl ContainerRuntime {
             }),
             network_backend: network_setup.backend.map(|backend| backend.to_string()),
             network_ownership: network_setup.ownership.clone(),
+            network_endpoints: Vec::new(),
             managed_overlay: network_setup.managed_overlay.clone(),
             managed_cleanup_provenance: network_setup.managed_cleanup_provenance.clone(),
             managed_host_veth: network_setup.managed_host_veth.clone(),
@@ -3317,6 +3358,7 @@ impl ContainerRuntime {
                 action: "container.run".into(),
             }),
         };
+        record.network_endpoints = record.effective_network_endpoints();
 
         rollback.persist_network()?;
         let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
@@ -3847,6 +3889,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        ensure_log_readback_supported(&record)?;
         let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
         let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))
@@ -3864,6 +3907,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        ensure_log_readback_supported(&record)?;
         let split = |path: &str| -> Option<Vec<TimestampedLine>> {
             let log_path = PathBuf::from(path);
             if !log_path.exists() || !log_journal_path(&log_path).exists() {
@@ -3908,13 +3952,23 @@ impl ContainerRuntime {
 
     #[inline]
     pub fn stats(&self, id: &str) -> Result<CgroupStats, RuntimeError> {
-        let _record = self
+        let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let manager = CgroupV2Manager::new(&self.cgroup_root);
         let group_path = self.cgroup_root.join("ferrocrate").join(id);
-        Ok(manager.read_stats(group_path)?)
+        let cgroup = manager.read_stats(group_path);
+        let needs_process_fallback = cgroup
+            .as_ref()
+            .map(|stats| {
+                stats.memory_current.unwrap_or(0) == 0 || stats.cpu_usage_usec.is_none()
+            })
+            .unwrap_or(true);
+        let process = (needs_process_fallback && pid_identity_matches(&record))
+            .then(|| process_tree_stats(record.pid))
+            .flatten();
+        Ok(stats_with_process_fallback(cgroup, process)?)
     }
 
     pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {
@@ -4330,6 +4384,345 @@ impl ContainerRuntime {
         })
     }
 
+    pub fn connect_network(
+        &self,
+        id: &str,
+        config: NamedNetworkEndpointConfig,
+    ) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
+            runtime.connect_network_authorized(proof, intent, id, &config)
+        })
+    }
+
+    pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
+        self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
+            runtime.disconnect_network_authorized(proof, intent, id, network_name)
+        })
+    }
+
+    fn connect_network_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        config: &NamedNetworkEndpointConfig,
+    ) -> Result<(), RuntimeError> {
+        if !nix::unistd::Uid::effective().is_root() {
+            return Err(RuntimeError::Network(
+                "connecting a named bridge endpoint requires root".into(),
+            ));
+        }
+        ferro_net::validate::validate_interface_name(&config.bridge_name)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if !matches!(record.status.as_str(), "running" | "paused") {
+            return Err(RuntimeError::InvalidState(
+                "network connect requires a running or paused container".into(),
+            ));
+        }
+        let netns_name = record.netns.as_deref().ok_or_else(|| {
+            RuntimeError::Network("container has no durable network namespace".into())
+        })?;
+        let namespace_identity = record.namespace_identity.ok_or_else(|| {
+            RuntimeError::Network("container network namespace has no durable identity".into())
+        })?;
+        verify_endpoint_namespace_identity(netns_name, namespace_identity)?;
+        let mut endpoints = record.effective_network_endpoints();
+        if endpoints
+            .iter()
+            .any(|endpoint| endpoint.network_name == config.network_name)
+        {
+            return Err(RuntimeError::InvalidState(format!(
+                "container is already connected to network {}",
+                config.network_name
+            )));
+        }
+        let bridge_ifindex = interface_ifindex(&config.bridge_name).map_err(|error| {
+            RuntimeError::Network(format!(
+                "named network bridge {} is unavailable: {error}",
+                config.bridge_name
+            ))
+        })?;
+        let occupied = self
+            .store
+            .list()?
+            .into_iter()
+            .flat_map(|candidate| candidate.effective_network_endpoints())
+            .filter(|endpoint| endpoint.network_name == config.network_name)
+            .filter_map(|endpoint| endpoint.ipv4_address)
+            .collect::<BTreeSet<_>>();
+        let ipv4 = allocate_named_endpoint_ipv4(
+            id,
+            &config.network_name,
+            &config.ipv4_subnet,
+            &config.ipv4_gateway,
+            &occupied,
+        )?;
+        let prefix = config
+            .ipv4_subnet
+            .split_once('/')
+            .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+            .ok_or_else(|| {
+                RuntimeError::Network(format!("invalid network subnet {}", config.ipv4_subnet))
+            })?;
+        let interface_name = next_endpoint_interface(
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.interface_name.as_str()),
+        );
+        let host_interface = named_endpoint_host_interface(id, &config.network_name);
+        if interface_ifindex_optional(&host_interface)?.is_some() {
+            return Err(RuntimeError::Network(format!(
+                "endpoint interface {host_interface} already exists without a matching durable record"
+            )));
+        }
+        let peer_interface = format!("c{}", &host_interface[1..]);
+        let veth_config = veth::VethConfig {
+            pair: veth::VethPair {
+                host: host_interface.clone(),
+                container: peer_interface.clone(),
+            },
+            mtu: configured_veth_mtu()?,
+            host_addr: None,
+            container_addr: None,
+        };
+        run_cmd(&veth::build_ip_link_add_veth_cmd(&veth_config)?)?;
+        let attach_result = (|| {
+            let host_ifindex = interface_ifindex(&host_interface)?;
+            run_cmd(&bridge::build_ip_link_set_master_cmd(
+                &host_interface,
+                &config.bridge_name,
+            )?)?;
+            run_cmd(&veth::build_ip_link_set_up_cmd(&host_interface)?)?;
+            run_cmd(&netns::build_ip_link_set_netns_cmd(
+                &peer_interface,
+                netns_name,
+            )?)?;
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &["ip", "link", "set", &peer_interface, "name", &interface_name],
+            ))?;
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "addr",
+                    "add",
+                    &format!("{ipv4}/{prefix}"),
+                    "dev",
+                    &interface_name,
+                ],
+            ))?;
+            // A prior detach leaves an unreachable route for this exact
+            // subnet so traffic cannot escape through another attached
+            // bridge's default gateway. The connected route now owns the
+            // subnet again, so remove that detach tombstone if present.
+            let _ = run_cmd_allow_missing(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "route",
+                    "del",
+                    "unreachable",
+                    &config.ipv4_subnet,
+                    "metric",
+                    "42760",
+                ],
+            ));
+            let ipv6_address = if let Some(cidr) = config.ipv6_gateway_cidr.as_deref() {
+                let (gateway, prefix) = cidr.split_once('/').ok_or_else(|| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let gateway = gateway.parse::<Ipv6Addr>().map_err(|_| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let prefix = prefix.parse::<u8>().map_err(|_| {
+                    RuntimeError::Network(format!("invalid IPv6 gateway CIDR {cidr}"))
+                })?;
+                let address = allocate_container_ipv6(
+                    &format!("{id}\0{}", config.network_name),
+                    &gateway,
+                    prefix,
+                );
+                run_cmd(&ip_netns_exec(
+                    netns_name,
+                    &[
+                        "ip",
+                        "-6",
+                        "addr",
+                        "add",
+                        &format!("{address}/{prefix}"),
+                        "dev",
+                        &interface_name,
+                    ],
+                ))?;
+                Some(address)
+            } else {
+                None
+            };
+            run_cmd(&ip_netns_exec(
+                netns_name,
+                &["ip", "link", "set", &interface_name, "up"],
+            ))?;
+            Ok::<_, RuntimeError>((host_ifindex, ipv6_address))
+        })();
+        let (host_ifindex, ipv6_address) = match attach_result {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = run_cmd_allow_missing(&[
+                    "ip".into(),
+                    "link".into(),
+                    "delete".into(),
+                    host_interface.clone(),
+                ]);
+                return Err(error);
+            }
+        };
+        let ownership = NetworkOwnershipRecord {
+            schema_version: 3,
+            owner_id: id.to_string(),
+            network_id: Some(config.network_name.clone()),
+            host_interface: host_interface.clone(),
+            host_ifindex: Some(host_ifindex),
+            namespace_identity: Some(namespace_identity),
+            managed_interface: None,
+            managed_ifindex: None,
+            loopback_ifindex: None,
+            bridge_ifindex: Some(bridge_ifindex),
+            source_cidr: Some(config.ipv4_subnet.clone()),
+            bridge: Some(config.bridge_name.clone()),
+            firewall_id: None,
+            firewall_marker: None,
+            firewall_expected_state: None,
+            ebpf_pin_path: None,
+            external_ipv4: None,
+            next_hop_mac: None,
+            snat_port_start: None,
+            snat_port_end: None,
+            object_sha256: None,
+            object_abi: None,
+            ebpf_filters: Vec::new(),
+            ebpf_pins: Vec::new(),
+        };
+        endpoints.push(NetworkEndpointRecord {
+            network_name: config.network_name.clone(),
+            endpoint_id: host_interface.clone(),
+            interface_name,
+            ipv4_address: Some(ipv4),
+            ipv6_address,
+            generation: config.generation,
+            namespace_identity: Some(namespace_identity),
+            network_backend: None,
+            ownership: Some(ownership),
+        });
+        record.network_endpoints = endpoints;
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        if let Err(error) = self.store.put_for_mutation(&record, operation_id) {
+            let _ = run_cmd_allow_missing(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                host_interface,
+            ]);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn disconnect_network_authorized(
+        &self,
+        _proof: &AuthorizedRequest,
+        _intent: Option<&crate::witness::DurableIntent>,
+        id: &str,
+        network_name: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if !matches!(record.status.as_str(), "running" | "paused") {
+            return Err(RuntimeError::InvalidState(
+                "network disconnect requires a running or paused container".into(),
+            ));
+        }
+        let endpoint = record
+            .effective_network_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.network_name == network_name)
+            .ok_or_else(|| {
+                RuntimeError::InvalidState(format!(
+                    "container is not connected to network {network_name}"
+                ))
+            })?;
+        let ownership = endpoint.ownership.as_ref().ok_or_else(|| {
+            RuntimeError::Network(format!(
+                "network endpoint {network_name} has no durable kernel ownership"
+            ))
+        })?;
+        verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+        let netns_name = record.netns.as_deref().ok_or_else(|| {
+            RuntimeError::Network("container has no durable network namespace".into())
+        })?;
+        let source_cidr = ownership.source_cidr.as_deref().ok_or_else(|| {
+            RuntimeError::Network(format!(
+                "network endpoint {network_name} has no durable source subnet"
+            ))
+        })?;
+        run_cmd(&ip_netns_exec(
+            netns_name,
+            &[
+                "ip",
+                "route",
+                "add",
+                "unreachable",
+                source_cidr,
+                "metric",
+                "42760",
+            ],
+        ))?;
+        if let Err(error) = run_cmd(&[
+            "ip".into(),
+            "link".into(),
+            "delete".into(),
+            ownership.host_interface.clone(),
+        ]) {
+            let _ = run_cmd_allow_missing(&ip_netns_exec(
+                netns_name,
+                &[
+                    "ip",
+                    "route",
+                    "del",
+                    "unreachable",
+                    source_cidr,
+                    "metric",
+                    "42760",
+                ],
+            ));
+            return Err(error);
+        }
+        take_network_endpoint(&mut record, network_name).ok_or_else(|| {
+            RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
+        })?;
+        project_primary_network_fields(&mut record);
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .ok_or_else(|| {
+                RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
+            })?;
+        self.store
+            .put_for_mutation(&record, operation_id)
+            .map_err(RuntimeError::PostEffectPersistence)
+    }
+
     fn start_from_reconciliation(&self, id: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::ContainerStart, id, |runtime, proof, intent| {
             runtime.restart_authorized(proof, intent, id, Duration::ZERO, false, false, true)
@@ -4658,6 +5051,7 @@ impl ContainerRuntime {
             record.readonly_rootfs,
             self.runtime_dir.clone(),
             log_rotation_from_annotations(&record.annotations),
+            configured_log_driver(&record.annotations).to_string(),
         )?;
         self.phase_hook.reached(
             if stop_existing { "restart" } else { "start" },
@@ -5276,6 +5670,13 @@ impl ContainerRuntime {
         }
         result
     }
+}
+
+fn ensure_log_readback_supported(record: &ContainerRecord) -> Result<(), RuntimeError> {
+    if configured_log_driver(&record.annotations) != "json-file" {
+        return Err(RuntimeError::LogReadUnsupported);
+    }
+    Ok(())
 }
 
 fn validate_rootless_mount_capability(
@@ -5946,6 +6347,95 @@ fn process_start_time_for_pid(pid: u32) -> Option<u64> {
         .ok()
 }
 
+fn process_stats_from_stat(
+    stat: &str,
+    page_size: u64,
+    ticks_per_second: u64,
+) -> Option<CgroupStats> {
+    if page_size == 0 || ticks_per_second == 0 {
+        return None;
+    }
+    let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+    let resident_pages = fields.get(21)?.parse::<i64>().ok()?.max(0) as u64;
+    let ticks_to_usec = |ticks: u64| {
+        ((ticks as u128).saturating_mul(1_000_000) / ticks_per_second as u128)
+            .min(u64::MAX as u128) as u64
+    };
+    let cpu_user_usec = ticks_to_usec(user_ticks);
+    let cpu_system_usec = ticks_to_usec(system_ticks);
+    Some(CgroupStats {
+        memory_current: Some(resident_pages.saturating_mul(page_size)),
+        pids_current: Some(1),
+        cpu_usage_usec: Some(cpu_user_usec.saturating_add(cpu_system_usec)),
+        cpu_user_usec: Some(cpu_user_usec),
+        cpu_system_usec: Some(cpu_system_usec),
+        ..CgroupStats::default()
+    })
+}
+
+fn process_tree_stats(root: u32) -> Option<CgroupStats> {
+    // SAFETY: sysconf only reads immutable host process settings.
+    let page_size = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) };
+    // SAFETY: sysconf only reads immutable host process settings.
+    let ticks_per_second = unsafe { nix::libc::sysconf(nix::libc::_SC_CLK_TCK) };
+    if page_size <= 0 || ticks_per_second <= 0 {
+        return None;
+    }
+    let mut pids = crate::process_lifecycle::owned_descendants_deepest_first(root);
+    pids.push(root);
+    let mut aggregate = CgroupStats::default();
+    let mut samples = 0_u64;
+    for pid in pids {
+        let Some(sample) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| process_stats_from_stat(&stat, page_size as u64, ticks_per_second as u64))
+        else {
+            continue;
+        };
+        samples = samples.saturating_add(1);
+        aggregate.memory_current = Some(aggregate.memory_current.unwrap_or(0).saturating_add(sample.memory_current.unwrap_or(0)));
+        aggregate.cpu_usage_usec = Some(aggregate.cpu_usage_usec.unwrap_or(0).saturating_add(sample.cpu_usage_usec.unwrap_or(0)));
+        aggregate.cpu_user_usec = Some(aggregate.cpu_user_usec.unwrap_or(0).saturating_add(sample.cpu_user_usec.unwrap_or(0)));
+        aggregate.cpu_system_usec = Some(aggregate.cpu_system_usec.unwrap_or(0).saturating_add(sample.cpu_system_usec.unwrap_or(0)));
+    }
+    if samples == 0 {
+        return None;
+    }
+    aggregate.pids_current = Some(samples);
+    Some(aggregate)
+}
+
+fn stats_with_process_fallback<E>(
+    cgroup: Result<CgroupStats, E>,
+    process: Option<CgroupStats>,
+) -> Result<CgroupStats, E> {
+    match (cgroup, process) {
+        (Err(_), Some(process)) => Ok(process),
+        (Err(error), None) => Err(error),
+        (Ok(mut cgroup), Some(process)) => {
+            cgroup.memory_current = Some(
+                cgroup.memory_current.unwrap_or(0).max(process.memory_current.unwrap_or(0)),
+            );
+            cgroup.pids_current = Some(
+                cgroup.pids_current.unwrap_or(0).max(process.pids_current.unwrap_or(0)),
+            );
+            cgroup.cpu_usage_usec = Some(
+                cgroup.cpu_usage_usec.unwrap_or(0).max(process.cpu_usage_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_user_usec = Some(
+                cgroup.cpu_user_usec.unwrap_or(0).max(process.cpu_user_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_system_usec = Some(
+                cgroup.cpu_system_usec.unwrap_or(0).max(process.cpu_system_usec.unwrap_or(0)),
+            );
+            Ok(cgroup)
+        }
+        (Ok(cgroup), None) => Ok(cgroup),
+    }
+}
+
 fn recovery_observation(
     record: Option<&ContainerRecord>,
     action: crate::witness::WitnessAction,
@@ -6268,6 +6758,7 @@ fn spawn_process_with_logs(
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
     rotation: Option<LogRotation>,
+    log_driver: String,
 ) -> Result<u32, RuntimeError> {
     let command = build_command(
         cmd,
@@ -6284,8 +6775,17 @@ fn spawn_process_with_logs(
         &tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let (child_id, child, pidfd) =
-        spawn_child_with_logs(command, stdout_path, stderr_path, append, tty, rotation)?;
+    let (child_id, child, pidfd) = spawn_child_with_logs(
+        command,
+        stdout_path,
+        stderr_path,
+        append,
+        tty,
+        rotation,
+        &runtime_dir,
+        &container_id,
+        &log_driver,
+    )?;
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -6324,6 +6824,7 @@ fn spawn_process_with_logs(
             readonly_rootfs,
             runtime_dir,
             rotation,
+            log_driver,
             oom_kills,
         );
     });
@@ -6995,31 +7496,26 @@ fn spawn_child_with_logs(
     append: bool,
     tty: bool,
     rotation: Option<LogRotation>,
+    runtime_dir: &Path,
+    container_id: &str,
+    log_driver: &str,
 ) -> Result<(u32, Child, OwnedFd), RuntimeError> {
     let rotation = rotation.or_else(log_rotation_from_env);
-    let stdout_file = if append {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(stdout_path)?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(stdout_path)?
-    };
-    let stderr_file = if append {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(stderr_path)?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(stderr_path)?
+    let driver = load_log_driver(
+        log_driver,
+        runtime_dir,
+        rotation.map(|rotation| DriverLogRotation {
+            max_size: rotation.max_size,
+            max_files: rotation.max_files,
+        }),
+    )?;
+    let context = ContainerLogContext {
+        container_id: container_id.to_string(),
+        log_dir: stdout_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+        append,
     };
     let stdin_path = stdin_fifo_path(stdout_path);
     ensure_stdin_fifo(&stdin_path)?;
@@ -7041,9 +7537,9 @@ fn spawn_child_with_logs(
         let mut master_reader = std::fs::File::from(master);
         let mut master_writer = master_reader.try_clone()?;
         let slave = std::fs::File::from(slave);
-        let mut log = stdout_file;
+        let capture = LogCapture::new(driver.open(&context)?, 1);
         thread::spawn(move || {
-            let _ = io::copy(&mut master_reader, &mut log);
+            let _ = capture_stream(&mut master_reader, capture, LogStream::Stdout);
         });
         drop(stdin_file);
         let mut input = OpenOptions::new()
@@ -7075,7 +7571,10 @@ fn spawn_child_with_logs(
             }
         });
         child
-    } else if std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some() || rotation.is_some() {
+    } else if driver.name() != "json-file"
+        || std::env::var_os("FERROCRATE_LOG_JOURNAL").is_some()
+        || rotation.is_some()
+    {
         // Long-lived callers (the Docker-compatible daemon) opt into pipe
         // capture so every output line gets a sidecar timestamp journal
         // (`<stream>.log.ts`: `<offset> <nanos>` per line). The raw log file
@@ -7083,27 +7582,49 @@ fn spawn_child_with_logs(
         // semantics derive from the journal. Short-lived CLI callers must not
         // use pipes: their copier threads would die with the process and drop
         // the detached container's output.
+        let capture = LogCapture::new(driver.open(&context)?, 2);
         let mut child = command
             .stdin(Stdio::from(stdin_file))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
         if let Some(mut pipe) = child.stdout.take() {
-            let mut log = stdout_file;
-            let journal = log_journal_path(stdout_path);
+            let stdout_capture = capture.clone();
             thread::spawn(move || {
-                copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation)
+                let _ = capture_stream(&mut pipe, stdout_capture, LogStream::Stdout);
             });
         }
         if let Some(mut pipe) = child.stderr.take() {
-            let mut log = stderr_file;
-            let journal = log_journal_path(stderr_path);
             thread::spawn(move || {
-                copy_line_journaled_with_rotation(&mut pipe, &mut log, &journal, rotation)
+                let _ = capture_stream(&mut pipe, capture, LogStream::Stderr);
             });
         }
         child
     } else {
+        let stdout_file = if append {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(stdout_path)?
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(stdout_path)?
+        };
+        let stderr_file = if append {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(stderr_path)?
+        } else {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(stderr_path)?
+        };
         command
             .stdin(Stdio::from(stdin_file))
             .stdout(Stdio::from(stdout_file))
@@ -7142,6 +7663,7 @@ fn log_journal_path(log_path: &Path) -> PathBuf {
 /// `max-file` option. Keeping the two files as a pair is essential: a moved
 /// log without its sidecar would make `since`/`until` silently misclassify
 /// historical output.
+#[cfg(test)]
 fn rotate_log_pair(log_path: &Path, max_files: u32) -> io::Result<()> {
     if max_files < 2 {
         return Ok(());
@@ -7205,6 +7727,14 @@ struct LogRotation {
     max_files: u32,
 }
 
+fn configured_log_driver(annotations: &HashMap<String, String>) -> &str {
+    annotations
+        .get("io.ferrocrate.log.driver")
+        .map(String::as_str)
+        .filter(|driver| !driver.is_empty())
+        .unwrap_or("json-file")
+}
+
 fn log_rotation_from_env() -> Option<LogRotation> {
     let max_size = std::env::var("FERROCRATE_LOG_MAX_SIZE")
         .ok()
@@ -7258,6 +7788,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
     copy_line_journaled_with_rotation(pipe, log, journal_path, None);
 }
 
+#[cfg(test)]
 fn copy_line_journaled_with_rotation(
     pipe: &mut impl io::Read,
     log: &mut fs::File,
@@ -7516,6 +8047,7 @@ fn supervise_child(
     readonly_rootfs: bool,
     runtime_dir: PathBuf,
     rotation: Option<LogRotation>,
+    log_driver: String,
     mut oom_kills: u64,
 ) {
     let mut adaptive_model_version = "runtime-v1".to_string();
@@ -7744,9 +8276,17 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd) =
-            match spawn_child_with_logs(command, &stdout_path, &stderr_path, append, tty, rotation)
-            {
+        let (pid, new_child, new_pidfd) = match spawn_child_with_logs(
+            command,
+            &stdout_path,
+            &stderr_path,
+            append,
+            tty,
+            rotation,
+            &runtime_dir,
+            &container_id,
+            &log_driver,
+        ) {
                 Ok(tuple) => tuple,
                 Err(error) => {
                     warn!(
@@ -8272,9 +8812,7 @@ fn setup_network(
         cidr: bridge_config.cidr.clone(),
         ipv6_cidr: bridge_config.ipv6_cidr.clone(),
     };
-    let bridge_existed = Path::new("/sys/class/net")
-        .join(&bridge_config.name)
-        .exists();
+    let bridge_existed = interface_ifindex_optional(&bridge_config.name)?.is_some();
     match bridge::create_bridge(&bridge_exec_config) {
         Ok(()) => {
             if !bridge_existed {
@@ -9570,12 +10108,32 @@ fn ebpf_external_route() -> Result<EbpfExternalRoute, RuntimeError> {
 }
 
 fn interface_ifindex(interface: &str) -> Result<u32, RuntimeError> {
+    interface_ifindex_optional(interface)?.ok_or_else(|| {
+        RuntimeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound))
+    })
+}
+
+fn interface_ifindex_optional(interface: &str) -> Result<Option<u32>, RuntimeError> {
     ferro_net::validate::validate_interface_name(interface)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
-    fs::read_to_string(Path::new("/sys/class/net").join(interface).join("ifindex"))?
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| RuntimeError::Network(format!("invalid ifindex for {interface}")))
+    let interface = std::ffi::CString::new(interface)
+        .map_err(|_| RuntimeError::Network("interface name contains NUL".into()))?;
+    // sysfs can remain bound to the parent network namespace inside a user
+    // namespace. if_nametoindex(3) asks the current namespace through the
+    // kernel API and therefore binds identity to the namespace we mutate.
+    let ifindex = unsafe { nix::libc::if_nametoindex(interface.as_ptr()) };
+    if ifindex == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error
+            .raw_os_error()
+            .is_some_and(|code| code == nix::libc::ENODEV || code == nix::libc::ENXIO)
+        {
+            Ok(None)
+        } else {
+            Err(RuntimeError::Io(error))
+        };
+    }
+    Ok(Some(ifindex))
 }
 
 fn netns_interface_mac(netns_name: &str, interface: &str) -> Result<[u8; 6], RuntimeError> {
@@ -10006,17 +10564,20 @@ fn verify_container_kernel_ownership(
     let expected_host_ifindex = ownership.host_ifindex.ok_or_else(|| {
         RuntimeError::Network("network ownership has no host-veth ifindex".to_string())
     })?;
-    let host_path = Path::new("/sys/class/net").join(&ownership.host_interface);
-    if host_path.exists() {
-        if interface_ifindex(&ownership.host_interface)? != expected_host_ifindex {
+    match interface_ifindex_optional(&ownership.host_interface)? {
+        Some(observed) => {
+            if observed != expected_host_ifindex {
+                return Err(RuntimeError::Network(
+                    "owned host veth was replaced".to_string(),
+                ));
+            }
+        }
+        None if require_present => {
             return Err(RuntimeError::Network(
-                "owned host veth was replaced".to_string(),
+                "owned host veth is missing".to_string(),
             ));
         }
-    } else if require_present {
-        return Err(RuntimeError::Network(
-            "owned host veth is missing".to_string(),
-        ));
+        None => {}
     }
 
     let expected_namespace = ownership.namespace_identity.ok_or_else(|| {
@@ -10064,29 +10625,33 @@ fn verify_container_kernel_ownership(
     }
 
     if let (Some(bridge), Some(expected)) = (&ownership.bridge, ownership.bridge_ifindex) {
-        let path = Path::new("/sys/class/net").join(bridge);
-        if path.exists() && interface_ifindex(bridge)? != expected {
-            return Err(RuntimeError::Network(
-                "owned bridge was replaced".to_string(),
-            ));
-        }
-        if require_present && !path.exists() {
-            return Err(RuntimeError::Network("owned bridge is missing".to_string()));
+        match interface_ifindex_optional(bridge)? {
+            Some(observed) if observed != expected => {
+                return Err(RuntimeError::Network(
+                    "owned bridge was replaced".to_string(),
+                ));
+            }
+            None if require_present => {
+                return Err(RuntimeError::Network("owned bridge is missing".to_string()));
+            }
+            _ => {}
         }
     }
     if let (Some(interface), Some(expected)) =
         (&ownership.managed_interface, ownership.managed_ifindex)
     {
-        let path = Path::new("/sys/class/net").join(interface);
-        if path.exists() && interface_ifindex(interface)? != expected {
-            return Err(RuntimeError::Network(
-                "managed network interface was replaced".to_string(),
-            ));
-        }
-        if require_present && !path.exists() {
-            return Err(RuntimeError::Network(
-                "managed network interface is missing".to_string(),
-            ));
+        match interface_ifindex_optional(interface)? {
+            Some(observed) if observed != expected => {
+                return Err(RuntimeError::Network(
+                    "managed network interface was replaced".to_string(),
+                ));
+            }
+            None if require_present => {
+                return Err(RuntimeError::Network(
+                    "managed network interface is missing".to_string(),
+                ));
+            }
+            _ => {}
         }
     }
     Ok(true)
@@ -10409,6 +10974,47 @@ fn cleanup_network(
             run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
         }
         return Ok(());
+    }
+    if !record.network_endpoints.is_empty() {
+        let primary_host = record
+            .network_ownership
+            .as_ref()
+            .map(|ownership| ownership.host_interface.as_str());
+        for endpoint in &record.network_endpoints {
+            let Some(ownership) = endpoint.ownership.as_ref() else {
+                continue;
+            };
+            if primary_host == Some(ownership.host_interface.as_str()) {
+                continue;
+            }
+            verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            run_cmd_allow_missing(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                ownership.host_interface.clone(),
+            ])?;
+        }
+        if record.network_backend.is_none() {
+            if let Some(ownership) = record.network_ownership.as_ref() {
+                verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+                run_cmd_allow_missing(&[
+                    "ip".into(),
+                    "link".into(),
+                    "delete".into(),
+                    ownership.host_interface.clone(),
+                ])?;
+            }
+            if record.namespace_owned {
+                if let (Some(netns_name), Some(expected)) =
+                    (record.netns.as_deref(), record.namespace_identity)
+                {
+                    verify_endpoint_namespace_identity(netns_name, expected)?;
+                    run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                }
+            }
+            return Ok(());
+        }
     }
     if record.network_backend.is_none() && record.network_ownership.is_none() {
         let proven = legacy_firewall_rules_proven(record)?;
@@ -11842,6 +12448,121 @@ fn allocate_container_ip(container_id: &str, gateway: &str) -> Result<String, Ru
     let host = 2 + (byte % 200);
     octets[3] = host;
     Ok(Ipv4Addr::from(octets).to_string())
+}
+
+fn allocate_named_endpoint_ipv4(
+    container_id: &str,
+    network_name: &str,
+    subnet: &str,
+    gateway: &str,
+    occupied: &BTreeSet<String>,
+) -> Result<String, RuntimeError> {
+    let (address, prefix) = subnet
+        .split_once('/')
+        .ok_or_else(|| RuntimeError::Network(format!("invalid network subnet {subnet}")))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| RuntimeError::Network(format!("invalid network subnet {subnet}")))?;
+    if prefix > 30 {
+        return Err(RuntimeError::Network(format!(
+            "network subnet {subnet} has no usable endpoint addresses"
+        )));
+    }
+    let address = u32::from(
+        address
+            .parse::<Ipv4Addr>()
+            .map_err(|_| RuntimeError::Network(format!("invalid network subnet {subnet}")))?,
+    );
+    let gateway = gateway
+        .parse::<Ipv4Addr>()
+        .map_err(|_| RuntimeError::Network(format!("invalid network gateway {gateway}")))?;
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let network = address & mask;
+    let broadcast = network | !mask;
+    if u32::from(gateway) <= network || u32::from(gateway) >= broadcast {
+        return Err(RuntimeError::Network(format!(
+            "network gateway {gateway} is outside usable subnet {subnet}"
+        )));
+    }
+    let first = network.saturating_add(1);
+    let usable = broadcast.saturating_sub(first);
+    let digest = rvf_crypto::shake256_256(
+        format!("named-endpoint\0{container_id}\0{network_name}").as_bytes(),
+    );
+    let start = u32::from_be_bytes(digest[..4].try_into().expect("digest prefix")) % usable;
+    for offset in 0..usable {
+        let candidate = Ipv4Addr::from(first + ((start + offset) % usable));
+        if candidate != gateway && !occupied.contains(&candidate.to_string()) {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err(RuntimeError::Network(format!(
+        "network {network_name} has no free IPv4 endpoint addresses"
+    )))
+}
+
+fn named_endpoint_host_interface(container_id: &str, network_name: &str) -> String {
+    let digest = rvf_crypto::shake256_256(
+        format!("named-veth\0{container_id}\0{network_name}").as_bytes(),
+    );
+    format!("v{}", hex::encode(&digest[..7]))
+}
+
+fn next_endpoint_interface<'a>(used: impl IntoIterator<Item = &'a str>) -> String {
+    let used = used.into_iter().collect::<BTreeSet<_>>();
+    (1..=255)
+        .map(|index| format!("eth{index}"))
+        .find(|candidate| !used.contains(candidate.as_str()))
+        .unwrap_or_else(|| "eth255".to_string())
+}
+
+fn take_network_endpoint(
+    record: &mut ContainerRecord,
+    network_name: &str,
+) -> Option<NetworkEndpointRecord> {
+    if record.network_endpoints.is_empty() {
+        record.network_endpoints = record.effective_network_endpoints();
+    }
+    let index = record
+        .network_endpoints
+        .iter()
+        .position(|endpoint| endpoint.network_name == network_name)?;
+    Some(record.network_endpoints.remove(index))
+}
+
+fn project_primary_network_fields(record: &mut ContainerRecord) {
+    let Some(primary) = record.network_endpoints.first() else {
+        record.network_name = None;
+        record.ip_address = None;
+        record.ipv6_address = None;
+        record.network_backend = None;
+        record.network_ownership = None;
+        return;
+    };
+    record.network_name = Some(primary.network_name.clone());
+    record.ip_address = primary.ipv4_address.clone();
+    record.ipv6_address = primary.ipv6_address.clone();
+    record.network_backend = primary.network_backend.clone();
+    record.network_ownership = primary.ownership.clone();
+}
+
+fn verify_endpoint_namespace_identity(
+    netns_name: &str,
+    expected: KernelObjectIdentityRecord,
+) -> Result<(), RuntimeError> {
+    let path = netns::netns_path(netns_name);
+    let observed = kernel_path_identity(&path)?;
+    if observed != expected {
+        return Err(RuntimeError::Network(format!(
+            "container network namespace identity changed: expected {}:{}, found {}:{}",
+            expected.device, expected.inode, observed.device, observed.inode
+        )));
+    }
+    Ok(())
 }
 
 fn associated_network_name(associated: Option<&str>, network_mode: &str) -> Option<String> {
@@ -13425,7 +14146,8 @@ mod tests {
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
-        now_unix, ContainerRecord, MutationReservation, PortMappingRecord, RestartPolicy,
+        now_unix, ContainerRecord, MutationReservation, NetworkEndpointRecord, PortMappingRecord,
+        RestartPolicy,
     };
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
@@ -14061,6 +14783,37 @@ mod tests {
     }
 
     #[test]
+    fn logs_rejects_driver_without_readback_using_docker_wording() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("write-only-logs", "exited");
+        let log_dir = temp.path().join("containers/write-only-logs/logs");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        record.stdout_path = log_dir.join("stdout.log").display().to_string();
+        record.stderr_path = log_dir.join("stderr.log").display().to_string();
+        record.annotations.insert(
+            "io.ferrocrate.log.driver".to_string(),
+            "journald".to_string(),
+        );
+        runtime.store.put(&record).expect("record");
+
+        let error = runtime
+            .logs_split(&record.id)
+            .expect_err("write-only driver must reject logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
+        let error = runtime
+            .logs_timestamped_split(&record.id)
+            .expect_err("write-only driver must reject timestamped logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
+    }
+
+    #[test]
     fn logs_returns_output() {
         if !can_run_containers() {
             eprintln!("SKIP: requires root privileges for container operations");
@@ -14496,6 +15249,7 @@ mod tests {
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             managed_overlay: None,
             managed_cleanup_provenance: None,
             managed_host_veth: None,
@@ -14563,6 +15317,7 @@ mod tests {
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             ai_runtime: None,
             creation_provenance: Default::default(),
             mutation_generation: 1,
@@ -15117,6 +15872,38 @@ mod tests {
         assert!(super::pid_identity_matches(&record));
     }
 
+    #[test]
+    fn proc_stat_fallback_reports_live_memory_and_cpu() {
+        let stat = "123 (worker (batch)) R 1 0 0 0 0 0 0 0 0 0 100 50 0 0 0 0 0 0 777 0 10";
+        let stats = super::process_stats_from_stat(stat, 4096, 100).expect("process stats");
+        assert_eq!(stats.memory_current, Some(40_960));
+        assert_eq!(stats.cpu_usage_usec, Some(1_500_000));
+        assert_eq!(stats.cpu_user_usec, Some(1_000_000));
+        assert_eq!(stats.cpu_system_usec, Some(500_000));
+    }
+
+    #[test]
+    fn process_stats_replace_an_unreadable_cgroup_sample() {
+        let process = crate::cgroups::CgroupStats {
+            memory_current: Some(4096),
+            cpu_usage_usec: Some(50),
+            ..crate::cgroups::CgroupStats::default()
+        };
+        let recovered = super::stats_with_process_fallback(
+            Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+            Some(process.clone()),
+        )
+        .expect("verified process fallback");
+        assert_eq!(recovered, process);
+        assert_eq!(
+            super::stats_with_process_fallback(
+                Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+                None,
+            ),
+            Err("permission denied"),
+        );
+    }
+
     fn fixture_container_record(id: &str, status: &str) -> ContainerRecord {
         ContainerRecord {
             id: id.to_string(),
@@ -15159,6 +15946,7 @@ mod tests {
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             ai_runtime: None,
             creation_provenance: Default::default(),
             mutation_generation: 1,
@@ -16604,6 +17392,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             ai_runtime: None,
             creation_provenance: Default::default(),
             mutation_generation: 1,
@@ -16635,6 +17424,87 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let network_mask = !host_mask;
         assert_eq!(gateway_u & network_mask, assigned_u & network_mask);
         assert_ne!(assigned, gateway);
+    }
+
+    #[test]
+    fn named_endpoint_plan_is_network_scoped_and_avoids_used_addresses() {
+        let occupied = ["172.30.0.91".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let first = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "frontend",
+            "172.30.0.0/24",
+            "172.30.0.1",
+            &occupied,
+        )
+        .expect("address");
+        let repeated = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "frontend",
+            "172.30.0.0/24",
+            "172.30.0.1",
+            &occupied,
+        )
+        .expect("stable address");
+        let other_network = super::allocate_named_endpoint_ipv4(
+            "container-a",
+            "backend",
+            "172.31.0.0/24",
+            "172.31.0.1",
+            &std::collections::BTreeSet::new(),
+        )
+        .expect("other address");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, "172.30.0.1");
+        assert!(!occupied.contains(&first));
+        assert!(first.starts_with("172.30.0."));
+        assert!(other_network.starts_with("172.31.0."));
+    }
+
+    #[test]
+    fn secondary_endpoint_names_are_stable_unique_and_interface_safe() {
+        let host_a = super::named_endpoint_host_interface("container-a", "frontend");
+        let host_b = super::named_endpoint_host_interface("container-a", "backend");
+        assert_eq!(
+            host_a,
+            super::named_endpoint_host_interface("container-a", "frontend")
+        );
+        assert_ne!(host_a, host_b);
+        assert!(host_a.len() <= 15);
+        assert_eq!(super::next_endpoint_interface(["eth0", "eth1"]), "eth2");
+    }
+
+    #[test]
+    fn disconnect_selection_removes_exactly_the_requested_endpoint() {
+        let mut record = ContainerRecord::authorization_candidate(
+            "container-a".into(),
+            "example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+        );
+        record.network_endpoints = ["frontend", "backend"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, network_name)| NetworkEndpointRecord {
+                network_name: network_name.into(),
+                endpoint_id: format!("veth-{network_name}"),
+                interface_name: format!("eth{index}"),
+                ipv4_address: Some(format!("172.{}.0.2", 30 + index)),
+                ipv6_address: None,
+                generation: 1,
+                namespace_identity: None,
+                network_backend: None,
+                ownership: None,
+            })
+            .collect();
+
+        let removed = super::take_network_endpoint(&mut record, "frontend")
+            .expect("frontend endpoint");
+
+        assert_eq!(removed.network_name, "frontend");
+        assert_eq!(record.network_endpoints.len(), 1);
+        assert_eq!(record.network_endpoints[0].network_name, "backend");
     }
 
     #[test]
@@ -17309,8 +18179,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn supervised_launch_blocks_workload_until_parent_release() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("workload-ran");
-        let stdout = root.path().join("stdout");
-        let stderr = root.path().join("stderr");
+        let stdout = root.path().join("stdout.log");
+        let stderr = root.path().join("stderr.log");
         #[cfg(target_env = "musl")]
         let touch = "/bin/touch";
         #[cfg(not(target_env = "musl"))]
@@ -17331,8 +18201,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, false, None).unwrap();
+        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+            command,
+            &stdout,
+            &stderr,
+            false,
+            false,
+            None,
+            root.path(),
+            "launch-test",
+            "json-file",
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
             !marker.exists(),
@@ -17346,8 +18226,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     #[test]
     fn tty_spawn_uses_kernel_pty_and_merges_output_into_logs() {
         let root = tempfile::tempdir().expect("runtime");
-        let stdout = root.path().join("stdout");
-        let stderr = root.path().join("stderr");
+        let stdout = root.path().join("stdout.log");
+        let stderr = root.path().join("stderr.log");
         let command = super::build_command(
             &["/bin/sh".into(), "-c".into(), "printf tty-ready".into()],
             &[],
@@ -17364,9 +18244,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd) =
-            super::spawn_child_with_logs(command, &stdout, &stderr, false, true, None)
-                .expect("spawn PTY child");
+        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+            command,
+            &stdout,
+            &stderr,
+            false,
+            true,
+            None,
+            root.path(),
+            "tty-test",
+            "json-file",
+        )
+        .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
         for _ in 0..50 {
@@ -17533,11 +18422,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         .unwrap();
         let (pid, _child, _pidfd) = super::spawn_child_with_logs(
             command,
-            &root.path().join("stdout"),
-            &root.path().join("stderr"),
+            &root.path().join("stdout.log"),
+            &root.path().join("stderr.log"),
             false,
             false,
             None,
+            root.path(),
+            "launch-helper",
+            "json-file",
         )
         .unwrap();
         if let Ok(store_path) = std::env::var("FERRO_LAUNCH_HELPER_STORE") {

@@ -48,6 +48,12 @@ export function containerContentState(totalCount, visibleCount, query) {
   return "table";
 }
 
+export function filterNamedResources(rows, query, getName = (row) => row.name) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter((row) => String(getName(row)).toLowerCase().includes(needle));
+}
+
 export function nextResourceDialog(current, command) {
   if (command === "open-volume") return "volume";
   if (command === "open-network") return "network";
@@ -77,6 +83,7 @@ export function isDaemonUnavailable(error) {
 
 export function shouldShowFirstRun(snapshot, activeSection) {
   if (!snapshot || activeSection === "doctor" || activeSection === "settings") return false;
+  if (snapshot.daemon && snapshot.daemon.state !== "running") return true;
   return [snapshot.containers, snapshot.images].some((command) => (
     command?.ok === false && isDaemonUnavailable(command.stderr)
   ));
@@ -88,9 +95,16 @@ export function runtimeSurfaceState(snapshot, activeSection) {
   return shouldShowFirstRun(snapshot, activeSection) ? "first-run" : "resource";
 }
 
-export function snapshotFailureDetail(snapshot) {
+export function snapshotFailureDetail(snapshot, activeSection) {
   if (!snapshot || shouldShowFirstRun(snapshot, "containers")) return null;
-  const failed = [snapshot.containers, snapshot.images].find((command) => command?.ok === false);
+  const commands = activeSection === "containers"
+    ? [snapshot.containers]
+    : activeSection === "images"
+      ? [snapshot.images]
+      : activeSection == null
+        ? [snapshot.containers, snapshot.images]
+        : [];
+  const failed = commands.find((command) => command?.ok === false);
   return failed?.stderr?.trim() || (failed ? `A runtime command did not complete successfully (status ${failed.code ?? "unknown"}).` : null);
 }
 
@@ -157,11 +171,13 @@ export function HostPathField({
 }) {
   const validationError = hostPathError(value, kind);
   const visibleError = value.trim() ? validationError : null;
+  const inputId = `host-${kind}-path`;
   return createElement("div", { className: "host-path-field detail-span" },
-    createElement("label", null,
+    createElement("label", { htmlFor: inputId },
       createElement("span", null, label),
       createElement("div", { className: "field-row" },
         createElement("input", {
+          id: inputId,
           value,
           onChange,
           placeholder: `absolute ${kind} path on the daemon host`,
@@ -304,13 +320,13 @@ export function ResourceCreateDialog({
         createElement("button", { className: "btn btn-secondary", onClick: onCancel }, "Cancel"),
       ),
       createElement("div", { className: "editor-grid" },
-        createElement("label", { className: "detail-span" },
+        createElement("label", { className: "detail-span", htmlFor: `${kind}-name` },
           createElement("span", null, isNetwork ? "Network name" : "Volume name"),
-          createElement("input", { value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data", autoFocus: true }),
+          createElement("input", { id: `${kind}-name`, value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data", autoFocus: true }),
         ),
-        isNetwork ? createElement("label", { className: "detail-span" },
+        isNetwork ? createElement("label", { className: "detail-span", htmlFor: "network-subnet" },
           createElement("span", null, "Subnet (optional)"),
-          createElement("input", { value: subnet, onChange: onSubnetChange, placeholder: "172.20.0.0/16" }),
+          createElement("input", { id: "network-subnet", value: subnet, onChange: onSubnetChange, placeholder: "172.20.0.0/16" }),
         ) : null,
         error ? createElement(ActionErrorNotice, { error, onStart, onReviewLicensing }) : null,
       ),

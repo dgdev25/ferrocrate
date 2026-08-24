@@ -7,8 +7,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/process-tree-ownership.sh"
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/debug/ferro-cli}"
 fixture="$repo_root/tests/fixtures/real-app/compose.yml"
-output="$repo_root/docs/compatibility/parity-scoreboard.md"
-execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+if [[ "${DOCKER_BUILDKIT:-}" == 1 ]]; then
+  output="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.md"
+  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.tsv"
+else
+  output="$repo_root/docs/compatibility/parity-scoreboard.md"
+  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+fi
 command_timeout="${FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS:-240}"
 daemon_timeout="${FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS:-20}"
 
@@ -20,12 +25,14 @@ Run genuine Docker and Compose clients against an isolated FerroCrate daemon,
 record every declared invocation, and atomically generate a Markdown scoreboard.
 
 Options:
-  --output <path>  Markdown scoreboard (default: docs/compatibility/parity-scoreboard.md)
-  --log <path>     Tab-separated execution log (default: docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv)
+  --output <path>  Markdown scoreboard (defaults are mode-specific)
+  --log <path>     Tab-separated execution log (defaults are mode-specific)
   -h, --help       Show this help
 
 Required environment:
-  DOCKER_BUILDKIT=0
+  DOCKER_BUILDKIT=0  Run and require the supported classic build row.
+  DOCKER_BUILDKIT=1  Run the same matrix, qualifying the expected BuildKit
+                     compatibility error on the build row only.
 
 Optional environment:
   FERROCRATE_BIN                                  ferro-cli executable
@@ -70,12 +77,17 @@ done
   harness_error "FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS must be an integer in 1..600"
 [[ "$daemon_timeout" =~ ^[1-9][0-9]*$ ]] && (( daemon_timeout <= 120 )) ||
   harness_error "FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS must be an integer in 1..120"
-[[ "${DOCKER_BUILDKIT:-}" == 0 ]] || harness_error "DOCKER_BUILDKIT=0 is required for FerroCrate's classic builder"
+builder_mode="${DOCKER_BUILDKIT:-}"
+[[ "$builder_mode" == 0 || "$builder_mode" == 1 ]] ||
+  harness_error "DOCKER_BUILDKIT must be 0 (classic) or 1 (BuildKit fallback qualification)"
 [[ "$(uname -s)" == Linux ]] || harness_error "the Docker-compatible daemon is Linux-only"
 [[ -x "$ferro_bin" ]] || harness_error "missing executable ferro-cli: $ferro_bin"
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
 command -v timeout >/dev/null 2>&1 || harness_error "timeout is required"
 command -v setsid >/dev/null 2>&1 || harness_error "setsid is required for bounded daemon cleanup"
+command -v unshare >/dev/null 2>&1 || harness_error "unshare is required for isolated rootful network conformance"
+command -v ip >/dev/null 2>&1 || harness_error "ip is required for isolated rootful network conformance"
+command -v slirp4netns >/dev/null 2>&1 || harness_error "slirp4netns is required for isolated network egress"
 command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
@@ -83,6 +95,65 @@ command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
 [[ -f "$fixture" ]] || harness_error "missing Compose fixture: $fixture"
 [[ -f "$repo_root/tests/fixtures/real-app/webroot/index.html" ]] || harness_error "incomplete Compose fixture: webroot/index.html"
 [[ -f "$repo_root/tests/fixtures/real-app/apiroot/index.json" ]] || harness_error "incomplete Compose fixture: apiroot/index.json"
+
+# The real connect/disconnect rows require CAP_NET_ADMIN. Run the entire
+# isolated harness in a disposable user+network namespace so both the Docker
+# client peer identity and the daemon share the same trusted user namespace;
+# no host bridge, route, or firewall state is touched.
+if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
+  namespace_sync="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-conformance-userns.XXXXXX")" \
+    || harness_error "cannot create user namespace synchronization directory"
+  mkfifo "$namespace_sync/go" "$namespace_sync/ready" "$namespace_sync/child-ready" \
+    || harness_error "cannot create user namespace synchronization pipes"
+  exec 7<>"$namespace_sync/child-ready"
+  exec 8<>"$namespace_sync/go"
+  exec 9<>"$namespace_sync/ready"
+  unshare --user --map-root-user --mount --net bash -c '
+    mount -t tmpfs tmpfs /run/netns
+    ip link set lo up
+    printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
+    mount --bind "$5/resolv.conf" /etc/resolv.conf
+    printf r >"$6"
+    IFS= read -r -n1 <"$1"
+    exec env FERROCRATE_CONFORMANCE_USERNS=1 bash "$2" --output "$3" --log "$4"
+  ' bash "$namespace_sync/go" "$0" "$output" "$execution_log" "$namespace_sync" \
+    "$namespace_sync/child-ready" &
+  namespace_pid=$!
+  if ! IFS= read -r -n1 -t 10 <&7; then
+    kill "$namespace_pid" 2>/dev/null || true
+    wait "$namespace_pid" 2>/dev/null || true
+    rm -rf -- "$namespace_sync"
+    harness_error "isolated user/network namespace did not become ready"
+  fi
+  slirp4netns --configure --mtu=65520 --ready-fd=9 "$namespace_pid" tap0 \
+    >"$namespace_sync/slirp.log" 2>&1 &
+  slirp_pid=$!
+  if ! IFS= read -r -n1 -t 10 <&9; then
+    kill "$namespace_pid" "$slirp_pid" 2>/dev/null || true
+    wait "$namespace_pid" "$slirp_pid" 2>/dev/null || true
+    slirp_message="$(tr '\n' ' ' <"$namespace_sync/slirp.log")"
+    rm -rf -- "$namespace_sync"
+    harness_error "slirp4netns did not configure isolated egress${slirp_message:+: $slirp_message}"
+  fi
+  printf x >&8
+  wait "$namespace_pid"
+  namespace_status=$?
+  kill "$slirp_pid" 2>/dev/null || true
+  wait "$slirp_pid" 2>/dev/null || true
+  exec 7>&-
+  exec 8>&-
+  exec 9>&-
+  rm -rf -- "$namespace_sync"
+  exit "$namespace_status"
+fi
+if [[ "${FERROCRATE_CONFORMANCE_USERNS:-0}" == 1 ]]; then
+  ip link set lo up || harness_error "cannot enable loopback in conformance network namespace"
+  if ! ip link show ferro0 >/dev/null 2>&1; then
+    ip link add ferro0 type bridge || harness_error "cannot create isolated default bridge"
+    ip addr add 10.0.0.1/24 dev ferro0 || harness_error "cannot address isolated default bridge"
+    ip link set ferro0 up || harness_error "cannot enable isolated default bridge"
+  fi
+fi
 
 output_parent="$(dirname "$output")"
 log_parent="$(dirname "$execution_log")"
@@ -110,8 +181,13 @@ state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
 outputs_dir="$work_root/outputs"
-mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" ||
+cgroup_root="$work_root/cgroup"
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
+printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
+  harness_error "cannot initialize isolated cgroup controller fixture"
+: >"$cgroup_root/cgroup.subtree_control" ||
+  harness_error "cannot initialize isolated cgroup subtree fixture"
 
 # Execute an immutable, run-private snapshot. The daemon and version probe use
 # the same bytes named by the published hash even if a concurrent build replaces
@@ -149,7 +225,11 @@ container="$run_prefix-main"
 attach_container="$run_prefix-attach"
 volume="$run_prefix-volume"
 network="$run_prefix-network"
+write_only_log_container="$run_prefix-write-only-log"
+secondary_network="$run_prefix-secondary"
 compose_project="$run_prefix-compose"
+compose_frontend_network="${compose_project}_frontend"
+compose_backend_network="${compose_project}_backend"
 host_port=18093
 process_token_base="ferrocrate-conformance-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 daemon_process_token="$process_token_base-daemon"
@@ -300,7 +380,17 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker rm --force "$container" "$attach_container" >/dev/null 2>&1 || true
+        docker rm --force "$container" "$attach_container" "$write_only_log_container" \
+      >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker network rm "$network" "$secondary_network" >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker network rm "$compose_frontend_network" "$compose_backend_network" \
+      >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
@@ -373,6 +463,7 @@ setsid env \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
   FERROCRATE_NETWORK_KERNEL_STATE="$state_dir/network-kernel-state.json" \
   FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
+  FERROCRATE_CGROUP_ROOT="$cgroup_root" \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
   "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
   >"$work_root/daemon.stdout" 2>"$work_root/daemon.stderr" &
@@ -402,6 +493,8 @@ pass_count=0
 fail_count=0
 error_count=0
 record_stdin="/dev/null"
+expected_daemon_error_message=""
+record_docker_buildkit=0
 
 shell_command() {
   local rendered="docker" argument
@@ -425,7 +518,7 @@ record_command() {
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
         FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
@@ -451,6 +544,7 @@ record_command() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
+  record_docker_buildkit=0
 }
 
 # A command whose success is a nonzero exit WITH a daemon-mediated error
@@ -467,7 +561,7 @@ record_expected_daemon_error() {
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
         FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
@@ -477,7 +571,9 @@ record_expected_daemon_error() {
   ended="$(date +%s%N)"
   duration=$(((ended - started) / 1000000))
   if [[ "$exit_code" != 0 ]] && [[ "$exit_code" != 124 && "$exit_code" != 137 ]] \
-      && grep -q "Error response from daemon" "$stderr_file"; then
+      && grep -q "Error response from daemon" "$stderr_file" \
+      && { [[ -z "$expected_daemon_error_message" ]] \
+        || grep -Fq "$expected_daemon_error_message" "$stderr_file"; }; then
     status=PASS
     pass_count=$((pass_count + 1))
   else
@@ -487,6 +583,8 @@ record_expected_daemon_error() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
+  expected_daemon_error_message=""
+  record_docker_buildkit=0
 }
 
 # Client identity and engine prerequisites.
@@ -496,7 +594,22 @@ record_command engine-info client info
 
 # Offline image and broad container lifecycle prerequisites. These calls are
 # deliberately unconditional: one failed command must not suppress later rows.
-record_command image-build image build --tag "$image" "$context_dir"
+if [[ "$builder_mode" == 1 ]]; then
+  # The recorded BuildKit probe is expected to reject before producing an
+  # image. Seed the shared lifecycle fixture through the supported reference
+  # path so later, unrelated rows remain independently meaningful.
+  bootstrap_token="$process_token_base-buildkit-classic-bootstrap"
+  if ! run_bounded_owned "$command_timeout" 5 "$bootstrap_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker build --tag "$image" "$context_dir" >/dev/null 2>&1; then
+    harness_error "classic fixture bootstrap failed before BuildKit qualification"
+  fi
+  record_docker_buildkit=1
+  expected_daemon_error_message="BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder"
+  record_expected_daemon_error image-build image build --tag "$image" "$context_dir"
+else
+  record_command image-build image build --tag "$image" "$context_dir"
+fi
 record_command image-inspect image image inspect "$image"
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120
@@ -510,10 +623,26 @@ record_command container-update container update --memory 64m --pids-limit 64 "$
 record_command container-stats container stats --no-stream "$container"
 record_command container-top container top "$container"
 record_command container-export container container export --output "$work_root/container-export.tar" "$container"
+record_command secondary-network-create network network create --driver bridge --subnet 172.30.240.0/24 "$secondary_network"
+record_command secondary-network-connect network network connect "$secondary_network" "$container"
+record_command secondary-network-disconnect network network disconnect "$secondary_network" "$container"
+record_command secondary-network-remove network network rm "$secondary_network"
 record_command container-stop container stop --time 1 "$container"
 record_command container-wait container wait "$container"
 record_command container-logs container logs "$container"
 record_command container-remove container rm "$container"
+
+# Logging-driver selection is exercised with the genuine Docker CLI. The
+# default conformance binary intentionally lacks the journald feature, so the
+# container remains in created state; Docker still preserves LogConfig.Type,
+# and `docker logs` must return dockerd's write-only-driver error wording.
+record_command log-driver-create container create --label "$owner_label" \
+  --name "$write_only_log_container" --log-driver journald \
+  "$image" /bin/busybox true
+record_command log-driver-inspect container inspect "$write_only_log_container"
+expected_daemon_error_message="configured logging driver does not support reading"
+record_expected_daemon_error log-driver-read-rejected container logs "$write_only_log_container"
+record_command log-driver-remove container rm "$write_only_log_container"
 
 # Save/remove/load makes both archive directions meaningful rather than merely
 # probing their help or argument parsing paths.
@@ -556,6 +685,10 @@ record_command registry-logout registry logout 127.0.0.1:1
 
 # Genuine Compose plugin invocations against the repository's representative
 # four-service application fixture.
+record_command compose-network-create-frontend compose network create --driver bridge \
+  --subnet 172.30.243.0/24 "$compose_frontend_network"
+record_command compose-network-create-backend compose network create --driver bridge \
+  --subnet 172.30.244.0/24 "$compose_backend_network"
 record_command compose-up compose compose --ansi never --project-name "$compose_project" \
   --file "$fixture" up --detach
 record_command compose-ps compose compose --ansi never --project-name "$compose_project" \
@@ -564,10 +697,17 @@ record_command compose-logs compose compose --ansi never --project-name "$compos
   --file "$fixture" logs --no-color
 record_command compose-down compose compose --ansi never --project-name "$compose_project" \
   --file "$fixture" down --timeout 10
+record_command compose-network-remove-frontend compose network rm "$compose_frontend_network"
+record_command compose-network-remove-backend compose network rm "$compose_backend_network"
 record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"
 host_metadata="$(uname -srm)"
+if [[ "$builder_mode" == 0 ]]; then
+  builder_label='`DOCKER_BUILDKIT=0`'
+else
+  builder_label='BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)'
+fi
 version_token="$process_token_base-version"
 ferro_version="$(run_bounded_owned "$command_timeout" 5 "$version_token" \
   "$ferro_snapshot" --version 2>/dev/null | head -n 1)"
@@ -612,7 +752,7 @@ stop later invocations.
 - Docker-compatible server: $docker_server_version
 - Compose client: $compose_version
 - Endpoint: isolated \`DOCKER_HOST=unix://<temporary-runtime>/docker.sock\`
-- Builder: \`DOCKER_BUILDKIT=0\`
+- Builder: $builder_label
 - Per-command timeout: ${command_timeout}s
 - Compose fixture: \`tests/fixtures/real-app/compose.yml\`
 - Execution log: \`$display_execution_log\`

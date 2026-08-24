@@ -4407,6 +4407,23 @@ impl ContainerRuntime {
         let manager = CgroupV2Manager::new(&self.cgroup_root);
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.replace_limits(&group, &to_cgroup(Some(&limits))?)?;
+        if matches!(record.status.as_str(), "running" | "paused" | "restarting") {
+            if let Err(error) = manager.add_pid(&group, record.pid) {
+                let rollback = to_cgroup(previous.as_ref()).and_then(|old| {
+                    manager
+                        .replace_limits(&group, &old)
+                        .map_err(RuntimeError::from)
+                });
+                if let Err(rollback_error) = rollback {
+                    log::error!(
+                        "container resource-limit rollback failed after cgroup attachment: container_id={} error={}",
+                        id,
+                        rollback_error
+                    );
+                }
+                return Err(RuntimeError::Cgroup(error));
+            }
+        }
 
         record.resource_limits = Some(limits);
         if let Some(restart_policy) = restart_policy {
@@ -14527,6 +14544,47 @@ mod tests {
         unsafe {
             std::env::remove_var("FERROCRATE_CGROUP_ROOT");
         }
+    }
+
+    #[test]
+    fn live_update_moves_previously_unlimited_process_into_new_cgroup() {
+        let _guard = acquire_lock(&CGROUP_ENV_LOCK);
+        let _runtime_guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("cgroup");
+        std::fs::create_dir_all(&root).expect("cgroup root");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids")
+            .expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "")
+            .expect("subtree control");
+        unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root) };
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("live-update", "running");
+        record.pid = std::process::id();
+        record.process_start_time = super::process_start_time_for_pid(record.pid);
+        record.network_name = None;
+        record.namespace_owned = false;
+        runtime.store.put(&record).expect("seed running record");
+
+        runtime
+            .update_resource_limits(
+                &record.id,
+                crate::container_store::ResourceLimitRecord {
+                    memory_max: Some(64 * 1024 * 1024),
+                    cpu_quota: None,
+                    cpu_period: None,
+                    pids_max: Some(64),
+                },
+            )
+            .expect("live resource update");
+
+        let group = root.join("ferrocrate").join(&record.id);
+        assert_eq!(
+            std::fs::read_to_string(group.join("cgroup.procs")).expect("cgroup membership"),
+            record.pid.to_string()
+        );
+        unsafe { std::env::remove_var("FERROCRATE_CGROUP_ROOT") };
     }
 
     #[test]

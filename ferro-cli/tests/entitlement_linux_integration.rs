@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 #[cfg(target_os = "linux")]
 mod linux_tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

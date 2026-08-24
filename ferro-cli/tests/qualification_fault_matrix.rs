@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Roadmap item 21: bounded 100-container resource/fault qualification.
 //!
 //! Every scenario runs unprivileged against a real `ferro-cli daemon` over

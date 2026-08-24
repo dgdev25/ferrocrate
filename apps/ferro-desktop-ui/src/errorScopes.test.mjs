@@ -31,6 +31,7 @@ test("network-create failures stay in their dialog and navigation clears transie
     actionLabel: "",
     actionResult: null,
     sectionErrors: {},
+    dismissDialogs: true,
   });
   assert.equal(errorForSection(navigated.sectionErrors, "doctor"), null);
   assert.equal(errorForSection(navigated.sectionErrors, "images"), null);

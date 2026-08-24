@@ -35,5 +35,6 @@ export function navigationTransientState(sectionErrors) {
     actionLabel: "",
     actionResult: null,
     sectionErrors: clearErrorsForNavigation(sectionErrors),
+    dismissDialogs: true,
   };
 }

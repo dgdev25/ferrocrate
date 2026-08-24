@@ -345,11 +345,27 @@ function App(): JSX.Element {
     setActionLabel("");
   }, [activeSection]);
 
+  function dismissDialogs(): void {
+    setRunDialogOpen(false);
+    setRunDialogError(null);
+    setPullImageDialogOpen(false);
+    setPullFailure(null);
+    setBuildImageDialogOpen(false);
+    setBuildLicensingDialogOpen(false);
+    setRegistryDialogOpen(false);
+    setResourceDialog(null);
+    setResourceDialogError(null);
+    setLicensingDialogOpen(false);
+    setDoctorDialogOpen(false);
+    setSettingsDialog(null);
+  }
+
   function selectSection(section: AppSection): void {
     const next = navigationTransientState(sectionErrors);
     setSectionErrors(next.sectionErrors);
     setLastAction(next.actionResult);
     setActionLabel(next.actionLabel);
+    if (next.dismissDialogs) dismissDialogs();
     setActiveSection(section);
   }
 
@@ -360,17 +376,7 @@ function App(): JSX.Element {
         event.preventDefault();
         globalSearchRef.current?.focus();
       } else if (command === "close-dialog") {
-        setRunDialogOpen(false);
-        setRunDialogError(null);
-        setPullImageDialogOpen(false);
-        setBuildImageDialogOpen(false);
-        setBuildLicensingDialogOpen(false);
-        setRegistryDialogOpen(false);
-        setResourceDialog(null);
-        setResourceDialogError(null);
-        setLicensingDialogOpen(false);
-        setDoctorDialogOpen(false);
-        setSettingsDialog(null);
+        dismissDialogs();
       }
     };
     window.addEventListener("keydown", onKeyDown);

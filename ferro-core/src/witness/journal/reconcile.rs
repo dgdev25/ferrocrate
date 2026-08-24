@@ -319,6 +319,8 @@ fn action(value: u8) -> Result<WitnessAction, JournalError> {
         29 => Ok(RootlessMapping),
         30 => Ok(ContainerRename),
         33 => Ok(ContainerUpdate),
+        34 => Ok(VolumeBackup),
+        35 => Ok(VolumeRestore),
         _ => Err(JournalError::Corrupt),
     }
 }

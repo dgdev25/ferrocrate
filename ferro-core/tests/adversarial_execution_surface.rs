@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(target_os = "linux")]
 
 //! Adversarial execution-surface tests (roadmap item 2).

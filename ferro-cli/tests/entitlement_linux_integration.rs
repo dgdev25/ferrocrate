@@ -41,6 +41,7 @@ mod linux_tests {
         cmd.env("HOME", runtime_dir.path())
             .env_remove("FERROCRATE_ENTITLEMENT_FILE")
             .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .env("FERROCRATE_IMAGE_STORE", image_store.path());
         (cmd, runtime_dir, image_store)

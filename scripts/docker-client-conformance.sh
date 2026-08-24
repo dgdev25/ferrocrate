@@ -177,11 +177,12 @@ log_parent="$(dirname "$execution_log")"
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-client-conformance.XXXXXX")" ||
   harness_error "cannot create temporary work directory"
 runtime_dir="$work_root/runtime"
+state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
 outputs_dir="$work_root/outputs"
 cgroup_root="$work_root/cgroup"
-mkdir -p "$runtime_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
 printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
   harness_error "cannot initialize isolated cgroup controller fixture"
@@ -219,10 +220,13 @@ run_id="scoreboard"
 run_prefix="ferrocrate-conformance-$run_id"
 owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
+tagged_image="$run_prefix:tagged"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
+volume="$run_prefix-volume"
+network="$run_prefix-network"
 write_only_log_container="$run_prefix-write-only-log"
-network="$run_prefix-secondary"
+secondary_network="$run_prefix-secondary"
 compose_project="$run_prefix-compose"
 compose_frontend_network="${compose_project}_frontend"
 compose_backend_network="${compose_project}_backend"
@@ -381,7 +385,7 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker network rm "$network" >/dev/null 2>&1 || true
+        docker network rm "$network" "$secondary_network" >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
@@ -451,12 +455,17 @@ fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 
+# The harness already runs inside a disposable root-mapped user+network
+# namespace, so exercise the real bridge/connect path there. Callers can still
+# opt into the rootless slirp path explicitly for targeted qualification.
+rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-0}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 setsid env \
   FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$daemon_process_token" \
+  FERROCRATE_HOME="$state_dir" \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
+  FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
   FERROCRATE_CGROUP_ROOT="$cgroup_root" \
-  FERROCRATE_ROOTLESS_NETNS=0 \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
   "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
   >"$work_root/daemon.stdout" 2>"$work_root/daemon.stderr" &
@@ -613,11 +622,13 @@ record_command container-port container port "$container" 8080/tcp
 record_command container-copy-in container cp "$work_root/copy-marker.txt" "$container":/copy-marker.txt
 record_command container-diff container diff "$container"
 record_command container-update container update --memory 64m --pids-limit 64 "$container"
+record_command container-stats container stats --no-stream "$container"
+record_command container-top container top "$container"
 record_command container-export container container export --output "$work_root/container-export.tar" "$container"
-record_command network-create network network create --driver bridge --subnet 172.30.240.0/24 "$network"
-record_command network-connect network network connect "$network" "$container"
-record_command network-disconnect network network disconnect "$network" "$container"
-record_command network-remove network network rm "$network"
+record_command secondary-network-create network network create --driver bridge --subnet 172.30.240.0/24 "$secondary_network"
+record_command secondary-network-connect network network connect "$secondary_network" "$container"
+record_command secondary-network-disconnect network network disconnect "$secondary_network" "$container"
+record_command secondary-network-remove network network rm "$secondary_network"
 record_command container-stop container stop --time 1 "$container"
 record_command container-wait container wait "$container"
 record_command container-logs container logs "$container"
@@ -641,6 +652,18 @@ record_command image-save image save --output "$work_root/image-save.tar" "$imag
 record_command image-remove image image rm "$image"
 record_command image-load image load --input "$work_root/image-save.tar"
 record_command image-list image images "$image"
+record_command image-tag image tag "$image" "$tagged_image"
+record_command image-tag-inspect image image inspect "$tagged_image"
+
+# Durable named resources exercise their full Docker-client CRUD projections.
+record_command volume-create volume volume create "$volume"
+record_command volume-list volume volume ls
+record_command volume-inspect volume volume inspect "$volume"
+record_command volume-remove volume volume rm "$volume"
+record_command network-create network network create "$network"
+record_command network-list network network ls
+record_command network-inspect network network inspect "$network"
+record_command network-remove network network rm "$network"
 
 # Attach uses a finite workload so a conforming client closes naturally.
 record_command attach-container-create container create --label "$owner_label" --name "$attach_container" \

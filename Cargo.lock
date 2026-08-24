@@ -854,6 +854,7 @@ dependencies = [
  "nix",
  "owo-colors",
  "proptest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

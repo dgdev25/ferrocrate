@@ -37,6 +37,7 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] 
 proptest = { workspace = true }
 ferro-core = { path = "../ferro-core" }
 nix = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [[test]]
 name = "macos_compatibility_tests"

@@ -348,6 +348,8 @@ mod tests {
             Action::VolumeDelete,
             Action::VolumeMount,
             Action::VolumeUnmount,
+            Action::VolumeBackup,
+            Action::VolumeRestore,
             Action::NetworkCreate,
             Action::NetworkDelete,
             Action::NetworkAttach,

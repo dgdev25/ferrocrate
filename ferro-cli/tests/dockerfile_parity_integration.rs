@@ -41,6 +41,7 @@ fn run_build(
     extra_args: &[&str],
 ) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir)
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir)
         .current_dir(context_dir)
         .args(["build", "--dockerfile"])
@@ -67,6 +68,7 @@ fn dockerfile_build_from_scratch_is_listed_in_images() {
     let tag = "local/parity:test";
 
     let build_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .current_dir(context_dir.path())
         .args(["build", "--dockerfile"])
@@ -82,6 +84,7 @@ fn dockerfile_build_from_scratch_is_listed_in_images() {
     );
 
     let images_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .args(["images", "--format", "json"])
         .output()
@@ -116,6 +119,7 @@ fn dockerfile_build_defaults_to_local_dockerfile() {
     let tag = "local/parity:default-dockerfile";
 
     let build_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .current_dir(context_dir.path())
         .args(["build", "--dockerfile", "Dockerfile", "--tag", tag])
@@ -129,6 +133,7 @@ fn dockerfile_build_defaults_to_local_dockerfile() {
     );
 
     let images_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .args(["images", "--format", "json"])
         .output()
@@ -169,6 +174,7 @@ fn dockerfile_add_extracts_a_local_tar_archive() {
 
     let tag = "local/parity:add-archive";
     let build_output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
         .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
         .current_dir(context_dir.path())
         .args(["build", "--dockerfile"])

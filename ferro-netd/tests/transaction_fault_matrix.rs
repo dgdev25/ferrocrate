@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(feature = "test-support")]
 
 use base64::Engine;

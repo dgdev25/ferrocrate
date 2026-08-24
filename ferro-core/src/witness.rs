@@ -119,7 +119,7 @@ pub enum DisclosureClass {
     Accelerator = 6,
 }
 
-/// Closed mutation vocabulary persisted as the discriminants 1 through 33 in
+/// Closed authorization vocabulary persisted as the discriminants 1 through 35 in
 /// declaration order. Unknown values are never carried forward.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -157,6 +157,8 @@ pub enum WitnessAction {
     ContainerStart = 31,
     ContainerArchiveWrite = 32,
     ContainerUpdate = 33,
+    VolumeBackup = 34,
+    VolumeRestore = 35,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

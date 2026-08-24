@@ -112,6 +112,7 @@ impl QualDaemon {
             }
         };
         command
+            .env("FERROCRATE_HOME", runtime_dir)
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir)
             .env("FERROCRATE_NETWORK_KERNEL_STATE", kernel_state_path)
             .env("FERROCRATE_NETWORK_BACKEND", "iptables")

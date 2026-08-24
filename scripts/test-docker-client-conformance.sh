@@ -261,11 +261,13 @@ container-port
 container-copy-in
 container-diff
 container-update
+container-stats
+container-top
 container-export
-network-create
-network-connect
-network-disconnect
-network-remove
+secondary-network-create
+secondary-network-connect
+secondary-network-disconnect
+secondary-network-remove
 container-stop
 container-wait
 container-logs
@@ -278,6 +280,16 @@ image-save
 image-remove
 image-load
 image-list
+image-tag
+image-tag-inspect
+volume-create
+volume-list
+volume-inspect
+volume-remove
+network-create
+network-list
+network-inspect
+network-remove
 attach-container-create
 attach-container-start
 container-attach
@@ -392,7 +404,7 @@ awk -F '\t' '$2 == "compose-down" { found = ($5 == 0 && $6 == "PASS") } END { ex
   "$execution_log"
 grep -Eq '^\| [0-9]+ \| registry-search \|.*\| 37 \| FAIL \|$' "$scoreboard"
 grep -Eq '^\| [0-9]+ \| container-attach \|.*\| 124 \| ERROR \|$' "$scoreboard"
-grep -Fq '| PASS | 43 |' "$scoreboard"
+grep -Fq '| PASS | 55 |' "$scoreboard"
 grep -Fq '| FAIL | 3 |' "$scoreboard"
 grep -Fq '| ERROR | 1 |' "$scoreboard"
 grep -Fq 'DOCKER_BUILDKIT=0' "$scoreboard"
@@ -466,7 +478,7 @@ awk -F '\t' '$1 != "image-build" && $1 != "unrecorded" && $4 != "0" { exit 1 }' 
   "$fake_state/docker.calls"
 awk -F '\t' '$2 == "image-build" { found = ($5 == 1 && $6 == "PASS") } END { exit !found }' \
   "$buildkit_log"
-grep -Fq '| PASS | 43 |' "$buildkit_scoreboard"
+grep -Fq '| PASS | 55 |' "$buildkit_scoreboard"
 grep -Fq '| FAIL | 3 |' "$buildkit_scoreboard"
 grep -Fq '| ERROR | 1 |' "$buildkit_scoreboard"
 grep -Fq 'BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)' "$buildkit_scoreboard"

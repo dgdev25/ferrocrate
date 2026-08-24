@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-
 #![cfg(target_os = "linux")]
 
 use ferro_core::mount_cleanup::cleanup_container_mount;

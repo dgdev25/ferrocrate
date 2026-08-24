@@ -772,6 +772,8 @@ fn witness_action(action: Action) -> Result<WitnessAction, SurfaceAuthorizationE
         Action::ImageReferenceWrite => WitnessAction::ImageReferenceWrite,
         Action::VolumeCreate => WitnessAction::VolumeCreate,
         Action::VolumeDelete => WitnessAction::VolumeDelete,
+        Action::VolumeBackup => WitnessAction::VolumeBackup,
+        Action::VolumeRestore => WitnessAction::VolumeRestore,
         Action::NetworkCreate => WitnessAction::NetworkCreate,
         Action::NetworkDelete => WitnessAction::NetworkDelete,
         Action::NetworkAttach => WitnessAction::NetworkAttach,
@@ -804,7 +806,12 @@ fn recovery_action(action: WitnessAction) -> WitnessAction {
         | WitnessAction::ImageBuild
         | WitnessAction::ImageTag
         | WitnessAction::ImageReferenceWrite => WitnessAction::ImageDelete,
-        WitnessAction::VolumeCreate | WitnessAction::VolumeDelete => WitnessAction::VolumeDelete,
+        WitnessAction::VolumeCreate
+        | WitnessAction::VolumeDelete
+        | WitnessAction::VolumeRestore => WitnessAction::VolumeDelete,
+        // Backup is observational: recovery classifies the interrupted read
+        // without ever deleting or replaying the volume.
+        WitnessAction::VolumeBackup => WitnessAction::VolumeBackup,
         WitnessAction::NetworkCreate | WitnessAction::NetworkDelete => WitnessAction::NetworkDelete,
         WitnessAction::NetworkAttach | WitnessAction::NetworkDetach => WitnessAction::NetworkDetach,
         WitnessAction::RootlessMapping => WitnessAction::RootlessMapping,
@@ -1022,6 +1029,24 @@ mod tests {
                 3,
             )
             .expect("authorized network");
+        let backup = auth
+            .authorize_named(
+                &origin(),
+                Action::VolumeBackup,
+                ResourceKind::Volume,
+                "data",
+                3,
+            )
+            .expect("authorized backup");
+        let restore = auth
+            .authorize_named(
+                &origin(),
+                Action::VolumeRestore,
+                ResourceKind::Volume,
+                "data",
+                3,
+            )
+            .expect("authorized restore");
 
         assert_eq!(
             volume.proof().canonical().resource_id(),
@@ -1032,6 +1057,72 @@ mod tests {
             network.proof().canonical().resource_id()
         );
         assert_eq!(volume.proof().canonical().resource_generation(), 3);
+        assert_eq!(
+            backup.proof().canonical().context().action(),
+            Action::VolumeBackup
+        );
+        assert_eq!(
+            restore.proof().canonical().context().action(),
+            Action::VolumeRestore
+        );
+        assert_eq!(
+            backup.proof().canonical().resource_id(),
+            volume.proof().canonical().resource_id()
+        );
+    }
+
+    #[test]
+    fn volume_archive_denials_keep_action_and_resource_attribution() {
+        let root = tempfile::tempdir().unwrap();
+        let policy = root.path().join("policy.toml");
+        std::fs::write(
+            &policy,
+            "schema_version = 1\ngeneration = 1\nmode = \"enforce\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let journal = Arc::new(
+            crate::witness::WitnessJournal::open(crate::witness::JournalConfig::new(
+                root.path().join("journal"),
+                [93; 16],
+                crate::witness::JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let auth = SurfaceAuthorization::with_journal(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::load(&policy).unwrap(),
+            ))),
+            Arc::clone(&journal),
+            [94; 16],
+        );
+
+        for (action, witness_action) in [
+            (Action::VolumeBackup, WitnessAction::VolumeBackup),
+            (Action::VolumeRestore, WitnessAction::VolumeRestore),
+        ] {
+            assert!(matches!(
+                auth.authorize_named(&origin(), action, ResourceKind::Volume, "data", 1),
+                Err(SurfaceAuthorizationError::Denied(_))
+            ));
+            let records = journal.records().unwrap();
+            let denied = crate::witness::decode_record(records.last().unwrap()).unwrap();
+            assert_eq!(denied.action(), witness_action);
+            assert_eq!(denied.resource_kind(), WitnessResourceKind::Volume);
+            assert_eq!(denied.outcome(), WitnessOutcome::Denied);
+        }
+    }
+
+    #[test]
+    fn volume_backup_recovery_is_observational_not_destructive() {
+        assert_eq!(
+            recovery_action(WitnessAction::VolumeBackup),
+            WitnessAction::VolumeBackup
+        );
+        assert_eq!(
+            recovery_action(WitnessAction::VolumeRestore),
+            WitnessAction::VolumeDelete
+        );
     }
 
     #[test]

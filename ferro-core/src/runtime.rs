@@ -1922,7 +1922,8 @@ impl ContainerRuntime {
                 .begin_internal_container_recovery(&record.id)?;
             record.status = "exited".to_string();
             record.last_exit_code = Some(-1);
-            self.store.put(&record)?;
+            self.store
+                .put_if_generation_unreserved(&record, record.mutation_generation)?;
             self.authorization.finish_internal_recovery(
                 recovery,
                 internal_cleanup_observation(&record.id, true),
@@ -1985,6 +1986,30 @@ impl ContainerRuntime {
             };
             if restart && record.status != "running" {
                 self.start_from_reconciliation(&record.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refresh terminal process state for a live daemon without performing
+    /// boot recovery. Each publication re-reads and validates the process
+    /// identity inside the store transaction, and an active lifecycle
+    /// reservation is left to its owning request.
+    pub fn refresh_daemon_state(&self) -> Result<(), RuntimeError> {
+        for record in self.store.list()? {
+            if !matches!(record.status.as_str(), "running" | "paused")
+                || pid_identity_matches(&record)
+            {
+                continue;
+            }
+            match self.store.update_exit_for_process(
+                &record.id,
+                record.pid,
+                record.process_start_time,
+                -1,
+            ) {
+                Ok(_) | Err(ContainerStoreError::MutationConflict) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())
@@ -3505,16 +3530,16 @@ impl ContainerRuntime {
         cmd: &[String],
         options: &ExecOptions,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_with_options_authorized(proof, intent, id, cmd, options);
-        self.store.mark_mutation_effect(id, operation_id, result.is_ok())?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
-        self.phase_hook.reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
+        self.phase_hook
+            .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
     }
 
@@ -3526,7 +3551,10 @@ impl ContainerRuntime {
         cmd: &[String],
         options: &ExecOptions,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let record = self.store.get(id)?.ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let record = self
+            .store
+            .get(id)?
+            .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             if options.user.is_some() {
@@ -3536,20 +3564,60 @@ impl ContainerRuntime {
             }
             let mut env = record.env.clone();
             env.extend(options.env.iter().cloned());
-            let mounts = record.mounts.iter().map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only)).collect::<Vec<_>>();
-            let tmpfs_mounts = record.tmpfs_mounts.iter().map(|mount| (mount.target.clone(), mount.size.clone())).collect::<Vec<_>>();
+            let mounts = record
+                .mounts
+                .iter()
+                .map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only))
+                .collect::<Vec<_>>();
+            let tmpfs_mounts = record
+                .tmpfs_mounts
+                .iter()
+                .map(|mount| (mount.target.clone(), mount.size.clone()))
+                .collect::<Vec<_>>();
             let workdir = options.working_dir.as_deref().or(record.workdir.as_deref());
             if options.tty {
-                exec_in_rootless_rootfs_tty(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs)?
+                exec_in_rootless_rootfs_tty(
+                    &rootfs,
+                    cmd,
+                    &env,
+                    workdir,
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                )?
             } else {
-                exec_in_rootless_rootfs(&rootfs, cmd, &env, workdir, &mounts, &tmpfs_mounts, record.readonly_rootfs, None)?
+                exec_in_rootless_rootfs(
+                    &rootfs,
+                    cmd,
+                    &env,
+                    workdir,
+                    &mounts,
+                    &tmpfs_mounts,
+                    record.readonly_rootfs,
+                    None,
+                )?
             }
         } else if options.tty {
-            exec_in_container_tty_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+            exec_in_container_tty_with_options(
+                record.pid,
+                cmd,
+                &options.env,
+                options.working_dir.as_deref(),
+                options.user.as_deref(),
+            )?
         } else {
-            exec_in_container_with_options(record.pid, cmd, &options.env, options.working_dir.as_deref(), options.user.as_deref())?
+            exec_in_container_with_options(
+                record.pid,
+                cmd,
+                &options.env,
+                options.working_dir.as_deref(),
+                options.user.as_deref(),
+            )?
         };
-        let _ = log_event(&self.runtime_dir, make_event("exec", Some(&record.id), Some(&record.image), None, None));
+        let _ = log_event(
+            &self.runtime_dir,
+            make_event("exec", Some(&record.id), Some(&record.image), None, None),
+        );
         Ok(result)
     }
 
@@ -3559,18 +3627,14 @@ impl ContainerRuntime {
         id: &str,
         cmd: &[String],
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, None, true, None);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3582,18 +3646,14 @@ impl ContainerRuntime {
         cmd: &[String],
         timeout: Option<Duration>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, timeout, false, None);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3608,18 +3668,14 @@ impl ContainerRuntime {
         input: &[u8],
         tty: bool,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result = self.exec_authorized(proof, intent, id, cmd, None, tty, Some(input));
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -3636,19 +3692,15 @@ impl ContainerRuntime {
         tty_ready: &mut dyn FnMut(&Path) -> io::Result<()>,
         output: &mut dyn FnMut(ExecOutputStream, &[u8]) -> io::Result<()>,
     ) -> Result<crate::container_exec::ExecResult, RuntimeError> {
-        let permit = self.authorize_existing(Action::ContainerExec, id)?;
-        let operation_id = permit.operation_id();
+        let permit = self.authorize_exec(id)?;
         let (proof, intent) = permit.execution_authority();
         let result =
             self.exec_streaming_authorized(proof, intent, id, cmd, input, tty, tty_ready, output);
-        self.store
-            .mark_mutation_effect(id, operation_id, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::EffectObserved)?;
         self.authorization.complete(permit, result.is_ok())?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::TerminalDurable)?;
-        self.store.finish_mutation(id, operation_id)?;
         self.phase_hook
             .reached("container.exec", LifecyclePhasePoint::ReservationCleared)?;
         result
@@ -4125,6 +4177,16 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        // The supervisor can publish a natural exit after the Docker handler
+        // inspects `running` but before this mutation acquires its reservation.
+        // For force-kill, that terminal observation already proves there is no
+        // live workload left to signal; publish only the operator-stop intent.
+        if signal == Some(nix::sys::signal::Signal::SIGKILL)
+            && matches!(record.status.as_str(), "stopped" | "killed" | "exited")
+        {
+            self.persist_user_stopped(proof, id, true)?;
+            return Ok(());
+        }
         if let Some(signal) = signal {
             // Host-PID-namespace execution makes the container's whole
             // process tree the signal target for SIGKILL (nothing may be
@@ -4294,6 +4356,43 @@ impl ContainerRuntime {
                 user_stopped,
             )
         };
+        if matches!(result, Err(ContainerStoreError::MutationConflict)) {
+            match self.store.get(id) {
+                Ok(Some(current)) => {
+                    let last_writer = current
+                        .pending_mutation
+                        .as_ref()
+                        .map(|reservation| reservation.action.as_str())
+                        .unwrap_or_else(|| {
+                            if current.status == "exited" {
+                                "process-exit-publisher"
+                            } else {
+                                "terminal-or-background-writer"
+                            }
+                        });
+                    log::warn!(
+                        "post-effect container CAS conflict: container_id={} authorized_generation={} current_generation={} expected_status={} current_status={} last_writer={}",
+                        id,
+                        proof.canonical().resource_generation(),
+                        current.mutation_generation,
+                        expected_status,
+                        current.status,
+                        last_writer
+                    );
+                }
+                Ok(None) => log::warn!(
+                    "post-effect container CAS conflict: container_id={} authorized_generation={} current_record=deleted last_writer=container-delete",
+                    id,
+                    proof.canonical().resource_generation()
+                ),
+                Err(error) => log::warn!(
+                    "post-effect container CAS conflict: container_id={} authorized_generation={} current_record=unreadable error={}",
+                    id,
+                    proof.canonical().resource_generation(),
+                    error
+                ),
+            }
+        }
         result.map_err(RuntimeError::PostEffectPersistence)
     }
 
@@ -5284,10 +5383,16 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        let operation_id = record
+            .pending_mutation
+            .as_ref()
+            .map(|reservation| reservation.operation_id)
+            .or_else(|| intent.map(|value| *value.operation_id().as_bytes()))
+            .ok_or(ContainerStoreError::MutationConflict)?;
         if self.authorization.requires_provenance()
             && !self.authorization.provenance_matches(&record)
         {
-            self.update_reserved_status(id, "quarantined", intent)?;
+            self.update_reserved_status(id, "quarantined", operation_id)?;
             return Err(RuntimeError::InvalidState(format!(
                 "container {id} has unverifiable creation provenance and was quarantined"
             )));
@@ -5306,13 +5411,13 @@ impl ContainerRuntime {
             // Keep the durable record available for a later retry. Removing a
             // directory while one of its mountpoints is still attached leaks
             // the mount and leaves the container permanently stuck.
-            let _ = self.update_reserved_status(id, "removed-pending", intent);
+            let _ = self.update_reserved_status(id, "removed-pending", operation_id);
             return Err(error);
         }
         if let Err(e) = fs::remove_dir_all(&container_dir) {
             log::warn!("[cleanup] failed to remove container dir for {id}: {e}");
         }
-        self.update_reserved_status(id, "removed-pending", intent)?;
+        self.update_reserved_status(id, "removed-pending", operation_id)?;
         if let Ok(containers) = self.store.list() {
             if let Err(e) = update_container_hosts(&self.runtime_dir, &containers) {
                 warn!("failed to update hosts file: {e}");
@@ -5347,7 +5452,7 @@ impl ContainerRuntime {
         &self,
         id: &str,
         status: &str,
-        _intent: Option<&crate::witness::DurableIntent>,
+        operation_id: [u8; 16],
     ) -> Result<(), RuntimeError> {
         // A restarted TTY workload can publish its exit while Docker's
         // force-remove path is finalizing the same lifecycle mutation. Keep
@@ -5359,23 +5464,22 @@ impl ContainerRuntime {
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_owned()))?;
-            let Some(operation_id) = record
-                .pending_mutation
-                .as_ref()
-                .map(|reservation| reservation.operation_id)
-            else {
-                // A recovery process may have already cleared this
-                // terminal reservation while the original `run --rm`
-                // caller was finishing cleanup. Do not turn that durable
-                // terminal state into a spurious compare-and-swap failure.
-                if record.status == status
-                    || record.status == "removed"
-                    || !matches!(record.status.as_str(), "running" | "paused")
-                {
-                    return Ok(());
+            if record.pending_mutation.is_none() {
+                match self.store.re_reserve_mutation(
+                    id,
+                    operation_id,
+                    runtime_action_name(Action::ContainerDelete),
+                ) {
+                    Ok(()) => continue,
+                    Err(ContainerStoreError::MutationConflict)
+                        if attempt + 1 < MAX_STATUS_RETRIES =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                return Err(ContainerStoreError::MutationConflict.into());
-            };
+            }
             match self.store.set_status_for_mutation(id, operation_id, status) {
                 Ok(()) => return Ok(()),
                 Err(ContainerStoreError::MutationConflict) if attempt + 1 < MAX_STATUS_RETRIES => {
@@ -5473,6 +5577,46 @@ impl ContainerRuntime {
         ))
     }
 
+    /// Authorize an exec process without reserving the container record.
+    /// Exec does not change lifecycle state, and a long-lived attached exec
+    /// must not block stop, kill, or delete from publishing their own kernel
+    /// effects. The fresh re-read still rejects a stale authorization binding.
+    fn authorize_exec(
+        &self,
+        id: &str,
+    ) -> Result<crate::authorization::runtime::MutationPermit, RuntimeError> {
+        const MAX_REVALIDATION_RETRIES: usize = 64;
+        for attempt in 0..MAX_REVALIDATION_RETRIES {
+            let record = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            let permit = self.authorization.authorize(Action::ContainerExec, &record)?;
+            self.phase_hook.reached(
+                runtime_action_name(Action::ContainerExec),
+                LifecyclePhasePoint::DecisionDurable,
+            )?;
+            let current = self
+                .store
+                .get(id)?
+                .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+            match self.authorization.revalidate(&permit, &current) {
+                Ok(()) => return Ok(permit),
+                Err(MediationError::Stale) if attempt + 1 < MAX_REVALIDATION_RETRIES => {
+                    self.authorization.complete(permit, false)?;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    self.authorization.complete(permit, false)?;
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(RuntimeError::InvalidState(
+            "container exec authorization remained stale after bounded retries".to_string(),
+        ))
+    }
+
     fn mediate_existing<T>(
         &self,
         action: Action,
@@ -5511,12 +5655,37 @@ impl ContainerRuntime {
             }),
             _ => None,
         };
-        if let Err(error) = self.store.mark_mutation_effect_observed(
-            id,
-            operation_id,
-            result.is_ok() || post_effect_unknown,
-            freezer_state,
-        ) {
+        let mut effect_recorded = false;
+        let mut effect_error = None;
+        for attempt in 0..256 {
+            match self.store.mark_mutation_effect_observed(
+                id,
+                operation_id,
+                result.is_ok() || post_effect_unknown,
+                freezer_state,
+            ) {
+                Ok(()) => {
+                    effect_recorded = true;
+                    break;
+                }
+                Err(ContainerStoreError::MutationConflict) if attempt < 255 => {
+                    if self.store.get(id)?.is_some_and(|record| record.pending_mutation.is_none()) {
+                        let _ = self.store.re_reserve_mutation(
+                            id,
+                            operation_id,
+                            runtime_action_name(action),
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    effect_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if !effect_recorded {
+            let error = effect_error.unwrap_or(ContainerStoreError::MutationConflict);
             log::error!(
                 "{} failed while recording effect: container_id={} operation_id={:?} error={}",
                 runtime_action_name(action),
@@ -5532,9 +5701,14 @@ impl ContainerRuntime {
         )?;
         if post_effect_unknown {
             self.authorization.complete_unknown(permit)?;
+            self.store.finish_mutation(id, operation_id)?;
             self.phase_hook.reached(
                 runtime_action_name(action),
                 LifecyclePhasePoint::TerminalDurable,
+            )?;
+            self.phase_hook.reached(
+                runtime_action_name(action),
+                LifecyclePhasePoint::ReservationCleared,
             )?;
             return result;
         } else if action == Action::ContainerDelete && result.is_ok() {
@@ -7119,9 +7293,9 @@ fn build_command(
         command.env(key, value);
     }
 
-    if let Some(dir) = workdir.filter(|_| {
-        rootfs_dir.is_none() && !direct_container_setup && !rootfs_chroot_launcher
-    }) {
+    if let Some(dir) = workdir
+        .filter(|_| rootfs_dir.is_none() && !direct_container_setup && !rootfs_chroot_launcher)
+    {
         command.current_dir(dir);
     }
 
@@ -7696,7 +7870,10 @@ fn log_rotation_from_env() -> Option<LogRotation> {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
-    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+    (max_files >= 2).then_some(LogRotation {
+        max_size,
+        max_files,
+    })
 }
 
 fn log_rotation_from_annotations(annotations: &HashMap<String, String>) -> Option<LogRotation> {
@@ -7707,12 +7884,16 @@ fn log_rotation_from_annotations(annotations: &HashMap<String, String>) -> Optio
         .get("io.ferrocrate.log.max-file")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
-    (max_files >= 2).then_some(LogRotation { max_size, max_files })
+    (max_files >= 2).then_some(LogRotation {
+        max_size,
+        max_files,
+    })
 }
 
 fn parse_log_size(value: &str) -> Option<u64> {
     let value = value.trim();
-    let split = value.find(|character: char| !character.is_ascii_digit())
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
         .unwrap_or(value.len());
     let (number, suffix) = value.split_at(split);
     let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
@@ -7722,7 +7903,11 @@ fn parse_log_size(value: &str) -> Option<u64> {
         "g" | "gb" | "gib" => 1024 * 1024 * 1024,
         _ => return None,
     };
-    number.parse::<u64>().ok()?.checked_mul(multiplier).filter(|size| *size > 0)
+    number
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
 }
 
 #[cfg(test)]
@@ -7779,7 +7964,11 @@ fn copy_line_journaled_with_rotation(
                     Ok(file) => *log = file,
                     Err(_) => return false,
                 }
-                match OpenOptions::new().create(true).append(true).open(journal_path) {
+                match OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(journal_path)
+                {
                     Ok(file) => *journal = file,
                     Err(_) => return false,
                 }
@@ -7814,7 +8003,14 @@ fn copy_line_journaled_with_rotation(
                     };
                     pending.extend_from_slice(&buffer[start..end]);
                     if newline.is_some() || pending.len() >= MAX_LINE_BYTES {
-                        if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
+                        if !flush(
+                            log,
+                            &mut journal,
+                            journal_path,
+                            &mut offset,
+                            &pending,
+                            rotation,
+                        ) {
                             let _ = journal.sync_all();
                             return;
                         }
@@ -7825,7 +8021,14 @@ fn copy_line_journaled_with_rotation(
             }
         }
     }
-    if !flush(log, &mut journal, journal_path, &mut offset, &pending, rotation) {
+    if !flush(
+        log,
+        &mut journal,
+        journal_path,
+        &mut offset,
+        &pending,
+        rotation,
+    ) {
         let _ = journal.sync_all();
         return;
     }
@@ -13250,7 +13453,7 @@ fn update_pid_status(
     record.process_start_time = crate::container_store::process_start_time(pid);
     record.status = status.to_string();
     record.restart_count = record.restart_count.saturating_add(1);
-    db.put(&record)?;
+    db.put_if_generation_unreserved(&record, record.mutation_generation)?;
     Ok(())
 }
 
@@ -14058,9 +14261,10 @@ mod tests {
     use super::{
         adaptive_restart_delay, associated_network_name, copy_line_journaled,
         immutable_image_manifest_reference, immutable_image_reference, log_journal_path,
-        rotate_log_pair, timestamped_lines_from, validate_archive_target, BindMount, ContainerRuntime,
-        KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint, NetworkBackend,
-        NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError, TmpfsMount,
+        rotate_log_pair, timestamped_lines_from, validate_archive_target, BindMount,
+        ContainerRuntime, KernelResourceOps, LifecyclePhaseHook, LifecyclePhasePoint,
+        NetworkBackend, NoopLifecyclePhaseHook, ResourceIdentity, ResourcePlan, RuntimeError,
+        TmpfsMount,
     };
     use crate::authorization::{
         gate::{AuthorizationGate, AuthorizedRequest},
@@ -14669,10 +14873,22 @@ mod tests {
         rotate_log_pair(&log_path, 3).expect("rotate");
 
         assert!(!log_path.exists());
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1")).unwrap(), b"active\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.1.ts")).unwrap(), b"0 300\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2")).unwrap(), b"one\n");
-        assert_eq!(std::fs::read(log_path.with_file_name("stdout.log.2.ts")).unwrap(), b"0 200\n");
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.1")).unwrap(),
+            b"active\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.1.ts")).unwrap(),
+            b"0 300\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.2")).unwrap(),
+            b"one\n"
+        );
+        assert_eq!(
+            std::fs::read(log_path.with_file_name("stdout.log.2.ts")).unwrap(),
+            b"0 200\n"
+        );
         assert!(!log_path.with_file_name("stdout.log.3").exists());
         assert!(!log_path.with_file_name("stdout.log.3.ts").exists());
     }
@@ -15101,9 +15317,10 @@ mod tests {
         let mut record = fixture_container_record("health-restart", "running");
         record.restart_policy = RestartPolicy::Always;
         assert!(!super::should_health_restart(&record));
-        record
-            .annotations
-            .insert("io.ferrocrate.health-restart".to_string(), "true".to_string());
+        record.annotations.insert(
+            "io.ferrocrate.health-restart".to_string(),
+            "true".to_string(),
+        );
         assert!(super::should_health_restart(&record));
         record.restart_policy = RestartPolicy::No;
         assert!(!super::should_health_restart(&record));
@@ -15352,10 +15569,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("cgroup");
         std::fs::create_dir_all(&root).expect("cgroup root");
-        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids")
-            .expect("controllers");
-        std::fs::write(root.join("cgroup.subtree_control"), "")
-            .expect("subtree control");
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids").expect("controllers");
+        std::fs::write(root.join("cgroup.subtree_control"), "").expect("subtree control");
         unsafe { std::env::set_var("FERROCRATE_CGROUP_ROOT", &root) };
 
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
@@ -15870,6 +16085,32 @@ mod tests {
     }
 
     #[test]
+    fn exec_authorization_does_not_reserve_the_container_lifecycle_record() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        runtime
+            .store
+            .put(&fixture_container_record("concurrent-exec", "running"))
+            .expect("store container");
+
+        let permit = runtime
+            .authorize_exec("concurrent-exec")
+            .expect("authorize exec");
+        assert!(
+            runtime
+                .inspect("concurrent-exec")
+                .expect("inspect")
+                .pending_mutation
+                .is_none(),
+            "an attached exec must not block stop, kill, or remove"
+        );
+        runtime
+            .authorization
+            .complete(permit, false)
+            .expect("close authorization decision");
+    }
+
+    #[test]
     fn restart_never_signals_a_pid_without_matching_start_time() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -15915,6 +16156,23 @@ mod tests {
                 .expect("inspect killed record")
                 .user_stopped
         );
+    }
+
+    #[test]
+    fn kill_is_idempotent_when_exit_publisher_wins_before_reservation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let exited = fixture_container_record("already-exited-before-kill", "exited");
+        runtime.store.put(&exited).expect("seed exited record");
+
+        runtime
+            .kill(&exited.id)
+            .expect("an already-observed exit satisfies the kill effect");
+
+        let stored = runtime.inspect(&exited.id).expect("inspect exited record");
+        assert_eq!(stored.status, "exited");
+        assert!(stored.user_stopped);
+        assert!(stored.pending_mutation.is_none());
     }
 
     #[test]
@@ -16368,6 +16626,36 @@ mod tests {
 
         let stored = runtime.store.get(&record.id).unwrap().unwrap();
         assert_eq!(stored.pending_mutation.unwrap().operation_id, operation_id);
+    }
+
+    #[test]
+    fn kill_terminal_cas_loss_does_not_orphan_following_remove() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ContainerRuntime::new(temp.path()).unwrap();
+        let record = fixture_container_record("post-effect-cas-loss", "exited");
+        runtime.store.put(&record).unwrap();
+
+        let error = runtime
+            .mediate_existing(Action::ContainerKill, &record.id, |_runtime, _proof, _intent| {
+                Err::<(), _>(RuntimeError::PostEffectPersistence(
+                    crate::container_store::ContainerStoreError::MutationConflict,
+                ))
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::PostEffectPersistence(_)));
+        let stored = runtime.store.get(&record.id).unwrap().unwrap();
+        assert!(
+            stored.pending_mutation.is_none(),
+            "post-effect uncertainty must not orphan the mutation reservation"
+        );
+
+        runtime
+            .mediate_existing(Action::ContainerDelete, &record.id, |_runtime, _proof, _intent| {
+                Ok(())
+            })
+            .expect("a fresh remove can reserve and complete after the lost kill write");
+        assert!(runtime.store.get(&record.id).unwrap().is_none());
     }
 
     #[test]
@@ -17074,17 +17362,14 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args
-            .windows(2)
-            .any(|window| window == ["--chdir", "/data"]));
+        assert!(args.windows(2).any(|window| window == ["--chdir", "/data"]));
         assert_eq!(command.get_current_dir(), None);
     }
 
     #[test]
     fn missing_image_workdir_is_created_inside_the_rootfs() {
         let temp = tempfile::tempdir().expect("tempdir");
-        super::ensure_rootfs_workdir(temp.path(), "/var/lib/app")
-            .expect("prepare image workdir");
+        super::ensure_rootfs_workdir(temp.path(), "/var/lib/app").expect("prepare image workdir");
         assert!(temp.path().join("var/lib/app").is_dir());
         assert!(super::ensure_rootfs_workdir(temp.path(), "/safe/../escape").is_err());
     }

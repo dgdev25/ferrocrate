@@ -171,9 +171,15 @@ impl RecoveryRecipe {
                 WitnessResourceKind::Image,
                 WitnessAction::ImageDelete
             ) | (
-                WitnessAction::VolumeCreate | WitnessAction::VolumeDelete,
+                WitnessAction::VolumeCreate
+                    | WitnessAction::VolumeDelete
+                    | WitnessAction::VolumeRestore,
                 WitnessResourceKind::Volume,
                 WitnessAction::VolumeDelete
+            ) | (
+                WitnessAction::VolumeBackup,
+                WitnessResourceKind::Volume,
+                WitnessAction::VolumeBackup
             ) | (
                 WitnessAction::VolumeMount,
                 WitnessResourceKind::Volume,
@@ -291,6 +297,7 @@ impl RecoveryRecipe {
             27 => WitnessAction::CheckpointRecover,
             28 => WitnessAction::KeyRotate,
             29 => WitnessAction::RootlessMapping,
+            34 => WitnessAction::VolumeBackup,
             _ => return None,
         };
         let truth_strategy = truth_strategy_from(bytes[12])?;
@@ -353,6 +360,8 @@ fn action_from(value: u8) -> Option<WitnessAction> {
         30 => Some(WitnessAction::ContainerRename),
         32 => Some(WitnessAction::ContainerArchiveWrite),
         33 => Some(WitnessAction::ContainerUpdate),
+        34 => Some(WitnessAction::VolumeBackup),
+        35 => Some(WitnessAction::VolumeRestore),
         _ => None,
     }
 }

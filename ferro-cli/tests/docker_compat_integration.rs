@@ -111,6 +111,7 @@ fn rootless_bwrap_available() -> bool {
 struct DaemonHarness {
     child: Child,
     _runtime_dir: tempfile::TempDir,
+    _socket_dir: tempfile::TempDir,
     socket_path: PathBuf,
     kernel_state_path: PathBuf,
     mode: String,
@@ -130,11 +131,18 @@ impl DaemonHarness {
 
     fn spawn_mode(mode: &str) -> Self {
         let runtime_dir = cli_fixture::configured_runtime(mode);
-        let socket_path = runtime_dir.path().join("docker.sock");
+        let socket_dir = tempfile::tempdir().expect("socket runtime directory");
+        let socket_path = socket_dir.path().join("docker.sock");
         // Private per-daemon state file: only active because the env var is set.
         let kernel_state_path = runtime_dir.path().join("network-kernel-state.json");
 
-        let mut child = Self::spawn_process(&runtime_dir, &socket_path, &kernel_state_path, mode);
+        let mut child = Self::spawn_process(
+            &runtime_dir,
+            socket_dir.path(),
+            &socket_path,
+            &kernel_state_path,
+            mode,
+        );
 
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(5) {
@@ -142,6 +150,7 @@ impl DaemonHarness {
                 return Self {
                     child,
                     _runtime_dir: runtime_dir,
+                    _socket_dir: socket_dir,
                     socket_path,
                     kernel_state_path,
                     mode: mode.to_string(),
@@ -160,12 +169,14 @@ impl DaemonHarness {
 
     fn spawn_process(
         runtime_dir: &tempfile::TempDir,
+        socket_dir: &Path,
         socket_path: &Path,
         kernel_state_path: &Path,
         mode: &str,
     ) -> Child {
         Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .env("FERROCRATE_RUNTIME_DIR", socket_dir)
             .env(
                 "FERROCRATE_AUTH_FILE",
                 runtime_dir.path().join("registry-auth.json"),
@@ -196,6 +207,7 @@ impl DaemonHarness {
     fn start_daemon(&mut self) {
         self.child = Self::spawn_process(
             &self._runtime_dir,
+            self._socket_dir.path(),
             &self.socket_path,
             &self.kernel_state_path,
             &self.mode,
@@ -386,6 +398,301 @@ fn docker_compat_routes_support_version_prefix() {
             );
         }
     }
+}
+
+#[test]
+fn native_cli_automatically_delegates_to_active_daemon_owner() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=native-delegation HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={response}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run native CLI against daemon-owned runtime");
+    assert!(
+        output.status.success(),
+        "native CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("native container list JSON");
+    assert!(
+        containers
+            .iter()
+            .any(|container| container["Names"][0] == "/native-delegation"),
+        "native CLI did not delegate to daemon: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
+    std::fs::write(
+        runtime.path().join("engine-owner.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "pid": u32::MAX,
+            "runtime_root": canonical_runtime,
+            "socket": runtime.path().join("missing.sock"),
+        }))
+        .expect("owner record JSON"),
+    )
+    .expect("write stale owner record");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime.path())
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run native CLI with stale owner record");
+    assert!(
+        output.status.success(),
+        "stale owner record blocked direct ownership: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("container list JSON"),
+        serde_json::json!([])
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn standalone_cli_waits_for_a_competing_process_owner() {
+    use nix::errno::Errno;
+    use nix::fcntl::{flock, FlockArg};
+    use std::os::fd::AsRawFd;
+
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let lock = runtime.path().join("engine.lock");
+    let mut holder = Command::new("flock")
+        .arg("-x")
+        .arg(&lock)
+        .arg("sleep")
+        .arg("0.25")
+        .spawn()
+        .expect("start competing lock holder");
+    let ready_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock)
+            .expect("open owner lock probe");
+        match flock(probe.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Err(Errno::EWOULDBLOCK) => break,
+            Ok(()) => {
+                flock(probe.as_raw_fd(), FlockArg::Unlock).expect("unlock probe");
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "competing owner never acquired the lock"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("probe owner lock: {error}"),
+        }
+    }
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime.path())
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("run serialized CLI");
+    holder.wait().expect("wait for competing owner");
+    assert!(
+        output.status.success(),
+        "serialized CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "CLI did not wait for the competing process"
+    );
+}
+
+#[test]
+fn daemon_reconciles_authorization_before_publishing_or_opening_stores() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime = cli_fixture::configured_runtime("disabled");
+    let authorization = runtime.path().join("authorization");
+    std::fs::create_dir_all(&authorization).expect("authorization directory");
+    std::fs::set_permissions(&authorization, std::fs::Permissions::from_mode(0o700))
+        .expect("authorization permissions");
+    let marker = authorization.join("emergency-active.json");
+    std::fs::write(&marker, b"durable-marker").expect("emergency marker");
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600))
+        .expect("marker permissions");
+    let socket = runtime.path().join("blocked.sock");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime.path())
+        .env("FERROCRATE_RUNTIME_DIR", runtime.path())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args([
+            "daemon",
+            "--docker-compat",
+            "--socket",
+            socket.to_str().expect("socket UTF-8"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start blocked daemon");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let output = loop {
+        if child.try_wait().expect("poll blocked daemon").is_some() {
+            break child.wait_with_output().expect("collect blocked daemon");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("unreconciled daemon remained running");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(!output.status.success(), "unreconciled daemon must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("reconciliation is required"),
+        "unexpected daemon error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!socket.exists(), "blocked daemon must not bind its socket");
+    assert!(
+        !runtime.path().join("engine-owner.json").exists(),
+        "blocked daemon must not publish ownership"
+    );
+    assert!(
+        !runtime.path().join("containers.db").exists(),
+        "blocked daemon must not open the container store"
+    );
+}
+
+#[test]
+fn native_cli_routes_representative_reads_writes_and_list_flags() {
+    let harness = DaemonHarness::spawn();
+    let create = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["create", "--name", "delegated-create", "busybox", "true"])
+        .output()
+        .expect("delegate native create");
+    assert!(
+        create.status.success(),
+        "native create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    for command in ["info", "version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("FERROCRATE_HOME", harness.runtime_dir())
+            .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+            .env("FERROCRATE_DESKTOP_FORWARD", "0")
+            .arg(command)
+            .output()
+            .expect("delegate native read");
+        assert!(
+            output.status.success(),
+            "native {} failed: {}",
+            command,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.trim_start().starts_with('{'),
+            "native {command} emitted daemon JSON: {stdout}"
+        );
+        assert!(
+            stdout.contains(if command == "info" {
+                "Containers:"
+            } else {
+                "Client:"
+            }),
+            "native {command} presentation was not preserved: {stdout}"
+        );
+    }
+
+    let text = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all"])
+        .output()
+        .expect("delegate native text list");
+    assert!(text.status.success(), "text list failed");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("delegated-create"), "text list={text}");
+    assert!(
+        !text.trim_start().starts_with('['),
+        "text mode emitted JSON: {text}"
+    );
+
+    let quiet = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["containers", "--all", "--quiet", "--no-trunc"])
+        .output()
+        .expect("delegate native quiet list");
+    assert!(quiet.status.success(), "quiet list failed");
+    let quiet = String::from_utf8_lossy(&quiet.stdout);
+    assert_eq!(quiet.lines().count(), 1, "quiet list={quiet}");
+    assert!(
+        quiet.trim().len() > 12,
+        "--no-trunc ID was truncated: {quiet}"
+    );
+    assert!(!quiet.contains('['), "quiet mode emitted JSON: {quiet}");
+
+    let compose_file = harness.runtime_dir().join("compose.yaml");
+    std::fs::write(&compose_file, "services:\n  app:\n    image: busybox\n")
+        .expect("write delegated compose file");
+    let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args([
+            "compose",
+            "--file",
+            compose_file.to_str().expect("compose path UTF-8"),
+            "config",
+        ])
+        .output()
+        .expect("delegate compose config");
+    assert!(
+        compose.status.success(),
+        "compose config failed: {}",
+        String::from_utf8_lossy(&compose.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&compose.stdout).contains("services:"),
+        "compose output was not returned to the native CLI: {}",
+        String::from_utf8_lossy(&compose.stdout)
+    );
 }
 
 #[test]
@@ -908,7 +1215,9 @@ fn docker_compat_attach_detach_keys_leave_verified_workload_running() {
         .write_all(&[0x01, 0x02])
         .expect("send custom detach sequence");
     let mut tail = Vec::new();
-    stream.read_to_end(&mut tail).expect("read detached attach close");
+    stream
+        .read_to_end(&mut tail)
+        .expect("read detached attach close");
 
     let after = inspect_container(&harness, &id);
     assert_eq!(after["State"]["Status"], "running", "inspect={after}");
@@ -1815,12 +2124,9 @@ fn docker_compat_exec_resize_updates_live_tty() {
         received.extend_from_slice(&buffer[..read]);
     }
 
-    assert_eq!(
-        harness
-            .request("DELETE", "/v1.45/containers/exec-resize?force=true")
-            .0,
-        204
-    );
+    let (status, body) =
+        harness.request("DELETE", "/v1.45/containers/exec-resize?force=true");
+    assert_eq!(status, 204, "exec resize cleanup response={body}");
 }
 
 #[test]
@@ -3292,6 +3598,35 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 }
 
 #[test]
+fn api_volume_persists_under_ferrocrate_home_not_runtime_socket_dir() {
+    let mut harness = DaemonHarness::spawn();
+    let body = br#"{"Name":"persistent-api-volume","Driver":"local","DriverOpts":{}}"#;
+    let (status, response) =
+        harness.request_bytes("POST", "/v1.45/volumes/create", "application/json", body);
+    assert_eq!(status, 201, "create body={response}");
+
+    assert!(
+        harness
+            .runtime_dir()
+            .join("volumes/persistent-api-volume")
+            .is_dir(),
+        "API volume was not created under FERROCRATE_HOME"
+    );
+    assert!(
+        !harness
+            ._socket_dir
+            .path()
+            .join("volumes/persistent-api-volume")
+            .exists(),
+        "FERROCRATE_RUNTIME_DIR must contain runtime endpoints, not persistent volumes"
+    );
+
+    harness.restart();
+    let (status, response) = harness.request("GET", "/v1.45/volumes/persistent-api-volume");
+    assert_eq!(status, 200, "persisted volume inspect body={response}");
+}
+
+#[test]
 fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     if !nix::unistd::geteuid().is_root() && !rootless_bwrap_available() {
         eprintln!("skipping anonymous-volume fixture: bwrap user namespaces are unavailable");
@@ -3308,8 +3643,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
         create_body.as_bytes(),
     );
     assert_eq!(status, 201, "create response: {body}");
-    let id = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("create response JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create response JSON")["Id"]
         .as_str()
         .expect("container ID")
         .to_string();
@@ -3319,8 +3653,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     let (status, body) = harness.request("GET", "/v1.45/volumes");
     assert_eq!(status, 200, "volume list response: {body}");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body)
-            .expect("volume list JSON")["Volumes"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("volume list JSON")["Volumes"]
             .as_array()
             .expect("volume array")
             .len(),
@@ -3333,8 +3666,7 @@ fn docker_compat_rm_v_removes_only_anonymous_volumes() {
     let (status, body) = harness.request("GET", "/v1.45/volumes");
     assert_eq!(status, 200, "volume list response: {body}");
     assert!(
-        serde_json::from_str::<serde_json::Value>(&body)
-            .expect("volume list JSON")["Volumes"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("volume list JSON")["Volumes"]
             .as_array()
             .expect("volume array")
             .is_empty(),

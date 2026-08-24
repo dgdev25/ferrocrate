@@ -1,7 +1,31 @@
 use super::{
     Action, AuthorizationMode, PolicyDocument, ReasonCode, RequestContext, RequestFacts,
-    ResolvedPrincipal, Resource, ResourceKind, Role,
+    RequestOrigin, ResolvedPrincipal, Resource, ResourceKind, Role,
 };
+
+#[test]
+fn operation_origin_preserves_authenticated_caller_attribution() {
+    let origin = RequestOrigin::cli_current().expect("caller origin");
+    let operation = [0x5a; 16];
+    let scoped = origin.for_operation(operation);
+    assert_eq!(scoped.principal(), origin.principal());
+    assert_eq!(scoped.invocation(), origin.invocation());
+    assert_eq!(scoped.request_id(), Some(operation));
+}
+
+#[test]
+fn volume_archive_actions_have_distinct_policy_vocabulary() {
+    assert_eq!(
+        serde_json::to_string(&Action::VolumeBackup).expect("backup action"),
+        "\"volume.backup\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Action::VolumeRestore).expect("restore action"),
+        "\"volume.restore\""
+    );
+    assert_ne!(Action::VolumeBackup, Action::VolumeCreate);
+    assert_ne!(Action::VolumeRestore, Action::VolumeCreate);
+}
 
 #[test]
 fn service_mode_rejects_missing_digest_and_cross_service_contradictions() {

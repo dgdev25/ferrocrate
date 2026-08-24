@@ -352,6 +352,12 @@ pub enum Commands {
         #[arg(long, default_value = "json", value_parser = validate_output_format)]
         format: String,
     },
+    /// Docker system maintenance commands.
+    #[cfg(target_os = "linux")]
+    System {
+        #[command(subcommand)]
+        command: SystemCommands,
+    },
     /// Show image configuration and layer metadata.
     ImageInspect {
         image: String,
@@ -977,6 +983,22 @@ pub enum ComposeCommands {
     Ps,
     /// Read logs of Compose services.
     Logs,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SystemCommands {
+    /// Remove unused container, image, build-cache, and network resources.
+    Prune {
+        /// Accepted for Docker CLI compatibility; this CLI never prompts.
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// Also prune unused volumes.
+        #[arg(long)]
+        volumes: bool,
+        /// Remove all unused images rather than dangling images only.
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -3388,6 +3410,17 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     println!("{}", body);
                 }
                 Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::System { command: SystemCommands::Prune { force: _, volumes, all } } => {
+                handle_system_prune(
+                    &runtime_dir,
+                    &runtime,
+                    &image_store,
+                    &surface_authorization,
+                    volumes,
+                    all,
+                )
             }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
             Commands::ImageInspect { image, format } => {
@@ -8893,6 +8926,38 @@ fn handle_container_prune(
         deleted.push(record.id);
     }
     println!("container prune: removed={}", deleted.len());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn handle_system_prune(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    image_store: &LocalImageStore,
+    authorization: &SurfaceAuthorization,
+    volumes: bool,
+    all: bool,
+) -> Result<(), String> {
+    println!("Containers:");
+    handle_container_prune(runtime, &[])?;
+    println!("Images:");
+    if all {
+        // The existing image pruner deliberately scopes each pass to one
+        // Docker dangling selector.  Run both selectors to make `-a` cover
+        // tagged and dangling local references.
+        handle_image_prune(image_store, authorization, &["dangling=true".to_string()])?;
+        handle_image_prune(image_store, authorization, &["dangling=false".to_string()])?;
+    } else {
+        handle_image_prune(image_store, authorization, &[])?;
+    }
+    println!("Build cache:");
+    handle_build_cache_prune(runtime_dir, 0, "text")?;
+    println!("Networks:");
+    handle_network(runtime_dir, runtime, NetworkCommands::Prune { filters: Vec::new() }, authorization)?;
+    if volumes {
+        println!("Volumes:");
+        handle_volume(runtime_dir, VolumeCommands::Prune { filters: Vec::new() }, authorization)?;
+    }
     Ok(())
 }
 
@@ -19324,6 +19389,16 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn system_prune_parses_docker_flags() {
+        let cli = Cli::try_parse_from(["ferrocrate", "system", "prune", "-f", "-a", "--volumes"])
+            .expect("Docker system prune flags parse");
+        assert!(matches!(
+            cli.command,
+            Commands::System { command: super::SystemCommands::Prune { force: true, all: true, volumes: true } }
+        ));
     }
 
     #[test]

@@ -125,6 +125,12 @@ test("filtered container state replaces the table instead of rendering beneath i
   assert.equal(resourcePages.containerContentState(2, 1, "web"), "table");
 });
 
+test("global resource search filters every named desktop resource", () => {
+  const rows = [{ name: "database" }, { name: "frontend" }];
+  assert.deepEqual(resourcePages.filterNamedResources(rows, "DATA", (row) => row.name), [{ name: "database" }]);
+  assert.deepEqual(resourcePages.filterNamedResources(rows, "", (row) => row.name), rows);
+});
+
 test("Escape closes the active resource creation dialog", () => {
   assert.equal(typeof resourcePages.nextResourceDialog, "function");
   assert.equal(resourcePages.nextResourceDialog(null, "open-volume"), "volume");

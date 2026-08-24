@@ -12,6 +12,8 @@ export function DoctorPage(props: {
 export function SettingsPage(props: {
   authState: PaidAuthState | null;
   installerResult: InstallerRunSummary | null;
-  onOpenAccount: () => void;
-  onOpenInstall: () => void;
+  nativeLinux?: boolean;
+  daemonStatus?: { state: string };
+  onOpenAccount?: () => void;
+  onOpenInstall?: () => void;
 }): ReactElement;

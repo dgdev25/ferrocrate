@@ -27,6 +27,15 @@ export function formatImageCreated(value) {
   return "—";
 }
 
+export function displayImageReference(reference) {
+  return String(reference).replace(/^(?:registry-1\.docker\.io|docker\.io)\/library\//, "");
+}
+
+export function imageIsUsed(image, containerImages) {
+  const candidates = new Set(containerImages.flatMap((reference) => [String(reference), displayImageReference(reference)]));
+  return candidates.has(image.fullReference) || candidates.has(image.reference) || candidates.has(displayImageReference(image.fullReference));
+}
+
 export function pullFailurePresentation(error) {
   return failurePresentation(error, {
     license: "Your current plan doesn't include image pulls.",
@@ -103,12 +112,16 @@ export function parseImageRows(output) {
   try {
     const records = JSON.parse(output || "[]");
     if (!Array.isArray(records)) return [];
-    return records.map((record) => ({
-      id: String(record.Id || record.id || record.RepoTags?.[0] || "unknown"),
-      reference: String(record.RepoTags?.[0] || record.reference || "untagged"),
-      size: formatImageSize(record.Size ?? record.size),
-      created: formatImageCreated(record.Created ?? record.created),
-    }));
+    return records.map((record) => {
+      const fullReference = String(record.RepoTags?.[0] || record.reference || "untagged");
+      return {
+        id: String(record.Id || record.id || fullReference || "unknown"),
+        reference: displayImageReference(fullReference),
+        fullReference,
+        size: formatImageSize(record.Size ?? record.size),
+        created: formatImageCreated(record.Created ?? record.created),
+      };
+    });
   } catch {
     return [];
   }

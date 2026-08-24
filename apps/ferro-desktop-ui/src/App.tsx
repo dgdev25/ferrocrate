@@ -21,12 +21,13 @@ import type {
   VolumeSummary,
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
-import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
+import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
+import { clearErrorsForNavigation, errorForSection, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
-import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
+import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import { DoctorPage, SettingsPage } from "./systemPages.mjs";
@@ -34,6 +35,7 @@ import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
   containerContentState,
+  filterNamedResources,
   FirstRunState,
   HostPathField,
   hostPathError,
@@ -47,6 +49,8 @@ import {
   snapshotFailureDetail,
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
+import { runtimeActionAvailability } from "./runtimeActions.mjs";
+import { buildRunContainerOptions } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -55,6 +59,8 @@ import {
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   daemonIsAvailable,
+  daemonStatusPresentation,
+  containerRemoveAvailability,
   filterContainers,
   filterContainersByStatus,
   groupContainers,
@@ -84,7 +90,7 @@ type BuildHistoryEntry = {
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
-  return new Date(value * 1000).toLocaleString();
+  return formatImageCreated(value);
 }
 
 function commandMessage(result: CommandResult, fallback: string): string {
@@ -96,7 +102,7 @@ function App(): JSX.Element {
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [sectionErrors, setSectionErrors] = useState<Partial<Record<AppSection, string>>>({});
   const [licensingDialogOpen, setLicensingDialogOpen] = useState(false);
   const [licensingDetail, setLicensingDetail] = useState("");
   const [theme, setTheme] = useState<ThemeMode>("dark");
@@ -147,6 +153,7 @@ function App(): JSX.Element {
   const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
   const buildSequenceRef = useRef(0);
   const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
+  const [inspectorError, setInspectorError] = useState<string | null>(null);
   const [showEnvironment, setShowEnvironment] = useState(false);
   const [detailMemory, setDetailMemory] = useState("");
   const [detailCpuQuota, setDetailCpuQuota] = useState("");
@@ -158,9 +165,12 @@ function App(): JSX.Element {
   const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
   const [newContainerName, setNewContainerName] = useState("");
   const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
+  const [newContainerCommand, setNewContainerCommand] = useState("");
+  const [newContainerPullMissing, setNewContainerPullMissing] = useState(true);
+  const [newContainerPorts, setNewContainerPorts] = useState([{ host: "", container: "" }]);
+  const [newContainerVolumes, setNewContainerVolumes] = useState([{ source: "", target: "" }]);
   const [newContainerMemory, setNewContainerMemory] = useState("");
-  const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
-  const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
+  const [newContainerCpus, setNewContainerCpus] = useState("");
   const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
   const [registryUsername, setRegistryUsername] = useState("");
   const [registryPassword, setRegistryPassword] = useState("");
@@ -182,6 +192,11 @@ function App(): JSX.Element {
   const [doctorBootstrap, setDoctorBootstrap] = useState(false);
   const [doctorDryRun, setDoctorDryRun] = useState(true);
   const [doctorConfirm, setDoctorConfirm] = useState(false);
+
+  const error = errorForSection(sectionErrors, activeSection);
+  function setError(next: unknown): void {
+    setSectionErrors((current) => setSectionError(current, activeSection, next));
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem(THEME_KEY);
@@ -292,6 +307,10 @@ function App(): JSX.Element {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    setSectionErrors((current) => clearErrorsForNavigation(current));
+  }, [activeSection]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -479,11 +498,14 @@ function App(): JSX.Element {
     };
   }, []);
 
-  function beginRuntimeAction(allowWhileStreaming = false): boolean {
-    if (
-      runtimeActionRef.current
-      || ((logFollowRef.current || terminalActiveRef.current) && !allowWhileStreaming)
-    ) {
+  function beginRuntimeAction(): boolean {
+    const availability = runtimeActionAvailability({
+      actionBusy: runtimeActionRef.current,
+      logsFollowing: logFollowRef.current,
+      terminalActive: terminalActiveRef.current,
+    });
+    if (!availability.allowed) {
+      setError(availability.reason);
       return false;
     }
     runtimeActionRef.current = true;
@@ -611,7 +633,7 @@ function App(): JSX.Element {
   }
 
   async function stopLogFollow(): Promise<void> {
-    if (!logFollowRef.current || !beginRuntimeAction(true)) return;
+    if (!logFollowRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("stop_log_follow");
       logFollowRef.current = false;
@@ -662,7 +684,7 @@ function App(): JSX.Element {
   }
 
   async function closeTerminal(): Promise<void> {
-    if (!terminalActiveRef.current || !beginRuntimeAction(true)) return;
+    if (!terminalActiveRef.current || !beginRuntimeAction()) return;
     try {
       await invoke("close_terminal");
       terminalActiveRef.current = false;
@@ -739,18 +761,24 @@ function App(): JSX.Element {
   }
 
   async function inspectContainer(target = containerTarget): Promise<void> {
-    if (!beginRuntimeAction()) return;
-    setError(null);
+    const selectedTarget = target.trim();
+    if (!selectedTarget || !beginRuntimeAction()) return;
+    setContainerTarget(selectedTarget);
+    setContainerDetail(null);
+    setInspectorError(null);
     try {
-      const detail = await invoke<ContainerDetailSummary>("get_container_detail", { target });
-      setContainerTarget(target);
-      setContainerDetail(detail);
+      const selection = await loadContainerSelection(selectedTarget, (selected) => (
+        invoke<ContainerDetailSummary>("get_container_detail", { target: selected })
+      ));
+      setContainerTarget(selection.target);
+      setContainerDetail(selection.detail);
+      setInspectorError(selection.error);
+      if (!selection.detail) return;
+      const detail = selection.detail;
       setShowEnvironment(false);
       setDetailMemory(String(detail.resources.memory));
       setDetailCpuQuota(String(detail.resources.cpu_quota));
       setDetailCpuPeriod(String(detail.resources.cpu_period));
-    } catch (err) {
-      setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -792,16 +820,21 @@ function App(): JSX.Element {
     setRunDialogError(null);
     setActionLabel("Container Run");
     try {
+      const options = buildRunContainerOptions({ command: newContainerCommand, ports: newContainerPorts, volumes: newContainerVolumes, memoryMb: newContainerMemory, cpus: newContainerCpus });
       const result = await invoke<CommandResult>("run_new_container", {
         image: newContainerImage,
         name: newContainerName.trim() || null,
+        command: options.command,
+        ports: options.ports,
+        volumes: options.volumes,
+        pullIfMissing: newContainerPullMissing,
         environment: newContainerEnvironment
           .split("\n")
           .map((value) => value.trim())
           .filter(Boolean),
-        memory: parseOptionalLimit(newContainerMemory),
-        cpuQuota: parseOptionalLimit(newContainerCpuQuota),
-        cpuPeriod: parseOptionalLimit(newContainerCpuPeriod),
+        memory: options.memory,
+        cpuQuota: options.cpuQuota,
+        cpuPeriod: options.cpuPeriod,
       });
       setLastAction(result);
       if (!result.ok) {
@@ -810,6 +843,7 @@ function App(): JSX.Element {
       }
       setRunDialogOpen(false);
       setNewContainerName("");
+      setNewContainerCommand("");
       setNewContainerEnvironment("");
       await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
     } catch (err) {
@@ -1057,7 +1091,7 @@ function App(): JSX.Element {
       : visibleOutput;
   }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
 
-  const runtimeBusy = runtimeActionBusy || logsFollowing || terminalActive;
+  const runtimeBusy = runtimeActionBusy;
 
   async function copyLogs(): Promise<void> {
     try {
@@ -1087,12 +1121,16 @@ function App(): JSX.Element {
   ), [containerRows, containerStatusFilter, globalSearch]);
   const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
-  const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
+  const visibleImages = useMemo(() => filterNamedResources(imageRows, globalSearch, (image) => image.reference), [imageRows, globalSearch]);
+  const visibleVolumes = useMemo(() => filterNamedResources(volumes, globalSearch), [volumes, globalSearch]);
+  const visibleNetworks = useMemo(() => filterNamedResources(networks, globalSearch), [networks, globalSearch]);
+  const containerImageReferences = useMemo(() => containerRows.map((row) => row.image), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const resourceUsage = resourceTotals(containerRows);
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
+  const daemonPresentation = daemonStatusPresentation(snapshot?.daemon);
   const containerViewState = containerContentState(
     containerRows.length,
     visibleContainers.length,
@@ -1103,7 +1141,7 @@ function App(): JSX.Element {
   const networkPage = resourcePageState("networks", networks.length);
   const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
   const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
-  const surfaceError = error ?? snapshotFailureDetail(snapshot);
+  const surfaceError = error ?? snapshotFailureDetail(snapshot, activeSection);
   const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
@@ -1138,7 +1176,7 @@ function App(): JSX.Element {
             ref={globalSearchRef}
             value={globalSearch}
             onChange={(event) => setGlobalSearch(event.target.value)}
-            placeholder="Search containers, images, volumes…"
+            placeholder="Filter containers, images, volumes, networks…"
             aria-label="Global search"
           />
           <kbd>⌘K</kbd>
@@ -1146,8 +1184,8 @@ function App(): JSX.Element {
         <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
-        <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
-          <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
+        <div className={`daemon-pill is-${daemonPresentation.tone}`} title={daemonPresentation.title}>
+          <span className="daemon-dot" /> {daemonPresentation.label}
         </div>
         <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
         {showGlobalRunAction(activeSection) ? <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>
@@ -1276,6 +1314,7 @@ function App(): JSX.Element {
                             {group.rows.map((row) => {
                               const tone = statusTone(row);
                               const selected = selectedRow?.id === row.id;
+                              const remove = containerRemoveAvailability(row);
                               return (
                                 <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
                                   <td><div className="container-name">{row.composeService || row.name}</div>{row.composeService ? <div className="container-runtime-name mono">{row.name}</div> : null}</td>
@@ -1292,7 +1331,7 @@ function App(): JSX.Element {
                                         <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}><Icon name={row.state === "running" ? "stop" : "play"} size={16} />{row.state === "running" ? "Stop container" : "Start container"}</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}><Icon name="terminal" size={16} />Follow logs</button>
                                         <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); void inspectContainer(row.id); }}><Icon name="terminal" size={16} />Open terminal</button>
-                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)}><Icon name="trash" size={16} />Remove container</button>
+                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)} disabled={!remove.allowed} title={remove.reason || undefined}><Icon name="trash" size={16} />{remove.allowed ? "Remove container" : "Stop before removing"}</button>
                                       </div>
                                     </details>
                                   </td>
@@ -1317,13 +1356,14 @@ function App(): JSX.Element {
                       <button key={tab} role="tab" aria-selected={detailTab === tab} className={detailTab === tab ? "active" : ""} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>
                     ))}
                   </div>
+                  {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
                   <div className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
                     <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
                       <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
-                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy || logsFollowing}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
                       <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
                       <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
                       <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
@@ -1340,7 +1380,7 @@ function App(): JSX.Element {
                     </div>
                     <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
                     <div className="detail-foot">
-                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || !containerTarget.trim()}>Open shell</button>
+                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || !containerTarget.trim()}>Open shell</button>
                       <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
                       <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
                     </div>
@@ -1383,7 +1423,7 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel image-table-panel" aria-label="Images">
                   <div className="table-toolbar">
-                    <span className="count-badge">{imageCount}</span>
+                    <span className="count-badge">{visibleImages.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More image actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1395,13 +1435,13 @@ function App(): JSX.Element {
                   <div className="table-scroll">
                     <table>
                       <thead><tr><th>Repository</th><th>Size</th><th>Created</th><th>In use</th><th aria-label="Actions" /></tr></thead>
-                      <tbody>{imageRows.map((image) => (
+                      <tbody>{visibleImages.map((image) => (
                         <tr key={image.id}>
-                          <td className="container-name mono">{image.reference}</td>
+                          <td className="container-name mono" title={image.fullReference}>{image.reference}</td>
                           <td className="muted">{image.size}</td>
                           <td className="muted">{image.created}</td>
-                          <td>{imagesInUse.has(image.reference) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
-                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
+                          <td>{imageIsUsed(image, containerImageReferences) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
+                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.fullReference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -1429,7 +1469,7 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Volumes">
                   <div className="table-toolbar">
-                    <span className="count-badge">{volumes.length}</span>
+                    <span className="count-badge">{visibleVolumes.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More volume actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
@@ -1439,7 +1479,7 @@ function App(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th>Usage</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {volumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
+                    {visibleVolumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1453,14 +1493,14 @@ function App(): JSX.Element {
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
                   <div className="table-toolbar">
-                    <span className="count-badge">{networks.length}</span>
+                    <span className="count-badge">{visibleNetworks.length}</span>
                     <details className="image-toolbar-overflow">
                       <summary aria-label="More network actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu"><button onClick={() => void refreshNetworks()} disabled={runtimeBusy || networksLoading}>{networksLoading ? "Refreshing…" : "Refresh networks"}</button></div>
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th><th>Containers</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {networks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
+                    {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1499,7 +1539,7 @@ function App(): JSX.Element {
 
             {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
-            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
+            {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} nativeLinux={snapshot?.daemon.platform === "linux-native"} daemonStatus={snapshot?.daemon} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 
             {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : "did not complete"}</span>{lastAction.stderr || !lastAction.ok ? <details><summary>Technical details</summary><pre>{`${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}`}</pre></details> : null}</section> : null}
           </div>
@@ -1546,7 +1586,15 @@ function App(): JSX.Element {
       ) : null}
 
       {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>{runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog run-container-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid">
+          <label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
+          <label className="detail-span"><span>Command (optional)</span><input value={newContainerCommand} onChange={(event) => setNewContainerCommand(event.target.value)} placeholder="sh -c echo ready" /></label>
+          <label className="detail-span checkbox-row"><input type="checkbox" checked={newContainerPullMissing} onChange={(event) => setNewContainerPullMissing(event.target.checked)} />Pull image if it is not available locally</label>
+          <fieldset className="detail-span mapping-fieldset"><legend>Ports</legend>{newContainerPorts.map((row, index) => <div className="mapping-row" key={`port-${index}`}><input aria-label={`Host port ${index + 1}`} value={row.host} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, host: event.target.value } : value))} placeholder="Host port" /><span>→</span><input aria-label={`Container port ${index + 1}`} value={row.container} onChange={(event) => setNewContainerPorts((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, container: event.target.value } : value))} placeholder="Container port" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerPorts((rows) => [...rows, { host: "", container: "" }])}>Add port</button></fieldset>
+          <fieldset className="detail-span mapping-fieldset"><legend>Volumes</legend>{newContainerVolumes.map((row, index) => <div className="mapping-row" key={`volume-${index}`}><input aria-label={`Volume source ${index + 1}`} value={row.source} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, source: event.target.value } : value))} placeholder="Host path or volume" /><span>→</span><input aria-label={`Container path ${index + 1}`} value={row.target} onChange={(event) => setNewContainerVolumes((rows) => rows.map((value, rowIndex) => rowIndex === index ? { ...value, target: event.target.value } : value))} placeholder="Container path" /></div>)}<button className="btn btn-ghost" onClick={() => setNewContainerVolumes((rows) => [...rows, { source: "", target: "" }])}>Add volume</button></fieldset>
+          <label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={5} /></label>
+          <details className="detail-span advanced-fields"><summary>Advanced resources</summary><div className="editor-grid"><label><span>Memory (MB)</span><input inputMode="decimal" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="Unlimited" /></label><label><span>CPUs</span><input inputMode="decimal" value={newContainerCpus} onChange={(event) => setNewContainerCpus(event.target.value)} placeholder="Unlimited" /></label></div></details>
+          {runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
       ) : null}
 
       <ResourceCreateDialog

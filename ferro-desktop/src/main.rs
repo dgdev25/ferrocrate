@@ -10,6 +10,8 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -534,37 +536,40 @@ fn resize_terminal_exec(
 }
 
 #[cfg(target_os = "linux")]
-fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopError> {
-    use std::os::unix::fs::FileTypeExt;
-
+fn ferrocrate_socket_candidates(
+    explicit: Option<&str>,
+    rootless_socket: Option<&str>,
+    runtime_dir: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = explicit {
         candidates.push(PathBuf::from(path));
     } else {
-        if let Some(path) = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET") {
+        if let Some(path) = rootless_socket {
             candidates.push(PathBuf::from(path));
         }
-        if let Some(host) = std::env::var_os("DOCKER_HOST") {
-            if let Some(path) = host
-                .to_str()
-                .and_then(|value| value.strip_prefix("unix://"))
-            {
-                candidates.push(PathBuf::from(path));
-            }
-        }
-        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-            let runtime = PathBuf::from(runtime);
+        if let Some(runtime) = runtime_dir {
             candidates.push(runtime.join("ferrocrate.sock"));
-            candidates.push(runtime.join("docker.sock"));
         }
-        if let Some(runtime) = std::env::var_os("FERROCRATE_RUNTIME_DIR") {
-            let runtime = PathBuf::from(runtime);
+        if let Some(runtime) = xdg_runtime_dir {
             candidates.push(runtime.join("ferrocrate.sock"));
-            candidates.push(runtime.join("docker.sock"));
         }
-        candidates.push(PathBuf::from("/var/run/ferrocrate.sock"));
-        candidates.push(PathBuf::from("/var/run/docker.sock"));
     }
+    candidates.dedup();
+    candidates
+}
+
+#[cfg(target_os = "linux")]
+fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let candidates = ferrocrate_socket_candidates(
+        explicit,
+        std::env::var("FERROCRATE_ROOTLESS_SOCKET").ok().as_deref(),
+        std::env::var_os("FERROCRATE_RUNTIME_DIR").map(PathBuf::from),
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+    );
 
     let mut rejected = Vec::new();
     for path in candidates {
@@ -579,8 +584,178 @@ fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopErro
         }
     }
     Err(DesktopError::Invalid(format!(
-        "daemon socket not found; probed {}",
-        rejected.join(", ")
+        "Ferrocrate daemon socket not found; probed {}",
+        if rejected.is_empty() {
+            "no configured rootless runtime directory".to_string()
+        } else {
+            rejected.join(", ")
+        }
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_runtime_socket() -> Result<PathBuf, DesktopError> {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(PathBuf::from)
+        .map(|directory| directory.join("ferrocrate.sock"))
+        .ok_or_else(|| {
+            DesktopError::Invalid(
+                "FERROCRATE_RUNTIME_DIR or XDG_RUNTIME_DIR is required for the rootless desktop daemon"
+                    .to_string(),
+            )
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn ferrocrate_daemon_command(socket: &Path) -> Vec<String> {
+    vec![
+        "daemon".to_string(),
+        "--socket".to_string(),
+        socket.display().to_string(),
+        "--docker-compat".to_string(),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_health_response_ok(response: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_is_healthy(socket: &Path) -> bool {
+    use std::os::unix::net::UnixStream;
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    if stream
+        .write_all(b"GET /_ping HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok() && daemon_health_response_ok(&response)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_ferrocrate_daemon(socket: &Path) -> Result<std::process::Child, DesktopError> {
+    let binary = std::env::var_os("FERROCRATE_BIN").unwrap_or_else(|| "ferrocrate".into());
+    let mut command = Command::new(&binary);
+    command
+        .args(ferrocrate_daemon_command(socket))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    command.spawn().map_err(DesktopError::Io)
+}
+
+#[cfg(target_os = "linux")]
+struct RuntimeSupervisor {
+    socket: PathBuf,
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    stop: Arc<AtomicBool>,
+    owned: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for RuntimeSupervisor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Ok(mut slot) = self.child.lock() {
+            if let Some(mut child) = slot.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        if self.owned && self.socket.exists() {
+            let _ = fs::remove_file(&self.socket);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn start_runtime_supervisor() -> Result<RuntimeSupervisor, DesktopError> {
+    let socket = desktop_runtime_socket()?;
+    let child_slot = Arc::new(Mutex::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if daemon_is_healthy(&socket) {
+        eprintln!(
+            "Ferrocrate API daemon already running at {}",
+            socket.display()
+        );
+        return Ok(RuntimeSupervisor {
+            socket,
+            child: child_slot,
+            stop,
+            owned: false,
+        });
+    }
+    let mut child = spawn_ferrocrate_daemon(&socket)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if daemon_is_healthy(&socket) {
+            eprintln!("Ferrocrate API daemon running at {}", socket.display());
+            *child_slot.lock().map_err(|_| {
+                DesktopError::Invalid("daemon supervisor state poisoned".to_string())
+            })? = Some(child);
+            let monitored_socket = socket.clone();
+            let monitored_child = child_slot.clone();
+            let monitored_stop = stop.clone();
+            thread::spawn(move || loop {
+                if monitored_stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let status = monitored_child.lock().ok().and_then(|mut slot| {
+                    slot.as_mut()
+                        .and_then(|child| child.try_wait().ok())
+                        .flatten()
+                });
+                match status {
+                    Some(status) => {
+                        eprintln!("Ferrocrate API daemon exited with {status}; restarting");
+                        thread::sleep(Duration::from_millis(250));
+                        match spawn_ferrocrate_daemon(&monitored_socket) {
+                            Ok(replacement) => {
+                                if let Ok(mut slot) = monitored_child.lock() {
+                                    *slot = Some(replacement);
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("Ferrocrate API daemon restart failed: {error}");
+                                thread::sleep(Duration::from_secs(1));
+                            }
+                        }
+                    }
+                    None => thread::sleep(Duration::from_millis(250)),
+                }
+            });
+            return Ok(RuntimeSupervisor {
+                socket,
+                child: child_slot,
+                stop,
+                owned: true,
+            });
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(DesktopError::Invalid(format!(
+                "Ferrocrate API daemon failed during startup with {status}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(DesktopError::Invalid(format!(
+        "Ferrocrate API daemon did not become healthy at {}",
+        socket.display()
     )))
 }
 
@@ -1307,15 +1482,38 @@ fn run_daemon(
         return run_daemon_pipe(pipe_name, default_wsl_distro);
     }
     validate_daemon_addr(addr, allow_remote)?;
+    #[cfg(target_os = "linux")]
+    let runtime_supervisor = start_runtime_supervisor()?;
+    #[cfg(target_os = "linux")]
+    {
+        signal_hook::flag::register(
+            signal_hook::consts::SIGTERM,
+            runtime_supervisor.stop.clone(),
+        )?;
+        signal_hook::flag::register(signal_hook::consts::SIGINT, runtime_supervisor.stop.clone())?;
+    }
     let listener = TcpListener::bind(addr)?;
-    for stream in listener.incoming() {
-        let mut stream = stream?;
+    #[cfg(target_os = "linux")]
+    listener.set_nonblocking(true)?;
+    loop {
+        #[cfg(target_os = "linux")]
+        if runtime_supervisor.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            #[cfg(target_os = "linux")]
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let default_wsl_distro = default_wsl_distro.clone();
         thread::spawn(move || {
             let _ = handle_client(&mut stream, default_wsl_distro.as_deref());
         });
     }
-    Ok(())
 }
 
 fn validate_daemon_addr(addr: &str, allow_remote: bool) -> Result<(), DesktopError> {
@@ -3381,10 +3579,11 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
-        copy_interactive_input, create_terminal_exec, exec_mode_from_env, gather_phase0_check,
-        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
-        load_forward_entries, load_vm_state, network_proxy_request, open_terminal_exec,
-        parse_exec_mode, read_exec_request, registry_login_request,
+        copy_interactive_input, create_terminal_exec, daemon_health_response_ok,
+        exec_mode_from_env, ferrocrate_daemon_command, ferrocrate_socket_candidates,
+        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
+        open_terminal_exec, parse_exec_mode, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         resize_terminal_exec, run_request, save_forward_entries, save_vm_state,
         select_terminal_socket, should_route_to_macos_guest, terminal_exec_create_path,
@@ -3690,6 +3889,49 @@ mod tests {
             select_terminal_socket(Some(socket.to_str().expect("path"))).expect("daemon socket"),
             socket
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_socket_candidates_never_include_docker_engine_paths() {
+        let candidates = ferrocrate_socket_candidates(
+            None,
+            Some("/tmp/explicit-ferrocrate.sock"),
+            Some(PathBuf::from("/tmp/ferro-runtime")),
+            Some(PathBuf::from("/run/user/1000")),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/tmp/explicit-ferrocrate.sock"),
+                PathBuf::from("/tmp/ferro-runtime/ferrocrate.sock"),
+                PathBuf::from("/run/user/1000/ferrocrate.sock"),
+            ]
+        );
+        assert!(candidates.iter().all(|path| !path.ends_with("docker.sock")));
+        assert!(!candidates
+            .iter()
+            .any(|path| path == std::path::Path::new("/var/run/docker.sock")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_daemon_starts_real_rootless_api_daemon() {
+        assert_eq!(
+            ferrocrate_daemon_command(std::path::Path::new("/run/user/1000/ferrocrate.sock")),
+            vec![
+                "daemon".to_string(),
+                "--socket".to_string(),
+                "/run/user/1000/ferrocrate.sock".to_string(),
+                "--docker-compat".to_string(),
+            ]
+        );
+        assert!(daemon_health_response_ok(
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nOK\n"
+        ));
+        assert!(!daemon_health_response_ok(
+            "HTTP/1.1 500 Internal Server Error\r\n\r\nOK\n"
+        ));
     }
 
     #[test]

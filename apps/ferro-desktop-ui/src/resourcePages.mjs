@@ -48,6 +48,12 @@ export function containerContentState(totalCount, visibleCount, query) {
   return "table";
 }
 
+export function filterNamedResources(rows, query, getName = (row) => row.name) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter((row) => String(getName(row)).toLowerCase().includes(needle));
+}
+
 export function nextResourceDialog(current, command) {
   if (command === "open-volume") return "volume";
   if (command === "open-network") return "network";
@@ -77,6 +83,7 @@ export function isDaemonUnavailable(error) {
 
 export function shouldShowFirstRun(snapshot, activeSection) {
   if (!snapshot || activeSection === "doctor" || activeSection === "settings") return false;
+  if (snapshot.daemon && snapshot.daemon.state !== "running") return true;
   return [snapshot.containers, snapshot.images].some((command) => (
     command?.ok === false && isDaemonUnavailable(command.stderr)
   ));
@@ -88,9 +95,16 @@ export function runtimeSurfaceState(snapshot, activeSection) {
   return shouldShowFirstRun(snapshot, activeSection) ? "first-run" : "resource";
 }
 
-export function snapshotFailureDetail(snapshot) {
+export function snapshotFailureDetail(snapshot, activeSection) {
   if (!snapshot || shouldShowFirstRun(snapshot, "containers")) return null;
-  const failed = [snapshot.containers, snapshot.images].find((command) => command?.ok === false);
+  const commands = activeSection === "containers"
+    ? [snapshot.containers]
+    : activeSection === "images"
+      ? [snapshot.images]
+      : activeSection == null
+        ? [snapshot.containers, snapshot.images]
+        : [];
+  const failed = commands.find((command) => command?.ok === false);
   return failed?.stderr?.trim() || (failed ? `A runtime command did not complete successfully (status ${failed.code ?? "unknown"}).` : null);
 }
 

@@ -349,6 +349,11 @@ struct ContainerResourcesArgs {
 struct NewContainerArgs {
     image: String,
     name: Option<String>,
+    command: Vec<String>,
+    ports: Vec<String>,
+    volumes: Vec<String>,
+    #[serde(alias = "pullIfMissing")]
+    pull_if_missing: bool,
     environment: Vec<String>,
     memory: Option<u64>,
     #[serde(alias = "cpuQuota")]
@@ -473,6 +478,10 @@ fn dispatch_command(command: &str, args: Value, events: WebEventHub) -> Result<V
             encode_result(run_new_container(
                 args.image,
                 args.name,
+                args.command,
+                args.ports,
+                args.volumes,
+                args.pull_if_missing,
                 args.environment,
                 args.memory,
                 args.cpu_quota,
@@ -734,8 +743,8 @@ mod tests {
                 },
                 "data" => json!([65]),
                 "columns" | "rows" | "memory" | "cpuQuota" | "cpuPeriod" => json!(1),
-                "env" | "environment" => json!([]),
-                "fix" | "bootstrap" | "dry_run" | "confirm" => json!(false),
+                "env" | "environment" | "command" | "ports" | "volumes" => json!([]),
+                "fix" | "bootstrap" | "dry_run" | "confirm" | "pullIfMissing" => json!(false),
                 "user" | "workdir" | "name" | "subnet" | "issuance_endpoint" | "access_token" => {
                     Value::Null
                 }
@@ -794,6 +803,28 @@ mod tests {
     }
 
     #[test]
+    fn run_new_container_bridge_decodes_every_native_argument() {
+        let args = decode::<NewContainerArgs>(json!({
+            "image": "alpine:latest",
+            "name": "demo",
+            "command": ["echo", "ready"],
+            "ports": ["8080:80"],
+            "volumes": ["data:/data"],
+            "pullIfMissing": true,
+            "environment": ["MODE=test"],
+            "memory": 1048576,
+            "cpuQuota": 50000,
+            "cpuPeriod": 100000
+        }))
+        .expect("browser payload");
+
+        assert_eq!(args.command, ["echo", "ready"]);
+        assert_eq!(args.ports, ["8080:80"]);
+        assert_eq!(args.volumes, ["data:/data"]);
+        assert!(args.pull_if_missing);
+    }
+
+    #[test]
     fn multiword_bridge_arguments_accept_native_snake_and_browser_camel_case() {
         let cases = [
             (
@@ -808,8 +839,8 @@ mod tests {
             ),
             (
                 "run_new_container",
-                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpu_quota": 2, "cpu_period": 3 }),
-                json!({ "image": "one", "name": null, "environment": [], "memory": null, "cpuQuota": 2, "cpuPeriod": 3 }),
+                json!({ "image": "one", "name": null, "command": [], "ports": [], "volumes": [], "pull_if_missing": false, "environment": [], "memory": null, "cpu_quota": 2, "cpu_period": 3 }),
+                json!({ "image": "one", "name": null, "command": [], "ports": [], "volumes": [], "pullIfMissing": false, "environment": [], "memory": null, "cpuQuota": 2, "cpuPeriod": 3 }),
             ),
             (
                 "save_paid_backend_config",

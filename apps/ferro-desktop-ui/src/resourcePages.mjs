@@ -133,6 +133,58 @@ export function ResourceEmptyState({ section, disabled = false, onAction }) {
   );
 }
 
+export function hostPathError(value, kind = "path") {
+  const path = String(value ?? "").trim();
+  const absolute = path.startsWith("/")
+    || /^[A-Za-z]:[\\/]/.test(path)
+    || /^\\\\[^\\]/.test(path);
+  if (!path || !absolute || path.includes("\0")) {
+    return `Enter an absolute ${kind} path on the daemon host.`;
+  }
+  return null;
+}
+
+export function HostPathField({
+  label,
+  kind = "path",
+  value = "",
+  dialogAvailable = false,
+  busy = false,
+  submitLabel,
+  onChange,
+  onChoose,
+  onSubmit,
+}) {
+  const validationError = hostPathError(value, kind);
+  const visibleError = value.trim() ? validationError : null;
+  return createElement("div", { className: "host-path-field detail-span" },
+    createElement("label", null,
+      createElement("span", null, label),
+      createElement("div", { className: "field-row" },
+        createElement("input", {
+          value,
+          onChange,
+          placeholder: `absolute ${kind} path on the daemon host`,
+          "aria-invalid": visibleError ? true : undefined,
+          "aria-describedby": visibleError ? "host-path-error" : "host-path-help",
+        }),
+        dialogAvailable
+          ? createElement("button", { className: "btn btn-secondary", type: "button", onClick: onChoose, disabled: busy }, `Choose ${kind}`)
+          : null,
+      ),
+    ),
+    dialogAvailable
+      ? null
+      : createElement("p", { id: "host-path-help", className: "host-path-help" }, `Enter an absolute ${kind} path on the daemon host.`),
+    visibleError
+      ? createElement("p", { id: "host-path-error", className: "host-path-error", role: "alert" }, visibleError)
+      : null,
+    submitLabel
+      ? createElement("button", { className: "btn btn-primary", type: "button", onClick: onSubmit, disabled: busy || Boolean(validationError) }, submitLabel)
+      : null,
+  );
+}
+
 export function ResourceToolbar({ count, label, overflowLabel, actions = [] }) {
   return createElement("div", { className: "table-toolbar" },
     label ? createElement("span", { className: "toolbar-label mono", title: label }, label) : null,

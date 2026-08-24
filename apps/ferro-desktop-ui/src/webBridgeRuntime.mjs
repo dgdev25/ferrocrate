@@ -1,0 +1,118 @@
+const TOKEN_STORAGE_KEY = "ferrocrate.webBridgeToken";
+export const DEFAULT_INVOKE_TIMEOUT_MS = 60_000;
+
+export function extractWebBridgeToken(target = globalThis) {
+  const hash = target.location?.hash ?? "";
+  const hashParams = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+  const hashToken = hashParams.get("token");
+  if (hashToken) {
+    target.sessionStorage?.setItem(TOKEN_STORAGE_KEY, hashToken);
+    hashParams.delete("token");
+    const remainingHash = hashParams.toString();
+    const cleanUrl = `${target.location.pathname}${target.location.search}${remainingHash ? `#${remainingHash}` : ""}`;
+    target.history?.replaceState(null, "", cleanUrl);
+    return hashToken;
+  }
+  return target.sessionStorage?.getItem(TOKEN_STORAGE_KEY) ?? null;
+}
+
+export function createWebBridgeRuntime(options = {}) {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+  const eventSourceFactory = options.eventSourceFactory ?? ((url) => new globalThis.EventSource(url));
+  const target = options.target ?? globalThis;
+  const dialogOpenImpl = options.dialogOpenImpl ?? target.__TAURI__?.dialog?.open;
+  const dialogAvailable = typeof dialogOpenImpl === "function";
+  const token = options.token ?? extractWebBridgeToken(target);
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+  let eventSource;
+
+  function sharedEventSource() {
+    if (eventSource) return eventSource;
+    const streamUrl = token
+      ? `/__tauri/stream?token=${encodeURIComponent(token)}`
+      : "/__tauri/stream";
+    eventSource = eventSourceFactory(streamUrl);
+    target.addEventListener?.("beforeunload", () => eventSource.close(), { once: true });
+    return eventSource;
+  }
+
+  return {
+    capabilities: { dialog: dialogAvailable },
+
+    async invoke(command, args = {}, invokeOptions = {}) {
+      if (!fetchImpl) throw new Error("web bridge fetch is unavailable");
+      const timeoutMs = invokeOptions.timeoutMs ?? defaultTimeoutMs;
+      const controller = new AbortController();
+      const timeoutError = new Error(
+        `${command} timed out after ${timeoutMs} ${timeoutMs === 1 ? "millisecond" : "milliseconds"}. Please try again.`,
+      );
+      let timedOut = false;
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true;
+          reject(timeoutError);
+          controller.abort();
+        }, timeoutMs);
+      });
+      const request = (async () => {
+        try {
+          const response = await fetchImpl(`/__tauri/${encodeURIComponent(command)}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(args ?? {}),
+            signal: controller.signal,
+          });
+          const payload = await response.json();
+          if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
+            throw new Error(String(payload?.error ?? `command ${command} failed`));
+          }
+          return payload;
+        } catch (error) {
+          if (timedOut) throw timeoutError;
+          throw error;
+        }
+      })();
+      try {
+        return await Promise.race([request, timeout]);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    },
+
+    async listen(event, handler) {
+      const source = sharedEventSource();
+      const listener = (message) => {
+        handler({ event, payload: JSON.parse(message.data) });
+      };
+      source.addEventListener(event, listener);
+      let listening = true;
+      return () => {
+        if (!listening) return;
+        listening = false;
+        source.removeEventListener(event, listener);
+      };
+    },
+
+    async open(options = {}) {
+      if (!dialogAvailable) {
+        throw new Error("Native file and directory dialogs are unavailable in web mode.");
+      }
+      return dialogOpenImpl(options);
+    },
+  };
+}
+
+export function installWebBridgeRuntime(target, runtime = createWebBridgeRuntime()) {
+  if (!target.__TAURI__) {
+    target.__TAURI__ = {
+      core: { invoke: runtime.invoke },
+      event: { listen: runtime.listen },
+      dialog: { open: runtime.open },
+    };
+  }
+  return runtime;
+}

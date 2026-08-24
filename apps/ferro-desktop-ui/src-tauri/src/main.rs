@@ -406,6 +406,20 @@ struct ContainerDetailSummary {
     restart_policy: ContainerRestartPolicySummary,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredRegistryCredential {
+    registry: String,
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RegistryAuthStatus {
+    registry: String,
+    logged_in: bool,
+    username: Option<String>,
+}
+
 fn container_detail_from_json(value: JsonValue) -> Result<ContainerDetailSummary, String> {
     let string = |path: &[&str]| {
         path.iter()
@@ -578,6 +592,39 @@ fn run_container_bridge_command(
     }
     command.push(image.to_string());
     Ok(command)
+}
+
+fn registry_login_command(registry: &str, username: &str) -> Result<Vec<String>, String> {
+    let registry = registry.trim();
+    let username = username.trim();
+    if registry.is_empty() || username.is_empty() {
+        return Err("registry and username are required".to_string());
+    }
+    Ok(vec![
+        "registry-proxy".to_string(),
+        "login".to_string(),
+        "--registry".to_string(),
+        registry.to_string(),
+        "--username".to_string(),
+        username.to_string(),
+    ])
+}
+
+fn registry_logout_command(registry: &str) -> Result<Vec<String>, String> {
+    let registry = registry.trim();
+    if registry.is_empty() {
+        return Err("registry is required".to_string());
+    }
+    Ok([
+        "exec",
+        "--",
+        "ferrocrate",
+        "logout",
+        registry,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect())
 }
 
 fn network_summaries(
@@ -1342,6 +1389,44 @@ fn clear_session_token() -> Result<(), String> {
     }
 }
 
+fn registry_keyring_entry(registry: &str) -> Result<keyring::Entry, String> {
+    let registry = registry.trim().to_ascii_lowercase();
+    if registry.is_empty() {
+        return Err("registry is required".to_string());
+    }
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry.as_bytes());
+    keyring::Entry::new(KEYRING_SERVICE, &format!("registry_auth:{encoded}"))
+        .map_err(|err| format!("registry keyring init failed: {err}"))
+}
+
+fn get_registry_credential(registry: &str) -> Result<Option<StoredRegistryCredential>, String> {
+    let entry = registry_keyring_entry(registry)?;
+    match entry.get_password() {
+        Ok(value) => serde_json::from_str(&value)
+            .map(Some)
+            .map_err(|err| format!("invalid registry credential in keyring: {err}")),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(format!("failed to read registry credential from keyring: {err}")),
+    }
+}
+
+fn set_registry_credential(credential: &StoredRegistryCredential) -> Result<(), String> {
+    let entry = registry_keyring_entry(&credential.registry)?;
+    let value = serde_json::to_string(credential)
+        .map_err(|err| format!("failed to encode registry credential: {err}"))?;
+    entry
+        .set_password(&value)
+        .map_err(|err| format!("failed to write registry credential to keyring: {err}"))
+}
+
+fn clear_registry_credential(registry: &str) -> Result<(), String> {
+    let entry = registry_keyring_entry(registry)?;
+    match entry.delete_credential() {
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(format!("failed to clear registry credential from keyring: {err}")),
+    }
+}
+
 fn parse_jwt_claims(token: &str) -> Option<JsonValue> {
     let mut parts = token.split('.');
     let _header = parts.next()?;
@@ -1664,6 +1749,74 @@ fn run_new_container(
 }
 
 #[tauri::command]
+fn get_registry_auth_status(registry: String) -> Result<RegistryAuthStatus, String> {
+    let registry = registry.trim().to_string();
+    let credential = get_registry_credential(&registry)?;
+    Ok(RegistryAuthStatus {
+        registry,
+        logged_in: credential.is_some(),
+        username: credential.map(|value| value.username),
+    })
+}
+
+#[tauri::command]
+fn login_registry(
+    registry: String,
+    username: String,
+    password: String,
+) -> Result<CommandResult, String> {
+    let registry = registry.trim().to_string();
+    let username = username.trim().to_string();
+    if password.is_empty() {
+        return Err("registry password is required".to_string());
+    }
+    let args = registry_login_command(&registry, &username)?;
+    let mut child = Command::new("ferro-desktop")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start registry login proxy: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "registry login stdin unavailable".to_string())?;
+    stdin
+        .write_all(password.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .map_err(|error| format!("failed to send registry password: {error}"))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for registry login: {error}"))?;
+    let result = CommandResult {
+        ok: output.status.success(),
+        code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    };
+    if result.ok {
+        set_registry_credential(&StoredRegistryCredential {
+            registry,
+            username,
+            password,
+        })?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn logout_registry(registry: String) -> Result<CommandResult, String> {
+    let registry = registry.trim().to_string();
+    let result = run_owned_command("ferro-desktop", &registry_logout_command(&registry)?);
+    if result.ok {
+        clear_registry_credential(&registry)?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 fn get_paid_auth_state() -> Result<PaidAuthState, String> {
     let config = read_paid_backend_config()?;
     let token = get_session_token()?;
@@ -1911,6 +2064,9 @@ fn main() {
             run_network_action,
             update_container_resources,
             run_new_container,
+            get_registry_auth_status,
+            login_registry,
+            logout_registry,
             start_log_follow,
             stop_log_follow,
             start_terminal,
@@ -1936,7 +2092,8 @@ mod tests {
     use super::{
         build_bridge_command, compose_bridge_command, compose_service_rows,
         container_detail_from_json, container_inspect_command, container_update_command, log_channel,
-        log_follow_command, parse_terminal_exec_id, run_container_bridge_command,
+        log_follow_command, parse_terminal_exec_id, registry_login_command,
+        registry_logout_command, run_container_bridge_command,
         terminal_exec_command, terminal_resize_command, network_proxy_command, network_summaries,
         volume_proxy_command, ComposeAction,
         ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, LogBuffer,
@@ -2250,5 +2407,32 @@ mod tests {
                 "--cpu-quota", "25000", "--cpu-period", "100000", "alpine:latest",
             ]
         );
+    }
+
+    #[test]
+    fn registry_auth_commands_keep_password_out_of_process_arguments() {
+        assert_eq!(
+            registry_login_command("registry.example.com", "alice").expect("login command"),
+            vec![
+                "registry-proxy",
+                "login",
+                "--registry",
+                "registry.example.com",
+                "--username",
+                "alice",
+            ]
+        );
+        assert_eq!(
+            registry_logout_command("registry.example.com").expect("logout command"),
+            vec![
+                "exec",
+                "--",
+                "ferrocrate",
+                "logout",
+                "registry.example.com",
+            ]
+        );
+        assert!(registry_login_command("registry.example.com", " ").is_err());
+        assert!(registry_logout_command(" ").is_err());
     }
 }

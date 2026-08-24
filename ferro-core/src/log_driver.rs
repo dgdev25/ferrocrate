@@ -813,4 +813,42 @@ mod tests {
         assert!(records.contains("plugin-container"), "{records}");
         assert!(records.contains("cGx1Z2luIGhlbGxvCg=="), "{records}");
     }
+
+    #[test]
+    fn shared_capture_opens_once_writes_both_streams_and_closes_once() {
+        use super::{capture_stream, ContainerLogWriter, LogCapture};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct RecordingWriter(Arc<Mutex<Vec<String>>>);
+        impl ContainerLogWriter for RecordingWriter {
+            fn write(&mut self, entry: &LogEntry) -> std::io::Result<()> {
+                self.0.lock().unwrap().push(format!(
+                    "write:{}:{}",
+                    super::stream_name(entry.stream),
+                    String::from_utf8_lossy(&entry.bytes)
+                ));
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().push("flush".into());
+                Ok(())
+            }
+            fn close(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().push("close".into());
+                Ok(())
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let capture = LogCapture::new(Box::new(RecordingWriter(Arc::clone(&calls))), 2);
+        capture_stream(b"out\n".as_slice(), capture.clone(), LogStream::Stdout);
+        assert!(!calls.lock().unwrap().contains(&"close".to_string()));
+        capture_stream(b"err\n".as_slice(), capture, LogStream::Stderr);
+
+        let calls = calls.lock().unwrap();
+        assert!(calls.iter().any(|call| call == "write:stdout:out\n"));
+        assert!(calls.iter().any(|call| call == "write:stderr:err\n"));
+        assert_eq!(calls.iter().filter(|call| call.as_str() == "close").count(), 1);
+    }
 }

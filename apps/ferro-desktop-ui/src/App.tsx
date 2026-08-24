@@ -25,7 +25,7 @@ import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./c
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
-import { clearErrorsForNavigation, errorForSection, setSectionError } from "./errorScopes.mjs";
+import { errorForSection, navigationTransientState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
@@ -309,8 +309,18 @@ function App(): JSX.Element {
   }, [theme]);
 
   useEffect(() => {
-    setSectionErrors((current) => clearErrorsForNavigation(current));
+    setSectionErrors((current) => navigationTransientState(current).sectionErrors);
+    setLastAction(null);
+    setActionLabel("");
   }, [activeSection]);
+
+  function selectSection(section: AppSection): void {
+    const next = navigationTransientState(sectionErrors);
+    setSectionErrors(next.sectionErrors);
+    setLastAction(next.actionResult);
+    setActionLabel(next.actionLabel);
+    setActiveSection(section);
+  }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -708,10 +718,11 @@ function App(): JSX.Element {
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
-      setLastAction(result);
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`));
+      setLastAction(next.actionResult);
       if (!result.ok) {
-        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
-        if (action === "create") setResourceDialogError(detail); else setError(detail);
+        if (next.dialogError) setResourceDialogError(next.dialogError);
+        if (next.pageError) setError(next.pageError);
         return;
       }
       if (action === "create") {
@@ -741,10 +752,11 @@ function App(): JSX.Element {
         target,
         subnet: action === "create" ? networkSubnet.trim() || null : null,
       });
-      setLastAction(result);
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`));
+      setLastAction(next.actionResult);
       if (!result.ok) {
-        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
-        if (action === "create") setResourceDialogError(detail); else setError(detail);
+        if (next.dialogError) setResourceDialogError(next.dialogError);
+        if (next.pageError) setError(next.pageError);
         return;
       }
       if (action === "create") {
@@ -1204,7 +1216,7 @@ function App(): JSX.Element {
           networks: networks.length,
         }}
         doctorIssues={doctorResult?.raw.checks.filter((check) => !check.ok).length ?? 0}
-        onSelect={setActiveSection}
+        onSelect={selectSection}
       />
 
       <div className="workspace">

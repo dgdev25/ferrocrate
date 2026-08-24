@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
 use std::thread;
@@ -24,6 +25,8 @@ const LOG_CHANNEL_CAPACITY: usize = 128;
 static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
 static DESKTOP_DAEMON_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static DESKTOP_DAEMON_STARTING: AtomicBool = AtomicBool::new(false);
+static DESKTOP_DAEMON_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
 struct TerminalProcess {
     child: Child,
@@ -210,6 +213,54 @@ fn ping_daemon(socket: &std::path::Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn unavailable_daemon_state(
+    starting: bool,
+    supervisor_running: bool,
+    supervisor_failure: Option<&str>,
+) -> (&'static str, Option<String>) {
+    if starting || supervisor_running {
+        return ("starting", supervisor_failure.map(str::to_string));
+    }
+    match supervisor_failure {
+        Some(reason) => ("failed", Some(reason.to_string())),
+        None => ("stopped", None),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_process_state() -> (bool, Option<String>) {
+    let Ok(mut slot) = DESKTOP_DAEMON_PROCESS.lock() else {
+        return (
+            false,
+            Some("desktop daemon supervisor state is unavailable".to_string()),
+        );
+    };
+    let Some(child) = slot.as_mut() else {
+        drop(slot);
+        return (
+            false,
+            DESKTOP_DAEMON_FAILURE
+                .lock()
+                .ok()
+                .and_then(|value| value.clone()),
+        );
+    };
+    match child.try_wait() {
+        Ok(None) => (true, None),
+        Ok(Some(status)) => (
+            false,
+            Some(format!("desktop daemon supervisor exited with {status}")),
+        ),
+        Err(error) => (
+            false,
+            Some(format!(
+                "failed to inspect desktop daemon supervisor: {error}"
+            )),
+        ),
+    }
+}
+
 fn daemon_status() -> DaemonStatus {
     #[cfg(target_os = "linux")]
     {
@@ -221,12 +272,20 @@ fn daemon_status() -> DaemonStatus {
                     reason: None,
                     platform: "linux-native".to_string(),
                 },
-                Err(reason) => DaemonStatus {
-                    state: "stopped".to_string(),
-                    socket_path: socket.display().to_string(),
-                    reason: Some(reason),
-                    platform: "linux-native".to_string(),
-                },
+                Err(reason) => {
+                    let (supervisor_running, supervisor_failure) = supervisor_process_state();
+                    let (state, lifecycle_reason) = unavailable_daemon_state(
+                        DESKTOP_DAEMON_STARTING.load(Ordering::SeqCst),
+                        supervisor_running,
+                        supervisor_failure.as_deref(),
+                    );
+                    DaemonStatus {
+                        state: state.to_string(),
+                        socket_path: socket.display().to_string(),
+                        reason: lifecycle_reason.or(Some(reason)),
+                        platform: "linux-native".to_string(),
+                    }
+                }
             },
             Err(reason) => DaemonStatus {
                 state: "failed".to_string(),
@@ -246,38 +305,87 @@ fn daemon_status() -> DaemonStatus {
 }
 
 fn start_desktop_daemon() -> Result<(), String> {
-    if std::net::TcpStream::connect("127.0.0.1:4288").is_ok() {
-        return Ok(());
-    }
-    let mut slot = DESKTOP_DAEMON_PROCESS
-        .lock()
-        .map_err(|_| "desktop daemon state is unavailable".to_string())?;
-    if slot
-        .as_mut()
-        .is_some_and(|child| child.try_wait().ok().flatten().is_none())
+    if std::net::TcpStream::connect("127.0.0.1:4288").is_ok()
+        && desktop_socket_path()
+            .and_then(|socket| ping_daemon(&socket))
+            .is_ok()
     {
+        DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
+        if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+            *failure = None;
+        }
         return Ok(());
     }
-    let child = Command::new("ferro-desktop")
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| format!("failed to start desktop daemon supervisor: {error}"))?;
-    *slot = Some(child);
+    DESKTOP_DAEMON_STARTING.store(true, Ordering::SeqCst);
+    if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+        *failure = None;
+    }
+    let mut slot = match DESKTOP_DAEMON_PROCESS.lock() {
+        Ok(slot) => slot,
+        Err(_) => {
+            let reason = "desktop daemon state is unavailable".to_string();
+            DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
+            if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+                *failure = Some(reason.clone());
+            }
+            return Err(reason);
+        }
+    };
+    let supervisor_running = slot
+        .as_mut()
+        .is_some_and(|child| child.try_wait().ok().flatten().is_none());
+    if !supervisor_running {
+        let child = match Command::new("ferro-desktop")
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let reason = format!("failed to start desktop daemon supervisor: {error}");
+                DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
+                if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+                    *failure = Some(reason.clone());
+                }
+                return Err(reason);
+            }
+        };
+        *slot = Some(child);
+    }
     drop(slot);
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
-        if std::net::TcpStream::connect("127.0.0.1:4288").is_ok() {
+        if std::net::TcpStream::connect("127.0.0.1:4288").is_ok()
+            && desktop_socket_path()
+                .and_then(|socket| ping_daemon(&socket))
+                .is_ok()
+        {
+            DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("desktop daemon supervisor did not become ready".to_string())
+    let reason = "desktop daemon supervisor did not become ready".to_string();
+    DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
+    if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+        *failure = Some(reason.clone());
+    }
+    if let Ok(mut slot) = DESKTOP_DAEMON_PROCESS.lock() {
+        if let Some(mut child) = slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    Err(reason)
 }
 
 fn stop_desktop_daemon() {
+    DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
+    if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
+        *failure = None;
+    }
     if let Ok(mut slot) = DESKTOP_DAEMON_PROCESS.lock() {
         if let Some(mut child) = slot.take() {
             let _ = child.kill();
@@ -2799,7 +2907,7 @@ mod tests {
     };
 
     #[cfg(target_os = "linux")]
-    use super::daemon_health_response_ok;
+    use super::{daemon_health_response_ok, unavailable_daemon_state};
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2810,6 +2918,18 @@ mod tests {
         assert!(!daemon_health_response_ok(
             "HTTP/1.1 500 Internal Server Error\r\n\r\nOK\n"
         ));
+        assert_eq!(
+            unavailable_daemon_state(true, false, None),
+            ("starting", None)
+        );
+        assert_eq!(
+            unavailable_daemon_state(false, false, Some("exit status 1")),
+            ("failed", Some("exit status 1".to_string()))
+        );
+        assert_eq!(
+            unavailable_daemon_state(false, false, None),
+            ("stopped", None)
+        );
     }
 
     #[test]

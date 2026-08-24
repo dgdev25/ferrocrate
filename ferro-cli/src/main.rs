@@ -7119,10 +7119,10 @@ fn parse_volume_mounts(
     let mut out = Vec::new();
     for entry in volumes {
         let parts = entry.split(':').collect::<Vec<_>>();
-        let (source, target, read_only) = match parts.as_slice() {
-            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false),
-            [source, target] => ((*source).to_string(), *target, false),
-            [source, target, "ro"] => ((*source).to_string(), *target, true),
+        let (source, target, read_only, anonymous) = match parts.as_slice() {
+            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true),
+            [source, target] => ((*source).to_string(), *target, false, false),
+            [source, target, "ro"] => ((*source).to_string(), *target, true, false),
             _ => return Err("run: volume must be source:target[:ro]".to_string()),
         };
 
@@ -7132,8 +7132,12 @@ fn parse_volume_mounts(
             let record = match volume_store.get(&source).map_err(|err| err.to_string())? {
                 Some(record) => record,
                 None => {
+                    let mut driver_opts = BTreeMap::new();
+                    if anonymous {
+                        driver_opts.insert("ferrocrate.anonymous".to_string(), "true".to_string());
+                    }
                     let plan = volume_store
-                        .prepare_create(&source, "local", BTreeMap::new())
+                        .prepare_create(&source, "local", driver_opts)
                         .map_err(|err| err.to_string())?;
                     let permit = authorization
                         .authorize_volume_create_plan(origin, &plan)
@@ -21577,6 +21581,10 @@ volumes:
         assert_eq!(volumes.len(), 1);
         assert_eq!(volumes[0].name.len(), 64);
         assert!(volumes[0].name.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            volumes[0].driver_opts.get("ferrocrate.anonymous"),
+            Some(&"true".to_string())
+        );
         assert_eq!(mounts[0].source, volumes[0].path);
     }
 

@@ -24,7 +24,7 @@ import type {
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
-import { BuildHistoryList } from "./imageBuild.mjs";
+import { appendBuildProgress, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { ImageEmptyState, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
@@ -71,6 +71,8 @@ function App(): JSX.Element {
   const [imageTarget, setImageTarget] = useState("alpine:latest");
   const [pullImageDialogOpen, setPullImageDialogOpen] = useState(false);
   const [buildImageDialogOpen, setBuildImageDialogOpen] = useState(false);
+  const [buildLicensingDialogOpen, setBuildLicensingDialogOpen] = useState(false);
+  const [buildLicensingDetail, setBuildLicensingDetail] = useState("");
   const [registryDialogOpen, setRegistryDialogOpen] = useState(false);
   const [pullProgress, setPullProgress] = useState("");
   const [pullFailure, setPullFailure] = useState<PullFailure | null>(null);
@@ -107,7 +109,7 @@ function App(): JSX.Element {
   const [buildContext, setBuildContext] = useState("");
   const [buildTag, setBuildTag] = useState("local/build:latest");
   const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
-  const activeBuildIdRef = useRef<string | null>(null);
+  const buildSequenceRef = useRef(0);
   const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
   const [showEnvironment, setShowEnvironment] = useState(false);
   const [detailMemory, setDetailMemory] = useState("");
@@ -154,11 +156,7 @@ function App(): JSX.Element {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<BuildProgressFrame>("image-build-progress", (event) => {
-      const buildId = activeBuildIdRef.current;
-      if (!buildId) return;
-      setBuildHistory((history) => history.map((build) => build.id === buildId
-        ? { ...build, progress: [...build.progress, event.payload] }
-        : build));
+      setBuildHistory((history) => appendBuildProgress(history, event.payload));
     }).then((stop) => {
       if (disposed) stop(); else unlisten = stop;
     });
@@ -813,14 +811,14 @@ function App(): JSX.Element {
 
   async function buildImage(): Promise<void> {
     if (!beginRuntimeAction()) return;
-    const buildId = `build-${Date.now()}`;
+    const buildId = `build-${Date.now()}-${++buildSequenceRef.current}`;
     const startedAt = Date.now();
     const context = buildContext.trim();
     const tag = buildTag.trim();
     setError(null);
+    setLastAction(null);
     setActionLabel("Image Build");
     setBuildImageDialogOpen(false);
-    activeBuildIdRef.current = buildId;
     setBuildHistory((history) => [{
       id: buildId,
       image: tag,
@@ -832,8 +830,9 @@ function App(): JSX.Element {
       const result = await invoke<CommandResult>("build_image", {
         context,
         tag,
+        build_id: buildId,
       });
-      setLastAction(result);
+      if (result.ok) setLastAction(result);
       setBuildHistory((history) => history.map((build) => build.id === buildId ? {
         ...build,
         status: result.ok ? "succeeded" : "failed",
@@ -849,7 +848,6 @@ function App(): JSX.Element {
         error: String(err),
       } : build));
     } finally {
-      activeBuildIdRef.current = null;
       finishRuntimeAction();
     }
   }
@@ -1219,7 +1217,7 @@ function App(): JSX.Element {
                 disabled={runtimeBusy}
                 onNewBuild={() => setBuildImageDialogOpen(true)}
                 onStart={() => void startFerrocrate()}
-                onReviewLicensing={() => setActiveSection("settings")}
+                onReviewLicensing={(detail) => { setBuildLicensingDetail(detail); setBuildLicensingDialogOpen(true); }}
               />
             ) : null}
 
@@ -1256,6 +1254,13 @@ function App(): JSX.Element {
       {buildImageDialogOpen ? (
         <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="build-image-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Build pipeline</p><h2 id="build-image-dialog-title">New build</h2></div><button className="btn btn-secondary" onClick={() => setBuildImageDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Build context directory</span><div className="field-row"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button></div></label><label className="detail-span"><span>Image reference</span><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Start build</button></div></section></div>
       ) : null}
+
+      <BuildLicensingDialog
+        open={buildLicensingDialogOpen}
+        detail={buildLicensingDetail}
+        onClose={() => setBuildLicensingDialogOpen(false)}
+        onOpenSettings={() => { setBuildLicensingDialogOpen(false); setActiveSection("settings"); }}
+      />
 
       {registryDialogOpen ? (
         <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="registry-dialog-title"><div className="drawer-header"><div><p className="eyebrow">Credentials</p><h2 id="registry-dialog-title">Registry access</h2></div><button className="btn btn-secondary" onClick={() => setRegistryDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label className="detail-span"><span>Registry server</span><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" /></label><label><span>Username</span><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /></label><label><span>Password or token</span><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></label><p className={`registry-status detail-span ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatus.logged_in ? `Signed in to ${registryStatus.registry} as ${registryAccountName}` : `Not signed in to ${registryStatus.registry}` : "Check this registry to load keyring status"}</p></div><div className="panel-actions dialog-actions"><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button></div></section></div>

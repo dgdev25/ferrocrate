@@ -11,14 +11,28 @@ export type BuildHistoryEntry = {
   image: string;
   status: "building" | "succeeded" | "failed";
   durationMs: number | null;
-  progress: Array<{ stream: "stdout" | "stderr"; text: string }>;
+  progress: Array<{ build_id: string; stream: "stdout" | "stderr"; text: string }>;
   error?: string;
 };
+
+export type BuildProgressFrame = BuildHistoryEntry["progress"][number];
+
+export function appendBuildProgress(
+  history: BuildHistoryEntry[],
+  frame: BuildProgressFrame,
+): BuildHistoryEntry[];
 
 export function BuildHistoryList(props: {
   builds: BuildHistoryEntry[];
   disabled?: boolean;
   onNewBuild?: () => void;
   onStart?: () => void;
-  onReviewLicensing?: () => void;
+  onReviewLicensing?: (detail: string) => void;
 }): import("react").ReactElement;
+
+export function BuildLicensingDialog(props: {
+  open: boolean;
+  detail?: string;
+  onClose?: () => void;
+  onOpenSettings?: () => void;
+}): import("react").ReactElement | null;

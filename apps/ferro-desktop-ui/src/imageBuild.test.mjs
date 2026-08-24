@@ -21,7 +21,7 @@ test("rendered builds history keeps one primary action and shows live progress i
       image: "local/demo:latest",
       status: "building",
       durationMs: null,
-      progress: [{ stream: "stdout", text: "Step 2/3 : COPY . ." }],
+      progress: [{ build_id: "build-1", stream: "stdout", text: "Step 2/3 : COPY . ." }],
     }],
     onNewBuild: () => {},
   }));
@@ -69,4 +69,67 @@ test("failed builds explain known daemon failures and keep the original detail d
   assert.match(markup, />Start<\/button>/);
   assert.match(markup, /Technical details/);
   assert.match(markup, /daemon connection refused/);
+});
+
+test("build progress frames update only the history row with the matching build ID", () => {
+  assert.equal(typeof imageBuild.appendBuildProgress, "function");
+  const history = [{
+    id: "build-a",
+    image: "local/a:latest",
+    status: "building",
+    durationMs: null,
+    progress: [],
+  }, {
+    id: "build-b",
+    image: "local/b:latest",
+    status: "succeeded",
+    durationMs: 900,
+    progress: [{ build_id: "build-b", stream: "stdout", text: "done" }],
+  }];
+
+  assert.deepEqual(imageBuild.appendBuildProgress(history, {
+    build_id: "build-a",
+    stream: "stdout",
+    text: "Step 1/2 : FROM alpine",
+  }), [{
+    ...history[0],
+    progress: [{ build_id: "build-a", stream: "stdout", text: "Step 1/2 : FROM alpine" }],
+  }, history[1]]);
+});
+
+test("licensing dialog explains image-build access without technical account jargon", () => {
+  assert.equal(typeof imageBuild.BuildLicensingDialog, "function");
+  const markup = renderToStaticMarkup(createElement(imageBuild.BuildLicensingDialog, {
+    open: true,
+    detail: "missing entitlement for image build",
+    onClose: () => {},
+    onOpenSettings: () => {},
+  }));
+
+  assert.match(markup, /role="dialog"/);
+  assert.match(markup, /Image builds aren&#x27;t included in your current plan\./);
+  assert.match(markup, /Use an account with image-build access, then try again\./);
+  assert.match(markup, /Open technical settings/);
+  assert.match(markup, /Technical details/);
+  assert.match(markup, /missing entitlement for image build/);
+  assert.doesNotMatch(markup, />entitlement</i);
+});
+
+test("missing build access exposes the friendly licensing route from its history row", () => {
+  const markup = renderToStaticMarkup(createElement(imageBuild.BuildHistoryList, {
+    builds: [{
+      id: "build-3",
+      image: "local/demo:latest",
+      status: "failed",
+      durationMs: 1300,
+      progress: [],
+      error: "missing entitlement for image build",
+    }],
+    onNewBuild: () => {},
+    onReviewLicensing: () => {},
+  }));
+
+  assert.match(markup, /Your current plan doesn&#x27;t include image builds\./);
+  assert.match(markup, />Review licensing<\/button>/);
+  assert.match(markup, /<details><summary>Technical details<\/summary>/);
 });

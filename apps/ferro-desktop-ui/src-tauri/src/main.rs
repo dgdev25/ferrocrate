@@ -161,6 +161,7 @@ struct ComposeSnapshot {
 
 #[derive(Clone, Serialize)]
 struct BuildProgressFrame {
+    build_id: String,
     stream: String,
     text: String,
 }
@@ -1662,7 +1663,12 @@ fn build_image(
     app: tauri::AppHandle,
     context: String,
     tag: String,
+    build_id: String,
 ) -> Result<CommandResult, String> {
+    let build_id = build_id.trim().to_string();
+    if build_id.is_empty() {
+        return Err("build identifier is required".to_string());
+    }
     let args = build_bridge_command(&context, &tag)?;
     let mut child = Command::new("ferro-desktop")
         .args(&args)
@@ -1684,17 +1690,20 @@ fn build_image(
         ("stderr", Box::new(stderr) as Box<dyn Read + Send>),
     ] {
         let sender = sender.clone();
+        let build_id = build_id.clone();
         thread::spawn(move || {
             for line in BufReader::new(reader).lines() {
                 match line {
                     Ok(text) => {
                         let _ = sender.send(BuildProgressFrame {
+                            build_id: build_id.clone(),
                             stream: stream.to_string(),
                             text,
                         });
                     }
                     Err(error) => {
                         let _ = sender.send(BuildProgressFrame {
+                            build_id: build_id.clone(),
                             stream: "stderr".to_string(),
                             text: format!("failed to read build output: {error}"),
                         });
@@ -2133,9 +2142,9 @@ mod tests {
         log_channel, log_follow_command, network_proxy_command, network_summaries,
         parse_terminal_exec_id, registry_login_command, registry_logout_command,
         run_container_bridge_command, terminal_exec_command, terminal_resize_command,
-        volume_proxy_command, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
-        ContainerPortRecord, LogBuffer, NetworkAction, NetworkInspectRecord, NetworkIpam,
-        NetworkIpamConfig, NetworkListRecord, VolumeAction,
+        volume_proxy_command, BuildProgressFrame, ComposeAction, ComposeContainerRecord,
+        ContainerNetworkRecord, ContainerPortRecord, LogBuffer, NetworkAction,
+        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction,
     };
 
     #[test]
@@ -2155,6 +2164,19 @@ mod tests {
         );
         assert!(build_bridge_command(" ", "demo:latest").is_err());
         assert!(build_bridge_command("/tmp/context", " ").is_err());
+    }
+
+    #[test]
+    fn build_progress_payload_identifies_its_originating_build() {
+        let payload = serde_json::to_value(BuildProgressFrame {
+            build_id: "build-27".to_string(),
+            stream: "stdout".to_string(),
+            text: "Step 1/2 : FROM alpine".to_string(),
+        })
+        .expect("build progress serializes");
+
+        assert_eq!(payload["build_id"], "build-27");
+        assert_eq!(payload["stream"], "stdout");
     }
 
     #[test]

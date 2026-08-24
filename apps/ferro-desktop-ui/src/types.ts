@@ -118,6 +118,7 @@ export type ComposeSnapshot = {
 };
 
 export type BuildProgressFrame = {
+  build_id: string;
   stream: "stdout" | "stderr";
   text: string;
 };

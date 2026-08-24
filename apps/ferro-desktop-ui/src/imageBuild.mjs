@@ -30,6 +30,12 @@ export function buildFailurePresentation(error) {
   return { kind: "generic", message: "We couldn't build this image.", detail };
 }
 
+export function appendBuildProgress(history, frame) {
+  return history.map((build) => build.id === frame.build_id
+    ? { ...build, progress: [...build.progress, frame] }
+    : build);
+}
+
 export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onReviewLicensing }) {
   if (!builds.length) {
     return createElement("section", { className: "panel table-panel build-history-panel", "aria-label": "Builds" },
@@ -55,17 +61,20 @@ export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onRevi
         createElement("tbody", null, builds.map((build) => {
           const progress = build.progress.at(-1);
           const failure = build.status === "failed" && build.error ? buildFailurePresentation(build.error) : null;
+          const status = createElement("span", { className: `build-status build-status-${build.status}` },
+            build.status === "building" ? "Building" : build.status === "succeeded" ? "Succeeded" : "Failed",
+          );
           return createElement("tr", { key: build.id },
             createElement("td", { className: "container-name mono" }, build.image),
             createElement("td", null,
-              createElement("span", { className: `build-status build-status-${build.status}`, role: build.status === "building" ? "status" : undefined },
-                build.status === "building" ? "Building" : build.status === "succeeded" ? "Succeeded" : "Failed",
-              ),
-              progress ? createElement("p", { className: "build-progress" }, buildStepText(progress.text)) : null,
+              build.status === "building" ? createElement("div", { className: "build-live", role: "status" },
+                status,
+                progress ? createElement("p", { className: "build-progress" }, buildStepText(progress.text)) : null,
+              ) : status,
               failure ? createElement("div", { className: "build-failure" },
                 createElement("strong", null, failure.message),
                 failure.kind === "daemon" ? createElement("button", { className: "btn btn-secondary", onClick: onStart, disabled }, "Start") : null,
-                failure.kind === "license" ? createElement("button", { className: "btn btn-secondary", onClick: onReviewLicensing }, "Review licensing") : null,
+                failure.kind === "license" ? createElement("button", { className: "btn btn-secondary", onClick: () => onReviewLicensing?.(failure.detail) }, "Review licensing") : null,
                 createElement("details", null,
                   createElement("summary", null, "Technical details"),
                   createElement("pre", null, failure.detail),
@@ -75,6 +84,31 @@ export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onRevi
             createElement("td", { className: "muted" }, formatBuildDuration(build.durationMs)),
           );
         })),
+      ),
+    ),
+  );
+}
+
+export function BuildLicensingDialog({ open, detail, onClose, onOpenSettings }) {
+  if (!open) return null;
+  return createElement("div", { className: "modal-backdrop", role: "presentation" },
+    createElement("section", { className: "run-dialog licensing-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": "build-licensing-dialog-title" },
+      createElement("div", { className: "drawer-header" },
+        createElement("div", null,
+          createElement("p", { className: "eyebrow" }, "Image builds"),
+          createElement("h2", { id: "build-licensing-dialog-title" }, "Image builds aren't included in your current plan."),
+        ),
+        createElement("button", { className: "btn btn-secondary", onClick: onClose }, "Close"),
+      ),
+      createElement("div", { className: "licensing-dialog-content" },
+        createElement("p", null, "Use an account with image-build access, then try again."),
+        createElement("details", null,
+          createElement("summary", null, "Technical details"),
+          createElement("pre", null, detail || "No technical detail was returned."),
+        ),
+      ),
+      createElement("div", { className: "panel-actions dialog-actions" },
+        createElement("button", { className: "btn btn-secondary", onClick: onOpenSettings }, "Open technical settings"),
       ),
     ),
   );

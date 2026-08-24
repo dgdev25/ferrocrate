@@ -106,10 +106,11 @@ log_parent="$(dirname "$execution_log")"
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-client-conformance.XXXXXX")" ||
   harness_error "cannot create temporary work directory"
 runtime_dir="$work_root/runtime"
+state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
 outputs_dir="$work_root/outputs"
-mkdir -p "$runtime_dir" "$docker_config" "$context_dir" "$outputs_dir" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" ||
   harness_error "cannot initialize temporary work directory"
 
 # Execute an immutable, run-private snapshot. The daemon and version probe use
@@ -143,8 +144,11 @@ run_id="scoreboard"
 run_prefix="ferrocrate-conformance-$run_id"
 owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
+tagged_image="$run_prefix:tagged"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
+volume="$run_prefix-volume"
+network="$run_prefix-network"
 compose_project="$run_prefix-compose"
 host_port=18093
 process_token_base="ferrocrate-conformance-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
@@ -365,7 +369,9 @@ rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-1}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 setsid env \
   FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$daemon_process_token" \
+  FERROCRATE_HOME="$state_dir" \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
+  FERROCRATE_NETWORK_KERNEL_STATE="$state_dir/network-kernel-state.json" \
   FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
   "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
@@ -501,6 +507,8 @@ record_command container-port container port "$container" 8080/tcp
 record_command container-copy-in container cp "$work_root/copy-marker.txt" "$container":/copy-marker.txt
 record_command container-diff container diff "$container"
 record_command container-update container update --memory 64m --pids-limit 64 "$container"
+record_command container-stats container stats --no-stream "$container"
+record_command container-top container top "$container"
 record_command container-export container container export --output "$work_root/container-export.tar" "$container"
 record_command container-stop container stop --time 1 "$container"
 record_command container-wait container wait "$container"
@@ -513,6 +521,18 @@ record_command image-save image save --output "$work_root/image-save.tar" "$imag
 record_command image-remove image image rm "$image"
 record_command image-load image load --input "$work_root/image-save.tar"
 record_command image-list image images "$image"
+record_command image-tag image tag "$image" "$tagged_image"
+record_command image-tag-inspect image image inspect "$tagged_image"
+
+# Durable named resources exercise their full Docker-client CRUD projections.
+record_command volume-create volume volume create "$volume"
+record_command volume-list volume volume ls
+record_command volume-inspect volume volume inspect "$volume"
+record_command volume-remove volume volume rm "$volume"
+record_command network-create network network create "$network"
+record_command network-list network network ls
+record_command network-inspect network network inspect "$network"
+record_command network-remove network network rm "$network"
 
 # Attach uses a finite workload so a conforming client closes naturally.
 record_command attach-container-create container create --label "$owner_label" --name "$attach_container" \

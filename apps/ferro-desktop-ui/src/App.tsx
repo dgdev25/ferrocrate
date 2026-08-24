@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
   BuildProgressFrame,
@@ -24,6 +24,9 @@ import type {
 } from "./types";
 import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
+import { DesktopTabBar } from "./desktopChrome.mjs";
+import type { AppSection } from "./desktopChrome.mjs";
+import { Icon } from "./iconSystem.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
 import { ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
@@ -32,12 +35,10 @@ import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
   containerContentState,
-  EmptyResourcePage,
   FirstRunState,
   LicensingDialog,
   ResourceCreateDialog,
-  ResourceToolbar,
-  resourceDialogTransition,
+  ResourceEmptyState,
   resourcePageState,
   runFirstRunRecovery,
   RuntimeLoadingState,
@@ -51,12 +52,21 @@ import {
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
-import { daemonIsAvailable, filterContainers, parseContainerRows, shellKeyboardCommand, statusTone } from "./forgeShell.mjs";
+import {
+  daemonIsAvailable,
+  filterContainers,
+  filterContainersByStatus,
+  groupContainers,
+  parseContainerRows,
+  shellKeyboardCommand,
+  statusLabel,
+  statusTone,
+} from "./forgeShell.mjs";
+import type { ContainerStatusFilter } from "./forgeShell.mjs";
 
 const EMPTY = "Nothing to show.";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
-type AppSection = "containers" | "images" | "builds" | "volumes" | "compose" | "networks" | "doctor" | "settings";
 type DetailTab = "logs" | "terminal" | "inspect" | "stats";
 type LogBatch = { text: string; truncated: boolean };
 type TerminalOutput = { data: number[]; stderr: boolean };
@@ -85,6 +95,7 @@ function App(): JSX.Element {
   const [licensingDetail, setLicensingDetail] = useState("");
   const [theme, setTheme] = useState<ThemeMode>("dark");
   const [activeSection, setActiveSection] = useState<AppSection>("containers");
+  const [containerStatusFilter, setContainerStatusFilter] = useState<ContainerStatusFilter>("all");
   const [detailTab, setDetailTab] = useState<DetailTab>("logs");
   const [globalSearch, setGlobalSearch] = useState("");
   const [imageTarget, setImageTarget] = useState("alpine:latest");
@@ -282,11 +293,14 @@ function App(): JSX.Element {
         globalSearchRef.current?.focus();
       } else if (command === "close-dialog") {
         setRunDialogOpen(false);
+        setRunDialogError(null);
         setPullImageDialogOpen(false);
         setBuildImageDialogOpen(false);
         setBuildLicensingDialogOpen(false);
         setRegistryDialogOpen(false);
-        setResourceDialog((current) => nextResourceDialog(current, command));
+        setResourceDialog(null);
+        setResourceDialogError(null);
+        setLicensingDialogOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -528,6 +542,27 @@ function App(): JSX.Element {
     }
   }
 
+  async function recoverFirstRun(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Ferrocrate Start");
+    try {
+      const result = await runFirstRunRecovery({
+        start: () => invoke<CommandResult>("run_desktop_action", { action: "vm_start" }),
+        refreshSnapshot: refresh,
+        refreshVolumes,
+        refreshNetworks,
+        refreshCompose: composeFile ? () => readComposeSnapshot(composeFile) : undefined,
+      });
+      setLastAction(result);
+      if (!result.ok) setError(result.stderr || `Ferrocrate did not start (status ${result.code}).`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
   async function startLogFollow(target = containerTarget): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
@@ -617,12 +652,14 @@ function App(): JSX.Element {
   ): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
+    if (action === "create") setResourceDialogError(null);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `${label} failed with status ${result.code}`);
+        const detail = result.stderr || `${label} failed with status ${result.code}`;
+        if (action === "create") setResourceDialogError(detail); else setError(detail);
         return;
       }
       if (action === "create") {
@@ -631,7 +668,7 @@ function App(): JSX.Element {
       }
       await Promise.all([refreshVolumes(), refresh()]);
     } catch (err) {
-      setError(String(err));
+      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -644,6 +681,7 @@ function App(): JSX.Element {
   ): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
+    if (action === "create") setResourceDialogError(null);
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_network_action", {
@@ -653,7 +691,8 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `${label} failed with status ${result.code}`);
+        const detail = result.stderr || `${label} failed with status ${result.code}`;
+        if (action === "create") setResourceDialogError(detail); else setError(detail);
         return;
       }
       if (action === "create") {
@@ -663,7 +702,7 @@ function App(): JSX.Element {
       }
       await Promise.all([refreshNetworks(), refresh()]);
     } catch (err) {
-      setError(String(err));
+      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -720,6 +759,7 @@ function App(): JSX.Element {
   async function runNewContainer(): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
+    setRunDialogError(null);
     setActionLabel("Container Run");
     try {
       const result = await invoke<CommandResult>("run_new_container", {
@@ -735,7 +775,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `Container run failed with status ${result.code}`);
+        setRunDialogError(result.stderr || `Container run failed with status ${result.code}`);
         return;
       }
       setRunDialogOpen(false);
@@ -743,7 +783,7 @@ function App(): JSX.Element {
       setNewContainerEnvironment("");
       await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
     } catch (err) {
-      setError(String(err));
+      setRunDialogError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -1006,22 +1046,28 @@ function App(): JSX.Element {
     () => parseContainerRows(snapshot?.containers.stdout ?? ""),
     [snapshot?.containers.stdout],
   );
-  const visibleContainers = useMemo(
-    () => filterContainers(containerRows, globalSearch),
-    [containerRows, globalSearch],
-  );
+  const visibleContainers = useMemo(() => filterContainersByStatus(
+    filterContainers(containerRows, globalSearch),
+    containerStatusFilter,
+  ), [containerRows, containerStatusFilter, globalSearch]);
+  const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
   const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
-  const containerPage = resourcePageState("containers", containerRows.length);
+  const containerViewState = containerContentState(
+    containerRows.length,
+    visibleContainers.length,
+    `${globalSearch} ${containerStatusFilter === "all" ? "" : containerStatusFilter}`,
+  );
   const imagePage = resourcePageState("images", imageRows.length);
   const volumePage = resourcePageState("volumes", volumes.length);
   const networkPage = resourcePageState("networks", networks.length);
-  const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0);
-  const firstRunVisible = shouldShowFirstRun(snapshot, activeSection);
+  const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
+  const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
+  const surfaceError = error ?? snapshotFailureDetail(snapshot);
   const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
     containers: "Containers",
@@ -1034,13 +1080,24 @@ function App(): JSX.Element {
     settings: "Settings",
   };
 
+  useEffect(() => {
+    applyRuntimeSurfaceTransition(runtimeSurface, {
+      closeRun: () => { setRunDialogOpen(false); setRunDialogError(null); },
+      closePull: () => setPullImageDialogOpen(false),
+      closeBuild: () => { setBuildImageDialogOpen(false); setBuildLicensingDialogOpen(false); },
+      closeRegistry: () => setRegistryDialogOpen(false),
+      closeResource: () => { setResourceDialog(null); setResourceDialogError(null); },
+      closeLicensing: () => setLicensingDialogOpen(false),
+    });
+  }, [runtimeSurface]);
+
   return (
     <div className="forge-shell">
       <header className="titlebar">
         <div className="traffic" aria-hidden="true"><span /><span /><span /></div>
         <div className="logo">Ferrocrate <em>Desktop</em></div>
         <label className="global-search">
-          <span aria-hidden="true">⌕</span>
+          <Icon name="search" size={16} />
           <input
             ref={globalSearchRef}
             value={globalSearch}
@@ -1051,47 +1108,41 @@ function App(): JSX.Element {
           <kbd>⌘K</kbd>
         </label>
         <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
-          {theme === "dark" ? "☀" : "☾"}
+          <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
         <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
           <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
         </div>
         <RegistryAccountControl status={registryStatus} onOpen={() => { setRegistryDialogOpen(true); void refreshRegistryAuth(); }} />
+        <button className="btn btn-primary titlebar-primary" onClick={() => { setRunDialogError(null); setRunDialogOpen(true); }} disabled={runtimeBusy}>
+          <Icon name="play" size={16} /> Run container
+        </button>
       </header>
 
-      <div className="workspace">
-        <nav className="sidebar" aria-label="Primary">
-          <p className="nav-label">Manage</p>
-          {([
-            ["containers", "▣", "Containers", containerRows.length],
-            ["images", "▧", "Images", imageCount],
-            ["builds", "⌁", "Builds", buildHistory.length],
-            ["volumes", "▤", "Volumes", volumes.length],
-            ["compose", "◇", "Compose", composeSnapshot?.services.length ?? 0],
-            ["networks", "◎", "Networks", networks.length],
-          ] as const).map(([section, icon, label, count]) => (
-            <button key={section} className={`nav-item ${activeSection === section ? "active" : ""}`} onClick={() => setActiveSection(section)}>
-              <span className="nav-icon" aria-hidden="true">{icon}</span>{label}<span className="nav-count">{count}</span>
-            </button>
-          ))}
-          <p className="nav-label system-label">System</p>
-          <button className={`nav-item ${activeSection === "doctor" ? "active" : ""}`} onClick={() => setActiveSection("doctor")}>
-            <span className="nav-icon" aria-hidden="true">✚</span>Doctor
-            {doctorResult ? <span className="nav-count">{doctorResult.raw.checks.filter((check) => !check.ok).length}</span> : null}
-          </button>
-          <button className={`nav-item ${activeSection === "settings" ? "active" : ""}`} onClick={() => setActiveSection("settings")}>
-            <span className="nav-icon" aria-hidden="true">⚙</span>Settings
-          </button>
-          <div className="sidebar-foot">Ferrocrate v0.1.0<br />native daemon · VM optional</div>
-        </nav>
+      <DesktopTabBar
+        activeSection={activeSection}
+        counts={{
+          containers: containerRows.length,
+          images: imageCount,
+          builds: buildHistory.length,
+          compose: composeSnapshot?.services.length ?? 0,
+          volumes: volumes.length,
+          networks: networks.length,
+        }}
+        doctorIssues={doctorResult?.raw.checks.filter((check) => !check.ok).length ?? 0}
+        onSelect={setActiveSection}
+      />
 
+      <div className="workspace">
         <main className="main-area">
-          {firstRunVisible ? (
+          {runtimeSurface === "loading" ? (
+            <div className="page-content first-run-page"><RuntimeLoadingState /></div>
+          ) : runtimeSurface === "first-run" ? (
             <div className="page-content first-run-page">
               <FirstRunState
                 busy={runtimeBusy}
                 error={error}
-                onStart={() => void runAction("vm_start", "Ferrocrate Start")}
+                onStart={() => void recoverFirstRun()}
                 onDoctor={() => { setError(null); setActiveSection("doctor"); }}
               />
             </div>
@@ -1105,34 +1156,54 @@ function App(): JSX.Element {
                 {activeSection === "containers" ? <span className="status-chip">{runningContainers} running</span> : null}
               </div>
             </div>
+            {activeSection === "containers" ? (
+              <div className="status-filters" role="group" aria-label="Filter containers by status">
+                {(["all", "running", "degraded", "unhealthy", "exited"] as ContainerStatusFilter[]).map((filter) => (
+                  <button
+                    key={filter}
+                    className={`status-filter ${containerStatusFilter === filter ? "active" : ""}`}
+                    aria-pressed={containerStatusFilter === filter}
+                    onClick={() => setContainerStatusFilter(filter)}
+                  >{filter[0].toUpperCase() + filter.slice(1)}</button>
+                ))}
+              </div>
+            ) : null}
             <div className="actions">
               {activeSection === "containers" ? (
-                containerPage.primaryAction ? <button className="btn btn-primary" onClick={() => setRunDialogOpen(true)} disabled={runtimeBusy}>▶ Run container</button> : null
+                null
               ) : activeSection === "images" ? (
                 <ImagePagePullAction hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />
               ) : activeSection === "volumes" ? (
-                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialog(nextResourceDialog(resourceDialog, "open-volume")); }} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
+                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
               ) : activeSection === "networks" ? (
-                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialog(nextResourceDialog(resourceDialog, "open-network")); }} disabled={runtimeBusy || networksLoading}>Create network</button> : null
+                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} disabled={runtimeBusy || networksLoading}>Create network</button> : null
               ) : activeSection === "compose" ? (
                 composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
                 null
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
-                  {loading ? "Refreshing…" : "↻ Refresh runtime"}
+                  {!loading ? <Icon name="refresh" size={16} /> : null}{loading ? "Refreshing…" : "Refresh runtime"}
                 </button>
               )}
             </div>
           </div>
 
-          {error ? <ActionErrorNotice error={error} onDismiss={() => setError(null)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onReviewLicensing={() => setActiveSection("settings")} /> : null}
+          {surfaceError ? <ActionErrorNotice error={surfaceError} onDismiss={() => setError(null)} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => setActiveSection("doctor")} /> : null}
 
-          <div className={`page-content ${activeSection === "containers" && containerPage.content === "table" ? "container-layout" : ""}`}>
+          <div className={`page-content ${activeSection === "containers" && containerViewState === "table" ? "container-layout" : ""}`}>
             {activeSection === "containers" ? (
-              containerPage.content === "empty" ? (
+              containerViewState === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Containers">
                   <ResourceEmptyState section="containers" disabled={runtimeBusy} onAction={() => setRunDialogOpen(true)} />
+                </section>
+              ) : containerViewState === "filtered-empty" ? (
+                <section className="panel empty-page-panel" aria-label="No matching containers">
+                  <div className="empty-state resource-empty-state">
+                    <span className="empty-state-icon" aria-hidden="true"><Icon name="search" size={20} /></span>
+                    <span className="empty-state-copy">No containers match the current search and status filters.</span>
+                    <button className="btn btn-secondary" onClick={() => { setGlobalSearch(""); setContainerStatusFilter("all"); }}>Clear filters</button>
+                  </div>
                 </section>
               ) : (
               <>
@@ -1140,7 +1211,7 @@ function App(): JSX.Element {
                   <div className="table-toolbar">
                     <span className="count-badge">{containerRows.length}</span>
                     <details className="image-toolbar-overflow">
-                      <summary aria-label="More container actions">•••</summary>
+                      <summary aria-label="More container actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
                         <button onClick={() => void refresh()} disabled={loading}>Refresh containers</button>
                         <button className="danger-action" onClick={() => void runAction("container_prune", "Container Prune")} disabled={runtimeBusy}>Prune stopped containers</button>
@@ -1153,38 +1224,50 @@ function App(): JSX.Element {
                   </div>
                   <div className="table-scroll">
                     <table>
-                      <thead><tr><th>Status</th><th>Name</th><th>Image</th><th>Ports</th><th>Actions</th></tr></thead>
+                      <thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th><th>Started</th><th>CPU</th><th aria-label="Actions" /></tr></thead>
                       <tbody>
-                        {visibleContainers.map((row) => {
-                          const tone = statusTone(row);
-                          const selected = selectedRow?.id === row.id;
-                          return (
-                            <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
-                              <td><span className={`container-status ${tone}`}><i />{tone === "unhealthy" ? "Unhealthy" : row.status}</span></td>
-                              <td className="container-name">{row.name}</td>
-                              <td className="mono muted-cell">{row.image}</td>
-                              <td className="mono muted-cell">{row.ports}</td>
-                              <td className="row-actions">
-                                <details className="row-menu" onClick={(event) => event.stopPropagation()}>
-                                  <summary aria-label={`Actions for ${row.name}`}>•••</summary>
-                                  <div className="overflow-menu">
-                                    <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}>{row.state === "running" ? "Stop container" : "Start container"}</button>
-                                    <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}>Follow logs</button>
-                                    <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); }}>Open terminal</button>
-                                    <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)}>Remove container</button>
-                                  </div>
-                                </details>
+                        {containerGroups.map((group) => (
+                          <Fragment key={group.name}>
+                            <tr className="container-group-row">
+                              <td colSpan={7}>
+                                <strong>{group.name}</strong>
+                                <span>{group.compose ? "Compose project" : "Not managed by Compose"}</span>
+                                <span className="group-summary">{group.rows.length} container{group.rows.length === 1 ? "" : "s"} · {group.running} running</span>
                               </td>
                             </tr>
-                          );
-                        })}
+                            {group.rows.map((row) => {
+                              const tone = statusTone(row);
+                              const selected = selectedRow?.id === row.id;
+                              return (
+                                <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
+                                  <td><div className="container-name">{row.composeService || row.name}</div>{row.composeService ? <div className="container-runtime-name mono">{row.name}</div> : null}</td>
+                                  <td className="mono muted-cell">{row.image}</td>
+                                  <td><span className={`container-status ${tone}`}><i />{statusLabel(row)}</span></td>
+                                  <td className="mono muted-cell">{row.ports}</td>
+                                  <td className="mono muted-cell">{formatUnix(row.startedAt)}</td>
+                                  <td className="mono muted-cell">{row.cpu}</td>
+                                  <td className="row-actions">
+                                    <details className="row-menu" onClick={(event) => event.stopPropagation()}>
+                                      <summary aria-label={`Actions for ${row.name}`}><Icon name="more" size={16} /></summary>
+                                      <div className="overflow-menu">
+                                        <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}><Icon name={row.state === "running" ? "stop" : "play"} size={16} />{row.state === "running" ? "Stop container" : "Start container"}</button>
+                                        <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}><Icon name="terminal" size={16} />Follow logs</button>
+                                        <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); void inspectContainer(row.id); }}><Icon name="terminal" size={16} />Open terminal</button>
+                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)}><Icon name="trash" size={16} />Remove container</button>
+                                      </div>
+                                    </details>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </Fragment>
+                        ))}
                       </tbody>
                     </table>
                   </div>
-                  {visibleContainers.length === 0 ? <div className="empty-state"><strong>No containers found</strong><span>{globalSearch ? "Try a different search." : "Run a container to see it here."}</span></div> : null}
                 </section>
 
-                <aside className="panel detail-panel" aria-label="Container detail drawer">
+                <section className="panel detail-panel bottom-inspector" aria-label="Container inspector">
                   <div className="detail-head">
                     <span className={`container-status ${selectedRow ? statusTone(selectedRow) : "stopped"}`}><i /></span>
                     <div className="detail-identity"><strong>{selectedRow?.name || containerDetail?.name || "Select a container"}</strong><span>{selectedRow?.image || containerDetail?.image || "Choose a row to view details"}</span></div>
@@ -1200,8 +1283,8 @@ function App(): JSX.Element {
                     <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
-                      <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}>{logsPaused ? "▶ Resume" : "Ⅱ Pause"}</button>
-                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}>{logsFollowing ? "Following ✓" : "Follow"}</button>
+                      <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
                       <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
                       <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
                       <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
@@ -1248,7 +1331,7 @@ function App(): JSX.Element {
                       </>
                     ) : <div className="empty-state"><strong>No stats loaded</strong><span>Select a container row.</span></div>}
                   </div>
-                </aside>
+                </section>
               </>
               )
             ) : null}
@@ -1263,7 +1346,7 @@ function App(): JSX.Element {
                   <div className="table-toolbar">
                     <span className="count-badge">{imageCount}</span>
                     <details className="image-toolbar-overflow">
-                      <summary aria-label="More image actions">•••</summary>
+                      <summary aria-label="More image actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
                         <button onClick={() => void refresh()} disabled={loading}>Refresh images</button>
                         <button className="danger-action" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune unused images</button>
@@ -1279,7 +1362,7 @@ function App(): JSX.Element {
                           <td className="muted">{image.size}</td>
                           <td className="muted">{image.created}</td>
                           <td>{imagesInUse.has(image.reference) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
-                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}>•••</summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}>Remove image</button></div></details></td>
+                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.reference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -1301,14 +1384,14 @@ function App(): JSX.Element {
             {activeSection === "volumes" ? (
               volumePage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Volumes">
-                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => { setError(null); setResourceDialog(nextResourceDialog(resourceDialog, "open-volume")); }} />
+                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Volumes">
                   <div className="table-toolbar">
                     <span className="count-badge">{volumes.length}</span>
                     <details className="image-toolbar-overflow">
-                      <summary aria-label="More volume actions">•••</summary>
+                      <summary aria-label="More volume actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
                         <button onClick={() => void refreshVolumes()} disabled={runtimeBusy || volumesLoading}>{volumesLoading ? "Refreshing…" : "Refresh volumes"}</button>
                         <button className="danger-action" onClick={() => void runVolumeAction("prune", "Volume Prune")} disabled={runtimeBusy || volumesLoading}>Prune unused volumes</button>
@@ -1316,7 +1399,7 @@ function App(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th>Usage</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {volumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}>•••</summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}>Remove volume</button></div></details></td></tr>)}
+                    {volumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1325,19 +1408,19 @@ function App(): JSX.Element {
             {activeSection === "networks" ? (
               networkPage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Networks">
-                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading} onAction={() => { setError(null); setResourceDialog(nextResourceDialog(resourceDialog, "open-network")); }} />
+                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
                   <div className="table-toolbar">
                     <span className="count-badge">{networks.length}</span>
                     <details className="image-toolbar-overflow">
-                      <summary aria-label="More network actions">•••</summary>
+                      <summary aria-label="More network actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu"><button onClick={() => void refreshNetworks()} disabled={runtimeBusy || networksLoading}>{networksLoading ? "Refreshing…" : "Refresh networks"}</button></div>
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th><th>Containers</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {networks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}>•••</summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}>Remove network</button></div></details></td></tr>)}
+                    {networks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1354,7 +1437,7 @@ function App(): JSX.Element {
                     <span className="toolbar-label mono" title={composeFile}>{composeFile}</span>
                     <span className="count-badge">{composeSnapshot?.services.length ?? 0}</span>
                     <details className="image-toolbar-overflow">
-                      <summary aria-label="More Compose actions">•••</summary>
+                      <summary aria-label="More Compose actions"><Icon name="more" size={16} /></summary>
                       <div className="overflow-menu">
                         <button onClick={() => void validateCompose()} disabled={runtimeBusy || composeLoading}>{composeLoading ? "Validating…" : "Validate configuration"}</button>
                         <button onClick={() => void runComposeAction("up", "Compose Up")} disabled={runtimeBusy || composeLoading}>Create and start services</button>
@@ -1365,7 +1448,7 @@ function App(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Service</th><th>Status</th><th>Container</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replaceAll("_", " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${service.name}`}>•••</summary><div className="overflow-menu"><button onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}>Follow logs</button></div></details></td></tr>)}
+                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replace(/_/g, " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${service.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}><Icon name="terminal" size={16} />Follow logs</button></div></details></td></tr>)}
                   </tbody></table></div>
                   <details className="compose-config"><summary>Validated configuration</summary><pre>{composeSnapshot?.config}</pre></details>
                 </section>
@@ -1391,7 +1474,7 @@ function App(): JSX.Element {
       </footer>
 
       {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>Run detached</button></div></section></div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => { setRunDialogError(null); setRunDialogOpen(false); }}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>{runDialogError ? <ActionErrorNotice error={runDialogError} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} /> : null}</div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}><Icon name="play" size={16} />Run detached</button></div></section></div>
       ) : null}
 
       <ResourceCreateDialog
@@ -1399,13 +1482,15 @@ function App(): JSX.Element {
         name={resourceDialog === "network" ? networkName : volumeName}
         subnet={networkSubnet}
         busy={runtimeActionBusy || volumesLoading || networksLoading}
-        error={error}
+        error={resourceDialogError}
         onNameChange={(event) => resourceDialog === "network" ? setNetworkName(event.target.value) : setVolumeName(event.target.value)}
         onSubnetChange={(event) => setNetworkSubnet(event.target.value)}
-        onCancel={() => { setError(null); setResourceDialog(null); }}
+        onCancel={() => { setResourceDialogError(null); setResourceDialog(null); }}
         onCreate={() => resourceDialog === "network"
           ? void runNetworkAction("create", "Network Create", networkName)
           : void runVolumeAction("create", "Volume Create", volumeName)}
+        onStart={() => void recoverFirstRun()}
+        onReviewLicensing={(detail) => { setResourceDialog(null); setLicensingDetail(detail); setLicensingDialogOpen(true); }}
       />
 
       {pullImageDialogOpen ? (
@@ -1421,6 +1506,13 @@ function App(): JSX.Element {
         detail={buildLicensingDetail}
         onClose={() => setBuildLicensingDialogOpen(false)}
         onOpenSettings={() => { setBuildLicensingDialogOpen(false); setActiveSection("settings"); }}
+      />
+
+      <LicensingDialog
+        open={licensingDialogOpen}
+        detail={licensingDetail}
+        onClose={() => setLicensingDialogOpen(false)}
+        onOpenSettings={() => { setLicensingDialogOpen(false); setActiveSection("settings"); }}
       />
 
       {registryDialogOpen ? (

@@ -1,28 +1,29 @@
 import { createElement } from "react";
+import { Icon } from "./iconSystem.mjs";
 
 const EMPTY_STATES = {
   containers: {
-    icon: "▣",
+    icon: "box",
     copy: "Run a container to start an isolated workload.",
     action: "Run a container",
   },
   images: {
-    icon: "▧",
+    icon: "images",
     copy: "Pull an image to run or build containers.",
     action: "Pull an image",
   },
   volumes: {
-    icon: "▤",
+    icon: "disk",
     copy: "Create a volume to keep container data between runs.",
     action: "Create a volume",
   },
   networks: {
-    icon: "◎",
+    icon: "globe",
     copy: "Create a network to connect containers privately.",
     action: "Create a network",
   },
   compose: {
-    icon: "◇",
+    icon: "compose",
     copy: "Choose a Compose file to manage an application stack.",
     action: "Choose a Compose file",
   },
@@ -126,7 +127,7 @@ export function ResourceEmptyState({ section, disabled = false, onAction }) {
   const state = EMPTY_STATES[section];
   if (!state) return null;
   return createElement("div", { className: "empty-state resource-empty-state" },
-    createElement("span", { className: "empty-state-icon", "aria-hidden": true }, state.icon),
+    createElement("span", { className: "empty-state-icon", "aria-hidden": true }, createElement(Icon, { name: state.icon, size: 20 })),
     createElement("span", { className: "empty-state-copy" }, state.copy),
     createElement("button", { className: "btn btn-primary", disabled, onClick: onAction }, state.action),
   );
@@ -137,7 +138,7 @@ export function ResourceToolbar({ count, label, overflowLabel, actions = [] }) {
     label ? createElement("span", { className: "toolbar-label mono", title: label }, label) : null,
     count == null ? null : createElement("span", { className: "count-badge" }, count),
     createElement("details", { className: "image-toolbar-overflow" },
-      createElement("summary", { "aria-label": overflowLabel }, "•••"),
+      createElement("summary", { "aria-label": overflowLabel }, createElement(Icon, { name: "more", size: 16 })),
       createElement("div", { className: "overflow-menu" }, actions.map((action) => (
         createElement("button", {
           key: action.label,
@@ -166,7 +167,7 @@ export function EmptyResourcePage({
 
 export function RuntimeLoadingState() {
   return createElement("section", { className: "panel runtime-loading-state", role: "status", "aria-live": "polite" },
-    createElement("span", { className: "first-run-icon", "aria-hidden": true }, "▣"),
+    createElement("span", { className: "first-run-icon", "aria-hidden": true }, createElement(Icon, { name: "box", size: 20 })),
     createElement("strong", null, "Loading Ferrocrate…"),
     createElement("span", null, "Checking the local runtime and resources."),
   );
@@ -181,22 +182,28 @@ export function failurePresentation(error) {
   if (/(entitlement|license required|not licensed|not entitled)/.test(normalized)) {
     return { kind: "license", message: "Your current plan doesn't include this action.", detail };
   }
-  return { kind: "generic", message: "We couldn't complete that action.", detail };
+  if (/(?:ferrocrate[^\n]*(?:command not found|no such file)|spawn[^\n]*enoent|executable[^\n]*not found)/.test(normalized)) {
+    return { kind: "binary", message: "Ferrocrate isn't installed", detail };
+  }
+  return { kind: "generic", message: "Something went wrong", detail };
 }
 
-export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing }) {
+export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing, onDoctor }) {
   if (!error) return null;
   const failure = failurePresentation(error);
   return createElement("section", { className: `action-error action-error-${failure.kind}`, role: failure.kind === "license" ? "status" : "alert" },
     createElement("div", { className: "action-error-heading" },
       createElement("strong", null, failure.message),
-      onDismiss ? createElement("button", { className: "error-dismiss", onClick: onDismiss, "aria-label": "Dismiss error" }, "×") : null,
+      onDismiss ? createElement("button", { className: "error-dismiss", onClick: onDismiss, "aria-label": "Dismiss error" }, createElement(Icon, { name: "close", size: 16 })) : null,
     ),
     failure.kind === "daemon" && onStart
       ? createElement("button", { className: "btn btn-secondary", onClick: onStart }, "Start Ferrocrate")
       : null,
     failure.kind === "license" && onReviewLicensing
       ? createElement("button", { className: "btn btn-secondary", onClick: () => onReviewLicensing(failure.detail) }, "Review licensing")
+      : null,
+    failure.kind === "binary" && onDoctor
+      ? createElement("button", { className: "btn btn-secondary", onClick: onDoctor }, "Open Doctor")
       : null,
     createElement("details", null,
       createElement("summary", null, "Technical details"),
@@ -207,7 +214,7 @@ export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing
 
 export function FirstRunState({ busy = false, error = null, onStart, onDoctor }) {
   return createElement("section", { className: "panel first-run-state", "aria-labelledby": "first-run-title" },
-    createElement("span", { className: "first-run-icon", "aria-hidden": true }, "▣"),
+    createElement("span", { className: "first-run-icon", "aria-hidden": true }, createElement(Icon, { name: "box", size: 20 })),
     createElement("p", { className: "eyebrow" }, "Local container runtime"),
     createElement("h1", { id: "first-run-title" }, "Ferrocrate isn't running"),
     createElement("p", null, "Ferrocrate runs containers and images on your machine with a native, security-focused engine."),

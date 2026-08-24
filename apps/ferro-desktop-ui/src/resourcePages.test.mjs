@@ -187,6 +187,23 @@ test("action failures keep technical output behind a disclosure", () => {
   assert.doesNotMatch(markup, /<strong>Runtime error<\/strong>/);
 });
 
+test("unknown and missing-binary failures use human titles and keep recovery reachable", () => {
+  assert.deepEqual(resourcePages.failurePresentation("ferrocrate: command not found"), {
+    kind: "binary",
+    message: "Ferrocrate isn't installed",
+    detail: "ferrocrate: command not found",
+  });
+  assert.equal(resourcePages.failurePresentation("unexpected parse failure").message, "Something went wrong");
+  let doctor = 0;
+  const markup = renderToStaticMarkup(createElement(resourcePages.ActionErrorNotice, {
+    error: "spawn ferrocrate ENOENT",
+    onDoctor: () => { doctor += 1; },
+  }));
+  assert.match(markup, /Open Doctor/);
+  findButton(resourcePages.ActionErrorNotice({ error: "spawn ferrocrate ENOENT", onDoctor: () => { doctor += 1; } }), "Open Doctor").props.onClick();
+  assert.equal(doctor, 1);
+});
+
 test("dialog error recovery buttons invoke daemon and licensing callbacks with detail", () => {
   let starts = 0;
   let licensingDetail = "";

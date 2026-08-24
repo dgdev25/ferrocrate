@@ -192,6 +192,12 @@ struct DaemonStatus {
     socket_path: String,
     reason: Option<String>,
     platform: String,
+    custom_networks: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonCapabilities {
+    custom_networks: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -209,6 +215,54 @@ fn daemon_health_response_ok(response: &str) -> bool {
         return false;
     };
     headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_capabilities_from_info_response(response: &str) -> Result<DaemonCapabilities, String> {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return Err("Ferrocrate API info response is malformed".to_string());
+    };
+    if !headers.starts_with("HTTP/1.1 200") {
+        return Err("Ferrocrate API info request failed".to_string());
+    }
+    let info: JsonValue = serde_json::from_str(body.trim())
+        .map_err(|error| format!("Ferrocrate API info response is invalid: {error}"))?;
+    let explicit = info
+        .get("FerrocrateCapabilities")
+        .and_then(|value| value.get("CustomNetworks"))
+        .and_then(JsonValue::as_bool);
+    Ok(DaemonCapabilities {
+        custom_networks: explicit.unwrap_or(false),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_capabilities(socket: &std::path::Path) -> Result<DaemonCapabilities, String> {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|error| format!("cannot connect to {}: {error}", socket.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(b"GET /info HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\n\r\n")
+        .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+    daemon_capabilities_from_info_response(&response)
+}
+
+#[cfg(target_os = "linux")]
+fn running_daemon_status(socket_path: &str, capabilities: DaemonCapabilities) -> DaemonStatus {
+    DaemonStatus {
+        state: "running".to_string(),
+        socket_path: socket_path.to_string(),
+        reason: None,
+        platform: "linux-native".to_string(),
+        custom_networks: capabilities.custom_networks,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -286,12 +340,12 @@ fn daemon_status() -> DaemonStatus {
     {
         return match desktop_socket_path() {
             Ok(socket) => match ping_daemon(&socket) {
-                Ok(()) => DaemonStatus {
-                    state: "running".to_string(),
-                    socket_path: socket.display().to_string(),
-                    reason: None,
-                    platform: "linux-native".to_string(),
-                },
+                Ok(()) => {
+                    let capabilities = daemon_capabilities(&socket).unwrap_or(DaemonCapabilities {
+                        custom_networks: false,
+                    });
+                    running_daemon_status(&socket.display().to_string(), capabilities)
+                }
                 Err(reason) => {
                     let (supervisor_running, supervisor_failure) = supervisor_process_state();
                     let (state, lifecycle_reason) = unavailable_daemon_state(
@@ -304,6 +358,7 @@ fn daemon_status() -> DaemonStatus {
                         socket_path: socket.display().to_string(),
                         reason: lifecycle_reason.or(Some(reason)),
                         platform: "linux-native".to_string(),
+                        custom_networks: false,
                     }
                 }
             },
@@ -312,6 +367,7 @@ fn daemon_status() -> DaemonStatus {
                 socket_path: String::new(),
                 reason: Some(reason),
                 platform: "linux-native".to_string(),
+                custom_networks: false,
             },
         };
     }
@@ -321,6 +377,7 @@ fn daemon_status() -> DaemonStatus {
         socket_path: "desktop bridge".to_string(),
         reason: None,
         platform: "desktop-vm".to_string(),
+        custom_networks: true,
     }
 }
 
@@ -437,6 +494,7 @@ fn stop_desktop_daemon() {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct NativeContainerStats {
     memory_current: Option<u64>,
+    memory_max: Option<u64>,
     cpu_usage_usec: Option<u64>,
 }
 
@@ -445,10 +503,24 @@ struct NativeStatsOutput {
     stats: NativeContainerStats,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ContainerResourceUsage {
+#[derive(Debug, Clone)]
+struct TimedNativeContainerStats {
+    sampled_at: Instant,
+    stats: NativeContainerStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ContainerStatsSample {
+    id: String,
+    available: bool,
     memory_usage: Option<u64>,
+    memory_limit: Option<u64>,
     cpu_percent: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerStatsResponse {
+    samples: Vec<ContainerStatsSample>,
 }
 
 fn container_stats_command(target: &str) -> Vec<String> {
@@ -464,61 +536,88 @@ fn read_container_stats(target: &str) -> Option<NativeContainerStats> {
         .map(|output| output.stats)
 }
 
-fn collect_container_resource_usage(ids: &[String]) -> BTreeMap<String, ContainerResourceUsage> {
-    let first = ids
-        .iter()
-        .filter_map(|id| {
-            read_container_stats(id).map(|stats| (id.clone(), (Instant::now(), stats)))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if first.is_empty() {
-        return BTreeMap::new();
-    }
-    thread::sleep(Duration::from_millis(100));
+fn aggregate_container_stats(
+    ids: &[String],
+    first: &BTreeMap<String, TimedNativeContainerStats>,
+    second: &BTreeMap<String, TimedNativeContainerStats>,
+) -> Vec<ContainerStatsSample> {
     ids.iter()
-        .filter_map(|id| {
-            let (started, previous) = first.get(id)?;
-            let current = read_container_stats(id)?;
-            let elapsed_usec = started.elapsed().as_micros() as f64;
-            let cpu_percent = previous
-                .cpu_usage_usec
-                .zip(current.cpu_usage_usec)
-                .filter(|_| elapsed_usec > 0.0)
-                .map(|(before, after)| after.saturating_sub(before) as f64 / elapsed_usec * 100.0);
-            Some((
-                id.clone(),
-                ContainerResourceUsage {
-                    memory_usage: current.memory_current,
-                    cpu_percent,
-                },
-            ))
+        .map(|id| {
+            let pair = first.get(id).zip(second.get(id));
+            let cpu_percent = pair
+                .as_ref()
+                .and_then(|(previous, current)| {
+                    previous
+                        .stats
+                        .cpu_usage_usec
+                        .zip(current.stats.cpu_usage_usec)
+                })
+                .map(|(before, after)| {
+                    let elapsed_usec = pair
+                        .as_ref()
+                        .map(|(previous, current)| {
+                            current
+                                .sampled_at
+                                .saturating_duration_since(previous.sampled_at)
+                                .as_micros() as f64
+                        })
+                        .unwrap_or(0.0);
+                    (before, after, elapsed_usec)
+                })
+                .filter(|(_, _, elapsed_usec)| *elapsed_usec > 0.0)
+                .map(|(before, after, elapsed_usec)| {
+                    after.saturating_sub(before) as f64 / elapsed_usec * 100.0
+                });
+            let memory_usage = pair
+                .as_ref()
+                .and_then(|(_, current)| current.stats.memory_current);
+            ContainerStatsSample {
+                id: id.clone(),
+                available: cpu_percent.is_some() && memory_usage.is_some(),
+                memory_usage,
+                memory_limit: pair
+                    .as_ref()
+                    .and_then(|(_, current)| current.stats.memory_max),
+                cpu_percent,
+            }
         })
         .collect()
 }
 
-fn attach_container_resource_usage(
-    stdout: &str,
-    usage: &BTreeMap<String, ContainerResourceUsage>,
-) -> Result<String, serde_json::Error> {
-    let mut records = parse_nullable_json_list::<JsonValue>(stdout)?;
-    for record in &mut records {
-        let Some(id) = record.get("id").and_then(JsonValue::as_str) else {
-            continue;
-        };
-        let Some(stats) = usage.get(id) else {
-            continue;
-        };
-        let Some(object) = record.as_object_mut() else {
-            continue;
-        };
-        if let Some(memory) = stats.memory_usage {
-            object.insert("memory_usage".to_string(), JsonValue::from(memory));
-        }
-        if let Some(cpu) = stats.cpu_percent.and_then(serde_json::Number::from_f64) {
-            object.insert("cpu_percent".to_string(), JsonValue::Number(cpu));
-        }
+fn collect_container_stats(ids: &[String]) -> Vec<ContainerStatsSample> {
+    let first = ids
+        .iter()
+        .filter_map(|id| {
+            read_container_stats(id).map(|stats| {
+                (
+                    id.clone(),
+                    TimedNativeContainerStats {
+                        sampled_at: Instant::now(),
+                        stats,
+                    },
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    if first.is_empty() {
+        return aggregate_container_stats(ids, &first, &BTreeMap::new());
     }
-    serde_json::to_string(&records)
+    thread::sleep(Duration::from_millis(100));
+    let second = ids
+        .iter()
+        .filter_map(|id| {
+            read_container_stats(id).map(|stats| {
+                (
+                    id.clone(),
+                    TimedNativeContainerStats {
+                        sampled_at: Instant::now(),
+                        stats,
+                    },
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    aggregate_container_stats(ids, &first, &second)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2288,26 +2387,6 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
         &ferrocrate_proxy_command(&["containers", "--all", "--format", "json"]),
     );
     normalize_nullable_list_output(&mut containers);
-    if containers.ok {
-        if let Ok(records) = parse_nullable_json_list::<JsonValue>(&containers.stdout) {
-            let running_ids = records
-                .iter()
-                .filter(|record| {
-                    record.get("status").and_then(JsonValue::as_str) == Some("running")
-                })
-                .filter_map(|record| {
-                    record
-                        .get("id")
-                        .and_then(JsonValue::as_str)
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>();
-            let usage = collect_container_resource_usage(&running_ids);
-            if let Ok(enriched) = attach_container_resource_usage(&containers.stdout, &usage) {
-                containers.stdout = enriched;
-            }
-        }
-    }
     let mut images = run_owned_command(
         "ferro-desktop",
         &ferrocrate_proxy_command(&["images", "--format", "json"]),
@@ -2319,6 +2398,13 @@ fn get_desktop_snapshot() -> DesktopSnapshot {
         runtime,
         containers,
         images,
+    }
+}
+
+#[tauri::command]
+fn get_container_stats(ids: Vec<String>) -> ContainerStatsResponse {
+    ContainerStatsResponse {
+        samples: collect_container_stats(&ids),
     }
 }
 
@@ -2526,6 +2612,12 @@ fn run_network_action(
 ) -> Result<CommandResult, String> {
     if matches!(action, NetworkAction::List | NetworkAction::Inspect) {
         return Err("list is a read-only snapshot action".to_string());
+    }
+    if matches!(action, NetworkAction::Create) && !daemon_status().custom_networks {
+        return Err(
+            "Custom networks need a privileged (rootful) daemon, or a host configured with the Ferrocrate AppArmor profile. Open Doctor for guided setup."
+                .to_string(),
+        );
     }
     execute_network_proxy(action, target.as_deref(), subnet.as_deref())
 }
@@ -2994,6 +3086,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_desktop_snapshot,
+            get_container_stats,
             get_volumes,
             get_networks,
             get_container_detail,
@@ -3039,7 +3132,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        actionable_error, attach_container_resource_usage, build_bridge_command, command_failure,
+        actionable_error, aggregate_container_stats, build_bridge_command, command_failure,
         compose_bridge_command, compose_service_rows, container_detail_from_json,
         container_inspect_command, container_update_command, doctor_command,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
@@ -3047,14 +3140,97 @@ mod tests {
         parse_terminal_exec_id, parse_web_mode, registry_login_command, registry_logout_command,
         run_container_bridge_command, terminal_exec_command, terminal_resize_command,
         volume_proxy_command, BuildProgressFrame, CommandResult, ComposeAction,
-        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
-        ContainerResourceUsage, JsonValue, LogBuffer, NetworkAction, NetworkInspectRecord,
-        NetworkIpam, NetworkIpamConfig, NetworkListRecord, VolumeAction, VolumeListResponse,
+        ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord, JsonValue, LogBuffer,
+        NativeContainerStats, NetworkAction, NetworkInspectRecord, NetworkIpam, NetworkIpamConfig,
+        NetworkListRecord, TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
+
+    #[test]
+    fn container_stats_aggregate_usage_limit_and_unavailable_samples() {
+        let base = std::time::Instant::now();
+        let stats = |memory_current, cpu_usage_usec| NativeContainerStats {
+            memory_current: Some(memory_current),
+            memory_max: Some(256),
+            cpu_usage_usec: Some(cpu_usage_usec),
+        };
+        let first = BTreeMap::from([
+            (
+                "demo".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base,
+                    stats: stats(64, 1_000),
+                },
+            ),
+            (
+                "slow".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base,
+                    stats: stats(64, 1_000),
+                },
+            ),
+        ]);
+        let second = BTreeMap::from([
+            (
+                "demo".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base + std::time::Duration::from_micros(1_000),
+                    stats: stats(96, 1_250),
+                },
+            ),
+            (
+                "slow".to_string(),
+                TimedNativeContainerStats {
+                    sampled_at: base + std::time::Duration::from_micros(2_000),
+                    stats: stats(96, 1_250),
+                },
+            ),
+        ]);
+        let samples = aggregate_container_stats(
+            &[
+                "demo".to_string(),
+                "slow".to_string(),
+                "missing".to_string(),
+            ],
+            &first,
+            &second,
+        );
+
+        assert_eq!(samples[0].id, "demo");
+        assert!(samples[0].available);
+        assert_eq!(samples[0].memory_usage, Some(96));
+        assert_eq!(samples[0].memory_limit, Some(256));
+        assert_eq!(samples[0].cpu_percent, Some(25.0));
+        assert_eq!(samples[1].cpu_percent, Some(12.5));
+        assert_eq!(samples[2].id, "missing");
+        assert!(!samples[2].available);
+
+        let empty_stats = NativeContainerStats::default();
+        let empty_first = BTreeMap::from([(
+            "no-cgroup".to_string(),
+            TimedNativeContainerStats {
+                sampled_at: base,
+                stats: empty_stats.clone(),
+            },
+        )]);
+        let empty_second = BTreeMap::from([(
+            "no-cgroup".to_string(),
+            TimedNativeContainerStats {
+                sampled_at: base + std::time::Duration::from_millis(100),
+                stats: empty_stats,
+            },
+        )]);
+        let empty_samples = aggregate_container_stats(
+            &["no-cgroup".to_string()],
+            &empty_first,
+            &empty_second,
+        );
+        assert!(!empty_samples[0].available);
+    }
 
     #[cfg(target_os = "linux")]
     use super::{
-        daemon_health_response_ok, desktop_daemon_transport_ready, unavailable_daemon_state,
+        daemon_capabilities_from_info_response, daemon_health_response_ok,
+        desktop_daemon_transport_ready, running_daemon_status, unavailable_daemon_state,
     };
 
     #[cfg(target_os = "linux")]
@@ -3078,6 +3254,44 @@ mod tests {
             unavailable_daemon_state(false, false, None),
             ("stopped", None)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn daemon_info_propagates_custom_network_capability() {
+        let rootless = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[\"name=rootless\"],\"FerrocrateCapabilities\":{\"CustomNetworks\":false}}",
+        )
+        .expect("rootless info");
+        assert!(!rootless.custom_networks);
+        let status = running_daemon_status("/run/user/1000/ferrocrate.sock", rootless);
+        assert_eq!(
+            serde_json::to_value(status).expect("daemon status")["custom_networks"],
+            false
+        );
+
+        let rootful = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[],\"FerrocrateCapabilities\":{\"CustomNetworks\":true}}",
+        )
+        .expect("rootful info");
+        assert!(rootful.custom_networks);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_daemon_info_without_capability_evidence_fails_closed() {
+        let legacy = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+        )
+        .expect("legacy info response");
+
+        assert!(!legacy.custom_networks);
+
+        let standard_rootless = daemon_capabilities_from_info_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"SecurityOptions\":[\"name=rootless\"]}",
+        )
+        .expect("standard rootless info response");
+        assert!(!standard_rootless.custom_networks);
     }
 
     #[cfg(target_os = "linux")]
@@ -3325,27 +3539,6 @@ mod tests {
             doctor_command(true, true, false, true),
             vec!["doctor", "--json", "--fix", "--bootstrap", "--confirm"]
         );
-    }
-
-    #[test]
-    fn container_snapshot_includes_live_cpu_and_memory_usage() {
-        let usage = BTreeMap::from([(
-            "demo".to_string(),
-            ContainerResourceUsage {
-                memory_usage: Some(67_108_864),
-                cpu_percent: Some(12.5),
-            },
-        )]);
-        let output = attach_container_resource_usage(
-            r#"[{"id":"demo","status":"running"},{"id":"stopped","status":"exited"}]"#,
-            &usage,
-        )
-        .expect("enriched container JSON");
-        let records: Vec<JsonValue> = serde_json::from_str(&output).expect("container JSON");
-
-        assert_eq!(records[0]["memory_usage"], 67_108_864);
-        assert_eq!(records[0]["cpu_percent"], 12.5);
-        assert!(records[1].get("memory_usage").is_none());
     }
 
     #[test]
@@ -3607,8 +3800,8 @@ mod tests {
         assert_eq!(
             run_container_bridge_command(
                 "alpine:latest",
-                Some("web"),
-                &["sh".to_string(), "-c".to_string(), "echo ready".to_string()],
+                Some("sentinel-worker"),
+                &["printf".to_string(), "sentinel-command".to_string()],
                 &["8080:80".to_string()],
                 &["data:/data".to_string()],
                 &["MODE=dev".to_string(), "TOKEN=secret".to_string()],
@@ -3624,7 +3817,7 @@ mod tests {
                 "run",
                 "--detach",
                 "--name",
-                "web",
+                "sentinel-worker",
                 "--publish",
                 "8080:80",
                 "--volume",
@@ -3640,9 +3833,8 @@ mod tests {
                 "--cpu-period",
                 "100000",
                 "alpine:latest",
-                "sh",
-                "-c",
-                "echo ready",
+                "printf",
+                "sentinel-command",
             ]
         );
     }

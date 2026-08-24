@@ -1,6 +1,22 @@
 import { createElement } from "react";
 import { Icon } from "./iconSystem.mjs";
 
+export async function completeDoctorRun({ execute, refresh, setResult, setError, close, scheduleResultsFocus, finish }) {
+  let receivedResult = false;
+  try {
+    const result = await execute();
+    setResult(result);
+    receivedResult = true;
+    await refresh();
+  } catch (error) {
+    setError(String(error));
+  } finally {
+    close();
+    if (receivedResult) scheduleResultsFocus();
+    finish();
+  }
+}
+
 function MoreMenu({ label, actions }) {
   return createElement("details", { className: "image-toolbar-overflow" },
     createElement("summary", { "aria-label": label }, createElement(Icon, { name: "more", size: 16 })),
@@ -14,7 +30,7 @@ function MoreMenu({ label, actions }) {
   );
 }
 
-export function DoctorPage({ result, busy = false, onRun, onStart, onStop }) {
+export function DoctorPage({ result, busy = false, resultsTableRef, onRun, onStart, onStop }) {
   if (!result) {
     return createElement("section", { className: "panel empty-page-panel", "aria-label": "Doctor" },
       createElement("div", { className: "empty-state resource-empty-state" },
@@ -34,7 +50,7 @@ export function DoctorPage({ result, busy = false, onRun, onStart, onStop }) {
         { label: "Stop Ferrocrate", icon: "stop", onClick: onStop, disabled: busy },
       ] }),
     ),
-    createElement("div", { className: "table-scroll" }, createElement("table", null,
+    createElement("div", { className: "table-scroll" }, createElement("table", { ref: resultsTableRef, tabIndex: -1 },
       createElement("thead", null, createElement("tr", null,
         createElement("th", null, "Check"),
         createElement("th", null, "Status"),

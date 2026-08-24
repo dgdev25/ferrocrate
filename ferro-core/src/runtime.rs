@@ -3905,13 +3905,23 @@ impl ContainerRuntime {
 
     #[inline]
     pub fn stats(&self, id: &str) -> Result<CgroupStats, RuntimeError> {
-        let _record = self
+        let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         let manager = CgroupV2Manager::new(&self.cgroup_root);
         let group_path = self.cgroup_root.join("ferrocrate").join(id);
-        Ok(manager.read_stats(group_path)?)
+        let cgroup = manager.read_stats(group_path);
+        let needs_process_fallback = cgroup
+            .as_ref()
+            .map(|stats| {
+                stats.memory_current.unwrap_or(0) == 0 || stats.cpu_usage_usec.is_none()
+            })
+            .unwrap_or(true);
+        let process = (needs_process_fallback && pid_identity_matches(&record))
+            .then(|| process_tree_stats(record.pid))
+            .flatten();
+        Ok(stats_with_process_fallback(cgroup, process)?)
     }
 
     pub fn pause(&self, id: &str) -> Result<(), RuntimeError> {
@@ -6288,6 +6298,95 @@ fn process_start_time_for_pid(pid: u32) -> Option<u64> {
         .nth(19)?
         .parse()
         .ok()
+}
+
+fn process_stats_from_stat(
+    stat: &str,
+    page_size: u64,
+    ticks_per_second: u64,
+) -> Option<CgroupStats> {
+    if page_size == 0 || ticks_per_second == 0 {
+        return None;
+    }
+    let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+    let resident_pages = fields.get(21)?.parse::<i64>().ok()?.max(0) as u64;
+    let ticks_to_usec = |ticks: u64| {
+        ((ticks as u128).saturating_mul(1_000_000) / ticks_per_second as u128)
+            .min(u64::MAX as u128) as u64
+    };
+    let cpu_user_usec = ticks_to_usec(user_ticks);
+    let cpu_system_usec = ticks_to_usec(system_ticks);
+    Some(CgroupStats {
+        memory_current: Some(resident_pages.saturating_mul(page_size)),
+        pids_current: Some(1),
+        cpu_usage_usec: Some(cpu_user_usec.saturating_add(cpu_system_usec)),
+        cpu_user_usec: Some(cpu_user_usec),
+        cpu_system_usec: Some(cpu_system_usec),
+        ..CgroupStats::default()
+    })
+}
+
+fn process_tree_stats(root: u32) -> Option<CgroupStats> {
+    // SAFETY: sysconf only reads immutable host process settings.
+    let page_size = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) };
+    // SAFETY: sysconf only reads immutable host process settings.
+    let ticks_per_second = unsafe { nix::libc::sysconf(nix::libc::_SC_CLK_TCK) };
+    if page_size <= 0 || ticks_per_second <= 0 {
+        return None;
+    }
+    let mut pids = crate::process_lifecycle::owned_descendants_deepest_first(root);
+    pids.push(root);
+    let mut aggregate = CgroupStats::default();
+    let mut samples = 0_u64;
+    for pid in pids {
+        let Some(sample) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| process_stats_from_stat(&stat, page_size as u64, ticks_per_second as u64))
+        else {
+            continue;
+        };
+        samples = samples.saturating_add(1);
+        aggregate.memory_current = Some(aggregate.memory_current.unwrap_or(0).saturating_add(sample.memory_current.unwrap_or(0)));
+        aggregate.cpu_usage_usec = Some(aggregate.cpu_usage_usec.unwrap_or(0).saturating_add(sample.cpu_usage_usec.unwrap_or(0)));
+        aggregate.cpu_user_usec = Some(aggregate.cpu_user_usec.unwrap_or(0).saturating_add(sample.cpu_user_usec.unwrap_or(0)));
+        aggregate.cpu_system_usec = Some(aggregate.cpu_system_usec.unwrap_or(0).saturating_add(sample.cpu_system_usec.unwrap_or(0)));
+    }
+    if samples == 0 {
+        return None;
+    }
+    aggregate.pids_current = Some(samples);
+    Some(aggregate)
+}
+
+fn stats_with_process_fallback<E>(
+    cgroup: Result<CgroupStats, E>,
+    process: Option<CgroupStats>,
+) -> Result<CgroupStats, E> {
+    match (cgroup, process) {
+        (Err(_), Some(process)) => Ok(process),
+        (Err(error), None) => Err(error),
+        (Ok(mut cgroup), Some(process)) => {
+            cgroup.memory_current = Some(
+                cgroup.memory_current.unwrap_or(0).max(process.memory_current.unwrap_or(0)),
+            );
+            cgroup.pids_current = Some(
+                cgroup.pids_current.unwrap_or(0).max(process.pids_current.unwrap_or(0)),
+            );
+            cgroup.cpu_usage_usec = Some(
+                cgroup.cpu_usage_usec.unwrap_or(0).max(process.cpu_usage_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_user_usec = Some(
+                cgroup.cpu_user_usec.unwrap_or(0).max(process.cpu_user_usec.unwrap_or(0)),
+            );
+            cgroup.cpu_system_usec = Some(
+                cgroup.cpu_system_usec.unwrap_or(0).max(process.cpu_system_usec.unwrap_or(0)),
+            );
+            Ok(cgroup)
+        }
+        (Ok(cgroup), None) => Ok(cgroup),
+    }
 }
 
 fn recovery_observation(
@@ -15683,6 +15782,38 @@ mod tests {
         record.process_start_time = super::process_start_time_for_pid(std::process::id());
         assert!(record.process_start_time.is_some());
         assert!(super::pid_identity_matches(&record));
+    }
+
+    #[test]
+    fn proc_stat_fallback_reports_live_memory_and_cpu() {
+        let stat = "123 (worker (batch)) R 1 0 0 0 0 0 0 0 0 0 100 50 0 0 0 0 0 0 777 0 10";
+        let stats = super::process_stats_from_stat(stat, 4096, 100).expect("process stats");
+        assert_eq!(stats.memory_current, Some(40_960));
+        assert_eq!(stats.cpu_usage_usec, Some(1_500_000));
+        assert_eq!(stats.cpu_user_usec, Some(1_000_000));
+        assert_eq!(stats.cpu_system_usec, Some(500_000));
+    }
+
+    #[test]
+    fn process_stats_replace_an_unreadable_cgroup_sample() {
+        let process = crate::cgroups::CgroupStats {
+            memory_current: Some(4096),
+            cpu_usage_usec: Some(50),
+            ..crate::cgroups::CgroupStats::default()
+        };
+        let recovered = super::stats_with_process_fallback(
+            Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+            Some(process.clone()),
+        )
+        .expect("verified process fallback");
+        assert_eq!(recovered, process);
+        assert_eq!(
+            super::stats_with_process_fallback(
+                Err::<crate::cgroups::CgroupStats, _>("permission denied"),
+                None,
+            ),
+            Err("permission denied"),
+        );
     }
 
     fn fixture_container_record(id: &str, status: &str) -> ContainerRecord {

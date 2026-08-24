@@ -2,19 +2,40 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  beginContainerStatsPoll,
   daemonIsAvailable,
   daemonStatusPresentation,
+  containerStatsUnavailableMessage,
   containerRemoveAvailability,
   filterContainers,
   filterContainersByStatus,
   formatContainerPorts,
   groupContainers,
+  mergeContainerStats,
+  parseContainerStats,
   parseContainerRows,
   resourceTotals,
+  resourceTotalsForSurface,
+  shouldPollContainerStats,
   shellKeyboardCommand,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
+
+test("container stats polling has one shared in-flight owner across effect generations", () => {
+  const owner = { inFlight: false };
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), true);
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), false);
+  owner.inFlight = false;
+  assert.equal(beginContainerStatsPoll(owner, "containers", "visible"), true);
+});
+
+test("footer totals are invalid outside the visible Containers surface", () => {
+  const rows = [{ cpuPercent: 4, memoryUsage: 64, memoryLimit: 128 }];
+  assert.deepEqual(resourceTotalsForSurface(rows, "containers", "visible"), { cpu: "4.0%", memory: "64 B / 128 B" });
+  assert.deepEqual(resourceTotalsForSurface(rows, "images", "visible"), { cpu: null, memory: null });
+  assert.deepEqual(resourceTotalsForSurface(rows, "containers", "hidden"), { cpu: null, memory: null });
+});
 
 const records = JSON.stringify([
   {
@@ -65,6 +86,8 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       cpuPercent: 0.4,
       memory: "64.0 MiB",
       memoryUsage: 67_108_864,
+      memoryLimit: null,
+      statsAvailable: null,
     },
     {
       id: "def456",
@@ -81,8 +104,69 @@ test("parseContainerRows preserves runtime identity and derives table labels", (
       cpuPercent: null,
       memory: "—",
       memoryUsage: null,
+      memoryLimit: null,
+      statsAvailable: null,
     },
   ]);
+});
+
+test("live stats parse and merge usage, limits, and availability by container id", () => {
+  const rows = parseContainerRows(records);
+  const stats = parseContainerStats({
+    samples: [
+      { id: "abc123", available: true, cpu_percent: 12.25, memory_usage: 67_108_864, memory_limit: 134_217_728 },
+      { id: "def456", available: false, cpu_percent: null, memory_usage: null, memory_limit: null },
+    ],
+  });
+
+  const merged = mergeContainerStats(rows, stats);
+  assert.deepEqual(merged[0], {
+    ...rows[0],
+    statsAvailable: true,
+    cpu: "12.3%",
+    cpuPercent: 12.25,
+    memory: "64.0 MiB / 128.0 MiB",
+    memoryUsage: 67_108_864,
+    memoryLimit: 134_217_728,
+  });
+  assert.equal(merged[1].statsAvailable, false);
+  assert.equal(merged[1].cpu, "");
+  assert.equal(merged[1].memory, "");
+});
+
+test("a nominal sample with no live metrics is treated as unavailable", () => {
+  const [sample] = parseContainerStats({
+    samples: [{ id: "abc123", available: true, cpu_percent: null, memory_usage: null, memory_limit: null }],
+  });
+
+  assert.equal(sample.available, false);
+});
+
+test("container stats polling only runs for a visible Containers section", () => {
+  assert.equal(shouldPollContainerStats("containers", "visible"), true);
+  assert.equal(shouldPollContainerStats("images", "visible"), false);
+  assert.equal(shouldPollContainerStats("containers", "hidden"), false);
+});
+
+test("unavailable live stats use one explicit human message instead of placeholder cells", () => {
+  assert.equal(containerStatsUnavailableMessage(), "Live resource stats unavailable for one or more running containers.");
+  const [running] = parseContainerRows('[{"id":"live","status":"running"}]');
+  assert.equal(running.cpu, "");
+  assert.equal(running.memory, "");
+});
+
+test("resource totals aggregate live usage and limits", () => {
+  assert.deepEqual(resourceTotals([
+    { cpuPercent: 4.25, memoryUsage: 64, memoryLimit: 256 },
+    { cpuPercent: 5.75, memoryUsage: 32, memoryLimit: 256 },
+  ]), { cpu: "10.0%", memory: "96 B / 512 B" });
+});
+
+test("resource totals never present a partial finite limit as the total limit", () => {
+  assert.deepEqual(resourceTotals([
+    { cpuPercent: 1, memoryUsage: 64, memoryLimit: 256 },
+    { cpuPercent: 2, memoryUsage: 32, memoryLimit: null },
+  ]), { cpu: "3.0%", memory: "96 B / Unlimited" });
 });
 
 test("running containers explain why removal is unavailable", () => {
@@ -94,7 +178,7 @@ test("resourceTotals aggregates available live samples and hides absent metrics"
   const rows = parseContainerRows(records);
   assert.deepEqual(resourceTotals(rows), {
     cpu: "0.4%",
-    memory: "64.0 MiB",
+    memory: "64.0 MiB / Unlimited",
   });
   assert.deepEqual(resourceTotals([{ cpuPercent: null, memoryUsage: null }]), {
     cpu: null,

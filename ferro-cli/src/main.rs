@@ -2061,6 +2061,18 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
     Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
+fn doctor_platform_scope_message() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "doctor performs Linux current-host compatibility checks"
+    } else if cfg!(target_os = "macos") {
+        "doctor performs macOS current-host compatibility checks"
+    } else if cfg!(target_os = "windows") {
+        "doctor performs Windows current-host compatibility checks"
+    } else {
+        "doctor performs compatibility checks for the current host"
+    }
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2290,8 +2302,7 @@ fn handle_doctor(
         checks.push(DoctorCheck {
             id: "platform_scope".to_string(),
             ok: true,
-            message: "doctor currently performs full compatibility checks on macOS hosts"
-                .to_string(),
+            message: doctor_platform_scope_message().to_string(),
             hint: None,
             remediated: false,
             action: None,
@@ -17535,9 +17546,20 @@ fn docker_version_payload() -> serde_json::Value {
 }
 
 #[cfg(target_os = "linux")]
+fn docker_info_capabilities(is_root: bool) -> serde_json::Value {
+    serde_json::json!({
+        "SecurityOptions": if is_root { Vec::<String>::new() } else { vec!["name=rootless".to_string()] },
+        "FerrocrateCapabilities": {
+            "CustomNetworks": is_root,
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> Result<serde_json::Value, String> {
     let containers = runtime.list().map_err(|error| error.to_string())?;
     let images = store.list_references().map_err(|error| error.to_string())?;
+    let capabilities = docker_info_capabilities(nix::unistd::Uid::effective().is_root());
     Ok(serde_json::json!({
         "ID": "ferrocrate", "Containers": containers.len(),
         "ContainersRunning": containers.iter().filter(|c| c.status == "running").count(),
@@ -17545,6 +17567,8 @@ fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> R
         "ContainersStopped": containers.iter().filter(|c| c.status == "exited" || c.status == "stopped").count(),
         "Images": images.len(), "Driver": "overlayfs", "OperatingSystem": std::env::consts::OS,
         "Architecture": std::env::consts::ARCH,
+        "SecurityOptions": capabilities["SecurityOptions"],
+        "FerrocrateCapabilities": capabilities["FerrocrateCapabilities"],
     }))
 }
 
@@ -19568,6 +19592,24 @@ mod tests {
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_info_capabilities_report_rootless_network_truth() {
+        let rootless = super::docker_info_capabilities(false);
+        assert_eq!(rootless["SecurityOptions"], serde_json::json!(["name=rootless"]));
+        assert_eq!(
+            rootless["FerrocrateCapabilities"]["CustomNetworks"],
+            false
+        );
+
+        let rootful = super::docker_info_capabilities(true);
+        assert_eq!(rootful["SecurityOptions"], serde_json::json!([]));
+        assert_eq!(
+            rootful["FerrocrateCapabilities"]["CustomNetworks"],
+            true
+        );
+    }
+
     #[test]
     fn attached_run_trace_line_reports_phase_and_relative_timing() {
         assert_eq!(
@@ -21584,6 +21626,20 @@ volumes:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn doctor_platform_scope_copy_names_the_current_host() {
+        let message = super::doctor_platform_scope_message();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(message, "doctor performs Linux current-host compatibility checks");
+        #[cfg(target_os = "macos")]
+        assert_eq!(message, "doctor performs macOS current-host compatibility checks");
+        #[cfg(target_os = "windows")]
+        assert_eq!(message, "doctor performs Windows current-host compatibility checks");
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        assert_eq!(message, "doctor performs compatibility checks for the current host");
     }
 
     #[cfg(target_os = "linux")]

@@ -14,3 +14,30 @@ export function errorForSection(errors, section) {
 export function clearErrorsForNavigation() {
   return {};
 }
+
+export function resourceActionState(action, result, detail, requestGeneration, currentGeneration) {
+  if (action === "create" && requestGeneration != null && requestGeneration !== currentGeneration) {
+    return null;
+  }
+  if (!result.ok && action === "create") {
+    return { actionResult: null, dialogError: detail, pageError: null };
+  }
+  return {
+    actionResult: result,
+    dialogError: null,
+    pageError: result.ok ? null : detail,
+  };
+}
+
+export function resourceActionStartState(action, actionResult) {
+  return { actionResult: action === "create" ? null : actionResult };
+}
+
+export function navigationTransientState(sectionErrors) {
+  return {
+    actionLabel: "",
+    actionResult: null,
+    sectionErrors: clearErrorsForNavigation(sectionErrors),
+    dismissDialogs: true,
+  };
+}

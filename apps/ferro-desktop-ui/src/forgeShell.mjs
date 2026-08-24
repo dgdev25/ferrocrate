@@ -47,10 +47,12 @@ export function parseContainerRows(output) {
         composeProject: record.labels?.["com.docker.compose.project"] || null,
         composeService: record.labels?.["com.docker.compose.service"] || null,
         startedAt: Number(record.started_at_unix || record.created_at_unix || 0),
-        cpu: cpuPercent == null ? "—" : `${cpuPercent.toFixed(1)}%`,
+        cpu: cpuPercent == null ? (state === "running" ? "" : "—") : `${cpuPercent.toFixed(1)}%`,
         cpuPercent,
-        memory: memoryUsage == null ? "—" : formatBytes(memoryUsage),
+        memory: memoryUsage == null ? (state === "running" ? "" : "—") : formatBytes(memoryUsage),
         memoryUsage,
+        memoryLimit: null,
+        statsAvailable: null,
       };
     });
   } catch {
@@ -58,17 +60,78 @@ export function parseContainerRows(output) {
   }
 }
 
+export function parseContainerStats(response) {
+  if (!response || !Array.isArray(response.samples)) return [];
+  return response.samples.map((sample) => {
+    const cpuPercent = sample.cpu_percent != null && Number.isFinite(Number(sample.cpu_percent)) ? Number(sample.cpu_percent) : null;
+    const memoryUsage = sample.memory_usage != null && Number.isFinite(Number(sample.memory_usage)) ? Number(sample.memory_usage) : null;
+    return {
+      id: String(sample.id || ""),
+      available: sample.available === true && cpuPercent != null && memoryUsage != null,
+      cpuPercent,
+      memoryUsage,
+      memoryLimit: sample.memory_limit != null && Number.isFinite(Number(sample.memory_limit)) ? Number(sample.memory_limit) : null,
+    };
+  });
+}
+
+export function mergeContainerStats(rows, samples) {
+  const byId = new Map(samples.map((sample) => [sample.id, sample]));
+  return rows.map((row) => {
+    const sample = byId.get(row.id);
+    if (!sample) return row;
+    if (!sample.available) {
+      return { ...row, statsAvailable: false, cpu: "", cpuPercent: null, memory: "", memoryUsage: null, memoryLimit: null };
+    }
+    const memory = sample.memoryUsage == null
+      ? ""
+      : `${formatBytes(sample.memoryUsage)} / ${sample.memoryLimit == null ? "Unlimited" : formatBytes(sample.memoryLimit)}`;
+    return {
+      ...row,
+      statsAvailable: true,
+      cpu: sample.cpuPercent == null ? "" : `${sample.cpuPercent.toFixed(1)}%`,
+      cpuPercent: sample.cpuPercent,
+      memory,
+      memoryUsage: sample.memoryUsage,
+      memoryLimit: sample.memoryLimit,
+    };
+  });
+}
+
+export function shouldPollContainerStats(activeSection, visibilityState) {
+  return activeSection === "containers" && visibilityState === "visible";
+}
+
+export function beginContainerStatsPoll(owner, activeSection, visibilityState) {
+  if (owner.inFlight || !shouldPollContainerStats(activeSection, visibilityState)) return false;
+  owner.inFlight = true;
+  return true;
+}
+
+export function containerStatsUnavailableMessage() {
+  return "Live resource stats unavailable for one or more running containers.";
+}
+
 export function resourceTotals(rows) {
   const cpuValues = rows.map((row) => row.cpuPercent).filter(Number.isFinite);
-  const memoryValues = rows.map((row) => row.memoryUsage).filter(Number.isFinite);
+  const memoryRows = rows.filter((row) => Number.isFinite(row.memoryUsage));
+  const memoryValues = memoryRows.map((row) => row.memoryUsage);
+  const allMemoryLimitsFinite = memoryRows.length > 0 && memoryRows.every((row) => Number.isFinite(row.memoryLimit));
+  const memoryLimits = memoryRows.map((row) => row.memoryLimit).filter(Number.isFinite);
   return {
     cpu: cpuValues.length
       ? `${cpuValues.reduce((total, value) => total + value, 0).toFixed(1)}%`
       : null,
     memory: memoryValues.length
-      ? formatBytes(memoryValues.reduce((total, value) => total + value, 0))
+      ? `${formatBytes(memoryValues.reduce((total, value) => total + value, 0))}${allMemoryLimitsFinite ? ` / ${formatBytes(memoryLimits.reduce((total, value) => total + value, 0))}` : " / Unlimited"}`
       : null,
   };
+}
+
+export function resourceTotalsForSurface(rows, activeSection, visibilityState) {
+  return shouldPollContainerStats(activeSection, visibilityState)
+    ? resourceTotals(rows)
+    : { cpu: null, memory: null };
 }
 
 export function filterContainers(rows, query) {

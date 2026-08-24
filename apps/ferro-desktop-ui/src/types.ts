@@ -12,10 +12,23 @@ export type DesktopSnapshot = {
     socket_path: string;
     reason: string | null;
     platform: "linux-native" | "desktop-vm";
+    custom_networks: boolean;
   };
   runtime: CommandResult;
   containers: CommandResult;
   images: CommandResult;
+};
+
+export type ContainerStatsSample = {
+  id: string;
+  available: boolean;
+  cpu_percent: number | null;
+  memory_usage: number | null;
+  memory_limit: number | null;
+};
+
+export type ContainerStatsResponse = {
+  samples: ContainerStatsSample[];
 };
 
 export type DesktopAction =

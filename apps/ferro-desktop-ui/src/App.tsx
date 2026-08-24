@@ -30,7 +30,7 @@ import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingD
 import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
 import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
-import { DoctorPage, SettingsPage } from "./systemPages.mjs";
+import { completeDoctorRun, DoctorPage, SettingsPage } from "./systemPages.mjs";
 import {
   ActionErrorNotice,
   applyRuntimeSurfaceTransition,
@@ -1085,22 +1085,20 @@ function App(): JSX.Element {
   async function runDoctor(): Promise<void> {
     if (!beginRuntimeAction()) return;
     setError(null);
-    try {
-      const result = await invoke<DoctorSummary>("run_doctor_action", {
+    await completeDoctorRun({
+      execute: () => invoke<DoctorSummary>("run_doctor_action", {
         fix: doctorFix,
         bootstrap: doctorBootstrap,
         dry_run: doctorDryRun,
         confirm: doctorConfirm,
-      });
-      setDoctorResult(result);
-      doctorResultsFocusPendingRef.current = true;
-      await refresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setDoctorDialogOpen(false);
-      finishRuntimeAction();
-    }
+      }),
+      refresh,
+      setResult: setDoctorResult,
+      setError,
+      close: () => setDoctorDialogOpen(false),
+      scheduleResultsFocus: () => { doctorResultsFocusPendingRef.current = true; },
+      finish: finishRuntimeAction,
+    });
   }
 
   const sessionSummary = useMemo(() => authState?.session, [authState]);

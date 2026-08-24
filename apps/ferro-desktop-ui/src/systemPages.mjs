@@ -1,6 +1,22 @@
 import { createElement } from "react";
 import { Icon } from "./iconSystem.mjs";
 
+export async function completeDoctorRun({ execute, refresh, setResult, setError, close, scheduleResultsFocus, finish }) {
+  let receivedResult = false;
+  try {
+    const result = await execute();
+    setResult(result);
+    receivedResult = true;
+    await refresh();
+  } catch (error) {
+    setError(String(error));
+  } finally {
+    close();
+    if (receivedResult) scheduleResultsFocus();
+    finish();
+  }
+}
+
 function MoreMenu({ label, actions }) {
   return createElement("details", { className: "image-toolbar-overflow" },
     createElement("summary", { "aria-label": label }, createElement(Icon, { name: "more", size: 16 })),

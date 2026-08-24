@@ -67,6 +67,39 @@ test("Doctor results table accepts a focus ref and is programmatically focusable
   assert.equal(table.props.tabIndex, -1);
 });
 
+test("completed Doctor runs close before scheduling results focus", async () => {
+  const events = [];
+  const result = { ok: true, raw: { checks: [] } };
+
+  await systemPages.completeDoctorRun({
+    execute: async () => { events.push("execute"); return result; },
+    refresh: async () => { events.push("refresh"); },
+    setResult: (value) => { events.push(["result", value]); },
+    setError: (error) => { events.push(["error", error]); },
+    close: () => { events.push("close"); },
+    scheduleResultsFocus: () => { events.push("focus"); },
+    finish: () => { events.push("finish"); },
+  });
+
+  assert.deepEqual(events, ["execute", ["result", result], "refresh", "close", "focus", "finish"]);
+});
+
+test("failed Doctor runs close without scheduling results focus", async () => {
+  const events = [];
+
+  await systemPages.completeDoctorRun({
+    execute: async () => { events.push("execute"); throw new Error("doctor failed"); },
+    refresh: async () => { events.push("refresh"); },
+    setResult: (value) => { events.push(["result", value]); },
+    setError: (error) => { events.push(["error", error]); },
+    close: () => { events.push("close"); },
+    scheduleResultsFocus: () => { events.push("focus"); },
+    finish: () => { events.push("finish"); },
+  });
+
+  assert.deepEqual(events, ["execute", ["error", "Error: doctor failed"], "close", "finish"]);
+});
+
 test("Settings is a single capability table whose forms stay behind row actions", () => {
   assert.equal(typeof systemPages.SettingsPage, "function");
   const opened = [];

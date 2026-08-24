@@ -51,6 +51,9 @@ enum Commands {
         wsl_distro: Option<String>,
         #[arg(long, default_value_t = false)]
         follow: bool,
+        /// Relay stdin and streamed output for an interactive container exec.
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
@@ -221,6 +224,8 @@ struct ExecRequest {
     wsl_distro: Option<String>,
     #[serde(default)]
     follow: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -519,8 +524,17 @@ fn main() {
             wsl,
             wsl_distro,
             follow,
+            interactive,
             cmd,
-        } => run_client_exec(&addr, pipe_name.as_deref(), cmd, wsl, wsl_distro, follow),
+        } => run_client_exec(
+            &addr,
+            pipe_name.as_deref(),
+            cmd,
+            wsl,
+            wsl_distro,
+            follow,
+            interactive,
+        ),
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -592,6 +606,9 @@ fn handle_client(
     default_wsl_distro: Option<&str>,
 ) -> Result<(), DesktopError> {
     let request = read_exec_request(stream)?;
+    if request.interactive {
+        return proxy_interactive_request(stream, request, default_wsl_distro);
+    }
     if request.follow {
         return proxy_follow_request(stream, request, default_wsl_distro);
     }
@@ -681,6 +698,97 @@ fn forward_follow_output<R: Read>(
             return;
         }
     }
+}
+
+fn copy_interactive_input<R: Read, W: Write>(mut reader: R, mut writer: W) -> std::io::Result<()> {
+    std::io::copy(&mut reader, &mut writer)?;
+    writer.flush()
+}
+
+fn proxy_interactive_request(
+    stream: &mut TcpStream,
+    mut request: ExecRequest,
+    default_wsl_distro: Option<&str>,
+) -> Result<(), DesktopError> {
+    if !is_interactive_exec_command(&request.cmd) {
+        write_follow_frame(
+            stream,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: b"interactive requests must invoke ferrocrate exec with stdin and TTY\n"
+                    .to_vec(),
+            },
+        )?;
+        write_follow_frame(stream, &FollowFrame::Terminal { status: 2 })?;
+        return Ok(());
+    }
+    if request.wsl_distro.is_none() {
+        request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
+    }
+
+    let mut child = match run_follow_request(&request) {
+        Ok(child) => child,
+        Err(err) => {
+            write_follow_frame(
+                stream,
+                &FollowFrame::Data {
+                    channel: FollowChannel::Stderr,
+                    data: format!("{err}\n").into_bytes(),
+                },
+            )?;
+            write_follow_frame(stream, &FollowFrame::Terminal { status: 1 })?;
+            return Ok(());
+        }
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stdin missing".to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stdout missing".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stderr missing".to_string()))?;
+    let child = Arc::new(Mutex::new(child));
+    let output_stream = Arc::new(Mutex::new(stream.try_clone()?));
+
+    let input_stream = stream.try_clone()?;
+    thread::spawn(move || copy_interactive_input(input_stream, stdin));
+    let stdout_stream = Arc::clone(&output_stream);
+    let stdout_child = Arc::clone(&child);
+    let stdout_worker = thread::spawn(move || {
+        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
+    });
+    let stderr_stream = Arc::clone(&output_stream);
+    let stderr_child = Arc::clone(&child);
+    let stderr_worker = thread::spawn(move || {
+        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
+    });
+
+    let status = loop {
+        let status = child
+            .lock()
+            .map_err(|_| {
+                DesktopError::Invalid("interactive command state is unavailable".to_string())
+            })?
+            .try_wait()?;
+        if let Some(status) = status {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let _ = stdout_worker.join();
+    let _ = stderr_worker.join();
+    let _ = send_follow_frame(
+        &output_stream,
+        &FollowFrame::Terminal {
+            status: status.code().unwrap_or(-1),
+        },
+    );
+    Ok(())
 }
 
 fn proxy_follow_request(
@@ -780,18 +888,18 @@ fn process_exec_request(
 
 fn read_exec_request<R: Read>(stream: &mut R) -> Result<ExecRequest, DesktopError> {
     let mut buf = Vec::new();
-    {
-        let mut reader = BufReader::new(&mut *stream);
-        let bytes = reader.read_until(b'\n', &mut buf)?;
-        if bytes == 0 {
-            return Err(DesktopError::Invalid("empty request".to_string()));
+    let mut byte = [0_u8; 1];
+    while buf.len() <= MAX_REQUEST_BYTES {
+        if stream.read(&mut byte)? == 0 {
+            break;
         }
+        if byte[0] == b'\n' {
+            break;
+        }
+        buf.push(byte[0]);
     }
     if buf.len() > MAX_REQUEST_BYTES {
         return Err(DesktopError::Invalid("request too large".to_string()));
-    }
-    if matches!(buf.last(), Some(b'\n')) {
-        buf.pop();
     }
     if buf.is_empty() {
         return Err(DesktopError::Invalid("empty request".to_string()));
@@ -807,20 +915,27 @@ fn run_client_exec(
     wsl: bool,
     wsl_distro: Option<String>,
     follow: bool,
+    interactive: bool,
 ) -> Result<(), DesktopError> {
     if cmd.is_empty() {
         return Err(DesktopError::Invalid("command is required".to_string()));
+    }
+    if follow && interactive {
+        return Err(DesktopError::Invalid(
+            "--follow and --interactive are mutually exclusive".to_string(),
+        ));
     }
     let request = ExecRequest {
         cmd,
         use_wsl: wsl,
         wsl_distro,
         follow,
+        interactive,
     };
     if let Some(pipe_name) = pipe_name {
-        if follow {
+        if follow || interactive {
             return Err(DesktopError::Invalid(
-                "--follow is unsupported with --pipe-name".to_string(),
+                "streamed execution is unsupported with --pipe-name".to_string(),
             ));
         }
         return run_client_exec_pipe(pipe_name, request);
@@ -829,6 +944,16 @@ fn run_client_exec(
     let payload = serde_json::to_string(&request)? + "\n";
     stream.write_all(payload.as_bytes())?;
 
+    if interactive {
+        let input_stream = stream.try_clone()?;
+        thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let _ = copy_interactive_input(stdin.lock(), input_stream);
+        });
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        return replay_follow_frames(BufReader::new(stream), &mut stdout, &mut stderr);
+    }
     if follow {
         let mut stdout = std::io::stdout();
         let mut stderr = std::io::stderr();
@@ -2286,6 +2411,7 @@ fn run_follow_request(request: &ExecRequest) -> Result<std::process::Child, Desk
     let mut command = Command::new(program);
     command
         .args(args)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.env("FERROCRATE_DESKTOP_FORWARD", "0");
@@ -2408,7 +2534,9 @@ fn run_macos_guest_follow_command(
         )));
     }
     let mut cmd = build_guest_ssh_command(request, &state)?;
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     cmd.spawn().map_err(DesktopError::Io)
 }
 
@@ -2494,7 +2622,9 @@ fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, 
         }
         cmd.arg("--");
         cmd.args(&request.cmd);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         return Ok(cmd.spawn()?);
     }
     #[cfg(not(windows))]
@@ -2510,16 +2640,16 @@ fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, 
 mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
-        command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
-        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
-        load_channel_manifest, load_forward_entries, load_vm_state, parse_exec_mode,
-        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
-        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, write_follow_frame, Commands,
-        ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
-        VmCommands, VmConfig, VmState,
+        command_requires_desktop_entitlement, command_targets_ferrocrate, copy_interactive_input,
+        exec_mode_from_env, gather_phase0_check, is_interactive_exec_command,
+        is_log_follow_command, load_channel_manifest, load_forward_entries, load_vm_state,
+        parse_exec_mode, read_exec_request, render_macos_launch_agent_plist,
+        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
+        save_vm_state, should_route_to_macos_guest, upsert_forward_entry, validate_daemon_addr,
+        vm_state_running, write_follow_frame, Commands, ExecMode, ExecRequest, FollowChannel,
+        FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
-    use std::io::{BufReader, Cursor};
+    use std::io::{BufReader, Cursor, Read};
     use std::path::PathBuf;
 
     #[test]
@@ -2535,6 +2665,7 @@ mod tests {
             use_wsl: false,
             wsl_distro: None,
             follow: false,
+            interactive: false,
         };
         let out = run_request(&req).expect("run command");
         assert!(out.status.success());
@@ -2547,6 +2678,7 @@ mod tests {
             use_wsl: false,
             wsl_distro: None,
             follow: false,
+            interactive: false,
         };
         let err = run_request(&req).expect_err("should fail");
         assert!(err.to_string().contains("command is required"));
@@ -2599,6 +2731,31 @@ mod tests {
             "sh".to_string(),
             "-i".to_string(),
         ]));
+    }
+
+    #[test]
+    fn interactive_proxy_forwards_terminal_input_without_text_decoding() {
+        let input = Cursor::new(vec![b'e', b'c', b'h', b'o', b' ', 0xff, b'\n']);
+        let mut output = Vec::new();
+
+        copy_interactive_input(input, &mut output).expect("forward input");
+
+        assert_eq!(output, vec![b'e', b'c', b'h', b'o', b' ', 0xff, b'\n']);
+    }
+
+    #[test]
+    fn interactive_request_reader_preserves_input_sent_after_header() {
+        let mut wire = Cursor::new(
+            b"{\"cmd\":[\"ferrocrate\",\"exec\",\"-it\",\"web\",\"sh\"],\"use_wsl\":false,\"wsl_distro\":null,\"interactive\":true}\necho ready\n"
+                .to_vec(),
+        );
+
+        let request = read_exec_request(&mut wire).expect("request header");
+        let mut input = Vec::new();
+        wire.read_to_end(&mut input).expect("remaining input");
+
+        assert!(request.interactive);
+        assert_eq!(input, b"echo ready\n");
     }
 
     #[test]
@@ -2800,6 +2957,8 @@ mod tests {
             cmd: vec!["ferrocrate".to_string(), "images".to_string()],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
+            interactive: false,
         };
         let cmd = super::build_guest_ssh_command(&req, &state).expect("ssh command");
         assert_eq!(cmd.get_program().to_string_lossy(), "ssh");

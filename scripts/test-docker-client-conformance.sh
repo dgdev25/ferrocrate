@@ -150,6 +150,10 @@ fi
 
 case "$id" in
   image-build)
+    if [[ "${DOCKER_BUILDKIT:-0}" == 1 ]]; then
+      echo "Error response from daemon: BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder" >&2
+      exit 1
+    fi
     context="${!#}"
     loader="/lib/ld-musl-$(uname -m).so.1"
     if [[ -f "$loader" ]]; then
@@ -258,10 +262,18 @@ container-copy-in
 container-diff
 container-update
 container-export
+network-create
+network-connect
+network-disconnect
+network-remove
 container-stop
 container-wait
 container-logs
 container-remove
+log-driver-create
+log-driver-inspect
+log-driver-read-rejected
+log-driver-remove
 image-save
 image-remove
 image-load
@@ -274,10 +286,14 @@ attach-container-remove
 registry-search
 registry-login
 registry-logout
+compose-network-create-frontend
+compose-network-create-backend
 compose-up
 compose-ps
 compose-logs
 compose-down
+compose-network-remove-frontend
+compose-network-remove-backend
 system-prune
 EXPECTED
 
@@ -376,8 +392,8 @@ awk -F '\t' '$2 == "compose-down" { found = ($5 == 0 && $6 == "PASS") } END { ex
   "$execution_log"
 grep -Eq '^\| [0-9]+ \| registry-search \|.*\| 37 \| FAIL \|$' "$scoreboard"
 grep -Eq '^\| [0-9]+ \| container-attach \|.*\| 124 \| ERROR \|$' "$scoreboard"
-grep -Fq '| PASS | 33 |' "$scoreboard"
-grep -Fq '| FAIL | 1 |' "$scoreboard"
+grep -Fq '| PASS | 43 |' "$scoreboard"
+grep -Fq '| FAIL | 3 |' "$scoreboard"
 grep -Fq '| ERROR | 1 |' "$scoreboard"
 grep -Fq 'DOCKER_BUILDKIT=0' "$scoreboard"
 grep -Fq 'tests/fixtures/real-app/compose.yml' "$scoreboard"
@@ -422,6 +438,38 @@ source_commit="$(git -C "$repo_root" rev-parse HEAD)"
 binary_sha256="$(sha256sum "$spaced_ferro" | awk '{ print $1 }')"
 grep -Fq "FerroCrate source commit: \`$source_commit\`" "$scoreboard"
 grep -Fq "FerroCrate binary SHA-256: \`$binary_sha256\`" "$scoreboard"
+
+# The fallback qualification uses the real BuildKit client path for the build
+# row while retaining classic mode for unrelated lifecycle and Compose rows.
+# A daemon-mediated, actionable rejection is a PASS for this intentionally
+# unsupported protocol surface, and the evidence must say so explicitly.
+buildkit_scoreboard="$work_root/buildkit-parity-scoreboard.md"
+buildkit_log="$work_root/buildkit-conformance.log"
+: >"$fake_state/docker.calls"
+set +e
+PATH="$fake_bin:$PATH" \
+  FAKE_STATE="$fake_state" \
+  FERROCRATE_BIN="$spaced_ferro" \
+  DOCKER_BUILDKIT=1 \
+  FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS=2 \
+  FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS=2 \
+  "$harness" --output "$buildkit_scoreboard" --log "$buildkit_log" >/dev/null
+buildkit_status=$?
+set -e
+[[ "$buildkit_status" == 1 ]] || {
+  echo "expected BuildKit contract run's unrelated synthetic failures to exit 1, got $buildkit_status" >&2
+  exit 1
+}
+awk -F '\t' '$1 == "image-build" { found = ($4 == "1") } END { exit !found }' \
+  "$fake_state/docker.calls"
+awk -F '\t' '$1 != "image-build" && $1 != "unrecorded" && $4 != "0" { exit 1 }' \
+  "$fake_state/docker.calls"
+awk -F '\t' '$2 == "image-build" { found = ($5 == 1 && $6 == "PASS") } END { exit !found }' \
+  "$buildkit_log"
+grep -Fq '| PASS | 43 |' "$buildkit_scoreboard"
+grep -Fq '| FAIL | 3 |' "$buildkit_scoreboard"
+grep -Fq '| ERROR | 1 |' "$buildkit_scoreboard"
+grep -Fq 'BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)' "$buildkit_scoreboard"
 
 extract_log_results() {
   awk -F '\t' 'NR > 1 { print $1 "\t" $2 "\t" $5 "\t" $6 }' "$1"

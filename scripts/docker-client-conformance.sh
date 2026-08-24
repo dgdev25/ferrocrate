@@ -25,7 +25,9 @@ Options:
   -h, --help       Show this help
 
 Required environment:
-  DOCKER_BUILDKIT=0
+  DOCKER_BUILDKIT=0  Run and require the supported classic build row.
+  DOCKER_BUILDKIT=1  Run the same matrix, qualifying the expected BuildKit
+                     compatibility error on the build row only.
 
 Optional environment:
   FERROCRATE_BIN                                  ferro-cli executable
@@ -70,7 +72,9 @@ done
   harness_error "FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS must be an integer in 1..600"
 [[ "$daemon_timeout" =~ ^[1-9][0-9]*$ ]] && (( daemon_timeout <= 120 )) ||
   harness_error "FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS must be an integer in 1..120"
-[[ "${DOCKER_BUILDKIT:-}" == 0 ]] || harness_error "DOCKER_BUILDKIT=0 is required for FerroCrate's classic builder"
+builder_mode="${DOCKER_BUILDKIT:-}"
+[[ "$builder_mode" == 0 || "$builder_mode" == 1 ]] ||
+  harness_error "DOCKER_BUILDKIT must be 0 (classic) or 1 (BuildKit fallback qualification)"
 [[ "$(uname -s)" == Linux ]] || harness_error "the Docker-compatible daemon is Linux-only"
 [[ -x "$ferro_bin" ]] || harness_error "missing executable ferro-cli: $ferro_bin"
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
@@ -478,6 +482,7 @@ fail_count=0
 error_count=0
 record_stdin="/dev/null"
 expected_daemon_error_message=""
+record_docker_buildkit=0
 
 shell_command() {
   local rendered="docker" argument
@@ -501,7 +506,7 @@ record_command() {
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
         FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
@@ -527,6 +532,7 @@ record_command() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
+  record_docker_buildkit=0
 }
 
 # A command whose success is a nonzero exit WITH a daemon-mediated error
@@ -543,7 +549,7 @@ record_expected_daemon_error() {
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
         FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
@@ -566,6 +572,7 @@ record_expected_daemon_error() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
   expected_daemon_error_message=""
+  record_docker_buildkit=0
 }
 
 # Client identity and engine prerequisites.
@@ -575,7 +582,13 @@ record_command engine-info client info
 
 # Offline image and broad container lifecycle prerequisites. These calls are
 # deliberately unconditional: one failed command must not suppress later rows.
-record_command image-build image build --tag "$image" "$context_dir"
+if [[ "$builder_mode" == 1 ]]; then
+  record_docker_buildkit=1
+  expected_daemon_error_message="BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder"
+  record_expected_daemon_error image-build image build --tag "$image" "$context_dir"
+else
+  record_command image-build image build --tag "$image" "$context_dir"
+fi
 record_command image-inspect image image inspect "$image"
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120
@@ -655,6 +668,11 @@ record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"
 host_metadata="$(uname -srm)"
+if [[ "$builder_mode" == 0 ]]; then
+  builder_label='`DOCKER_BUILDKIT=0`'
+else
+  builder_label='BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)'
+fi
 version_token="$process_token_base-version"
 ferro_version="$(run_bounded_owned "$command_timeout" 5 "$version_token" \
   "$ferro_snapshot" --version 2>/dev/null | head -n 1)"
@@ -699,7 +717,7 @@ stop later invocations.
 - Docker-compatible server: $docker_server_version
 - Compose client: $compose_version
 - Endpoint: isolated \`DOCKER_HOST=unix://<temporary-runtime>/docker.sock\`
-- Builder: \`DOCKER_BUILDKIT=0\`
+- Builder: $builder_label
 - Per-command timeout: ${command_timeout}s
 - Compose fixture: \`tests/fixtures/real-app/compose.yml\`
 - Execution log: \`$display_execution_log\`

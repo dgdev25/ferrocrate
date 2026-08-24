@@ -142,7 +142,7 @@ fn bridge_router(dist: PathBuf, events: WebEventHub, addr: SocketAddr, token: St
     let index = dist.join("index.html");
     let guard = RequestGuard::new(addr, token);
     Router::new()
-        .route("/__tauri/stream/{event}", get(stream_event))
+        .route("/__tauri/stream", get(stream_events))
         .route("/__tauri/{command}", post(invoke_command))
         .route_layer(from_fn_with_state(guard, validate_request))
         .fallback_service(ServeDir::new(dist).not_found_service(ServeFile::new(index)))
@@ -186,10 +186,7 @@ async fn validate_request(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let stream_token = request
-        .uri()
-        .path()
-        .starts_with("/__tauri/stream/")
+    let stream_token = (request.uri().path() == "/__tauri/stream")
         .then(|| request.uri().query())
         .flatten()
         .and_then(|query| {
@@ -236,33 +233,25 @@ async fn invoke_command(
     }
 }
 
-async fn stream_event(
+async fn stream_events(
     State(state): State<BridgeState>,
-    Path(command): Path<String>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
     let mut receiver = state.events.sender.subscribe();
     let stream = async_stream::stream! {
         loop {
             match receiver.recv().await {
-                Ok(event) if stream_command_matches_event(&command, &event.name) => {
-                    let envelope = json!({ "event": event.name, "payload": event.payload });
-                    yield Ok(Event::default().json_data(envelope).unwrap_or_else(|_| Event::default()));
+                Ok(event) => {
+                    yield Ok(Event::default()
+                        .event(event.name)
+                        .json_data(event.payload)
+                        .unwrap_or_else(|_| Event::default()));
                 }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-fn stream_command_matches_event(command: &str, event: &str) -> bool {
-    match command {
-        "start_terminal" => event.starts_with("terminal-"),
-        "start_log_follow" => event.starts_with("container-log-"),
-        "build_image" => event == "image-build-progress",
-        _ => command == event,
-    }
 }
 
 fn decode<T: DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -565,31 +554,91 @@ fn dispatch_command(command: &str, args: Value, events: WebEventHub) -> Result<V
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use reqwest::Client;
     use serde_json::{json, Value};
 
-    use super::{spawn_web_bridge, stream_command_matches_event};
+    use super::spawn_web_bridge;
 
-    #[test]
-    fn streaming_command_routes_cover_terminal_logs_and_build_progress() {
-        assert!(stream_command_matches_event(
-            "start_terminal",
-            "terminal-output"
-        ));
-        assert!(stream_command_matches_event(
-            "start_log_follow",
-            "container-log-batch"
-        ));
-        assert!(stream_command_matches_event(
-            "build_image",
-            "image-build-progress"
-        ));
-        assert!(!stream_command_matches_event(
-            "start_terminal",
-            "container-log-batch"
-        ));
+    #[tokio::test]
+    async fn multiplexed_stream_does_not_block_eight_concurrent_posts() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dist = std::env::temp_dir().join(format!("ferro-web-bridge-concurrency-{suffix}"));
+        fs::create_dir_all(&dist).expect("create dist");
+        fs::write(dist.join("index.html"), "<main>Ferrocrate</main>").expect("write index");
+
+        let bridge = spawn_web_bridge("127.0.0.1:0".parse().unwrap(), dist.clone())
+            .await
+            .expect("start bridge");
+        let client = Client::new();
+        let host = bridge.addr().to_string();
+        let stream_url = format!(
+            "http://{}/__tauri/stream?token={}",
+            bridge.addr(),
+            bridge.token()
+        );
+        let stream = client
+            .get(stream_url)
+            .header("host", &host)
+            .send()
+            .await
+            .expect("connect multiplexed stream");
+        assert_eq!(stream.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            stream.headers().get(reqwest::header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+        let legacy_stream = client
+            .get(format!(
+                "http://{}/__tauri/stream/start_terminal?token={}",
+                bridge.addr(),
+                bridge.token()
+            ))
+            .header("host", &host)
+            .send()
+            .await
+            .expect("legacy stream request");
+        assert_ne!(
+            legacy_stream.headers().get(reqwest::header::CONTENT_TYPE),
+            Some(&reqwest::header::HeaderValue::from_static(
+                "text/event-stream"
+            ))
+        );
+
+        let endpoint = format!("http://{}/__tauri/get_desktop_snapshot", bridge.addr());
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let host = host.clone();
+            let token = bridge.token().to_string();
+            requests.spawn(async move {
+                client
+                    .post(endpoint)
+                    .header("host", host)
+                    .bearer_auth(token)
+                    .json(&json!({}))
+                    .send()
+                    .await
+            });
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = requests.join_next().await {
+                let response = result.expect("post task").expect("post response");
+                assert!(response.status().is_success());
+            }
+        })
+        .await
+        .expect("eight POSTs should complete while the SSE stream is open");
+
+        drop(stream);
+        bridge.shutdown().await;
+        fs::remove_dir_all(dist).ok();
     }
 
     #[tokio::test]

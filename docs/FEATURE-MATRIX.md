@@ -40,6 +40,7 @@ Snapshot: 2026-08-22, `main` at `2aa9715c`.
 | Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
+| Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |
 | Published IPv4 ports (rootful and rootless) | Supported | [`verification/2026-08-19-rootless-published-port-fedora-rocky-current-head.md`](evidence/verification/2026-08-19-rootless-published-port-fedora-rocky-current-head.md) |
 | DNS, firewall allow/deny, MTU, WireGuard overlay | Supported | four-distro privileged rerun witness (host tiers above) |
 | IPv6 address lifecycle | Supported | [`performance/2026-08-21-docker-ipv6-comparison.md`](evidence/performance/2026-08-21-docker-ipv6-comparison.md) |
@@ -67,7 +68,6 @@ Snapshot: 2026-08-22, `main` at `2aa9715c`.
 | `POST /plugins/pull` | 404 with explicit message | matrix test in [`ferro-cli/tests/api_compat_matrix.rs`](../ferro-cli/tests/api_compat_matrix.rs) |
 | `POST /auth` | 501 | same matrix test |
 | `POST /containers/{id}/attach/ws` | 501 | same matrix test |
-| `/networks/{id}/connect` and `/disconnect` | explicit unsupported boundary | [`docker-api/2026-08-21-api-endpoint-completion.md`](evidence/docker-api/2026-08-21-api-endpoint-completion.md) |
 | Remote Docker Hub image search | local catalog only | [`verification/2026-08-19-docker-image-search-current-head.md`](evidence/verification/2026-08-19-docker-image-search-current-head.md) |
 | Cross-platform native execution (Windows/macOS) | deferred; cross-target compile evidence only | cross-target witness (host tiers above) |
 

@@ -510,8 +510,14 @@ impl RuntimeAuthorization {
             parent_resource_id: run.parent_resource_id,
             ..Default::default()
         };
+        let is_network_endpoint = matches!(action, Action::NetworkAttach | Action::NetworkDetach);
+        let resource_kind = if is_network_endpoint {
+            super::ResourceKind::Network
+        } else {
+            super::ResourceKind::Container
+        };
         let resource = Resource::canonical(
-            super::ResourceKind::Container,
+            resource_kind,
             resource_uuid.clone(),
             None,
             generation,
@@ -541,12 +547,24 @@ impl RuntimeAuthorization {
             observation.update(generation.to_be_bytes());
             let recipe = RecoveryRecipe::for_original_with_observation(
                 witness_action,
-                WitnessResourceKind::Container,
-                WitnessAction::ContainerDelete,
+                if is_network_endpoint {
+                    WitnessResourceKind::Network
+                } else {
+                    WitnessResourceKind::Container
+                },
+                if is_network_endpoint {
+                    WitnessAction::NetworkDetach
+                } else {
+                    WitnessAction::ContainerDelete
+                },
                 template.request_digest,
                 generation,
-                RecoveryTruthStrategy::for_container_action(witness_action)
-                    .ok_or(MediationError::Identity)?,
+                if is_network_endpoint {
+                    RecoveryTruthStrategy::InversePrecondition
+                } else {
+                    RecoveryTruthStrategy::for_container_action(witness_action)
+                        .ok_or(MediationError::Identity)?
+                },
                 ObservationDigest::from_bytes(observation.finalize().into()),
                 ObservationHandle::from_bytes(*operation.as_bytes()),
             )
@@ -708,7 +726,11 @@ impl RuntimeAuthorization {
                 .as_ref()
                 .map_or(Invocation::Cli, RequestOrigin::invocation),
             action: witness_action(action),
-            resource_kind: WitnessResourceKind::Container,
+            resource_kind: if matches!(action, Action::NetworkAttach | Action::NetworkDetach) {
+                WitnessResourceKind::Network
+            } else {
+                WitnessResourceKind::Container
+            },
             resource,
             resource_generation: request.resource_generation(),
             policy_version: request.policy_generation(),
@@ -929,6 +951,8 @@ fn witness_action(action: Action) -> WitnessAction {
         Action::ContainerRename => WitnessAction::ContainerRename,
         Action::ContainerArchiveWrite => WitnessAction::ContainerArchiveWrite,
         Action::ContainerUpdate => WitnessAction::ContainerUpdate,
+        Action::NetworkAttach => WitnessAction::NetworkAttach,
+        Action::NetworkDetach => WitnessAction::NetworkDetach,
         _ => unreachable!("runtime authorization only handles container lifecycle"),
     }
 }

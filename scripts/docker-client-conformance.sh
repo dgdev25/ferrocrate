@@ -76,6 +76,9 @@ done
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
 command -v timeout >/dev/null 2>&1 || harness_error "timeout is required"
 command -v setsid >/dev/null 2>&1 || harness_error "setsid is required for bounded daemon cleanup"
+command -v unshare >/dev/null 2>&1 || harness_error "unshare is required for isolated rootful network conformance"
+command -v ip >/dev/null 2>&1 || harness_error "ip is required for isolated rootful network conformance"
+command -v slirp4netns >/dev/null 2>&1 || harness_error "slirp4netns is required for isolated network egress"
 command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
@@ -83,6 +86,65 @@ command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
 [[ -f "$fixture" ]] || harness_error "missing Compose fixture: $fixture"
 [[ -f "$repo_root/tests/fixtures/real-app/webroot/index.html" ]] || harness_error "incomplete Compose fixture: webroot/index.html"
 [[ -f "$repo_root/tests/fixtures/real-app/apiroot/index.json" ]] || harness_error "incomplete Compose fixture: apiroot/index.json"
+
+# The real connect/disconnect rows require CAP_NET_ADMIN. Run the entire
+# isolated harness in a disposable user+network namespace so both the Docker
+# client peer identity and the daemon share the same trusted user namespace;
+# no host bridge, route, or firewall state is touched.
+if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
+  namespace_sync="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-conformance-userns.XXXXXX")" \
+    || harness_error "cannot create user namespace synchronization directory"
+  mkfifo "$namespace_sync/go" "$namespace_sync/ready" "$namespace_sync/child-ready" \
+    || harness_error "cannot create user namespace synchronization pipes"
+  exec 7<>"$namespace_sync/child-ready"
+  exec 8<>"$namespace_sync/go"
+  exec 9<>"$namespace_sync/ready"
+  unshare --user --map-root-user --mount --net bash -c '
+    mount -t tmpfs tmpfs /run/netns
+    ip link set lo up
+    printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
+    mount --bind "$5/resolv.conf" /etc/resolv.conf
+    printf r >"$6"
+    IFS= read -r -n1 <"$1"
+    exec env FERROCRATE_CONFORMANCE_USERNS=1 bash "$2" --output "$3" --log "$4"
+  ' bash "$namespace_sync/go" "$0" "$output" "$execution_log" "$namespace_sync" \
+    "$namespace_sync/child-ready" &
+  namespace_pid=$!
+  if ! IFS= read -r -n1 -t 10 <&7; then
+    kill "$namespace_pid" 2>/dev/null || true
+    wait "$namespace_pid" 2>/dev/null || true
+    rm -rf -- "$namespace_sync"
+    harness_error "isolated user/network namespace did not become ready"
+  fi
+  slirp4netns --configure --mtu=65520 --ready-fd=9 "$namespace_pid" tap0 \
+    >"$namespace_sync/slirp.log" 2>&1 &
+  slirp_pid=$!
+  if ! IFS= read -r -n1 -t 10 <&9; then
+    kill "$namespace_pid" "$slirp_pid" 2>/dev/null || true
+    wait "$namespace_pid" "$slirp_pid" 2>/dev/null || true
+    slirp_message="$(tr '\n' ' ' <"$namespace_sync/slirp.log")"
+    rm -rf -- "$namespace_sync"
+    harness_error "slirp4netns did not configure isolated egress${slirp_message:+: $slirp_message}"
+  fi
+  printf x >&8
+  wait "$namespace_pid"
+  namespace_status=$?
+  kill "$slirp_pid" 2>/dev/null || true
+  wait "$slirp_pid" 2>/dev/null || true
+  exec 7>&-
+  exec 8>&-
+  exec 9>&-
+  rm -rf -- "$namespace_sync"
+  exit "$namespace_status"
+fi
+if [[ "${FERROCRATE_CONFORMANCE_USERNS:-0}" == 1 ]]; then
+  ip link set lo up || harness_error "cannot enable loopback in conformance network namespace"
+  if ! ip link show ferro0 >/dev/null 2>&1; then
+    ip link add ferro0 type bridge || harness_error "cannot create isolated default bridge"
+    ip addr add 10.0.0.1/24 dev ferro0 || harness_error "cannot address isolated default bridge"
+    ip link set ferro0 up || harness_error "cannot enable isolated default bridge"
+  fi
+fi
 
 output_parent="$(dirname "$output")"
 log_parent="$(dirname "$execution_log")"
@@ -109,8 +171,13 @@ runtime_dir="$work_root/runtime"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
 outputs_dir="$work_root/outputs"
-mkdir -p "$runtime_dir" "$docker_config" "$context_dir" "$outputs_dir" ||
+cgroup_root="$work_root/cgroup"
+mkdir -p "$runtime_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
+printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
+  harness_error "cannot initialize isolated cgroup controller fixture"
+: >"$cgroup_root/cgroup.subtree_control" ||
+  harness_error "cannot initialize isolated cgroup subtree fixture"
 
 # Execute an immutable, run-private snapshot. The daemon and version probe use
 # the same bytes named by the published hash even if a concurrent build replaces
@@ -145,7 +212,10 @@ owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
+network="$run_prefix-secondary"
 compose_project="$run_prefix-compose"
+compose_frontend_network="${compose_project}_frontend"
+compose_backend_network="${compose_project}_backend"
 host_port=18093
 process_token_base="ferrocrate-conformance-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 daemon_process_token="$process_token_base-daemon"
@@ -300,6 +370,15 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker network rm "$network" >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker network rm "$compose_frontend_network" "$compose_backend_network" \
+      >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
         docker image rm --force "$image" >/dev/null 2>&1 || true
   fi
   if [[ -n "$daemon_pid" ]]; then
@@ -361,12 +440,12 @@ fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 
-rootless_netns="${FERROCRATE_ROOTLESS_NETNS:-1}"
 network_backend="${FERROCRATE_NETWORK_BACKEND:-iptables}"
 setsid env \
   FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$daemon_process_token" \
   FERROCRATE_RUNTIME_DIR="$runtime_dir" \
-  FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
+  FERROCRATE_CGROUP_ROOT="$cgroup_root" \
+  FERROCRATE_ROOTLESS_NETNS=0 \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
   "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
   >"$work_root/daemon.stdout" 2>"$work_root/daemon.stderr" &
@@ -502,6 +581,10 @@ record_command container-copy-in container cp "$work_root/copy-marker.txt" "$con
 record_command container-diff container diff "$container"
 record_command container-update container update --memory 64m --pids-limit 64 "$container"
 record_command container-export container container export --output "$work_root/container-export.tar" "$container"
+record_command network-create network network create --driver bridge --subnet 172.30.240.0/24 "$network"
+record_command network-connect network network connect "$network" "$container"
+record_command network-disconnect network network disconnect "$network" "$container"
+record_command network-remove network network rm "$network"
 record_command container-stop container stop --time 1 "$container"
 record_command container-wait container wait "$container"
 record_command container-logs container logs "$container"
@@ -536,6 +619,10 @@ record_command registry-logout registry logout 127.0.0.1:1
 
 # Genuine Compose plugin invocations against the repository's representative
 # four-service application fixture.
+record_command compose-network-create-frontend compose network create --driver bridge \
+  --subnet 172.30.243.0/24 "$compose_frontend_network"
+record_command compose-network-create-backend compose network create --driver bridge \
+  --subnet 172.30.244.0/24 "$compose_backend_network"
 record_command compose-up compose compose --ansi never --project-name "$compose_project" \
   --file "$fixture" up --detach
 record_command compose-ps compose compose --ansi never --project-name "$compose_project" \
@@ -544,6 +631,8 @@ record_command compose-logs compose compose --ansi never --project-name "$compos
   --file "$fixture" logs --no-color
 record_command compose-down compose compose --ansi never --project-name "$compose_project" \
   --file "$fixture" down --timeout 10
+record_command compose-network-remove-frontend compose network rm "$compose_frontend_network"
+record_command compose-network-remove-backend compose network rm "$compose_backend_network"
 record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"

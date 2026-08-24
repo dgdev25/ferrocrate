@@ -49,6 +49,9 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
     let mut archive = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut archive);
+        #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+        let dockerfile = b"FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\nCOPY --chmod=755 ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1\n";
+        #[cfg(not(all(target_env = "musl", target_arch = "x86_64")))]
         let dockerfile = b"FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\n";
         let mut header = tar::Header::new_gnu();
         header.set_path("Dockerfile").expect("dockerfile path");
@@ -76,7 +79,7 @@ fn build_local_busybox_image(harness: &DaemonHarness, tag: &str) {
             let loader = fs::read("/lib/ld-musl-x86_64.so.1").expect("host musl loader fixture");
             let mut header = tar::Header::new_gnu();
             header
-                .set_path("lib/ld-musl-x86_64.so.1")
+                .set_path("ld-musl-x86_64.so.1")
                 .expect("musl loader path");
             header.set_size(loader.len() as u64);
             header.set_mode(0o755);

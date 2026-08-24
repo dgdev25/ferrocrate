@@ -21,10 +21,12 @@ base64 = "0.22"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 ipnet = "2"
 nix = { workspace = true, features = ["socket"] }
-caps = { workspace = true }
 sha2 = "0.10"
 rustix = { version = "1", features = ["process"] }
 fs2 = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+caps = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

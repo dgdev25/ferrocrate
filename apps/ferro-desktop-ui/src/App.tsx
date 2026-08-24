@@ -1,17 +1,44 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
+  BuildProgressFrame,
+  ComposeAction,
+  ComposeServiceSummary,
+  ComposeSnapshot,
+  ContainerDetailSummary,
   DesktopAction,
   DesktopSnapshot,
   DoctorSummary,
   InstallerRunSummary,
   PaidAuthState,
+  RegistryAuthStatus,
+  NetworkAction,
+  NetworkSummary,
+  VolumeAction,
+  VolumeSummary,
 } from "./types";
+import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
+import { maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
+import { buildStepText } from "./imageBuild.mjs";
+import { formatNetworkAttachment, networkIsRemovable } from "./networkView.mjs";
+import { registryStatusText } from "./registryAuth.mjs";
+import {
+  applyRemoteTerminalResize,
+  applyTerminalResize,
+  DEFAULT_TERMINAL_ENV,
+} from "./terminalResize.mjs";
+import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
+type LogBatch = { text: string; truncated: boolean };
+type TerminalOutput = { data: number[]; stderr: boolean };
 
 function formatUnix(value: number | null): string {
   if (!value) return "-";
@@ -29,6 +56,52 @@ function App(): JSX.Element {
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
   const [actionLabel, setActionLabel] = useState("");
+  const [logOutput, setLogOutput] = useState("");
+  const [logFilter, setLogFilter] = useState("");
+  const [logsFollowing, setLogsFollowing] = useState(false);
+  const [logsPaused, setLogsPaused] = useState(false);
+  const [pausedLogOutput, setPausedLogOutput] = useState("");
+  const [runtimeActionBusy, setRuntimeActionBusy] = useState(false);
+  const runtimeActionRef = useRef(false);
+  const logFollowRef = useRef(false);
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const terminalActiveRef = useRef(false);
+  const [terminalActive, setTerminalActive] = useState(false);
+  const [terminalShell, setTerminalShell] = useState("sh");
+  const [terminalEnv, setTerminalEnv] = useState(DEFAULT_TERMINAL_ENV);
+  const [terminalUser, setTerminalUser] = useState("");
+  const [terminalWorkdir, setTerminalWorkdir] = useState("");
+  const [volumes, setVolumes] = useState<VolumeSummary[]>([]);
+  const [volumeName, setVolumeName] = useState("");
+  const [volumesLoading, setVolumesLoading] = useState(false);
+  const [networks, setNetworks] = useState<NetworkSummary[]>([]);
+  const [networkName, setNetworkName] = useState("");
+  const [networkSubnet, setNetworkSubnet] = useState("");
+  const [networksLoading, setNetworksLoading] = useState(false);
+  const [composeFile, setComposeFile] = useState("");
+  const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
+  const [composeLoading, setComposeLoading] = useState(false);
+  const [buildContext, setBuildContext] = useState("");
+  const [buildTag, setBuildTag] = useState("local/build:latest");
+  const [buildSteps, setBuildSteps] = useState<BuildProgressFrame[]>([]);
+  const [containerDetail, setContainerDetail] = useState<ContainerDetailSummary | null>(null);
+  const [showEnvironment, setShowEnvironment] = useState(false);
+  const [detailMemory, setDetailMemory] = useState("");
+  const [detailCpuQuota, setDetailCpuQuota] = useState("");
+  const [detailCpuPeriod, setDetailCpuPeriod] = useState("");
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
+  const [newContainerImage, setNewContainerImage] = useState("alpine:latest");
+  const [newContainerName, setNewContainerName] = useState("");
+  const [newContainerEnvironment, setNewContainerEnvironment] = useState("");
+  const [newContainerMemory, setNewContainerMemory] = useState("");
+  const [newContainerCpuQuota, setNewContainerCpuQuota] = useState("");
+  const [newContainerCpuPeriod, setNewContainerCpuPeriod] = useState("");
+  const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
+  const [registryUsername, setRegistryUsername] = useState("");
+  const [registryPassword, setRegistryPassword] = useState("");
+  const [registryStatus, setRegistryStatus] = useState<RegistryAuthStatus | null>(null);
+  const [registryLoading, setRegistryLoading] = useState(false);
 
   const [releaseBaseUrl, setReleaseBaseUrl] = useState("");
   const [tokenEndpoint, setTokenEndpoint] = useState("");
@@ -52,6 +125,101 @@ function App(): JSX.Element {
     }
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     setTheme(prefersDark ? "dark" : "light");
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<BuildProgressFrame>("image-build-progress", (event) => {
+      setBuildSteps((steps) => [...steps, event.payload]);
+    }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host || terminalRef.current) return;
+    const terminal = new Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+      fontSize: 13,
+      rows: 18,
+      theme: theme === "dark"
+        ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
+        : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" },
+    });
+    terminal.open(host);
+    terminal.onData((data) => {
+      if (!terminalActiveRef.current) return;
+      void invoke("write_terminal", { data: Array.from(new TextEncoder().encode(data)) }).catch((err) => {
+        setError(String(err));
+      });
+    });
+    terminal.writeln("Select a running container and open a shell.");
+    terminalRef.current = terminal;
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      applyTerminalResize(
+        entry.contentRect.width,
+        entry.contentRect.height,
+        terminalActiveRef.current,
+        (columns, rows) => terminal.resize(columns, rows),
+        (columns, rows) => {
+          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+        },
+      );
+    });
+    observer.observe(host);
+    return () => {
+      observer.disconnect();
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.theme = theme === "dark"
+      ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
+      : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" };
+  }, [theme]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlistenOutput: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+    let unlistenEnded: (() => void) | undefined;
+    void (async () => {
+      const stopOutput = await listen<TerminalOutput>("terminal-output", (event) => {
+        terminalRef.current?.write(new Uint8Array(event.payload.data));
+      });
+      const stopError = await listen<string>("terminal-error", (event) => setError(event.payload));
+      const stopEnded = await listen<boolean>("terminal-ended", (event) => {
+        terminalActiveRef.current = false;
+        setTerminalActive(false);
+        terminalRef.current?.writeln(event.payload ? "\r\n[exec exited]" : "\r\n[exec failed]");
+      });
+      if (disposed) {
+        stopOutput();
+        stopError();
+        stopEnded();
+        return;
+      }
+      unlistenOutput = stopOutput;
+      unlistenError = stopError;
+      unlistenEnded = stopEnded;
+    })();
+    return () => {
+      disposed = true;
+      unlistenOutput?.();
+      unlistenError?.();
+      unlistenEnded?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -89,16 +257,484 @@ function App(): JSX.Element {
     }
   }
 
+  async function refreshRegistryAuth(target = registryTarget): Promise<void> {
+    setRegistryLoading(true);
+    setError(null);
+    try {
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: target,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
+    }
+  }
+
+  async function refreshVolumes(): Promise<void> {
+    setVolumesLoading(true);
+    try {
+      setVolumes(await invoke<VolumeSummary[]>("get_volumes"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setVolumesLoading(false);
+    }
+  }
+
+  async function refreshNetworks(): Promise<void> {
+    setNetworksLoading(true);
+    try {
+      setNetworks(await invoke<NetworkSummary[]>("get_networks"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setNetworksLoading(false);
+    }
+  }
+
+  async function readComposeSnapshot(file: string): Promise<void> {
+    setComposeLoading(true);
+    try {
+      setComposeSnapshot(await invoke<ComposeSnapshot>("get_compose_snapshot", { file }));
+    } finally {
+      setComposeLoading(false);
+    }
+  }
+
+  async function chooseComposeFile(): Promise<void> {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Compose files", extensions: ["yml", "yaml"] }],
+      });
+      if (typeof selected !== "string") return;
+      setComposeFile(selected);
+      setError(null);
+      await readComposeSnapshot(selected);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function chooseBuildContext(): Promise<void> {
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (typeof selected === "string") setBuildContext(selected);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   useEffect(() => {
     void refresh();
     void refreshAuthState();
+    void refreshVolumes();
+    void refreshNetworks();
+    void refreshRegistryAuth("registry-1.docker.io");
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlistenBatch: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+    let unlistenEnded: (() => void) | undefined;
+
+    void (async () => {
+      const stopBatch = await listen<LogBatch>("container-log-batch", (event) => {
+        setLogOutput(event.payload.text);
+      });
+      const stopError = await listen<string>("container-log-error", (event) => {
+        setError(event.payload);
+      });
+      const stopEnded = await listen<boolean>("container-log-ended", (event) => {
+        logFollowRef.current = false;
+        setLogsFollowing(false);
+        setLogsPaused(false);
+        if (!event.payload) setError("Container log stream ended unexpectedly");
+      });
+      if (disposed) {
+        stopBatch();
+        stopError();
+        stopEnded();
+        return;
+      }
+      unlistenBatch = stopBatch;
+      unlistenError = stopError;
+      unlistenEnded = stopEnded;
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenBatch?.();
+      unlistenError?.();
+      unlistenEnded?.();
+    };
+  }, []);
+
+  function beginRuntimeAction(allowWhileStreaming = false): boolean {
+    if (
+      runtimeActionRef.current
+      || ((logFollowRef.current || terminalActiveRef.current) && !allowWhileStreaming)
+    ) {
+      return false;
+    }
+    runtimeActionRef.current = true;
+    setRuntimeActionBusy(true);
+    return true;
+  }
+
+  function finishRuntimeAction(): void {
+    runtimeActionRef.current = false;
+    setRuntimeActionBusy(false);
+  }
+
   async function runAction(action: DesktopAction, label: string, target?: string): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setActionLabel(label);
-    const result = await invoke<CommandResult>("run_desktop_action", { action, target });
-    setLastAction(result);
-    await refresh();
+    try {
+      const result = await invoke<CommandResult>("run_desktop_action", { action, target });
+      setLastAction(result);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function startLogFollow(target = containerTarget): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setLogOutput("");
+    setLogsPaused(false);
+    setPausedLogOutput("");
+    try {
+      await invoke("start_log_follow", { target });
+      logFollowRef.current = true;
+      setLogsFollowing(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function stopLogFollow(): Promise<void> {
+    if (!logFollowRef.current || !beginRuntimeAction(true)) return;
+    try {
+      await invoke("stop_log_follow");
+      logFollowRef.current = false;
+      setLogsFollowing(false);
+      setLogsPaused(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  function toggleLogPause(): void {
+    if (logsPaused) {
+      setLogsPaused(false);
+      return;
+    }
+    setPausedLogOutput(logOutput);
+    setLogsPaused(true);
+  }
+
+  async function startTerminal(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    terminalRef.current?.clear();
+    try {
+      await invoke("start_terminal", {
+        target: containerTarget,
+        shell: terminalShell,
+        env: terminalEnv.split("\n").map((value) => value.trim()).filter(Boolean),
+        user: terminalUser.trim() || null,
+        workdir: terminalWorkdir.trim() || null,
+      });
+      terminalActiveRef.current = true;
+      setTerminalActive(true);
+      const terminal = terminalRef.current;
+      if (terminal) {
+        applyRemoteTerminalResize(terminal.cols, terminal.rows, true, (columns, rows) => {
+          void invoke("resize_terminal", { columns, rows }).catch((err) => setError(String(err)));
+        });
+        terminal.focus();
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function closeTerminal(): Promise<void> {
+    if (!terminalActiveRef.current || !beginRuntimeAction(true)) return;
+    try {
+      await invoke("close_terminal");
+      terminalActiveRef.current = false;
+      setTerminalActive(false);
+      terminalRef.current?.writeln("\r\n[detached; container left running]");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runVolumeAction(
+    action: VolumeAction,
+    label: string,
+    target?: string,
+  ): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_volume_action", { action, target });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      if (action === "create") setVolumeName("");
+      await Promise.all([refreshVolumes(), refresh()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runNetworkAction(
+    action: NetworkAction,
+    label: string,
+    target: string,
+  ): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_network_action", {
+        action,
+        target,
+        subnet: action === "create" ? networkSubnet.trim() || null : null,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      if (action === "create") {
+        setNetworkName("");
+        setNetworkSubnet("");
+      }
+      await Promise.all([refreshNetworks(), refresh()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function inspectContainer(target = containerTarget): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    try {
+      const detail = await invoke<ContainerDetailSummary>("get_container_detail", { target });
+      setContainerTarget(target);
+      setContainerDetail(detail);
+      setShowEnvironment(false);
+      setDetailMemory(String(detail.resources.memory));
+      setDetailCpuQuota(String(detail.resources.cpu_quota));
+      setDetailCpuPeriod(String(detail.resources.cpu_period));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function updateContainerResources(): Promise<void> {
+    if (!containerDetail || !beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Container Update");
+    try {
+      const result = await invoke<CommandResult>("update_container_resources", {
+        target: containerDetail.id,
+        memory: parseOptionalLimit(detailMemory),
+        cpuQuota: parseOptionalLimit(detailCpuQuota),
+        cpuPeriod: parseOptionalLimit(detailCpuPeriod),
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Container update failed with status ${result.code}`);
+        return;
+      }
+      const detail = await invoke<ContainerDetailSummary>("get_container_detail", {
+        target: containerDetail.id,
+      });
+      setContainerDetail(detail);
+      setDetailMemory(String(detail.resources.memory));
+      setDetailCpuQuota(String(detail.resources.cpu_quota));
+      setDetailCpuPeriod(String(detail.resources.cpu_period));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runNewContainer(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Container Run");
+    try {
+      const result = await invoke<CommandResult>("run_new_container", {
+        image: newContainerImage,
+        name: newContainerName.trim() || null,
+        environment: newContainerEnvironment
+          .split("\n")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        memory: parseOptionalLimit(newContainerMemory),
+        cpuQuota: parseOptionalLimit(newContainerCpuQuota),
+        cpuPeriod: parseOptionalLimit(newContainerCpuPeriod),
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Container run failed with status ${result.code}`);
+        return;
+      }
+      setRunDialogOpen(false);
+      setNewContainerName("");
+      setNewContainerEnvironment("");
+      await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function loginRegistry(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Registry Login");
+    setRegistryLoading(true);
+    try {
+      const result = await invoke<CommandResult>("login_registry", {
+        registry: registryTarget,
+        username: registryUsername,
+        password: registryPassword,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Registry login failed with status ${result.code}`);
+        return;
+      }
+      setRegistryPassword("");
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: registryTarget,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
+      finishRuntimeAction();
+    }
+  }
+
+  async function logoutRegistry(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Registry Logout");
+    setRegistryLoading(true);
+    try {
+      const result = await invoke<CommandResult>("logout_registry", {
+        registry: registryTarget,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `Registry logout failed with status ${result.code}`);
+        return;
+      }
+      setRegistryPassword("");
+      setRegistryStatus(await invoke<RegistryAuthStatus>("get_registry_auth_status", {
+        registry: registryTarget,
+      }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRegistryLoading(false);
+      finishRuntimeAction();
+    }
+  }
+
+  async function validateCompose(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Compose Config");
+    try {
+      await readComposeSnapshot(composeFile);
+      setLastAction({ ok: true, code: 0, stdout: "Compose configuration is valid.", stderr: "" });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function runComposeAction(action: ComposeAction, label: string): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel(label);
+    try {
+      const result = await invoke<CommandResult>("run_compose_action", {
+        file: composeFile,
+        action,
+      });
+      setLastAction(result);
+      if (!result.ok) {
+        setError(result.stderr || `${label} failed with status ${result.code}`);
+        return;
+      }
+      await Promise.all([readComposeSnapshot(composeFile), refresh(), refreshVolumes()]);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
+  }
+
+  async function showComposeLogs(service: ComposeServiceSummary): Promise<void> {
+    const target = composeLogTarget(service);
+    setContainerTarget(target);
+    await startLogFollow(target);
+  }
+
+  async function buildImage(): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    setError(null);
+    setActionLabel("Image Build");
+    setBuildSteps([]);
+    try {
+      const result = await invoke<CommandResult>("build_image", {
+        context: buildContext,
+        tag: buildTag,
+      });
+      setLastAction(result);
+      if (!result.ok) setError(result.stderr || `Image build failed with status ${result.code}`);
+      await refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      finishRuntimeAction();
+    }
   }
 
   async function saveBackendConfig(): Promise<void> {
@@ -151,6 +787,7 @@ function App(): JSX.Element {
   }
 
   async function runInstaller(dryRun: boolean, confirm: boolean): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setError(null);
     try {
       const result = await invoke<InstallerRunSummary>("run_paid_full_stack_install", {
@@ -162,10 +799,13 @@ function App(): JSX.Element {
       await refreshAuthState();
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
   async function runDoctor(): Promise<void> {
+    if (!beginRuntimeAction()) return;
     setError(null);
     try {
       const result = await invoke<DoctorSummary>("run_doctor_action", {
@@ -178,10 +818,42 @@ function App(): JSX.Element {
       await refresh();
     } catch (err) {
       setError(String(err));
+    } finally {
+      finishRuntimeAction();
     }
   }
 
   const sessionSummary = useMemo(() => authState?.session, [authState]);
+  const visibleLogText = useMemo(() => {
+    const visibleOutput = logsPaused ? pausedLogOutput : logOutput;
+    const filter = logFilter.trim();
+    return filter
+      ? visibleOutput
+          .split("\n")
+          .filter((line) => line.includes(filter))
+          .join("\n")
+      : visibleOutput;
+  }, [logFilter, logOutput, logsPaused, pausedLogOutput]);
+
+  const runtimeBusy = runtimeActionBusy || logsFollowing || terminalActive;
+
+  async function copyLogs(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(visibleLogText);
+    } catch (err) {
+      setError(`Failed to copy logs: ${String(err)}`);
+    }
+  }
+
+  function exportLogs(): void {
+    const file = new Blob([visibleLogText], { type: "text/plain" });
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${containerTarget.trim() || "container"}-logs.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <main className="app-shell">
@@ -194,7 +866,7 @@ function App(): JSX.Element {
           >
             Theme: {theme === "dark" ? "Dark" : "Light"}
           </button>
-          <button className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
+          <button className="btn btn-primary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
             {loading ? "Refreshing..." : "Refresh Runtime"}
           </button>
           <button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>
@@ -292,10 +964,10 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             Full paid install path uses saved backend config and session token.
           </p>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runInstaller(true, false)}>
+            <button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>
               Dry-Run Install
             </button>
-            <button className="btn btn-primary" onClick={() => void runInstaller(false, true)}>
+            <button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>
               Run Full Install
             </button>
           </div>
@@ -339,7 +1011,7 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             </label>
           </div>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runDoctor()}>
+            <button className="btn btn-secondary" onClick={() => void runDoctor()} disabled={runtimeBusy}>
               Run Doctor
             </button>
           </div>
@@ -349,10 +1021,10 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
         <article className="panel">
           <h2>Runtime Status</h2>
           <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")} disabled={runtimeBusy}>
               VM Start
             </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")} disabled={runtimeBusy}>
               VM Stop
             </button>
           </div>
@@ -360,7 +1032,7 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           {snapshot?.runtime.stderr ? <p className="muted">{snapshot.runtime.stderr}</p> : null}
         </article>
 
-        <article className="panel">
+        <article className="panel panel-wide">
           <h2>Containers</h2>
           <div className="field-row">
             <input
@@ -373,30 +1045,91 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("start_container", "Container Start", containerTarget)}
+              disabled={runtimeBusy}
             >
               Start
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("stop_container", "Container Stop", containerTarget)}
+              disabled={runtimeBusy}
             >
               Stop
             </button>
             <button
               className="btn btn-secondary"
-              onClick={() => void runAction("container_logs", "Container Logs", containerTarget)}
+              onClick={() => void startLogFollow()}
+              disabled={runtimeBusy}
             >
-              Logs
+              {logsFollowing ? "Following Logs" : "Follow Logs"}
             </button>
             <button
               className="btn btn-danger"
               onClick={() => void runAction("remove_container", "Container Remove", containerTarget)}
+              disabled={runtimeBusy}
             >
               Remove
             </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void inspectContainer()}
+              disabled={runtimeBusy || !containerTarget.trim()}
+            >
+              Inspect Details
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => setRunDialogOpen(true)}
+              disabled={runtimeBusy}
+            >
+              Run New Container
+            </button>
           </div>
+          <div className="field-row">
+            <input
+              value={logFilter}
+              onChange={(event) => setLogFilter(event.target.value)}
+              placeholder="filter streamed logs"
+            />
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}>
+              {logsPaused ? "Resume Logs" : "Pause Logs"}
+            </button>
+            <button className="btn btn-secondary" onClick={() => void copyLogs()} disabled={!visibleLogText}>
+              Copy Logs
+            </button>
+            <button className="btn btn-secondary" onClick={exportLogs} disabled={!visibleLogText}>
+              Export Logs
+            </button>
+            <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>
+              Stop Following
+            </button>
+          </div>
+          <pre>{visibleLogText || (logsFollowing ? "Waiting for log lines..." : EMPTY)}</pre>
           <pre>{snapshot?.containers.stdout || EMPTY}</pre>
           {snapshot?.containers.stderr ? <p className="muted">{snapshot.containers.stderr}</p> : null}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Exec Terminal</h2>
+          <div className="terminal-fields">
+            <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
+            <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
+            <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
+          </div>
+          <div className="field-row">
+            <input value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="environment, one KEY=value per line" />
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy}>
+              Open Shell
+            </button>
+            <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>
+              Detach
+            </button>
+          </div>
+          <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
         </article>
 
         <article className="panel">
@@ -412,21 +1145,297 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
             <button
               className="btn btn-secondary"
               onClick={() => void runAction("pull_image", "Image Pull", imageTarget)}
+              disabled={runtimeBusy}
             >
               Pull
             </button>
             <button
               className="btn btn-danger"
               onClick={() => void runAction("remove_image", "Image Remove", imageTarget)}
+              disabled={runtimeBusy}
             >
               Remove
             </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")}>
+            <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>
               Prune
             </button>
           </div>
+          <div className="registry-auth">
+            <h3>Registry authentication</h3>
+            <input
+              value={registryTarget}
+              onChange={(event) => {
+                setRegistryTarget(event.target.value);
+                setRegistryStatus(null);
+              }}
+              placeholder="registry.example.com"
+              aria-label="Registry server"
+            />
+            <input
+              value={registryUsername}
+              onChange={(event) => setRegistryUsername(event.target.value)}
+              placeholder="username"
+              aria-label="Registry username"
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              value={registryPassword}
+              onChange={(event) => setRegistryPassword(event.target.value)}
+              placeholder="password or token"
+              aria-label="Registry password or token"
+              autoComplete="current-password"
+            />
+            <p className={`registry-status ${registryStatus?.logged_in ? "status-running" : ""}`}>
+              {registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}
+            </p>
+            <div className="panel-actions">
+              <button
+                className="btn btn-primary"
+                onClick={() => void loginRegistry()}
+                disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}
+              >
+                {registryLoading ? "Working..." : "Login"}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => void logoutRegistry()}
+                disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}
+              >
+                Logout
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => void refreshRegistryAuth()}
+                disabled={runtimeBusy || registryLoading || !registryTarget.trim()}
+              >
+                Check Status
+              </button>
+            </div>
+          </div>
           <pre>{snapshot?.images.stdout || EMPTY}</pre>
           {snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Build Image</h2>
+          <p className="muted">Choose a directory containing a Dockerfile and watch each build frame as it arrives.</p>
+          <div className="field-row build-fields">
+            <input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" aria-label="Build context directory" />
+            <button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose Directory</button>
+            <input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" aria-label="Build image tag" />
+            <button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build</button>
+          </div>
+          {buildSteps.length ? (
+            <ol className="build-steps">
+              {buildSteps.map((step, index) => (
+                <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}>
+                  <span>{step.stream}</span><code>{buildStepText(step.text)}</code>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="muted">Build progress will appear here.</p>}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Volumes</h2>
+          <div className="field-row">
+            <input
+              value={volumeName}
+              onChange={(event) => setVolumeName(event.target.value)}
+              placeholder="named volume"
+            />
+          </div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => void runVolumeAction("create", "Volume Create", volumeName)}
+              disabled={runtimeBusy || volumesLoading || !volumeName.trim()}
+            >
+              Create
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void refreshVolumes()}
+              disabled={runtimeBusy || volumesLoading}
+            >
+              {volumesLoading ? "Refreshing..." : "Refresh Volumes"}
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={() => void runVolumeAction("prune", "Volume Prune")}
+              disabled={runtimeBusy || volumesLoading}
+            >
+              Prune Unused
+            </button>
+          </div>
+          {volumes.length === 0 ? <p className="muted">No named volumes.</p> : (
+            <div className="resource-list">
+              {volumes.map((volume) => (
+                <div className="resource-row" key={volume.name}>
+                  <div>
+                    <strong>{volume.name}</strong>
+                    <p className="muted">{volume.driver} · {volume.mountpoint}</p>
+                    {volume.mounts.length === 0 ? (
+                      <p className="muted">Unused</p>
+                    ) : (
+                      <ul className="mount-list">
+                        {volume.mounts.map((mount) => (
+                          <li key={`${mount.container_id}:${mount.destination}`}>
+                            {formatVolumeMount(mount)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)}
+                    disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}
+                    title={volumeIsInUse(volume) ? "Detach this volume from all containers before removing it" : "Remove volume"}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Networks</h2>
+          <p className="muted">Create bridge networks and review each attached container, address, and published port.</p>
+          <div className="field-row network-fields">
+            <input
+              value={networkName}
+              onChange={(event) => setNetworkName(event.target.value)}
+              placeholder="network name"
+              aria-label="Network name"
+            />
+            <input
+              value={networkSubnet}
+              onChange={(event) => setNetworkSubnet(event.target.value)}
+              placeholder="subnet (optional, e.g. 172.30.0.0/16)"
+              aria-label="Network subnet"
+            />
+          </div>
+          <div className="panel-actions">
+            <button
+              className="btn btn-primary"
+              onClick={() => void runNetworkAction("create", "Network Create", networkName)}
+              disabled={runtimeBusy || networksLoading || !networkName.trim()}
+            >
+              Create Bridge
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void refreshNetworks()}
+              disabled={runtimeBusy || networksLoading}
+            >
+              {networksLoading ? "Refreshing..." : "Refresh Networks"}
+            </button>
+          </div>
+          {networks.length === 0 ? <p className="muted">No networks.</p> : (
+            <div className="resource-list">
+              {networks.map((network) => (
+                <div className="resource-row" key={network.name}>
+                  <div>
+                    <strong>{network.name}</strong>
+                    <p className="muted">
+                      {network.driver} · {network.subnets.length ? network.subnets.join(", ") : "daemon-managed subnet"}
+                    </p>
+                    {network.containers.length === 0 ? (
+                      <p className="muted">No attached containers</p>
+                    ) : (
+                      <ul className="mount-list">
+                        {network.containers.map((attachment) => (
+                          <li key={`${network.name}:${attachment.container_id}`}>
+                            {formatNetworkAttachment(attachment)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => void runNetworkAction("remove", "Network Remove", network.name)}
+                    disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}
+                    title={!networkIsRemovable(network)
+                      ? "The built-in bridge network cannot be removed"
+                      : network.containers.length > 0
+                        ? "Detach all containers before removing this network"
+                        : "Remove network"}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </article>
+
+        <article className="panel panel-wide">
+          <h2>Compose</h2>
+          <p className="muted">Choose a Compose YAML file, validate it, and manage the project services.</p>
+          <div className="field-row compose-file-row">
+            <input
+              value={composeFile}
+              onChange={(event) => {
+                setComposeFile(event.target.value);
+                setComposeSnapshot(null);
+              }}
+              placeholder="compose.yml"
+              aria-label="Compose file path"
+            />
+            <button className="btn btn-secondary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>
+              Choose File
+            </button>
+          </div>
+          <div className="panel-actions">
+            <button className="btn btn-secondary" onClick={() => void validateCompose()} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              {composeLoading ? "Validating..." : "Validate Config"}
+            </button>
+            <button className="btn btn-primary" onClick={() => void runComposeAction("up", "Compose Up")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Up
+            </button>
+            <button className="btn btn-secondary" onClick={() => void runComposeAction("start", "Compose Start")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Start
+            </button>
+            <button className="btn btn-secondary" onClick={() => void runComposeAction("stop", "Compose Stop")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Stop
+            </button>
+            <button className="btn btn-danger" onClick={() => void runComposeAction("down", "Compose Down")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
+              Down
+            </button>
+          </div>
+          {composeSnapshot?.services.length ? (
+            <div className="resource-list compose-services">
+              {composeSnapshot.services.map((service) => (
+                <div className="resource-row" key={service.name}>
+                  <div>
+                    <strong>{service.name}</strong>
+                    <p className={`service-status ${composeStatusClass(service.status)}`}>
+                      {service.status.replaceAll("_", " ")}
+                    </p>
+                    {service.container_id ? <p className="muted">{service.container_id}</p> : null}
+                  </div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void showComposeLogs(service)}
+                    disabled={runtimeBusy || service.status === "not_created"}
+                  >
+                    Follow Logs
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Validate a Compose file to load its services.</p>
+          )}
+          <details className="compose-config" open={false}>
+            <summary>Validated configuration</summary>
+            <pre>{composeSnapshot?.config || EMPTY}</pre>
+          </details>
         </article>
 
         <article className="panel">
@@ -435,6 +1444,117 @@ entitlement_message=${authState?.entitlement?.message ?? "-"}`}
           {lastAction?.stderr ? <p className="muted">{lastAction.stderr}</p> : null}
         </article>
       </section>
+
+      {containerDetail ? (
+        <aside className="detail-drawer" role="dialog" aria-modal="false" aria-labelledby="container-detail-title">
+          <div className="drawer-header">
+            <div>
+              <p className="eyebrow">Container details</p>
+              <h2 id="container-detail-title">{containerDetail.name || containerDetail.id}</h2>
+            </div>
+            <button className="btn btn-secondary" onClick={() => setContainerDetail(null)} aria-label="Close container details">
+              Close
+            </button>
+          </div>
+
+          <dl className="detail-grid">
+            <div><dt>Status</dt><dd>{containerDetail.status}</dd></div>
+            <div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
+            <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div>
+            <div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
+            <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
+            <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
+          </dl>
+
+          <section className="drawer-section">
+            <div className="drawer-section-header">
+              <h3>Environment</h3>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowEnvironment((visible) => !visible)}
+                aria-pressed={showEnvironment}
+              >
+                {showEnvironment ? "Mask values" : "Reveal values"}
+              </button>
+            </div>
+            <pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre>
+          </section>
+
+          <section className="drawer-section">
+            <h3>Mounts</h3>
+            {containerDetail.mounts.length ? (
+              <ul className="mount-list">
+                {containerDetail.mounts.map((mount, index) => (
+                  <li key={`${mount.destination}:${index}`}>
+                    {mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="muted">No mounts.</p>}
+          </section>
+
+          <section className="drawer-section">
+            <h3>Health history</h3>
+            {containerDetail.health ? (
+              <>
+                <p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>
+                {containerDetail.health.log.length ? (
+                  <ol className="health-list">
+                    {containerDetail.health.log.map((entry, index) => (
+                      <li key={`${entry.start}:${index}`}>
+                        <strong>Exit {entry.exit_code}</strong>
+                        <span>{entry.start} → {entry.end}</span>
+                        <code>{entry.output || "No output"}</code>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <p className="muted">No health checks recorded.</p>}
+              </>
+            ) : <p className="muted">No health check configured.</p>}
+          </section>
+
+          <section className="drawer-section">
+            <h3>Resource limits</h3>
+            <div className="editor-grid">
+              <label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label>
+              <label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label>
+              <label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label>
+            </div>
+            <button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>
+              Apply Limits
+            </button>
+          </section>
+        </aside>
+      ) : null}
+
+      {runDialogOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title">
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">New workload</p>
+                <h2 id="run-dialog-title">Run container</h2>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)} aria-label="Close run container dialog">
+                Cancel
+              </button>
+            </div>
+            <div className="editor-grid">
+              <label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label>
+              <label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
+              <label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label>
+              <label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label>
+              <label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label>
+              <label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>
+            </div>
+            <div className="panel-actions dialog-actions">
+              <button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>
+                Run Detached
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

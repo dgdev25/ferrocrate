@@ -10,6 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -48,8 +49,67 @@ enum Commands {
         wsl: bool,
         #[arg(long)]
         wsl_distro: Option<String>,
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+        /// Relay stdin and streamed output for an interactive container exec.
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
+    },
+    #[command(hide = true)]
+    TerminalProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[arg(long)]
+        container: String,
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        workdir: Option<String>,
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+    #[command(hide = true)]
+    TerminalResize {
+        #[arg(long)]
+        socket: Option<String>,
+        #[arg(long)]
+        exec_id: String,
+        #[arg(long)]
+        columns: u16,
+        #[arg(long)]
+        rows: u16,
+    },
+    #[command(hide = true)]
+    VolumeProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: VolumeProxyCommands,
+    },
+    #[command(hide = true)]
+    NetworkProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: NetworkProxyCommands,
+    },
+    #[command(hide = true)]
+    ContainerProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: ContainerProxyCommands,
+    },
+    #[command(hide = true)]
+    RegistryProxy {
+        #[arg(long)]
+        socket: Option<String>,
+        #[command(subcommand)]
+        command: RegistryProxyCommands,
     },
     Doctor {
         #[arg(long)]
@@ -78,6 +138,56 @@ enum Commands {
     Autostart {
         #[command(subcommand)]
         command: AutostartCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum VolumeProxyCommands {
+    List,
+    Create { name: String },
+    Remove { name: String },
+    Prune,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkProxyCommands {
+    List,
+    Inspect {
+        name: String,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        subnet: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContainerProxyCommands {
+    Inspect {
+        container: String,
+    },
+    Update {
+        container: String,
+        #[arg(long)]
+        memory: Option<u64>,
+        #[arg(long)]
+        cpu_quota: Option<u64>,
+        #[arg(long)]
+        cpu_period: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RegistryProxyCommands {
+    Login {
+        #[arg(long)]
+        registry: String,
+        #[arg(long)]
+        username: String,
     },
 }
 
@@ -216,6 +326,10 @@ struct ExecRequest {
     cmd: Vec<String>,
     use_wsl: bool,
     wsl_distro: Option<String>,
+    #[serde(default)]
+    follow: bool,
+    #[serde(default)]
+    interactive: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -223,6 +337,627 @@ struct ExecResponse {
     status: i32,
     stdout: String,
     stderr: String,
+}
+
+fn percent_encode_terminal_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn terminal_exec_create_path(container: &str) -> String {
+    format!(
+        "/containers/{}/exec",
+        percent_encode_terminal_path_component(container)
+    )
+}
+
+fn terminal_resize_path(exec_id: &str, columns: u16, rows: u16) -> String {
+    format!(
+        "/exec/{}/resize?w={columns}&h={rows}",
+        percent_encode_terminal_path_component(exec_id)
+    )
+}
+
+fn terminal_exec_create_payload(
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<Vec<u8>, DesktopError> {
+    Ok(serde_json::to_vec(&serde_json::json!({
+        "Cmd": cmd,
+        "AttachStdin": true,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Tty": true,
+        "Env": env,
+        "User": user,
+        "WorkingDir": workdir,
+    }))?)
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_http_request(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(u16, Vec<u8>), DesktopError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(body)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| DesktopError::Invalid("daemon returned malformed HTTP".to_string()))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| DesktopError::Invalid("daemon returned non-UTF-8 headers".to_string()))?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| DesktopError::Invalid("daemon returned invalid HTTP status".to_string()))?;
+    Ok((status, response[header_end + 4..].to_vec()))
+}
+
+fn terminal_daemon_error(status: u16, body: &[u8]) -> DesktopError {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string());
+    DesktopError::Invalid(format!("daemon returned HTTP {status}: {message}"))
+}
+
+#[cfg(target_os = "linux")]
+fn create_terminal_exec(
+    socket: &Path,
+    container: &str,
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<String, DesktopError> {
+    if container.trim().is_empty() {
+        return Err(DesktopError::Invalid(
+            "terminal container is required".to_string(),
+        ));
+    }
+    if cmd.is_empty() {
+        return Err(DesktopError::Invalid(
+            "terminal command is required".to_string(),
+        ));
+    }
+    let body = terminal_exec_create_payload(cmd, env, user, workdir)?;
+    let (status, response) =
+        terminal_http_request(socket, "POST", &terminal_exec_create_path(container), &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&response)?;
+    response
+        .get("Id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| DesktopError::Invalid("daemon exec create omitted Id".to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn read_terminal_http_headers(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<(u16, Vec<u8>), DesktopError> {
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+        if headers.len() > MAX_REQUEST_BYTES {
+            return Err(DesktopError::Invalid(
+                "daemon response headers are too large".to_string(),
+            ));
+        }
+    }
+    let text = std::str::from_utf8(&headers)
+        .map_err(|_| DesktopError::Invalid("daemon returned non-UTF-8 headers".to_string()))?;
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| DesktopError::Invalid("daemon returned invalid HTTP status".to_string()))?;
+    Ok((status, headers))
+}
+
+#[cfg(target_os = "linux")]
+fn open_terminal_exec(
+    socket: &Path,
+    exec_id: &str,
+) -> Result<std::os::unix::net::UnixStream, DesktopError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    let body = serde_json::to_vec(&serde_json::json!({"Detach": false, "Tty": true}))?;
+    let path = format!(
+        "/exec/{}/start",
+        percent_encode_terminal_path_component(exec_id)
+    );
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(&body)?;
+    let (status, _) = read_terminal_http_headers(&mut stream)?;
+    if status != 101 {
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response)?;
+        return Err(terminal_daemon_error(status, &response));
+    }
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+fn resize_terminal_exec(
+    socket: &Path,
+    exec_id: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<(), DesktopError> {
+    let (status, response) = terminal_http_request(
+        socket,
+        "POST",
+        &terminal_resize_path(exec_id, columns, rows),
+        &[],
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let mut candidates = Vec::new();
+    if let Some(path) = explicit {
+        candidates.push(PathBuf::from(path));
+    } else {
+        if let Some(path) = std::env::var_os("FERROCRATE_ROOTLESS_SOCKET") {
+            candidates.push(PathBuf::from(path));
+        }
+        if let Some(host) = std::env::var_os("DOCKER_HOST") {
+            if let Some(path) = host
+                .to_str()
+                .and_then(|value| value.strip_prefix("unix://"))
+            {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let runtime = PathBuf::from(runtime);
+            candidates.push(runtime.join("ferrocrate.sock"));
+            candidates.push(runtime.join("docker.sock"));
+        }
+        if let Some(runtime) = std::env::var_os("FERROCRATE_RUNTIME_DIR") {
+            let runtime = PathBuf::from(runtime);
+            candidates.push(runtime.join("ferrocrate.sock"));
+            candidates.push(runtime.join("docker.sock"));
+        }
+        candidates.push(PathBuf::from("/var/run/ferrocrate.sock"));
+        candidates.push(PathBuf::from("/var/run/docker.sock"));
+    }
+
+    let mut rejected = Vec::new();
+    for path in candidates {
+        if !path.is_absolute() {
+            rejected.push(format!("{} (not absolute)", path.display()));
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_socket() => return Ok(path),
+            Ok(_) => rejected.push(format!("{} (not a Unix socket)", path.display())),
+            Err(_) => rejected.push(format!("{} (missing)", path.display())),
+        }
+    }
+    Err(DesktopError::Invalid(format!(
+        "daemon socket not found; probed {}",
+        rejected.join(", ")
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn run_terminal_proxy(
+    socket: Option<&str>,
+    container: &str,
+    cmd: &[String],
+    env: &[String],
+    user: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let exec_id = create_terminal_exec(&socket, container, cmd, env, user, workdir)?;
+    let mut stream = open_terminal_exec(&socket, &exec_id)?;
+    eprintln!("FERROCRATE_EXEC_ID={exec_id}");
+    std::io::stderr().flush()?;
+
+    let mut input_stream = stream.try_clone()?;
+    thread::spawn(move || {
+        let mut input = std::io::stdin().lock();
+        let _ = std::io::copy(&mut input, &mut input_stream);
+        let _ = input_stream.shutdown(std::net::Shutdown::Write);
+    });
+    let mut output = std::io::stdout().lock();
+    std::io::copy(&mut stream, &mut output)?;
+    output.flush()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_terminal_proxy(
+    _socket: Option<&str>,
+    _container: &str,
+    _cmd: &[String],
+    _env: &[String],
+    _user: Option<&str>,
+    _workdir: Option<&str>,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "terminal daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_terminal_resize(
+    socket: Option<&str>,
+    exec_id: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<(), DesktopError> {
+    if columns == 0 || rows == 0 {
+        return Err(DesktopError::Invalid(
+            "terminal dimensions must be non-zero".to_string(),
+        ));
+    }
+    let socket = select_terminal_socket(socket)?;
+    resize_terminal_exec(&socket, exec_id, columns, rows)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_terminal_resize(
+    _socket: Option<&str>,
+    _exec_id: &str,
+    _columns: u16,
+    _rows: u16,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "terminal daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+fn volume_proxy_request(
+    command: &VolumeProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        VolumeProxyCommands::List => Ok(("GET", "/volumes".to_string(), Vec::new())),
+        VolumeProxyCommands::Create { name } => {
+            if name.trim().is_empty() {
+                return Err(DesktopError::Invalid("volume name is required".to_string()));
+            }
+            let body = serde_json::to_vec(&serde_json::json!({
+                "Name": name,
+                "Driver": "local",
+            }))?;
+            Ok(("POST", "/volumes/create".to_string(), body))
+        }
+        VolumeProxyCommands::Remove { name } => {
+            if name.trim().is_empty() {
+                return Err(DesktopError::Invalid("volume name is required".to_string()));
+            }
+            Ok((
+                "DELETE",
+                format!("/volumes/{}", percent_encode_terminal_path_component(name)),
+                Vec::new(),
+            ))
+        }
+        VolumeProxyCommands::Prune => Ok(("POST", "/volumes/prune".to_string(), Vec::new())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_volume_proxy(
+    socket: Option<&str>,
+    command: VolumeProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = volume_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+fn required_network_name(name: &str) -> Result<&str, DesktopError> {
+    if name.trim().is_empty() {
+        Err(DesktopError::Invalid(
+            "network name is required".to_string(),
+        ))
+    } else {
+        Ok(name.trim())
+    }
+}
+
+fn network_proxy_request(
+    command: &NetworkProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        NetworkProxyCommands::List => Ok(("GET", "/networks".to_string(), Vec::new())),
+        NetworkProxyCommands::Inspect { name } => Ok((
+            "GET",
+            format!(
+                "/networks/{}",
+                percent_encode_terminal_path_component(required_network_name(name)?)
+            ),
+            Vec::new(),
+        )),
+        NetworkProxyCommands::Create { name, subnet } => {
+            let name = required_network_name(name)?;
+            let mut payload = serde_json::json!({"Name": name, "Driver": "bridge"});
+            if let Some(subnet) = subnet
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                payload["IPAM"] = serde_json::json!({"Config": [{"Subnet": subnet}]});
+            }
+            Ok((
+                "POST",
+                "/networks/create".to_string(),
+                serde_json::to_vec(&payload)?,
+            ))
+        }
+        NetworkProxyCommands::Remove { name } => Ok((
+            "DELETE",
+            format!(
+                "/networks/{}",
+                percent_encode_terminal_path_component(required_network_name(name)?)
+            ),
+            Vec::new(),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_network_proxy(
+    socket: Option<&str>,
+    command: NetworkProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = network_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.is_empty() && !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+fn container_proxy_request(
+    command: &ContainerProxyCommands,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    match command {
+        ContainerProxyCommands::Inspect { container } => {
+            let container = required_network_name(container)
+                .map_err(|_| DesktopError::Invalid("container is required".to_string()))?;
+            Ok((
+                "GET",
+                format!(
+                    "/containers/{}/json",
+                    percent_encode_terminal_path_component(container)
+                ),
+                Vec::new(),
+            ))
+        }
+        ContainerProxyCommands::Update {
+            container,
+            memory,
+            cpu_quota,
+            cpu_period,
+        } => {
+            let container = required_network_name(container)
+                .map_err(|_| DesktopError::Invalid("container is required".to_string()))?;
+            if memory.is_none() && cpu_quota.is_none() && cpu_period.is_none() {
+                return Err(DesktopError::Invalid(
+                    "at least one resource limit is required".to_string(),
+                ));
+            }
+            let mut payload = serde_json::Map::new();
+            if let Some(value) = memory {
+                payload.insert("Memory".to_string(), serde_json::json!(value));
+            }
+            if let Some(value) = cpu_quota {
+                payload.insert("CpuQuota".to_string(), serde_json::json!(value));
+            }
+            if let Some(value) = cpu_period {
+                payload.insert("CpuPeriod".to_string(), serde_json::json!(value));
+            }
+            Ok((
+                "POST",
+                format!(
+                    "/containers/{}/update",
+                    percent_encode_terminal_path_component(container)
+                ),
+                serde_json::to_vec(&payload)?,
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_container_proxy(
+    socket: Option<&str>,
+    command: ContainerProxyCommands,
+) -> Result<(), DesktopError> {
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = container_proxy_request(&command)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.is_empty() && !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+fn registry_login_request(
+    registry: &str,
+    username: &str,
+    password: &str,
+) -> Result<(&'static str, String, Vec<u8>), DesktopError> {
+    let registry = registry.trim();
+    let username = username.trim();
+    if registry.is_empty() {
+        return Err(DesktopError::Invalid("registry is required".to_string()));
+    }
+    if username.is_empty() || password.is_empty() {
+        return Err(DesktopError::Invalid(
+            "registry username and password are required".to_string(),
+        ));
+    }
+    Ok((
+        "POST",
+        "/auth".to_string(),
+        serde_json::to_vec(&serde_json::json!({
+            "serveraddress": registry,
+            "username": username,
+            "password": password,
+        }))?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_registry_proxy(
+    socket: Option<&str>,
+    command: RegistryProxyCommands,
+) -> Result<(), DesktopError> {
+    let RegistryProxyCommands::Login { registry, username } = command;
+    let mut password = String::new();
+    std::io::stdin()
+        .take((MAX_REQUEST_BYTES + 1) as u64)
+        .read_to_string(&mut password)?;
+    if password.len() > MAX_REQUEST_BYTES {
+        return Err(DesktopError::Invalid(
+            "registry password input is too large".to_string(),
+        ));
+    }
+    let password = password.trim_end_matches(['\r', '\n']);
+    let socket = select_terminal_socket(socket)?;
+    let (method, path, body) = registry_login_request(&registry, &username, password)?;
+    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
+    if !(200..300).contains(&status) {
+        return Err(terminal_daemon_error(status, &response));
+    }
+    std::io::stdout().write_all(&response)?;
+    if !response.ends_with(b"\n") {
+        println!();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_registry_proxy(
+    _socket: Option<&str>,
+    _command: RegistryProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "registry daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_container_proxy(
+    _socket: Option<&str>,
+    _command: ContainerProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "container daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_network_proxy(
+    _socket: Option<&str>,
+    _command: NetworkProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "network daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_volume_proxy(
+    _socket: Option<&str>,
+    _command: VolumeProxyCommands,
+) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "volume daemon proxy is supported only on Linux".to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FollowChannel {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FollowFrame {
+    Data {
+        channel: FollowChannel,
+        data: Vec<u8>,
+    },
+    Terminal {
+        status: i32,
+    },
+}
+
+impl FollowFrame {
+    fn data(channel: FollowChannel, data: &[u8]) -> Self {
+        Self::Data {
+            channel,
+            data: data.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -485,8 +1220,47 @@ fn main() {
             pipe_name,
             wsl,
             wsl_distro,
+            follow,
+            interactive,
             cmd,
-        } => run_client_exec(&addr, pipe_name.as_deref(), cmd, wsl, wsl_distro),
+        } => run_client_exec(
+            &addr,
+            pipe_name.as_deref(),
+            cmd,
+            wsl,
+            wsl_distro,
+            follow,
+            interactive,
+        ),
+        Commands::TerminalProxy {
+            socket,
+            container,
+            env,
+            user,
+            workdir,
+            cmd,
+        } => run_terminal_proxy(
+            socket.as_deref(),
+            &container,
+            &cmd,
+            &env,
+            user.as_deref(),
+            workdir.as_deref(),
+        ),
+        Commands::TerminalResize {
+            socket,
+            exec_id,
+            columns,
+            rows,
+        } => run_terminal_resize(socket.as_deref(), &exec_id, columns, rows),
+        Commands::VolumeProxy { socket, command } => run_volume_proxy(socket.as_deref(), command),
+        Commands::NetworkProxy { socket, command } => run_network_proxy(socket.as_deref(), command),
+        Commands::ContainerProxy { socket, command } => {
+            run_container_proxy(socket.as_deref(), command)
+        }
+        Commands::RegistryProxy { socket, command } => {
+            run_registry_proxy(socket.as_deref(), command)
+        }
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
@@ -511,6 +1285,12 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
         command,
         Commands::Daemon { .. }
             | Commands::Exec { .. }
+            | Commands::TerminalProxy { .. }
+            | Commands::TerminalResize { .. }
+            | Commands::VolumeProxy { .. }
+            | Commands::NetworkProxy { .. }
+            | Commands::ContainerProxy { .. }
+            | Commands::RegistryProxy { .. }
             | Commands::Forward { .. }
             | Commands::Vm { .. }
             | Commands::Autostart { .. }
@@ -558,9 +1338,264 @@ fn handle_client(
     default_wsl_distro: Option<&str>,
 ) -> Result<(), DesktopError> {
     let request = read_exec_request(stream)?;
+    if request.interactive {
+        return proxy_interactive_request(stream, request, default_wsl_distro);
+    }
+    if request.follow {
+        return proxy_follow_request(stream, request, default_wsl_distro);
+    }
     let response = process_exec_request(request, default_wsl_distro)?;
     let payload = serde_json::to_string(&response)? + "\n";
     stream.write_all(payload.as_bytes())?;
+    Ok(())
+}
+
+fn write_follow_frame<W: Write>(writer: &mut W, frame: &FollowFrame) -> Result<(), DesktopError> {
+    serde_json::to_writer(&mut *writer, frame)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn replay_follow_frames<R: BufRead, O: Write, E: Write>(
+    mut reader: R,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<(), DesktopError> {
+    let mut raw = String::new();
+    loop {
+        raw.clear();
+        if reader.read_line(&mut raw)? == 0 {
+            return Err(DesktopError::Invalid(
+                "follow stream ended without terminal status".to_string(),
+            ));
+        }
+        let frame: FollowFrame = serde_json::from_str(raw.trim_end())?;
+        match frame {
+            FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data,
+            } => {
+                stdout.write_all(&data)?;
+                stdout.flush()?;
+            }
+            FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data,
+            } => {
+                stderr.write_all(&data)?;
+                stderr.flush()?;
+            }
+            FollowFrame::Terminal { status } if status == 0 => return Ok(()),
+            FollowFrame::Terminal { status } => {
+                return Err(DesktopError::Invalid(format!(
+                    "remote command exited with status {status}"
+                )));
+            }
+        }
+    }
+}
+
+fn send_follow_frame(
+    stream: &Arc<Mutex<TcpStream>>,
+    frame: &FollowFrame,
+) -> Result<(), DesktopError> {
+    let mut stream = stream
+        .lock()
+        .map_err(|_| DesktopError::Invalid("follow stream is unavailable".to_string()))?;
+    write_follow_frame(&mut *stream, frame)
+}
+
+fn forward_follow_output<R: Read>(
+    mut reader: R,
+    channel: FollowChannel,
+    stream: Arc<Mutex<TcpStream>>,
+    child: Arc<Mutex<std::process::Child>>,
+) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+        let frame = FollowFrame::Data {
+            channel: channel.clone(),
+            data: buffer[..bytes].to_vec(),
+        };
+        if send_follow_frame(&stream, &frame).is_err() {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
+            return;
+        }
+    }
+}
+
+fn copy_interactive_input<R: Read, W: Write>(mut reader: R, mut writer: W) -> std::io::Result<()> {
+    std::io::copy(&mut reader, &mut writer)?;
+    writer.flush()
+}
+
+fn proxy_interactive_request(
+    stream: &mut TcpStream,
+    mut request: ExecRequest,
+    default_wsl_distro: Option<&str>,
+) -> Result<(), DesktopError> {
+    if !is_interactive_exec_command(&request.cmd) {
+        write_follow_frame(
+            stream,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: b"interactive requests must invoke ferrocrate exec with stdin and TTY\n"
+                    .to_vec(),
+            },
+        )?;
+        write_follow_frame(stream, &FollowFrame::Terminal { status: 2 })?;
+        return Ok(());
+    }
+    if request.wsl_distro.is_none() {
+        request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
+    }
+
+    let mut child = match run_follow_request(&request) {
+        Ok(child) => child,
+        Err(err) => {
+            write_follow_frame(
+                stream,
+                &FollowFrame::Data {
+                    channel: FollowChannel::Stderr,
+                    data: format!("{err}\n").into_bytes(),
+                },
+            )?;
+            write_follow_frame(stream, &FollowFrame::Terminal { status: 1 })?;
+            return Ok(());
+        }
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stdin missing".to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stdout missing".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("interactive command stderr missing".to_string()))?;
+    let child = Arc::new(Mutex::new(child));
+    let output_stream = Arc::new(Mutex::new(stream.try_clone()?));
+
+    let input_stream = stream.try_clone()?;
+    thread::spawn(move || copy_interactive_input(input_stream, stdin));
+    let stdout_stream = Arc::clone(&output_stream);
+    let stdout_child = Arc::clone(&child);
+    let stdout_worker = thread::spawn(move || {
+        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
+    });
+    let stderr_stream = Arc::clone(&output_stream);
+    let stderr_child = Arc::clone(&child);
+    let stderr_worker = thread::spawn(move || {
+        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
+    });
+
+    let status = loop {
+        let status = child
+            .lock()
+            .map_err(|_| {
+                DesktopError::Invalid("interactive command state is unavailable".to_string())
+            })?
+            .try_wait()?;
+        if let Some(status) = status {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let _ = stdout_worker.join();
+    let _ = stderr_worker.join();
+    let _ = send_follow_frame(
+        &output_stream,
+        &FollowFrame::Terminal {
+            status: status.code().unwrap_or(-1),
+        },
+    );
+    Ok(())
+}
+
+fn proxy_follow_request(
+    stream: &mut TcpStream,
+    mut request: ExecRequest,
+    default_wsl_distro: Option<&str>,
+) -> Result<(), DesktopError> {
+    if !is_log_follow_command(&request.cmd) {
+        write_follow_frame(
+            stream,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: b"follow requests must invoke ferrocrate logs --follow\n".to_vec(),
+            },
+        )?;
+        write_follow_frame(stream, &FollowFrame::Terminal { status: 2 })?;
+        return Ok(());
+    }
+    if request.wsl_distro.is_none() {
+        request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
+    }
+
+    let mut child = match run_follow_request(&request) {
+        Ok(child) => child,
+        Err(err) => {
+            write_follow_frame(
+                stream,
+                &FollowFrame::Data {
+                    channel: FollowChannel::Stderr,
+                    data: format!("{err}\n").into_bytes(),
+                },
+            )?;
+            write_follow_frame(stream, &FollowFrame::Terminal { status: 1 })?;
+            return Ok(());
+        }
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("follow command stdout missing".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| DesktopError::Invalid("follow command stderr missing".to_string()))?;
+    let child = Arc::new(Mutex::new(child));
+    let stream = Arc::new(Mutex::new(stream.try_clone()?));
+    let stdout_stream = Arc::clone(&stream);
+    let stdout_child = Arc::clone(&child);
+    let stdout_worker = thread::spawn(move || {
+        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
+    });
+    let stderr_stream = Arc::clone(&stream);
+    let stderr_child = Arc::clone(&child);
+    let stderr_worker = thread::spawn(move || {
+        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
+    });
+
+    let status = loop {
+        let status = child
+            .lock()
+            .map_err(|_| DesktopError::Invalid("follow command state is unavailable".to_string()))?
+            .try_wait()?;
+        if let Some(status) = status {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let _ = stdout_worker.join();
+    let _ = stderr_worker.join();
+    let _ = send_follow_frame(
+        &stream,
+        &FollowFrame::Terminal {
+            status: status.code().unwrap_or(-1),
+        },
+    );
     Ok(())
 }
 
@@ -585,18 +1620,18 @@ fn process_exec_request(
 
 fn read_exec_request<R: Read>(stream: &mut R) -> Result<ExecRequest, DesktopError> {
     let mut buf = Vec::new();
-    {
-        let mut reader = BufReader::new(&mut *stream);
-        let bytes = reader.read_until(b'\n', &mut buf)?;
-        if bytes == 0 {
-            return Err(DesktopError::Invalid("empty request".to_string()));
+    let mut byte = [0_u8; 1];
+    while buf.len() <= MAX_REQUEST_BYTES {
+        if stream.read(&mut byte)? == 0 {
+            break;
         }
+        if byte[0] == b'\n' {
+            break;
+        }
+        buf.push(byte[0]);
     }
     if buf.len() > MAX_REQUEST_BYTES {
         return Err(DesktopError::Invalid("request too large".to_string()));
-    }
-    if matches!(buf.last(), Some(b'\n')) {
-        buf.pop();
     }
     if buf.is_empty() {
         return Err(DesktopError::Invalid("empty request".to_string()));
@@ -611,21 +1646,51 @@ fn run_client_exec(
     cmd: Vec<String>,
     wsl: bool,
     wsl_distro: Option<String>,
+    follow: bool,
+    interactive: bool,
 ) -> Result<(), DesktopError> {
     if cmd.is_empty() {
         return Err(DesktopError::Invalid("command is required".to_string()));
+    }
+    if follow && interactive {
+        return Err(DesktopError::Invalid(
+            "--follow and --interactive are mutually exclusive".to_string(),
+        ));
     }
     let request = ExecRequest {
         cmd,
         use_wsl: wsl,
         wsl_distro,
+        follow,
+        interactive,
     };
     if let Some(pipe_name) = pipe_name {
+        if follow || interactive {
+            return Err(DesktopError::Invalid(
+                "streamed execution is unsupported with --pipe-name".to_string(),
+            ));
+        }
         return run_client_exec_pipe(pipe_name, request);
     }
     let mut stream = TcpStream::connect(addr)?;
     let payload = serde_json::to_string(&request)? + "\n";
     stream.write_all(payload.as_bytes())?;
+
+    if interactive {
+        let input_stream = stream.try_clone()?;
+        thread::spawn(move || {
+            let stdin = std::io::stdin();
+            let _ = copy_interactive_input(stdin.lock(), input_stream);
+        });
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        return replay_follow_frames(BufReader::new(stream), &mut stdout, &mut stderr);
+    }
+    if follow {
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        return replay_follow_frames(BufReader::new(stream), &mut stdout, &mut stderr);
+    }
 
     let mut response_raw = String::new();
     stream.read_to_string(&mut response_raw)?;
@@ -2061,6 +3126,30 @@ fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopErr
     Ok(command.output()?)
 }
 
+fn run_follow_request(request: &ExecRequest) -> Result<std::process::Child, DesktopError> {
+    if request.use_wsl {
+        return run_wsl_follow_command(request);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if should_route_to_macos_guest(&request.cmd, exec_mode_from_env()) {
+            return run_macos_guest_follow_command(request);
+        }
+    }
+    let (program, args) = request
+        .cmd
+        .split_first()
+        .ok_or_else(|| DesktopError::Invalid("command is required".to_string()))?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.env("FERROCRATE_DESKTOP_FORWARD", "0");
+    Ok(command.spawn()?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ExecMode {
@@ -2113,6 +3202,33 @@ fn command_targets_ferrocrate(cmd: &[String]) -> bool {
     )
 }
 
+fn is_log_follow_command(cmd: &[String]) -> bool {
+    command_targets_ferrocrate(cmd)
+        && cmd.get(1).is_some_and(|subcommand| subcommand == "logs")
+        && cmd[2..]
+            .iter()
+            .any(|argument| argument == "--follow" || argument == "-f")
+}
+
+fn is_interactive_exec_command(cmd: &[String]) -> bool {
+    if !command_targets_ferrocrate(cmd) || cmd.get(1).is_none_or(|subcommand| subcommand != "exec")
+    {
+        return false;
+    }
+    let arguments = &cmd[2..];
+    let interactive = arguments.iter().any(|argument| {
+        argument == "--interactive"
+            || argument == "-i"
+            || (argument.starts_with('-') && !argument.starts_with("--") && argument.contains('i'))
+    });
+    let tty = arguments.iter().any(|argument| {
+        argument == "--tty"
+            || argument == "-t"
+            || (argument.starts_with('-') && !argument.starts_with("--") && argument.contains('t'))
+    });
+    interactive && tty
+}
+
 #[cfg(target_os = "macos")]
 fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
     let state_path = default_vm_state_path();
@@ -2130,6 +3246,30 @@ fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output
     }
     let mut cmd = build_guest_ssh_command(request, &state)?;
     cmd.output().map_err(DesktopError::Io)
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_guest_follow_command(
+    request: &ExecRequest,
+) -> Result<std::process::Child, DesktopError> {
+    let state_path = default_vm_state_path();
+    let state = load_vm_state(&state_path).map_err(|err| {
+        DesktopError::Invalid(format!(
+            "cannot route to guest runtime: failed to load vm state {}: {err}",
+            state_path.display()
+        ))
+    })?;
+    if !vm_state_running(&state) {
+        return Err(DesktopError::Invalid(format!(
+            "cannot route to guest runtime: vm is not running (state={})",
+            state.status
+        )));
+    }
+    let mut cmd = build_guest_ssh_command(request, &state)?;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().map_err(DesktopError::Io)
 }
 
 #[allow(dead_code)]
@@ -2205,18 +3345,344 @@ fn run_wsl_command(request: &ExecRequest) -> Result<std::process::Output, Deskto
     }
 }
 
+fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, DesktopError> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("wsl.exe");
+        if let Some(distro) = request.wsl_distro.as_deref() {
+            cmd.args(["--distribution", distro]);
+        }
+        cmd.arg("--");
+        cmd.args(&request.cmd);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return Ok(cmd.spawn()?);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        Err(DesktopError::Invalid(
+            "WSL execution is only available on Windows hosts".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
-        command_requires_desktop_entitlement, command_targets_ferrocrate, exec_mode_from_env,
-        gather_phase0_check, load_channel_manifest, load_forward_entries, load_vm_state,
-        parse_exec_mode, render_macos_launch_agent_plist, render_windows_service_script,
-        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, Commands, ExecMode,
-        ExecRequest, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
+        copy_interactive_input, create_terminal_exec, exec_mode_from_env, gather_phase0_check,
+        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
+        load_forward_entries, load_vm_state, network_proxy_request, open_terminal_exec,
+        parse_exec_mode, read_exec_request, registry_login_request,
+        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
+        resize_terminal_exec, run_request, save_forward_entries, save_vm_state,
+        select_terminal_socket, should_route_to_macos_guest, terminal_exec_create_path,
+        terminal_exec_create_payload, terminal_resize_path, upsert_forward_entry,
+        validate_daemon_addr, vm_state_running, volume_proxy_request, write_follow_frame, Cli,
+        Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
+        VmCommands, VmConfig, VmState,
     };
+    use clap::Parser;
+    use std::io::{BufRead, BufReader, Cursor, Read, Write};
     use std::path::PathBuf;
+
+    #[cfg(target_os = "linux")]
+    fn read_test_http_request(stream: &mut std::os::unix::net::UnixStream) -> (String, Vec<u8>) {
+        let mut reader = BufReader::new(stream);
+        let mut headers = String::new();
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("request header");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                if key.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("content length");
+                }
+            }
+            headers.push_str(&line);
+        }
+        let mut body = vec![0_u8; content_length];
+        reader.read_exact(&mut body).expect("request body");
+        (headers, body)
+    }
+
+    #[test]
+    fn parses_typed_terminal_proxy_commands() {
+        assert!(Cli::try_parse_from([
+            "ferro-desktop",
+            "terminal-proxy",
+            "--socket",
+            "/tmp/ferrocrate.sock",
+            "--container",
+            "web",
+            "--env",
+            "TERM=xterm-256color",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/workspace",
+            "--",
+            "sh",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "ferro-desktop",
+            "terminal-resize",
+            "--socket",
+            "/tmp/ferrocrate.sock",
+            "--exec-id",
+            "exec-1",
+            "--columns",
+            "100",
+            "--rows",
+            "40",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn volume_proxy_builds_bounded_daemon_requests() {
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::List).expect("list request"),
+            ("GET", "/volumes".to_string(), Vec::new())
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Create {
+                name: "data/blue".to_string()
+            })
+            .expect("create request"),
+            (
+                "POST",
+                "/volumes/create".to_string(),
+                br#"{"Driver":"local","Name":"data/blue"}"#.to_vec()
+            )
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Remove {
+                name: "data/blue".to_string()
+            })
+            .expect("remove request"),
+            ("DELETE", "/volumes/data%2Fblue".to_string(), Vec::new())
+        );
+        assert_eq!(
+            volume_proxy_request(&super::VolumeProxyCommands::Prune).expect("prune request"),
+            ("POST", "/volumes/prune".to_string(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn network_proxy_builds_bounded_daemon_requests() {
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::List).expect("list request"),
+            ("GET", "/networks".to_string(), Vec::new())
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Inspect {
+                name: "team/net".to_string(),
+            })
+            .expect("inspect request"),
+            ("GET", "/networks/team%2Fnet".to_string(), Vec::new())
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Create {
+                name: "frontend".to_string(),
+                subnet: Some("172.30.0.0/16".to_string()),
+            })
+            .expect("create request"),
+            (
+                "POST",
+                "/networks/create".to_string(),
+                br#"{"Driver":"bridge","IPAM":{"Config":[{"Subnet":"172.30.0.0/16"}]},"Name":"frontend"}"#.to_vec(),
+            )
+        );
+        assert_eq!(
+            network_proxy_request(&super::NetworkProxyCommands::Remove {
+                name: "frontend".to_string(),
+            })
+            .expect("remove request"),
+            ("DELETE", "/networks/frontend".to_string(), Vec::new())
+        );
+        assert!(network_proxy_request(&super::NetworkProxyCommands::Create {
+            name: " ".to_string(),
+            subnet: None,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn container_proxy_builds_inspect_and_resource_update_requests() {
+        assert_eq!(
+            container_proxy_request(&super::ContainerProxyCommands::Inspect {
+                container: "web/api".to_string(),
+            })
+            .expect("inspect request"),
+            ("GET", "/containers/web%2Fapi/json".to_string(), Vec::new())
+        );
+        assert_eq!(
+            container_proxy_request(&super::ContainerProxyCommands::Update {
+                container: "web".to_string(),
+                memory: Some(134_217_728),
+                cpu_quota: Some(50_000),
+                cpu_period: Some(100_000),
+            })
+            .expect("update request"),
+            (
+                "POST",
+                "/containers/web/update".to_string(),
+                br#"{"CpuPeriod":100000,"CpuQuota":50000,"Memory":134217728}"#.to_vec(),
+            )
+        );
+        assert!(
+            container_proxy_request(&super::ContainerProxyCommands::Update {
+                container: " ".to_string(),
+                memory: None,
+                cpu_quota: None,
+                cpu_period: None,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_login_proxy_builds_daemon_auth_request_without_argv_password() {
+        assert_eq!(
+            registry_login_request("registry.example.com", "alice", "secret")
+                .expect("auth request"),
+            (
+                "POST",
+                "/auth".to_string(),
+                br#"{"password":"secret","serveraddress":"registry.example.com","username":"alice"}"#.to_vec(),
+            )
+        );
+        assert!(registry_login_request("registry.example.com", " ", "secret").is_err());
+        assert!(registry_login_request("registry.example.com", "alice", "").is_err());
+    }
+
+    #[test]
+    fn terminal_proxy_builds_typed_exec_create_payload() {
+        let payload = terminal_exec_create_payload(
+            &["sh".to_string()],
+            &["TERM=xterm-256color".to_string()],
+            Some("1000:1000"),
+            Some("/workspace"),
+        )
+        .expect("exec payload");
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload JSON");
+
+        assert_eq!(payload["Cmd"], serde_json::json!(["sh"]));
+        assert_eq!(payload["AttachStdin"], true);
+        assert_eq!(payload["AttachStdout"], true);
+        assert_eq!(payload["AttachStderr"], true);
+        assert_eq!(payload["Tty"], true);
+        assert_eq!(payload["Env"], serde_json::json!(["TERM=xterm-256color"]));
+        assert_eq!(payload["User"], "1000:1000");
+        assert_eq!(payload["WorkingDir"], "/workspace");
+    }
+
+    #[test]
+    fn terminal_proxy_percent_encodes_daemon_resource_paths() {
+        assert_eq!(
+            terminal_exec_create_path("web/name"),
+            "/containers/web%2Fname/exec"
+        );
+        assert_eq!(
+            terminal_resize_path("exec/id", 100, 40),
+            "/exec/exec%2Fid/resize?w=100&h=40"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_creates_exec_through_daemon_socket() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept create");
+            let (headers, body) = read_test_http_request(&mut stream);
+            assert!(headers.starts_with("POST /containers/web%2Fblue/exec HTTP/1.1\r\n"));
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("create JSON");
+            assert_eq!(payload["Cmd"], serde_json::json!(["sh"]));
+            assert_eq!(payload["Env"], serde_json::json!(["TERM=xterm-256color"]));
+            stream
+                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 15\r\n\r\n{\"Id\":\"exec-1\"}")
+                .expect("create response");
+        });
+
+        let exec_id = create_terminal_exec(
+            &socket,
+            "web/blue",
+            &["sh".to_string()],
+            &["TERM=xterm-256color".to_string()],
+            None,
+            None,
+        )
+        .expect("create terminal exec");
+
+        assert_eq!(exec_id, "exec-1");
+        server.join().expect("server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_opens_hijack_and_resizes_exec() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("ferrocrate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let server = std::thread::spawn(move || {
+            let (mut start, _) = listener.accept().expect("accept start");
+            let (headers, body) = read_test_http_request(&mut start);
+            assert!(headers.starts_with("POST /exec/exec%2F1/start HTTP/1.1\r\n"));
+            assert!(headers.contains("Connection: Upgrade\r\n"));
+            assert_eq!(body, br#"{"Detach":false,"Tty":true}"#);
+            start
+                .write_all(
+                    b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nready",
+                )
+                .expect("hijack response");
+
+            let (mut resize, _) = listener.accept().expect("accept resize");
+            let (headers, body) = read_test_http_request(&mut resize);
+            assert!(headers.starts_with("POST /exec/exec%2F1/resize?w=100&h=40 HTTP/1.1\r\n"));
+            assert!(body.is_empty());
+            resize
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .expect("resize response");
+        });
+
+        let mut hijack = open_terminal_exec(&socket, "exec/1").expect("open terminal exec");
+        let mut ready = [0_u8; 5];
+        hijack
+            .read_exact(&mut ready)
+            .expect("initial terminal output");
+        assert_eq!(&ready, b"ready");
+        resize_terminal_exec(&socket, "exec/1", 100, 40).expect("resize terminal exec");
+        server.join().expect("server");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_proxy_requires_an_actual_daemon_socket() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let regular = temp.path().join("regular");
+        std::fs::write(&regular, b"not a socket").expect("regular file");
+        let error = select_terminal_socket(Some(regular.to_str().expect("path")))
+            .expect_err("regular file must be rejected");
+        assert!(error.to_string().contains("not a Unix socket"));
+
+        let socket = temp.path().join("ferrocrate.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        assert_eq!(
+            select_terminal_socket(Some(socket.to_str().expect("path"))).expect("daemon socket"),
+            socket
+        );
+    }
 
     #[test]
     fn command_exists_treats_binary_name_as_literal_argv() {
@@ -2230,6 +3696,8 @@ mod tests {
             cmd: vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
+            interactive: false,
         };
         let out = run_request(&req).expect("run command");
         assert!(out.status.success());
@@ -2241,9 +3709,142 @@ mod tests {
             cmd: vec![],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
+            interactive: false,
         };
         let err = run_request(&req).expect_err("should fail");
         assert!(err.to_string().contains("command is required"));
+    }
+
+    #[test]
+    fn follow_proxy_only_accepts_ferrocrate_logs_with_follow_flag() {
+        assert!(is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "logs".to_string(),
+            "--follow".to_string(),
+            "web".to_string(),
+        ]));
+        assert!(!is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "logs".to_string(),
+            "web".to_string(),
+        ]));
+        assert!(!is_log_follow_command(&[
+            "ferrocrate".to_string(),
+            "ps".to_string(),
+            "--follow".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn interactive_proxy_only_accepts_ferrocrate_exec_with_stdin_and_tty() {
+        assert!(is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "-i".to_string(),
+            "-t".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "-it".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(!is_interactive_exec_command(&[
+            "ferrocrate".to_string(),
+            "exec".to_string(),
+            "web".to_string(),
+            "sh".to_string(),
+        ]));
+        assert!(!is_interactive_exec_command(&[
+            "sh".to_string(),
+            "-i".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn interactive_proxy_forwards_terminal_input_without_text_decoding() {
+        let input = Cursor::new(vec![b'e', b'c', b'h', b'o', b' ', 0xff, b'\n']);
+        let mut output = Vec::new();
+
+        copy_interactive_input(input, &mut output).expect("forward input");
+
+        assert_eq!(output, vec![b'e', b'c', b'h', b'o', b' ', 0xff, b'\n']);
+    }
+
+    #[test]
+    fn interactive_request_reader_preserves_input_sent_after_header() {
+        let mut wire = Cursor::new(
+            b"{\"cmd\":[\"ferrocrate\",\"exec\",\"-it\",\"web\",\"sh\"],\"use_wsl\":false,\"wsl_distro\":null,\"interactive\":true}\necho ready\n"
+                .to_vec(),
+        );
+
+        let request = read_exec_request(&mut wire).expect("request header");
+        let mut input = Vec::new();
+        wire.read_to_end(&mut input).expect("remaining input");
+
+        assert!(request.interactive);
+        assert_eq!(input, b"echo ready\n");
+    }
+
+    #[test]
+    fn framed_follow_replays_channels_and_fails_nonzero_terminal_status() {
+        let mut wire = Vec::new();
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data: b"ready\n".to_vec(),
+            },
+        )
+        .expect("stdout frame");
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stderr,
+                data: b"warning\n".to_vec(),
+            },
+        )
+        .expect("stderr frame");
+        write_follow_frame(&mut wire, &FollowFrame::Terminal { status: 17 })
+            .expect("terminal frame");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let err = replay_follow_frames(BufReader::new(Cursor::new(wire)), &mut stdout, &mut stderr)
+            .expect_err("nonzero terminal status must fail the client");
+
+        assert_eq!(stdout, b"ready\n");
+        assert_eq!(stderr, b"warning\n");
+        assert!(err.to_string().contains("status 17"));
+    }
+
+    #[test]
+    fn follow_frames_preserve_multibyte_utf8_split_across_reads() {
+        let mut wire = Vec::new();
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::data(FollowChannel::Stdout, b"cost: \xe2"),
+        )
+        .expect("first byte frame");
+        write_follow_frame(
+            &mut wire,
+            &FollowFrame::data(FollowChannel::Stdout, b"\x82\xac\n"),
+        )
+        .expect("second byte frame");
+        write_follow_frame(&mut wire, &FollowFrame::Terminal { status: 0 })
+            .expect("terminal frame");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        replay_follow_frames(BufReader::new(Cursor::new(wire)), &mut stdout, &mut stderr)
+            .expect("successful terminal status");
+
+        assert_eq!(stdout, b"cost: \xe2\x82\xac\n");
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -2388,6 +3989,8 @@ mod tests {
             cmd: vec!["ferrocrate".to_string(), "images".to_string()],
             use_wsl: false,
             wsl_distro: None,
+            follow: false,
+            interactive: false,
         };
         let cmd = super::build_guest_ssh_command(&req, &state).expect("ssh command");
         assert_eq!(cmd.get_program().to_string_lossy(), "ssh");

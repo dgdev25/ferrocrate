@@ -19,8 +19,107 @@ export type DesktopAction =
   | "start_container"
   | "stop_container"
   | "remove_container"
-  | "container_logs"
   | "image_prune";
+
+export type VolumeAction = "create" | "remove" | "prune";
+
+export type VolumeMountUsage = {
+  container_id: string;
+  container_name: string;
+  destination: string;
+  read_write: boolean;
+};
+
+export type VolumeSummary = {
+  name: string;
+  driver: string;
+  mountpoint: string;
+  created_at: string;
+  mounts: VolumeMountUsage[];
+};
+
+export type NetworkAction = "create" | "remove";
+
+export type NetworkContainerAttachment = {
+  container_id: string;
+  name: string;
+  ipv4_address: string;
+  ipv6_address: string;
+  ports: string[];
+};
+
+export type NetworkSummary = {
+  name: string;
+  driver: string;
+  subnets: string[];
+  containers: NetworkContainerAttachment[];
+};
+
+export type ContainerMountSummary = {
+  kind: string;
+  source: string;
+  destination: string;
+  access: "ro" | "rw";
+};
+
+export type ContainerHealthLogSummary = {
+  start: string;
+  end: string;
+  exit_code: number;
+  output: string;
+};
+
+export type ContainerHealthSummary = {
+  status: string;
+  failing_streak: number;
+  log: ContainerHealthLogSummary[];
+};
+
+export type ContainerDetailSummary = {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  command: string[];
+  environment: string[];
+  working_dir: string;
+  user: string;
+  mounts: ContainerMountSummary[];
+  health: ContainerHealthSummary | null;
+  resources: {
+    memory: number;
+    cpu_quota: number;
+    cpu_period: number;
+  };
+  restart_policy: {
+    name: string;
+    maximum_retry_count: number;
+  };
+};
+
+export type RegistryAuthStatus = {
+  registry: string;
+  logged_in: boolean;
+  username: string | null;
+};
+
+export type ComposeAction = "up" | "down" | "stop" | "start";
+
+export type ComposeServiceSummary = {
+  name: string;
+  status: string;
+  container_id: string | null;
+};
+
+export type ComposeSnapshot = {
+  config: string;
+  services: ComposeServiceSummary[];
+};
+
+export type BuildProgressFrame = {
+  stream: "stdout" | "stderr";
+  text: string;
+};
 
 export type PaidBackendConfig = {
   release_base_url: string;

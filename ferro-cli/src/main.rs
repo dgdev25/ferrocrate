@@ -368,7 +368,10 @@ pub enum Commands {
     },
     /// Remove a stored image by reference.
     Rmi {
-        image: String,
+        #[arg(short = 'f', long)]
+        force: bool,
+        #[arg(required = true)]
+        images: Vec<String>,
     },
     /// Remove dangling or time-filtered images.
     ImagePrune {
@@ -3378,7 +3381,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &container,
                 &repository,
             ),
-            Commands::Rmi { image } => handle_rmi(&image_store, &image, &surface_authorization),
+            Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image, &surface_authorization)
+            }),
             Commands::ImagePrune { filters } => {
                 handle_image_prune(&image_store, &surface_authorization, &filters)
             }
@@ -3664,7 +3669,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
 
         match command {
             Commands::Images { format, filters } => handle_images(&image_store, &format, &filters),
-            Commands::Rmi { image } => handle_rmi(&image_store, &image),
+            Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image)
+            }),
             Commands::ImagePrune { filters } => handle_image_prune(&image_store, &filters),
             Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
             Commands::Push { image } => handle_push(&image_store, &image),
@@ -5875,14 +5882,14 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             request("POST", remote_commit_path(container, repository)?)
                 .and_then(|body| print_json(body, "json"))
         })(),
-        Commands::Rmi { image } => (|| -> Result<(), String> {
+        Commands::Rmi { force, images } => handle_multiple_containers(images, "rmi", |image| {
             let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
             request(
                 "DELETE",
-                format!("/images/{}", percent_encode_path_component(&canonical)),
+                format!("/images/{}?force={force}", percent_encode_path_component(&canonical)),
             )
             .map(|_| ())
-        })(),
+        }),
         Commands::ImagePrune { filters } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_prune_filters(&parsed)?;
@@ -9047,7 +9054,6 @@ fn handle_stop(runtime: &ContainerRuntime, container: &str, timeout: u64) -> Res
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn handle_multiple_containers(
     containers: &[String],
     action: &str,
@@ -19054,7 +19060,10 @@ volumes:
     fn parses_rmi_command() {
         let cli = Cli::parse_from(["ferrocrate", "rmi", "alpine:latest"]);
         match cli.command {
-            Commands::Rmi { image } => assert_eq!(image, "alpine:latest"),
+            Commands::Rmi { force, images } => {
+                assert!(!force);
+                assert_eq!(images, vec!["alpine:latest"]);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -20003,6 +20012,18 @@ volumes:
                 assert!(force);
                 assert!(volumes);
                 assert_eq!(containers, vec!["first", "second"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rmi_force_and_multiple_images() {
+        let cli = Cli::parse_from(["ferrocrate", "rmi", "-f", "first:latest", "second:latest"]);
+        match cli.command {
+            Commands::Rmi { force, images } => {
+                assert!(force);
+                assert_eq!(images, vec!["first:latest", "second:latest"]);
             }
             other => panic!("unexpected command: {other:?}"),
         }

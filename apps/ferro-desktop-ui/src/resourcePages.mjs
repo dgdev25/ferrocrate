@@ -188,12 +188,12 @@ export function failurePresentation(error, messages = {}) {
   return { kind: "generic", message: messages.generic || "Something went wrong", detail };
 }
 
-export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing, onDoctor }) {
+export function ActionErrorNotice({ error, humanMessage, technicalDetail, onDismiss, onStart, onReviewLicensing, onDoctor }) {
   if (!error) return null;
   const failure = failurePresentation(error);
   return createElement("section", { className: `action-error action-error-${failure.kind}`, role: failure.kind === "license" ? "status" : "alert" },
     createElement("div", { className: "action-error-heading" },
-      createElement("strong", null, failure.message),
+      createElement("strong", null, humanMessage || failure.message),
       onDismiss ? createElement("button", { className: "error-dismiss", onClick: onDismiss, "aria-label": "Dismiss error" }, createElement(Icon, { name: "close", size: 16 })) : null,
     ),
     failure.kind === "daemon" && onStart
@@ -207,7 +207,7 @@ export function ActionErrorNotice({ error, onDismiss, onStart, onReviewLicensing
       : null,
     createElement("details", null,
       createElement("summary", null, "Technical details"),
-      createElement("pre", null, failure.detail),
+      createElement("pre", null, technicalDetail || failure.detail),
     ),
   );
 }

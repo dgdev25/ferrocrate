@@ -187,6 +187,16 @@ test("action failures keep technical output behind a disclosure", () => {
   assert.doesNotMatch(markup, /<strong>Runtime error<\/strong>/);
 });
 
+test("action failures can show a clean message while retaining raw proxy details", () => {
+  const markup = renderToStaticMarkup(createElement(resourcePages.ActionErrorNotice, {
+    error: "restart: demo: io error: Permission denied",
+    humanMessage: "restart: demo: io error: Permission denied",
+    technicalDetail: "\u001b[2m2026-08-24T17:09:02Z WARN runtime noise\u001b[0m\nrestart: demo: io error: Permission denied\nStatus 1",
+  }));
+  assert.match(markup, /<strong>restart: demo: io error: Permission denied<\/strong>/);
+  assert.match(markup, /2026-08-24T17:09:02Z WARN runtime noise/);
+});
+
 test("unknown and missing-binary failures use human titles and keep recovery reachable", () => {
   assert.deepEqual(resourcePages.failurePresentation("ferrocrate: command not found"), {
     kind: "binary",

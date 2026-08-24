@@ -3122,7 +3122,11 @@ fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopErr
     let mut command = Command::new(program);
     command.args(args);
     // Prevent recursive host-desktop forwarding loops when daemon executes `ferrocrate`.
-    command.env("FERROCRATE_DESKTOP_FORWARD", "0");
+    command
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env("RUST_LOG", "error")
+        .env("FERROCRATE_LOG", "error")
+        .env("NO_COLOR", "1");
     Ok(command.output()?)
 }
 
@@ -3146,7 +3150,11 @@ fn run_follow_request(request: &ExecRequest) -> Result<std::process::Child, Desk
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.env("FERROCRATE_DESKTOP_FORWARD", "0");
+    command
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env("RUST_LOG", "error")
+        .env("FERROCRATE_LOG", "error")
+        .env("NO_COLOR", "1");
     Ok(command.spawn()?)
 }
 
@@ -3701,6 +3709,23 @@ mod tests {
         };
         let out = run_request(&req).expect("run command");
         assert!(out.status.success());
+    }
+
+    #[test]
+    fn proxied_commands_disable_color_and_warning_noise() {
+        let req = ExecRequest {
+            cmd: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '%s|%s|%s' \"$RUST_LOG\" \"$FERROCRATE_LOG\" \"$NO_COLOR\"".to_string(),
+            ],
+            use_wsl: false,
+            wsl_distro: None,
+            follow: false,
+            interactive: false,
+        };
+        let out = run_request(&req).expect("run command");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "error|error|1");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+use serde::Deserialize;
+
 #[cfg(target_os = "linux")]
 use std::{
     fs,
@@ -32,6 +34,134 @@ fn containers_command_succeeds() {
     let (mut cmd, _temp) = bin();
     let status = cmd.arg("containers").status().expect("run ferro-cli");
     assert!(status.success());
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DesktopNetworkListRecord {
+    name: String,
+    driver: String,
+    #[serde(default)]
+    ipam: DesktopNetworkIpam,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DesktopNetworkIpam {
+    #[serde(default)]
+    config: Vec<DesktopNetworkIpamConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DesktopNetworkIpamConfig {
+    subnet: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DesktopVolumeListResponse {
+    volumes: Vec<DesktopVolumeRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DesktopVolumeRecord {
+    name: String,
+    driver: String,
+    mountpoint: String,
+    #[serde(rename = "FerrocrateMounts", default)]
+    mounts: Vec<serde_json::Value>,
+}
+
+#[test]
+fn desktop_proxied_list_commands_emit_parseable_machine_output() {
+    let commands: &[(&[&str], fn(&[u8]))] = &[
+        (&["network", "ls", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("network list JSON value")
+                    .is_array(),
+                "network list must use an array, including when empty"
+            );
+            let records: Vec<DesktopNetworkListRecord> =
+                serde_json::from_slice(stdout).expect("network list JSON");
+            assert!(records.iter().any(|record| {
+                record.name == "bridge"
+                    && record.driver == "bridge"
+                    && record
+                        .ipam
+                        .config
+                        .iter()
+                        .all(|config| config.subnet.is_some())
+            }));
+        }),
+        (
+            &[
+                "network",
+                "ls",
+                "--format",
+                "json",
+                "--filter",
+                "name=desktop-no-match",
+            ],
+            |stdout| {
+                let records: Vec<serde_json::Value> =
+                    serde_json::from_slice(stdout).expect("empty network list JSON array");
+                assert!(records.is_empty());
+            },
+        ),
+        (&["volume", "ls", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("volume list JSON value")["Volumes"]
+                    .is_array(),
+                "Volumes must use an array when empty"
+            );
+            let response: DesktopVolumeListResponse =
+                serde_json::from_slice(stdout).expect("volume list JSON");
+            assert!(response.volumes.iter().all(|volume| {
+                !volume.name.is_empty()
+                    && !volume.driver.is_empty()
+                    && !volume.mountpoint.is_empty()
+                    && volume.mounts.iter().all(serde_json::Value::is_object)
+            }));
+        }),
+        (&["containers", "--all", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("container list JSON value")
+                    .is_array(),
+                "container list must use an array when empty"
+            );
+            let records: Vec<serde_json::Value> =
+                serde_json::from_slice(stdout).expect("container list JSON");
+            assert!(records.iter().all(serde_json::Value::is_object));
+        }),
+        (&["images", "--format", "json"], |stdout| {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(stdout)
+                    .expect("image list JSON value")
+                    .is_array(),
+                "image list must use an array when empty"
+            );
+            let records: Vec<serde_json::Value> =
+                serde_json::from_slice(stdout).expect("image list JSON");
+            assert!(records.iter().all(serde_json::Value::is_object));
+        }),
+    ];
+
+    for (args, parse) in commands {
+        let (mut cmd, _temp) = bin();
+        let output = cmd.args(*args).output().expect("run proxied list command");
+        assert!(
+            output.status.success(),
+            "ferrocrate {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse(&output.stdout);
+    }
 }
 
 #[cfg(target_os = "linux")]

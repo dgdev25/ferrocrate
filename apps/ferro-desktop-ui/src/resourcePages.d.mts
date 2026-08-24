@@ -36,6 +36,8 @@ export function failurePresentation(error: unknown, messages?: Partial<Record<"d
 };
 export function ActionErrorNotice(props: {
   error?: unknown;
+  humanMessage?: string;
+  technicalDetail?: string;
   onDismiss?: () => void;
   onStart?: () => void;
   onReviewLicensing?: (detail: string) => void;

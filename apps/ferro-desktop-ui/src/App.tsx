@@ -59,6 +59,7 @@ import {
   filterContainersByStatus,
   groupContainers,
   parseContainerRows,
+  resourceTotals,
   shellKeyboardCommand,
   statusLabel,
   statusTone,
@@ -84,6 +85,10 @@ type BuildHistoryEntry = {
 function formatUnix(value: number | null): string {
   if (!value) return "-";
   return new Date(value * 1000).toLocaleString();
+}
+
+function commandMessage(result: CommandResult, fallback: string): string {
+  return result.message || result.stderr || fallback;
 }
 
 function App(): JSX.Element {
@@ -483,7 +488,7 @@ function App(): JSX.Element {
       const result = await invoke<CommandResult>("run_desktop_action", { action, target });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `${label} did not complete successfully (status ${result.code}).`);
+        setError(commandMessage(result, `${label} did not complete successfully (status ${result.code}).`));
       } else {
         await refresh();
       }
@@ -560,7 +565,7 @@ function App(): JSX.Element {
         refreshCompose: composeFile ? () => readComposeSnapshot(composeFile) : undefined,
       });
       setLastAction(result);
-      if (!result.ok) setError(result.stderr || `Ferrocrate did not start (status ${result.code}).`);
+      if (!result.ok) setError(commandMessage(result, `Ferrocrate did not start (status ${result.code}).`));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -663,7 +668,7 @@ function App(): JSX.Element {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
       setLastAction(result);
       if (!result.ok) {
-        const detail = result.stderr || `${label} failed with status ${result.code}`;
+        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
         if (action === "create") setResourceDialogError(detail); else setError(detail);
         return;
       }
@@ -696,7 +701,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        const detail = result.stderr || `${label} failed with status ${result.code}`;
+        const detail = commandMessage(result, `${label} failed with status ${result.code}`);
         if (action === "create") setResourceDialogError(detail); else setError(detail);
         return;
       }
@@ -744,7 +749,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `Container update failed with status ${result.code}`);
+        setError(commandMessage(result, `Container update failed with status ${result.code}`));
         return;
       }
       const detail = await invoke<ContainerDetailSummary>("get_container_detail", {
@@ -780,7 +785,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setRunDialogError(result.stderr || `Container run failed with status ${result.code}`);
+        setRunDialogError(commandMessage(result, `Container run failed with status ${result.code}`));
         return;
       }
       setRunDialogOpen(false);
@@ -807,7 +812,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `Registry login failed with status ${result.code}`);
+        setError(commandMessage(result, `Registry login failed with status ${result.code}`));
         return;
       }
       setRegistryPassword("");
@@ -833,7 +838,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `Registry logout failed with status ${result.code}`);
+        setError(commandMessage(result, `Registry logout failed with status ${result.code}`));
         return;
       }
       setRegistryPassword("");
@@ -873,7 +878,7 @@ function App(): JSX.Element {
       });
       setLastAction(result);
       if (!result.ok) {
-        setError(result.stderr || `${label} failed with status ${result.code}`);
+        setError(commandMessage(result, `${label} failed with status ${result.code}`));
         return;
       }
       await Promise.all([readComposeSnapshot(composeFile), refresh(), refreshVolumes()]);
@@ -914,7 +919,7 @@ function App(): JSX.Element {
         ...build,
         status: result.ok ? "succeeded" : "failed",
         durationMs: Date.now() - startedAt,
-        error: result.ok ? undefined : result.stderr || `The build command ended unsuccessfully (status ${result.code}).`,
+        error: result.ok ? undefined : commandMessage(result, `The build command ended unsuccessfully (status ${result.code}).`),
       } : build));
       await refresh();
     } catch (err) {
@@ -1060,6 +1065,7 @@ function App(): JSX.Element {
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
   const imagesInUse = useMemo(() => new Set(containerRows.map((row) => row.image)), [containerRows]);
   const runningContainers = containerRows.filter((row) => row.state === "running").length;
+  const resourceUsage = resourceTotals(containerRows);
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const imageCount = imageRows.length;
   const daemonRunning = daemonIsAvailable(snapshot);
@@ -1197,7 +1203,7 @@ function App(): JSX.Element {
             </div>
           </div>
 
-          {surfaceError ? <ActionErrorNotice error={surfaceError} onDismiss={() => setError(null)} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => setActiveSection("doctor")} /> : null}
+          {surfaceError ? <ActionErrorNotice error={surfaceError} humanMessage={error && lastAction && !lastAction.ok && error === lastAction.message ? lastAction.message : undefined} technicalDetail={error && lastAction && !lastAction.ok && error === lastAction.message ? `${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}` : undefined} onDismiss={() => setError(null)} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => setActiveSection("doctor")} /> : null}
 
           <div className={`page-content ${activeSection === "containers" && containerViewState === "table" ? "container-layout" : ""}`}>
             {activeSection === "containers" ? (
@@ -1232,12 +1238,12 @@ function App(): JSX.Element {
                   </div>
                   <div className="table-scroll">
                     <table>
-                      <thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th><th>Started</th><th>CPU</th><th aria-label="Actions" /></tr></thead>
+                      <thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th><th>Started</th><th>CPU</th><th>Memory</th><th aria-label="Actions" /></tr></thead>
                       <tbody>
                         {containerGroups.map((group) => (
                           <Fragment key={group.name}>
                             <tr className="container-group-row">
-                              <td colSpan={7}>
+                              <td colSpan={8}>
                                 <strong>{group.name}</strong>
                                 <span>{group.compose ? "Compose project" : "Not managed by Compose"}</span>
                                 <span className="group-summary">{group.rows.length} container{group.rows.length === 1 ? "" : "s"} · {group.running} running</span>
@@ -1254,6 +1260,7 @@ function App(): JSX.Element {
                                   <td className="mono muted-cell">{row.ports}</td>
                                   <td className="mono muted-cell">{formatUnix(row.startedAt)}</td>
                                   <td className="mono muted-cell">{row.cpu}</td>
+                                  <td className="mono muted-cell">{row.memory}</td>
                                   <td className="row-actions">
                                     <details className="row-menu" onClick={(event) => event.stopPropagation()}>
                                       <summary aria-label={`Actions for ${row.name}`}><Icon name="more" size={16} /></summary>
@@ -1479,7 +1486,7 @@ function App(): JSX.Element {
         <span><b>{containerRows.length}</b> containers · <b>{runningContainers}</b> running</span>
         <span><b>{imageCount}</b> images</span>
         <span>engine <b>native</b> — VM optional</span>
-        <div className="status-right"><span>CPU <b>—</b></span><span>MEM <b>—</b></span><span>v0.1.0</span></div>
+        <div className="status-right">{resourceUsage.cpu ? <span>CPU <b>{resourceUsage.cpu}</b></span> : null}{resourceUsage.memory ? <span>MEM <b>{resourceUsage.memory}</b></span> : null}<span>v0.1.0</span></div>
       </footer>
 
       {doctorDialogOpen ? (

@@ -5,6 +5,19 @@ export function formatContainerPorts(ports) {
     .join(", ");
 }
 
+export function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let scaled = bytes;
+  let unit = 0;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  return `${scaled.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
 export function parseContainerRows(output) {
   try {
     const records = JSON.parse(output || "[]");
@@ -17,6 +30,12 @@ export function parseContainerRows(output) {
         : state === "exited" && exitCode != null
           ? `Exited (${exitCode})`
           : state.charAt(0).toUpperCase() + state.slice(1);
+      const cpuPercent = Number.isFinite(Number(record.cpu_percent))
+        ? Number(record.cpu_percent)
+        : null;
+      const memoryUsage = record.memory_usage == null || !Number.isFinite(Number(record.memory_usage))
+        ? null
+        : Number(record.memory_usage);
       return {
         id: String(record.id || ""),
         name: String(record.name || record.id || "unnamed"),
@@ -28,14 +47,28 @@ export function parseContainerRows(output) {
         composeProject: record.labels?.["com.docker.compose.project"] || null,
         composeService: record.labels?.["com.docker.compose.service"] || null,
         startedAt: Number(record.started_at_unix || record.created_at_unix || 0),
-        cpu: Number.isFinite(Number(record.cpu_percent))
-          ? `${Number(record.cpu_percent).toFixed(1)}%`
-          : "—",
+        cpu: cpuPercent == null ? "—" : `${cpuPercent.toFixed(1)}%`,
+        cpuPercent,
+        memory: memoryUsage == null ? "—" : formatBytes(memoryUsage),
+        memoryUsage,
       };
     });
   } catch {
     return [];
   }
+}
+
+export function resourceTotals(rows) {
+  const cpuValues = rows.map((row) => row.cpuPercent).filter(Number.isFinite);
+  const memoryValues = rows.map((row) => row.memoryUsage).filter(Number.isFinite);
+  return {
+    cpu: cpuValues.length
+      ? `${cpuValues.reduce((total, value) => total + value, 0).toFixed(1)}%`
+      : null,
+    memory: memoryValues.length
+      ? formatBytes(memoryValues.reduce((total, value) => total + value, 0))
+      : null,
+  };
 }
 
 export function filterContainers(rows, query) {

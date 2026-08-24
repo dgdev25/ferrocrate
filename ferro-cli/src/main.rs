@@ -1084,6 +1084,8 @@ pub enum VolumeCommands {
     Ls {
         #[arg(short = 'q', long = "quiet")]
         quiet: bool,
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
@@ -1120,6 +1122,8 @@ pub enum NetworkCommands {
     },
     /// List networks.
     Ls {
+        #[arg(long, default_value = "text", value_parser = validate_output_format)]
+        format: String,
         #[arg(long = "filter")]
         filters: Vec<String>,
     },
@@ -6763,7 +6767,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
             .map(|_| println!("rename: container={container} name={name}"))
         })(),
         Commands::Network {
-            command: NetworkCommands::Ls { filters },
+            command: NetworkCommands::Ls { filters, format },
         } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_network_filters(&parsed)?;
@@ -6776,7 +6780,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     percent_encode_path_component(&encoded)
                 )
             };
-            request("GET", path).and_then(|body| print_json(body, "json"))
+            request("GET", path).and_then(|body| print_json(body, format))
         })(),
         Commands::Network {
             command: NetworkCommands::Inspect { name, format },
@@ -6786,7 +6790,11 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
         )
         .and_then(|body| print_json(body, format)),
         Commands::Volume {
-            command: VolumeCommands::Ls { filters, quiet: _ },
+            command: VolumeCommands::Ls {
+                filters,
+                quiet: _,
+                format,
+            },
         } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_volume_filters(&parsed)?;
@@ -6799,7 +6807,7 @@ fn dispatch_remote_context(command: &Commands) -> Option<Result<(), String>> {
                     percent_encode_path_component(&encoded)
                 )
             };
-            request("GET", path).and_then(|body| print_json(body, "json"))
+            request("GET", path).and_then(|body| print_json(body, format))
         })(),
         Commands::Volume {
             command: VolumeCommands::Prune { filters },
@@ -9887,7 +9895,11 @@ fn handle_volume_authorized(
                 .map_err(|err| err.to_string())?;
             println!("volume restore: {name} <- {path}");
         }
-        VolumeCommands::Ls { filters, quiet } => {
+        VolumeCommands::Ls {
+            filters,
+            quiet,
+            format,
+        } => {
             let filters = parse_cli_filters(&filters)?;
             validate_docker_volume_filters(&filters)?;
             let records = store
@@ -9896,7 +9908,34 @@ fn handle_volume_authorized(
                 .into_iter()
                 .filter(|record| docker_volume_matches_filters(record, &filters))
                 .collect::<Vec<_>>();
-            if quiet {
+            if format == "json" {
+                let containers = ContainerRuntime::new(runtime_dir)
+                    .and_then(|runtime| runtime.list())
+                    .map_err(|error| error.to_string())?;
+                let volumes = records
+                    .into_iter()
+                    .map(|record| {
+                        let mounts = docker_volume_mount_usage(&record.path, &containers);
+                        serde_json::json!({
+                            "Name": record.name,
+                            "Driver": record.driver,
+                            "Mountpoint": record.path,
+                            "CreatedAt": record.created_at_unix.to_string(),
+                            "Status": serde_json::Value::Null,
+                            "UsageData": {"RefCount": mounts.len(), "Size": 0},
+                            "FerrocrateMounts": mounts,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "Volumes": volumes,
+                        "Warnings": [],
+                    }))
+                    .map_err(|error| error.to_string())?
+                );
+            } else if quiet {
                 for record in records { println!("{}", record.name); }
             } else if records.is_empty() {
                 println!("volumes: no entries");
@@ -10321,7 +10360,7 @@ fn handle_network_authorized(
                 record.name, record.driver, record.subnet, record.gateway
             );
         }
-        NetworkCommands::Ls { filters } => {
+        NetworkCommands::Ls { filters, format } => {
             let filters = parse_cli_filters(&filters)?;
             validate_docker_network_filters(&filters)?;
             let records = load_networks(runtime_dir)?
@@ -10336,14 +10375,48 @@ fn handle_network_authorized(
                     )
                 })
                 .collect::<Vec<_>>();
-            println!("NAME\tDRIVER\tSUBNET\tGATEWAY");
-            if docker_network_matches_filters(
+            let include_bridge = docker_network_matches_filters(
                 &DockerNetworkView {
                     name: "bridge",
                     driver: "bridge",
                 },
                 &filters,
-            ) {
+            );
+            if format == "json" {
+                let mut entries = Vec::new();
+                if include_bridge {
+                    entries.push(serde_json::json!({
+                        "Name": "bridge",
+                        "Id": "bridge",
+                        "Driver": "bridge",
+                        "Scope": "local",
+                    }));
+                }
+                entries.extend(records.into_iter().map(|record| {
+                    let ipv6_config = docker_network_ipv6_config(&record);
+                    let mut ipam_config = vec![serde_json::json!({
+                        "Subnet": record.subnet,
+                        "Gateway": record.gateway,
+                    })];
+                    if let Some(config) = ipv6_config {
+                        ipam_config.push(config);
+                    }
+                    serde_json::json!({
+                        "Name": record.name,
+                        "Id": record.name,
+                        "Driver": record.driver,
+                        "Scope": "local",
+                        "IPAM": {"Config": ipam_config},
+                    })
+                }));
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&entries).map_err(|error| error.to_string())?
+                );
+                return Ok(());
+            }
+            println!("NAME\tDRIVER\tSUBNET\tGATEWAY");
+            if include_bridge {
                 println!("bridge\tbridge\t10.0.0.0/24\t10.0.0.1");
             }
             for record in records {
@@ -19869,9 +19942,14 @@ volumes:
         ]);
         match filtered_ls.command {
             Commands::Volume { command } => match command {
-                VolumeCommands::Ls { filters, quiet } => {
+                VolumeCommands::Ls {
+                    filters,
+                    quiet,
+                    format,
+                } => {
                     assert_eq!(filters, vec!["name=data", "driver=local"]);
                     assert!(!quiet);
+                    assert_eq!(format, "text");
                 }
                 _ => panic!("unexpected volume command"),
             },
@@ -21428,7 +21506,7 @@ volumes:
         let ls = Cli::parse_from(["ferrocrate", "volume", "ls"]);
         match ls.command {
             Commands::Volume { command } => {
-                assert!(matches!(command, VolumeCommands::Ls { filters, quiet } if filters.is_empty() && !quiet))
+                assert!(matches!(command, VolumeCommands::Ls { filters, quiet, format } if filters.is_empty() && !quiet && format == "text"))
             }
             _ => panic!("unexpected command"),
         }
@@ -21543,7 +21621,7 @@ volumes:
         let ls = Cli::parse_from(["ferrocrate", "network", "ls"]);
         match ls.command {
             Commands::Network { command } => {
-                assert!(matches!(command, NetworkCommands::Ls { filters } if filters.is_empty()))
+                assert!(matches!(command, NetworkCommands::Ls { filters, format } if filters.is_empty() && format == "text"))
             }
             _ => panic!("unexpected command"),
         }
@@ -21571,8 +21649,9 @@ volumes:
         ]);
         match filtered_ls.command {
             Commands::Network { command } => match command {
-                NetworkCommands::Ls { filters } => {
+                NetworkCommands::Ls { filters, format } => {
                     assert_eq!(filters, vec!["name=mesh", "driver=bridge"]);
+                    assert_eq!(format, "text");
                 }
                 _ => panic!("unexpected network command"),
             },
@@ -21587,6 +21666,26 @@ volumes:
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn list_commands_accept_explicit_json_output() {
+        assert!(Cli::try_parse_from([
+            "ferrocrate",
+            "network",
+            "ls",
+            "--format",
+            "json",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "ferrocrate",
+            "volume",
+            "ls",
+            "--format",
+            "json",
+        ])
+        .is_ok());
     }
 
     #[cfg(target_os = "linux")]
@@ -21740,7 +21839,11 @@ volumes:
         .expect("restore volume");
         handle_volume(
             &runtime_dir,
-            VolumeCommands::Ls { filters: vec![], quiet: false },
+            VolumeCommands::Ls {
+                filters: vec![],
+                quiet: false,
+                format: "text".to_string(),
+            },
             &authorization,
         )
         .expect("ls volumes");
@@ -21786,7 +21889,10 @@ volumes:
         handle_network(
             temp.path(),
             &runtime,
-            NetworkCommands::Ls { filters: vec![] },
+            NetworkCommands::Ls {
+                filters: vec![],
+                format: "text".to_string(),
+            },
             &authorization,
         )
         .expect("ls networks");

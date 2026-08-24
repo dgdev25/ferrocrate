@@ -114,7 +114,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Seek;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -7515,6 +7517,7 @@ fn log_journal_path(log_path: &Path) -> PathBuf {
 /// `max-file` option. Keeping the two files as a pair is essential: a moved
 /// log without its sidecar would make `since`/`until` silently misclassify
 /// historical output.
+#[cfg(test)]
 fn rotate_log_pair(log_path: &Path, max_files: u32) -> io::Result<()> {
     if max_files < 2 {
         return Ok(());
@@ -7628,6 +7631,7 @@ fn copy_line_journaled(pipe: &mut impl io::Read, log: &mut fs::File, journal_pat
     copy_line_journaled_with_rotation(pipe, log, journal_path, None);
 }
 
+#[cfg(test)]
 fn copy_line_journaled_with_rotation(
     pipe: &mut impl io::Read,
     log: &mut fs::File,

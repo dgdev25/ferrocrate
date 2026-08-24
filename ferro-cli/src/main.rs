@@ -14908,11 +14908,13 @@ fn handle_docker_compat_connection(
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                 let id = docker_resolve_id(&runtime, &pending, requested_id)?;
-                if pending.contains_key(&id) && runtime.inspect(&id).is_err() {
+                if let Some(spec) = pending.get(&id).filter(|_| runtime.inspect(&id).is_err()) {
+                    ensure_docker_log_readback_supported(&spec.log_driver)?;
                     // Docker exposes an empty log stream for a created
                     // container before it has a runtime log file.
                     return Ok(http_response(200, &[], "text/plain"));
                 }
+                drop(pending);
                 let tty = runtime
                     .inspect(&id)
                     .map(|record| record.tty)
@@ -16921,6 +16923,15 @@ fn docker_status_for_error(err: &str) -> u16 {
 }
 
 #[cfg(target_os = "linux")]
+fn ensure_docker_log_readback_supported(driver: &str) -> Result<(), String> {
+    if driver.is_empty() || driver == "json-file" {
+        Ok(())
+    } else {
+        Err("configured logging driver does not support reading".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn docker_tail_logs(logs: &str, tail: Option<&str>) -> Result<String, String> {
     let Some(tail) = tail else {
         return Ok(logs.to_string());
@@ -18261,6 +18272,18 @@ fn docker_inspect_payload(
             "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
         "HostConfig": {
+            "LogConfig": {
+                "Type": record.annotations
+                    .get("io.ferrocrate.log.driver")
+                    .filter(|driver| !driver.is_empty())
+                    .map(String::as_str)
+                    .unwrap_or("json-file"),
+                "Config": record.annotations.iter()
+                    .filter_map(|(key, value)| key.strip_prefix("io.ferrocrate.log.")
+                        .filter(|option| *option != "driver")
+                        .map(|option| (option.to_string(), value.clone())))
+                    .collect::<BTreeMap<_, _>>(),
+            },
             "Memory": record
                 .resource_limits
                 .as_ref()
@@ -18498,6 +18521,10 @@ fn docker_pending_inspect_payload(
             "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
         },
         "HostConfig": {
+            "LogConfig": {
+                "Type": spec.log_driver,
+                "Config": spec.log_options,
+            },
             "Memory": spec.memory_max.unwrap_or(0),
             "CpuQuota": spec.cpu_quota.unwrap_or(0),
             "CpuPeriod": spec.cpu_period.unwrap_or(0),

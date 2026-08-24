@@ -6,7 +6,16 @@ case "${1:-configure}" in
     if [ -x /usr/sbin/apparmor_parser ] &&
        [ -r /sys/module/apparmor/parameters/enabled ] &&
        [ "$(tr -d '[:space:]' </sys/module/apparmor/parameters/enabled)" = Y ]; then
-      /usr/sbin/apparmor_parser -r /etc/apparmor.d/usr.local.bin.ferrocrate
+      parser_major=$(
+        /usr/sbin/apparmor_parser --version 2>/dev/null |
+          sed -n 's/^AppArmor parser version \([0-9][0-9]*\).*/\1/p' |
+          head -n 1
+      )
+      if [ -n "$parser_major" ] && [ "$parser_major" -lt 4 ]; then
+        echo "ferrocrate: AppArmor $parser_major does not support userns policy; profile not loaded" >&2
+      else
+        /usr/sbin/apparmor_parser -r /etc/apparmor.d/usr.local.bin.ferrocrate
+      fi
     fi
     if command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload >/dev/null 2>&1 || true

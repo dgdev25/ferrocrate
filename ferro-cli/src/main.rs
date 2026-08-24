@@ -19899,6 +19899,22 @@ configs:
     }
 
     #[test]
+    fn parses_run_log_driver_selection() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "--log-driver",
+            "journald",
+            "alpine:latest",
+        ])
+        .expect("log driver flag must parse");
+        match cli.command {
+            Commands::Run { log_driver, .. } => assert_eq!(log_driver, "journald"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_health_restart_opt_in() {
         let cli = Cli::parse_from([
             "ferrocrate",

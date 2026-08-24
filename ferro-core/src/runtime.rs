@@ -14521,6 +14521,30 @@ mod tests {
     }
 
     #[test]
+    fn logs_rejects_driver_without_readback_using_docker_wording() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("write-only-logs", "exited");
+        let log_dir = temp.path().join("containers/write-only-logs/logs");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        record.stdout_path = log_dir.join("stdout.log").display().to_string();
+        record.stderr_path = log_dir.join("stderr.log").display().to_string();
+        record.annotations.insert(
+            "io.ferrocrate.log.driver".to_string(),
+            "journald".to_string(),
+        );
+        runtime.store.put(&record).expect("record");
+
+        let error = runtime
+            .logs_split(&record.id)
+            .expect_err("write-only driver must reject logs");
+        assert_eq!(
+            error.to_string(),
+            "configured logging driver does not support reading"
+        );
+    }
+
+    #[test]
     fn logs_returns_output() {
         if !can_run_containers() {
             eprintln!("SKIP: requires root privileges for container operations");

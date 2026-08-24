@@ -12547,12 +12547,23 @@ struct DockerHostConfig {
     pids_limit: Option<i64>,
     #[serde(rename = "RestartPolicy")]
     restart_policy: Option<DockerRestartPolicy>,
+    #[serde(rename = "LogConfig")]
+    log_config: Option<DockerLogConfig>,
     /// Every other HostConfig field the client sent. Docker's CLI always
     /// transmits the full HostConfig shape with default values; those are
     /// accepted, while any field carrying a meaningful value that this
     /// runtime does not implement fails closed by name.
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerLogConfig {
+    #[serde(rename = "Type", default)]
+    driver: String,
+    #[serde(rename = "Config", default)]
+    options: HashMap<String, String>,
 }
 
 /// True for values that only restate a default: null, false, 0, -1, empty
@@ -12596,6 +12607,42 @@ fn reject_meaningful_host_config_extras(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_log_config(config: Option<&DockerLogConfig>) -> Result<(), String> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if !config.driver.is_empty() && config.driver != "json-file" {
+        return Err(format!("docker: unsupported log driver {}", config.driver));
+    }
+    for (key, value) in &config.options {
+        match key.as_str() {
+            "max-size" if parse_docker_log_size(value).is_some() => {}
+            "max-file" if value.parse::<u32>().ok().is_some_and(|count| count >= 1) => {}
+            "max-size" | "max-file" => {
+                return Err(format!("docker: invalid json-file log option {key}={value}"));
+            }
+            _ => return Err(format!("docker: unsupported json-file log option {key}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_docker_log_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value.find(|character: char| !character.is_ascii_digit()).unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    number.parse::<u64>().ok()?.checked_mul(multiplier).filter(|size| *size > 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -16850,9 +16897,11 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cpu_period: None,
         pids_limit: None,
         restart_policy: None,
+        log_config: None,
         extra: serde_json::Map::new(),
     });
     reject_meaningful_host_config_extras(&host_config.extra)?;
+    validate_docker_log_config(host_config.log_config.as_ref())?;
     let publish = port_bindings_to_publish(host_config.port_bindings)?;
     let network_mode = match host_config.network_mode.as_deref() {
         None | Some("default") | Some("bridge") => "bridge".to_string(),
@@ -22471,7 +22520,6 @@ volumes:
             r#""Devices":[{"PathOnHost":"/dev/null","PathInContainer":"/dev/null"}]"#,
             r#""Ulimits":[{"Name":"nofile","Soft":1024,"Hard":1024}]"#,
             r#""CpusetCpus":"0""#,
-            r#""LogConfig":{"Type":"json-file"}"#,
             r#""Mounts":[{"Type":"bind","Source":"/tmp","Target":"/data"}]"#,
         ] {
             let body = format!(r#"{{"Image":"busybox","HostConfig":{{{field}}}}}"#);
@@ -22482,6 +22530,22 @@ volumes:
                 "field={field} error={error}"
             );
         }
+    }
+
+    #[test]
+    fn docker_create_log_config_accepts_json_file_and_rejects_other_drivers() {
+        parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"3"}}}}"#,
+            None,
+        )
+        .expect("json-file options are supported");
+
+        let error = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"LogConfig":{"Type":"journald"}}}"#,
+            None,
+        )
+        .expect_err("unknown log drivers must fail closed");
+        assert!(error.contains("unsupported log driver"), "{error}");
     }
 
     /// Docker's CLI sends the complete HostConfig shape with default values

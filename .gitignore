@@ -13,4 +13,5 @@ apps/ferro-desktop-ui/node_modules/
 apps/ferro-desktop-ui/dist/
 apps/ferro-desktop-ui/src-tauri/target/
 apps/ferro-desktop-ui/src-tauri/gen/
+ui-verify/
 docs/assets/.claude-flow/

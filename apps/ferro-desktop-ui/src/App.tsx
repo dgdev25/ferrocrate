@@ -33,10 +33,13 @@ import {
   DEFAULT_TERMINAL_ENV,
 } from "./terminalResize.mjs";
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
+import { filterContainers, parseContainerRows, shellKeyboardCommand, statusTone } from "./forgeShell.mjs";
 
 const EMPTY = "No data yet";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
+type AppSection = "containers" | "images" | "volumes" | "compose" | "networks" | "doctor" | "settings";
+type DetailTab = "logs" | "terminal" | "inspect" | "stats";
 type LogBatch = { text: string; truncated: boolean };
 type TerminalOutput = { data: number[]; stderr: boolean };
 
@@ -52,6 +55,9 @@ function App(): JSX.Element {
   const [authLoading, setAuthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [activeSection, setActiveSection] = useState<AppSection>("containers");
+  const [detailTab, setDetailTab] = useState<DetailTab>("logs");
+  const [globalSearch, setGlobalSearch] = useState("");
   const [imageTarget, setImageTarget] = useState("alpine:latest");
   const [containerTarget, setContainerTarget] = useState("");
   const [lastAction, setLastAction] = useState<CommandResult | null>(null);
@@ -65,6 +71,7 @@ function App(): JSX.Element {
   const runtimeActionRef = useRef(false);
   const logFollowRef = useRef(false);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const terminalActiveRef = useRef(false);
   const [terminalActive, setTerminalActive] = useState(false);
@@ -148,8 +155,8 @@ function App(): JSX.Element {
       fontSize: 13,
       rows: 18,
       theme: theme === "dark"
-        ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
-        : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" },
+        ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
+        : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" },
     });
     terminal.open(host);
     terminal.onData((data) => {
@@ -185,8 +192,8 @@ function App(): JSX.Element {
     const terminal = terminalRef.current;
     if (!terminal) return;
     terminal.options.theme = theme === "dark"
-      ? { background: "#030712", foreground: "#f8fafc", cursor: "#00d4ff" }
-      : { background: "#f8fafc", foreground: "#0f172a", cursor: "#0096c8" };
+      ? { background: "#16120f", foreground: "#e7ecef", cursor: "#f0691f" }
+      : { background: "#16120f", foreground: "#e8e2db", cursor: "#f59e0b" };
   }, [theme]);
 
   useEffect(() => {
@@ -226,6 +233,20 @@ function App(): JSX.Element {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const command = shellKeyboardCommand(event);
+      if (command === "focus-search") {
+        event.preventDefault();
+        globalSearchRef.current?.focus();
+      } else if (command === "close-dialog" && runDialogOpen) {
+        setRunDialogOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [runDialogOpen]);
 
   async function refresh(): Promise<void> {
     setLoading(true);
@@ -855,708 +876,249 @@ function App(): JSX.Element {
     URL.revokeObjectURL(url);
   }
 
+  const containerRows = useMemo(
+    () => parseContainerRows(snapshot?.containers.stdout ?? ""),
+    [snapshot?.containers.stdout],
+  );
+  const visibleContainers = useMemo(
+    () => filterContainers(containerRows, globalSearch),
+    [containerRows, globalSearch],
+  );
+  const runningContainers = containerRows.filter((row) => row.state === "running").length;
+  const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
+  const imageCount = useMemo(() => {
+    try {
+      const parsed: unknown = JSON.parse(snapshot?.images.stdout || "[]");
+      return Array.isArray(parsed) ? parsed.length : 0;
+    } catch {
+      return 0;
+    }
+  }, [snapshot?.images.stdout]);
+  const daemonRunning = snapshot?.runtime.ok === true;
+  const sectionTitles: Record<AppSection, string> = {
+    containers: "Containers",
+    images: "Images",
+    volumes: "Volumes",
+    compose: "Compose",
+    networks: "Networks",
+    doctor: "Doctor",
+    settings: "Settings",
+  };
+
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <h1>FerroCrate Desktop</h1>
-        <div className="actions">
-          <button
-            className="btn btn-secondary"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          >
-            Theme: {theme === "dark" ? "Dark" : "Light"}
-          </button>
-          <button className="btn btn-primary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
-            {loading ? "Refreshing..." : "Refresh Runtime"}
-          </button>
-          <button className="btn btn-secondary" onClick={() => void refreshAuthState()} disabled={authLoading}>
-            {authLoading ? "Refreshing..." : "Refresh Auth"}
-          </button>
+    <div className="forge-shell">
+      <header className="titlebar">
+        <div className="traffic" aria-hidden="true"><span /><span /><span /></div>
+        <div className="logo">Ferrocrate <em>Desktop</em></div>
+        <label className="global-search">
+          <span aria-hidden="true">⌕</span>
+          <input
+            ref={globalSearchRef}
+            value={globalSearch}
+            onChange={(event) => setGlobalSearch(event.target.value)}
+            placeholder="Search containers, images, volumes…"
+            aria-label="Global search"
+          />
+          <kbd>⌘K</kbd>
+        </label>
+        <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+        <div className={`daemon-pill ${daemonRunning ? "is-running" : "is-stopped"}`}>
+          <span className="daemon-dot" /> {daemonRunning ? "daemon running" : "daemon offline"}
         </div>
       </header>
 
-      {error ? <p className="error">{error}</p> : null}
+      <div className="workspace">
+        <nav className="sidebar" aria-label="Primary">
+          <p className="nav-label">Manage</p>
+          {([
+            ["containers", "▣", "Containers", containerRows.length],
+            ["images", "▧", "Images", imageCount],
+            ["volumes", "▤", "Volumes", volumes.length],
+            ["compose", "◇", "Compose", composeSnapshot?.services.length ?? 0],
+            ["networks", "◎", "Networks", networks.length],
+          ] as const).map(([section, icon, label, count]) => (
+            <button key={section} className={`nav-item ${activeSection === section ? "active" : ""}`} onClick={() => setActiveSection(section)}>
+              <span className="nav-icon" aria-hidden="true">{icon}</span>{label}<span className="nav-count">{count}</span>
+            </button>
+          ))}
+          <p className="nav-label system-label">System</p>
+          <button className={`nav-item ${activeSection === "doctor" ? "active" : ""}`} onClick={() => setActiveSection("doctor")}>
+            <span className="nav-icon" aria-hidden="true">✚</span>Doctor
+            {doctorResult ? <span className="nav-count">{doctorResult.raw.checks.filter((check) => !check.ok).length}</span> : null}
+          </button>
+          <button className={`nav-item ${activeSection === "settings" ? "active" : ""}`} onClick={() => setActiveSection("settings")}>
+            <span className="nav-icon" aria-hidden="true">⚙</span>Settings
+          </button>
+          <div className="sidebar-foot">Ferrocrate v0.1.0<br />native daemon · VM optional</div>
+        </nav>
 
-      <section className="grid">
-        <article className="panel panel-wide">
-          <h2>Paid Auth</h2>
-          <p className="muted">
-            Configure issuance backend endpoints, then set a short-lived paid session token.
-          </p>
-          <div className="field-row">
-            <input
-              value={releaseBaseUrl}
-              onChange={(event) => setReleaseBaseUrl(event.target.value)}
-              placeholder="release base URL (e.g. https://gateway.example.com/v1/releases/{tag})"
-            />
-          </div>
-          <div className="field-row">
-            <input
-              value={tokenEndpoint}
-              onChange={(event) => setTokenEndpoint(event.target.value)}
-              placeholder="token endpoint (e.g. https://gateway.example.com/v1/token)"
-            />
-          </div>
-          <div className="field-row">
-            <input
-              value={issuanceEndpoint}
-              onChange={(event) => setIssuanceEndpoint(event.target.value)}
-              placeholder="session issuance endpoint (e.g. https://issuer.example.com/v1/desktop/session)"
-            />
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>
-              Save Backend Config
-            </button>
-          </div>
-          <div className="field-row">
-            <input
-              value={customerId}
-              onChange={(event) => setCustomerId(event.target.value)}
-              placeholder="customer id (for backend session issuance)"
-            />
-          </div>
-          <div className="field-row">
-            <input
-              value={accessToken}
-              onChange={(event) => setAccessToken(event.target.value)}
-              placeholder="optional access token for issuance backend"
-            />
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>
-              Acquire Session Token
-            </button>
-          </div>
-          <div className="field-row">
-            <input
-              value={sessionTokenInput}
-              onChange={(event) => setSessionTokenInput(event.target.value)}
-              placeholder="paste session JWT"
-            />
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void saveSessionToken()}>
-              Save Session Token
-            </button>
-            <button className="btn btn-danger" onClick={() => void clearSessionToken()}>
-              Clear Session Token
-            </button>
-          </div>
-          <pre>
-{`token_present=${sessionSummary?.token_present ? "yes" : "no"}
-subject=${sessionSummary?.subject ?? "-"}
-plan=${sessionSummary?.plan ?? "-"}
-expires_at=${formatUnix(sessionSummary?.expires_at ?? null)}
-expired=${sessionSummary?.expired == null ? "-" : sessionSummary?.expired ? "yes" : "no"}`}
-          </pre>
-          <pre>
-{`entitlement_status=${authState?.entitlement?.status ?? "-"}
-entitlement_plan=${authState?.entitlement?.plan ?? "-"}
-entitlement_expires=${formatUnix(authState?.entitlement?.expires_at ?? null)}
-entitlement_message=${authState?.entitlement?.message ?? "-"}`}
-          </pre>
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Install + Bootstrap</h2>
-          <p className="muted">
-            Full paid install path uses saved backend config and session token.
-          </p>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>
-              Dry-Run Install
-            </button>
-            <button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>
-              Run Full Install
-            </button>
-          </div>
-          <pre>{installerResult ? JSON.stringify(installerResult, null, 2) : EMPTY}</pre>
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Doctor</h2>
-          <div className="check-row">
-            <label>
-              <input
-                type="checkbox"
-                checked={doctorFix}
-                onChange={(event) => setDoctorFix(event.target.checked)}
-              />
-              Fix
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={doctorBootstrap}
-                onChange={(event) => setDoctorBootstrap(event.target.checked)}
-              />
-              Bootstrap
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={doctorDryRun}
-                onChange={(event) => setDoctorDryRun(event.target.checked)}
-              />
-              Dry-Run
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={doctorConfirm}
-                onChange={(event) => setDoctorConfirm(event.target.checked)}
-              />
-              Confirm (--yes)
-            </label>
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runDoctor()} disabled={runtimeBusy}>
-              Run Doctor
-            </button>
-          </div>
-          <pre>{doctorResult ? JSON.stringify(doctorResult.raw, null, 2) : EMPTY}</pre>
-        </article>
-
-        <article className="panel">
-          <h2>Runtime Status</h2>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")} disabled={runtimeBusy}>
-              VM Start
-            </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")} disabled={runtimeBusy}>
-              VM Stop
-            </button>
-          </div>
-          <pre>{snapshot?.runtime.stdout || EMPTY}</pre>
-          {snapshot?.runtime.stderr ? <p className="muted">{snapshot.runtime.stderr}</p> : null}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Containers</h2>
-          <div className="field-row">
-            <input
-              value={containerTarget}
-              onChange={(event) => setContainerTarget(event.target.value)}
-              placeholder="container name/id"
-            />
-          </div>
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              onClick={() => void runAction("start_container", "Container Start", containerTarget)}
-              disabled={runtimeBusy}
-            >
-              Start
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() => void runAction("stop_container", "Container Stop", containerTarget)}
-              disabled={runtimeBusy}
-            >
-              Stop
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() => void startLogFollow()}
-              disabled={runtimeBusy}
-            >
-              {logsFollowing ? "Following Logs" : "Follow Logs"}
-            </button>
-            <button
-              className="btn btn-danger"
-              onClick={() => void runAction("remove_container", "Container Remove", containerTarget)}
-              disabled={runtimeBusy}
-            >
-              Remove
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() => void inspectContainer()}
-              disabled={runtimeBusy || !containerTarget.trim()}
-            >
-              Inspect Details
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => setRunDialogOpen(true)}
-              disabled={runtimeBusy}
-            >
-              Run New Container
-            </button>
-          </div>
-          <div className="field-row">
-            <input
-              value={logFilter}
-              onChange={(event) => setLogFilter(event.target.value)}
-              placeholder="filter streamed logs"
-            />
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}>
-              {logsPaused ? "Resume Logs" : "Pause Logs"}
-            </button>
-            <button className="btn btn-secondary" onClick={() => void copyLogs()} disabled={!visibleLogText}>
-              Copy Logs
-            </button>
-            <button className="btn btn-secondary" onClick={exportLogs} disabled={!visibleLogText}>
-              Export Logs
-            </button>
-            <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>
-              Stop Following
-            </button>
-          </div>
-          <pre>{visibleLogText || (logsFollowing ? "Waiting for log lines..." : EMPTY)}</pre>
-          <pre>{snapshot?.containers.stdout || EMPTY}</pre>
-          {snapshot?.containers.stderr ? <p className="muted">{snapshot.containers.stderr}</p> : null}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Exec Terminal</h2>
-          <div className="terminal-fields">
-            <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
-            <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
-            <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
-          </div>
-          <div className="field-row">
-            <input value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="environment, one KEY=value per line" />
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy}>
-              Open Shell
-            </button>
-            <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>
-              Detach
-            </button>
-          </div>
-          <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
-        </article>
-
-        <article className="panel">
-          <h2>Images</h2>
-          <div className="field-row">
-            <input
-              value={imageTarget}
-              onChange={(event) => setImageTarget(event.target.value)}
-              placeholder="image:tag"
-            />
-          </div>
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              onClick={() => void runAction("pull_image", "Image Pull", imageTarget)}
-              disabled={runtimeBusy}
-            >
-              Pull
-            </button>
-            <button
-              className="btn btn-danger"
-              onClick={() => void runAction("remove_image", "Image Remove", imageTarget)}
-              disabled={runtimeBusy}
-            >
-              Remove
-            </button>
-            <button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>
-              Prune
-            </button>
-          </div>
-          <div className="registry-auth">
-            <h3>Registry authentication</h3>
-            <input
-              value={registryTarget}
-              onChange={(event) => {
-                setRegistryTarget(event.target.value);
-                setRegistryStatus(null);
-              }}
-              placeholder="registry.example.com"
-              aria-label="Registry server"
-            />
-            <input
-              value={registryUsername}
-              onChange={(event) => setRegistryUsername(event.target.value)}
-              placeholder="username"
-              aria-label="Registry username"
-              autoComplete="username"
-            />
-            <input
-              type="password"
-              value={registryPassword}
-              onChange={(event) => setRegistryPassword(event.target.value)}
-              placeholder="password or token"
-              aria-label="Registry password or token"
-              autoComplete="current-password"
-            />
-            <p className={`registry-status ${registryStatus?.logged_in ? "status-running" : ""}`}>
-              {registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}
-            </p>
-            <div className="panel-actions">
-              <button
-                className="btn btn-primary"
-                onClick={() => void loginRegistry()}
-                disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}
-              >
-                {registryLoading ? "Working..." : "Login"}
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => void logoutRegistry()}
-                disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}
-              >
-                Logout
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={() => void refreshRegistryAuth()}
-                disabled={runtimeBusy || registryLoading || !registryTarget.trim()}
-              >
-                Check Status
-              </button>
-            </div>
-          </div>
-          <pre>{snapshot?.images.stdout || EMPTY}</pre>
-          {snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Build Image</h2>
-          <p className="muted">Choose a directory containing a Dockerfile and watch each build frame as it arrives.</p>
-          <div className="field-row build-fields">
-            <input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" aria-label="Build context directory" />
-            <button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose Directory</button>
-            <input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" aria-label="Build image tag" />
-            <button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build</button>
-          </div>
-          {buildSteps.length ? (
-            <ol className="build-steps">
-              {buildSteps.map((step, index) => (
-                <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}>
-                  <span>{step.stream}</span><code>{buildStepText(step.text)}</code>
-                </li>
-              ))}
-            </ol>
-          ) : <p className="muted">Build progress will appear here.</p>}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Volumes</h2>
-          <div className="field-row">
-            <input
-              value={volumeName}
-              onChange={(event) => setVolumeName(event.target.value)}
-              placeholder="named volume"
-            />
-          </div>
-          <div className="panel-actions">
-            <button
-              className="btn btn-primary"
-              onClick={() => void runVolumeAction("create", "Volume Create", volumeName)}
-              disabled={runtimeBusy || volumesLoading || !volumeName.trim()}
-            >
-              Create
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() => void refreshVolumes()}
-              disabled={runtimeBusy || volumesLoading}
-            >
-              {volumesLoading ? "Refreshing..." : "Refresh Volumes"}
-            </button>
-            <button
-              className="btn btn-danger"
-              onClick={() => void runVolumeAction("prune", "Volume Prune")}
-              disabled={runtimeBusy || volumesLoading}
-            >
-              Prune Unused
-            </button>
-          </div>
-          {volumes.length === 0 ? <p className="muted">No named volumes.</p> : (
-            <div className="resource-list">
-              {volumes.map((volume) => (
-                <div className="resource-row" key={volume.name}>
-                  <div>
-                    <strong>{volume.name}</strong>
-                    <p className="muted">{volume.driver} · {volume.mountpoint}</p>
-                    {volume.mounts.length === 0 ? (
-                      <p className="muted">Unused</p>
-                    ) : (
-                      <ul className="mount-list">
-                        {volume.mounts.map((mount) => (
-                          <li key={`${mount.container_id}:${mount.destination}`}>
-                            {formatVolumeMount(mount)}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                  <button
-                    className="btn btn-danger"
-                    onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)}
-                    disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}
-                    title={volumeIsInUse(volume) ? "Detach this volume from all containers before removing it" : "Remove volume"}
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Networks</h2>
-          <p className="muted">Create bridge networks and review each attached container, address, and published port.</p>
-          <div className="field-row network-fields">
-            <input
-              value={networkName}
-              onChange={(event) => setNetworkName(event.target.value)}
-              placeholder="network name"
-              aria-label="Network name"
-            />
-            <input
-              value={networkSubnet}
-              onChange={(event) => setNetworkSubnet(event.target.value)}
-              placeholder="subnet (optional, e.g. 172.30.0.0/16)"
-              aria-label="Network subnet"
-            />
-          </div>
-          <div className="panel-actions">
-            <button
-              className="btn btn-primary"
-              onClick={() => void runNetworkAction("create", "Network Create", networkName)}
-              disabled={runtimeBusy || networksLoading || !networkName.trim()}
-            >
-              Create Bridge
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() => void refreshNetworks()}
-              disabled={runtimeBusy || networksLoading}
-            >
-              {networksLoading ? "Refreshing..." : "Refresh Networks"}
-            </button>
-          </div>
-          {networks.length === 0 ? <p className="muted">No networks.</p> : (
-            <div className="resource-list">
-              {networks.map((network) => (
-                <div className="resource-row" key={network.name}>
-                  <div>
-                    <strong>{network.name}</strong>
-                    <p className="muted">
-                      {network.driver} · {network.subnets.length ? network.subnets.join(", ") : "daemon-managed subnet"}
-                    </p>
-                    {network.containers.length === 0 ? (
-                      <p className="muted">No attached containers</p>
-                    ) : (
-                      <ul className="mount-list">
-                        {network.containers.map((attachment) => (
-                          <li key={`${network.name}:${attachment.container_id}`}>
-                            {formatNetworkAttachment(attachment)}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                  <button
-                    className="btn btn-danger"
-                    onClick={() => void runNetworkAction("remove", "Network Remove", network.name)}
-                    disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}
-                    title={!networkIsRemovable(network)
-                      ? "The built-in bridge network cannot be removed"
-                      : network.containers.length > 0
-                        ? "Detach all containers before removing this network"
-                        : "Remove network"}
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
-
-        <article className="panel panel-wide">
-          <h2>Compose</h2>
-          <p className="muted">Choose a Compose YAML file, validate it, and manage the project services.</p>
-          <div className="field-row compose-file-row">
-            <input
-              value={composeFile}
-              onChange={(event) => {
-                setComposeFile(event.target.value);
-                setComposeSnapshot(null);
-              }}
-              placeholder="compose.yml"
-              aria-label="Compose file path"
-            />
-            <button className="btn btn-secondary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>
-              Choose File
-            </button>
-          </div>
-          <div className="panel-actions">
-            <button className="btn btn-secondary" onClick={() => void validateCompose()} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
-              {composeLoading ? "Validating..." : "Validate Config"}
-            </button>
-            <button className="btn btn-primary" onClick={() => void runComposeAction("up", "Compose Up")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
-              Up
-            </button>
-            <button className="btn btn-secondary" onClick={() => void runComposeAction("start", "Compose Start")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
-              Start
-            </button>
-            <button className="btn btn-secondary" onClick={() => void runComposeAction("stop", "Compose Stop")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
-              Stop
-            </button>
-            <button className="btn btn-danger" onClick={() => void runComposeAction("down", "Compose Down")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>
-              Down
-            </button>
-          </div>
-          {composeSnapshot?.services.length ? (
-            <div className="resource-list compose-services">
-              {composeSnapshot.services.map((service) => (
-                <div className="resource-row" key={service.name}>
-                  <div>
-                    <strong>{service.name}</strong>
-                    <p className={`service-status ${composeStatusClass(service.status)}`}>
-                      {service.status.replaceAll("_", " ")}
-                    </p>
-                    {service.container_id ? <p className="muted">{service.container_id}</p> : null}
-                  </div>
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => void showComposeLogs(service)}
-                    disabled={runtimeBusy || service.status === "not_created"}
-                  >
-                    Follow Logs
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">Validate a Compose file to load its services.</p>
-          )}
-          <details className="compose-config" open={false}>
-            <summary>Validated configuration</summary>
-            <pre>{composeSnapshot?.config || EMPTY}</pre>
-          </details>
-        </article>
-
-        <article className="panel">
-          <h2>Last Action: {actionLabel || "none"}</h2>
-          <pre>{lastAction?.stdout || EMPTY}</pre>
-          {lastAction?.stderr ? <p className="muted">{lastAction.stderr}</p> : null}
-        </article>
-      </section>
-
-      {containerDetail ? (
-        <aside className="detail-drawer" role="dialog" aria-modal="false" aria-labelledby="container-detail-title">
-          <div className="drawer-header">
+        <main className="main-area">
+          <div className="page-header">
             <div>
-              <p className="eyebrow">Container details</p>
-              <h2 id="container-detail-title">{containerDetail.name || containerDetail.id}</h2>
+              <p className="eyebrow">Local runtime</p>
+              <div className="title-line">
+                <h1>{sectionTitles[activeSection]}</h1>
+                {activeSection === "containers" ? <span className="status-chip">{runningContainers} running</span> : null}
+              </div>
             </div>
-            <button className="btn btn-secondary" onClick={() => setContainerDetail(null)} aria-label="Close container details">
-              Close
-            </button>
+            <div className="actions">
+              {activeSection === "containers" ? (
+                <>
+                  <button className="btn btn-secondary" onClick={() => void runAction("container_prune", "Container Prune")} disabled={runtimeBusy}>Prune stopped</button>
+                  <button className="btn btn-primary" onClick={() => setRunDialogOpen(true)} disabled={runtimeBusy}>▶ Run container</button>
+                </>
+              ) : (
+                <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
+                  {loading ? "Refreshing…" : "↻ Refresh runtime"}
+                </button>
+              )}
+            </div>
           </div>
 
-          <dl className="detail-grid">
-            <div><dt>Status</dt><dd>{containerDetail.status}</dd></div>
-            <div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
-            <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div>
-            <div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
-            <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
-            <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
-          </dl>
+          {error ? <div className="error-banner" role="alert"><strong>Runtime error</strong><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error">×</button></div> : null}
 
-          <section className="drawer-section">
-            <div className="drawer-section-header">
-              <h3>Environment</h3>
-              <button
-                className="btn btn-secondary"
-                onClick={() => setShowEnvironment((visible) => !visible)}
-                aria-pressed={showEnvironment}
-              >
-                {showEnvironment ? "Mask values" : "Reveal values"}
-              </button>
-            </div>
-            <pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre>
-          </section>
-
-          <section className="drawer-section">
-            <h3>Mounts</h3>
-            {containerDetail.mounts.length ? (
-              <ul className="mount-list">
-                {containerDetail.mounts.map((mount, index) => (
-                  <li key={`${mount.destination}:${index}`}>
-                    {mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})
-                  </li>
-                ))}
-              </ul>
-            ) : <p className="muted">No mounts.</p>}
-          </section>
-
-          <section className="drawer-section">
-            <h3>Health history</h3>
-            {containerDetail.health ? (
+          <div className={`page-content ${activeSection === "containers" ? "container-layout" : ""}`}>
+            {activeSection === "containers" ? (
               <>
-                <p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>
-                {containerDetail.health.log.length ? (
-                  <ol className="health-list">
-                    {containerDetail.health.log.map((entry, index) => (
-                      <li key={`${entry.start}:${index}`}>
-                        <strong>Exit {entry.exit_code}</strong>
-                        <span>{entry.start} → {entry.end}</span>
-                        <code>{entry.output || "No output"}</code>
-                      </li>
-                    ))}
-                  </ol>
-                ) : <p className="muted">No health checks recorded.</p>}
-              </>
-            ) : <p className="muted">No health check configured.</p>}
-          </section>
+                <section className="panel table-panel" aria-label="Containers">
+                  <div className="mobile-target">
+                    <input value={containerTarget} onChange={(event) => setContainerTarget(event.target.value)} placeholder="Container name or ID" />
+                    <button className="btn btn-secondary" onClick={() => void inspectContainer()} disabled={runtimeBusy || !containerTarget.trim()}>Open</button>
+                  </div>
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th>Status</th><th>Name</th><th>Image</th><th>Ports</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {visibleContainers.map((row) => {
+                          const tone = statusTone(row);
+                          const selected = selectedRow?.id === row.id;
+                          return (
+                            <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
+                              <td><span className={`container-status ${tone}`}><i />{tone === "unhealthy" ? "Unhealthy" : row.status}</span></td>
+                              <td className="container-name">{row.name}</td>
+                              <td className="mono muted-cell">{row.image}</td>
+                              <td className="mono muted-cell">{row.ports}</td>
+                              <td className="row-actions">
+                                <button className="icon-btn" title={row.state === "running" ? "Stop container" : "Start container"} onClick={(event) => { event.stopPropagation(); void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id); }}>{row.state === "running" ? "■" : "▶"}</button>
+                                <button className="icon-btn" title="Follow logs" onClick={(event) => { event.stopPropagation(); setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}>▤</button>
+                                <button className="icon-btn terminal-icon" title="Open terminal" onClick={(event) => { event.stopPropagation(); setContainerTarget(row.id); setDetailTab("terminal"); }}>&gt;_</button>
+                                <button className="icon-btn danger-icon" title="Remove container" onClick={(event) => { event.stopPropagation(); void runAction("remove_container", "Container Remove", row.id); }}>×</button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {visibleContainers.length === 0 ? <div className="empty-state"><strong>No containers found</strong><span>{globalSearch ? "Try a different search." : "Run a container to see it here."}</span></div> : null}
+                </section>
 
-          <section className="drawer-section">
-            <h3>Resource limits</h3>
-            <div className="editor-grid">
-              <label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label>
-              <label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label>
-              <label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label>
-            </div>
-            <button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>
-              Apply Limits
-            </button>
-          </section>
-        </aside>
-      ) : null}
+                <aside className="panel detail-panel" aria-label="Container detail drawer">
+                  <div className="detail-head">
+                    <span className={`container-status ${selectedRow ? statusTone(selectedRow) : "stopped"}`}><i /></span>
+                    <div className="detail-identity"><strong>{selectedRow?.name || containerDetail?.name || "Select a container"}</strong><span>{selectedRow?.image || containerDetail?.image || "Choose a row to view details"}</span></div>
+                    {selectedRow ? <span className="detail-meta">{selectedRow.status}</span> : null}
+                  </div>
+                  <div className="detail-tabs" role="tablist">
+                    {(["logs", "terminal", "inspect", "stats"] as DetailTab[]).map((tab) => (
+                      <button key={tab} role="tab" aria-selected={detailTab === tab} className={detailTab === tab ? "active" : ""} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>
+                    ))}
+                  </div>
+
+                  <div className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
+                    <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
+                    <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
+                    <div className="detail-foot">
+                      <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}>{logsPaused ? "▶ Resume" : "Ⅱ Pause"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy}>{logsFollowing ? "Following ✓" : "Follow"}</button>
+                      <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
+                      <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
+                      <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
+                      <span className="detail-meta">{logsFollowing ? "streaming" : "idle"} · {visibleLogText ? visibleLogText.split("\n").length : 0} lines</span>
+                    </div>
+                  </div>
+
+                  <div className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
+                    <div className="terminal-config">
+                      <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
+                      <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
+                      <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
+                      <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
+                    </div>
+                    <div className="terminal-host" ref={terminalHostRef} aria-label="Interactive container terminal" />
+                    <div className="detail-foot">
+                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || !containerTarget.trim()}>Open shell</button>
+                      <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
+                      <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
+                    </div>
+                  </div>
+
+                  <div className={`detail-pane inspect-pane ${detailTab === "inspect" ? "active" : ""}`}>
+                    {containerDetail ? (
+                      <>
+                        <dl className="detail-grid">
+                          <div><dt>Status</dt><dd>{containerDetail.status}</dd></div><div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
+                          <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div><div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
+                          <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
+                          <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
+                        </dl>
+                        <section className="drawer-section"><div className="drawer-section-header"><h3>Environment</h3><button className="btn btn-ghost" onClick={() => setShowEnvironment((visible) => !visible)}>{showEnvironment ? "Mask values" : "Reveal values"}</button></div><pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre></section>
+                        <section className="drawer-section"><h3>Mounts</h3>{containerDetail.mounts.length ? <ul className="mount-list">{containerDetail.mounts.map((mount, index) => <li key={`${mount.destination}:${index}`}>{mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})</li>)}</ul> : <p className="muted">No mounts.</p>}</section>
+                      </>
+                    ) : <div className="empty-state"><strong>No inspection loaded</strong><span>Select a container row.</span></div>}
+                  </div>
+
+                  <div className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
+                    {containerDetail ? (
+                      <>
+                        <div className="stat-cards"><div><span>Memory limit</span><strong>{containerDetail.resources.memory || "Unlimited"}</strong></div><div><span>CPU quota</span><strong>{containerDetail.resources.cpu_quota || "Unlimited"}</strong></div><div><span>CPU period</span><strong>{containerDetail.resources.cpu_period || "Default"}</strong></div></div>
+                        <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
+                        <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
+                      </>
+                    ) : <div className="empty-state"><strong>No stats loaded</strong><span>Select a container row.</span></div>}
+                  </div>
+                </aside>
+              </>
+            ) : null}
+
+            {activeSection === "images" ? (
+              <div className="section-grid">
+                <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Image library</p><h2>Images</h2></div><span className="count-badge">{imageCount}</span></div><div className="field-row"><input value={imageTarget} onChange={(event) => setImageTarget(event.target.value)} placeholder="image:tag" /></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void runAction("pull_image", "Image Pull", imageTarget)} disabled={runtimeBusy}>Pull image</button><button className="btn btn-danger" onClick={() => void runAction("remove_image", "Image Remove", imageTarget)} disabled={runtimeBusy}>Remove</button><button className="btn btn-secondary" onClick={() => void runAction("image_prune", "Image Prune")} disabled={runtimeBusy}>Prune</button></div><pre className="data-output">{snapshot?.images.stdout || EMPTY}</pre>{snapshot?.images.stderr ? <p className="muted">{snapshot.images.stderr}</p> : null}</section>
+                <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Credentials</p><h2>Registry authentication</h2></div></div><div className="form-stack"><input value={registryTarget} onChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} placeholder="registry.example.com" aria-label="Registry server" /><input value={registryUsername} onChange={(event) => setRegistryUsername(event.target.value)} placeholder="username" autoComplete="username" /><input type="password" value={registryPassword} onChange={(event) => setRegistryPassword(event.target.value)} placeholder="password or token" autoComplete="current-password" /></div><p className={`registry-status ${registryStatus?.logged_in ? "status-running" : ""}`}>{registryStatus ? registryStatusText(registryStatus) : "Check this registry to load keyring status"}</p><div className="panel-actions"><button className="btn btn-primary" onClick={() => void loginRegistry()} disabled={runtimeBusy || registryLoading || !registryTarget.trim() || !registryUsername.trim() || !registryPassword}>{registryLoading ? "Working…" : "Login"}</button><button className="btn btn-danger" onClick={() => void logoutRegistry()} disabled={runtimeBusy || registryLoading || !registryStatus?.logged_in}>Logout</button><button className="btn btn-secondary" onClick={() => void refreshRegistryAuth()} disabled={runtimeBusy || registryLoading || !registryTarget.trim()}>Check status</button></div></section>
+                <section className="panel section-panel full-span"><div className="panel-heading"><div><p className="eyebrow">Build pipeline</p><h2>Build image</h2></div></div><p className="muted">Choose a directory containing a Dockerfile and watch each build frame as it arrives.</p><div className="field-row build-fields"><input value={buildContext} onChange={(event) => setBuildContext(event.target.value)} placeholder="build context directory" /><button className="btn btn-secondary" onClick={() => void chooseBuildContext()} disabled={runtimeBusy}>Choose directory</button><input value={buildTag} onChange={(event) => setBuildTag(event.target.value)} placeholder="image:tag" /><button className="btn btn-primary" onClick={() => void buildImage()} disabled={runtimeBusy || !buildContext.trim() || !buildTag.trim()}>Build</button></div>{buildSteps.length ? <ol className="build-steps">{buildSteps.map((step, index) => <li className={step.stream === "stderr" ? "build-step-error" : ""} key={`${index}:${step.stream}`}><span>{step.stream}</span><code>{buildStepText(step.text)}</code></li>)}</ol> : <p className="muted">Build progress will appear here.</p>}</section>
+              </div>
+            ) : null}
+
+            {activeSection === "volumes" ? <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Persistent storage</p><h2>Named volumes</h2></div><span className="count-badge">{volumes.length}</span></div><div className="field-row"><input value={volumeName} onChange={(event) => setVolumeName(event.target.value)} placeholder="named volume" /><button className="btn btn-primary" onClick={() => void runVolumeAction("create", "Volume Create", volumeName)} disabled={runtimeBusy || volumesLoading || !volumeName.trim()}>Create</button><button className="btn btn-secondary" onClick={() => void refreshVolumes()} disabled={runtimeBusy || volumesLoading}>{volumesLoading ? "Refreshing…" : "Refresh"}</button><button className="btn btn-danger" onClick={() => void runVolumeAction("prune", "Volume Prune")} disabled={runtimeBusy || volumesLoading}>Prune unused</button></div><div className="resource-list">{volumes.map((volume) => <div className="resource-row" key={volume.name}><div><strong>{volume.name}</strong><p className="muted">{volume.driver} · {volume.mountpoint}</p>{volume.mounts.length ? <ul className="mount-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <p className="muted">Unused</p>}</div><button className="btn btn-danger" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}>Remove</button></div>)}</div>{volumes.length === 0 ? <div className="empty-state"><strong>No named volumes</strong><span>Create one to persist container data.</span></div> : null}</section> : null}
+
+            {activeSection === "networks" ? <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Connectivity</p><h2>Networks</h2></div><span className="count-badge">{networks.length}</span></div><div className="field-row network-fields"><input value={networkName} onChange={(event) => setNetworkName(event.target.value)} placeholder="network name" /><input value={networkSubnet} onChange={(event) => setNetworkSubnet(event.target.value)} placeholder="subnet (optional)" /><button className="btn btn-primary" onClick={() => void runNetworkAction("create", "Network Create", networkName)} disabled={runtimeBusy || networksLoading || !networkName.trim()}>Create bridge</button><button className="btn btn-secondary" onClick={() => void refreshNetworks()} disabled={runtimeBusy || networksLoading}>{networksLoading ? "Refreshing…" : "Refresh"}</button></div><div className="resource-list">{networks.map((network) => <div className="resource-row" key={network.name}><div><strong>{network.name}</strong><p className="muted">{network.driver} · {network.subnets.length ? network.subnets.join(", ") : "daemon-managed subnet"}</p>{network.containers.length ? <ul className="mount-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <p className="muted">No attached containers</p>}</div><button className="btn btn-danger" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}>Remove</button></div>)}</div>{networks.length === 0 ? <div className="empty-state"><strong>No networks</strong><span>Create a bridge network for isolated workloads.</span></div> : null}</section> : null}
+
+            {activeSection === "compose" ? <section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Application stacks</p><h2>Compose</h2></div><span className="count-badge">{composeSnapshot?.services.length ?? 0}</span></div><p className="muted">Choose a Compose YAML file, validate it, and manage project services.</p><div className="field-row compose-file-row"><input value={composeFile} onChange={(event) => { setComposeFile(event.target.value); setComposeSnapshot(null); }} placeholder="compose.yml" /><button className="btn btn-secondary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void validateCompose()} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>{composeLoading ? "Validating…" : "Validate config"}</button><button className="btn btn-primary" onClick={() => void runComposeAction("up", "Compose Up")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>Up</button><button className="btn btn-secondary" onClick={() => void runComposeAction("start", "Compose Start")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>Start</button><button className="btn btn-secondary" onClick={() => void runComposeAction("stop", "Compose Stop")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>Stop</button><button className="btn btn-danger" onClick={() => void runComposeAction("down", "Compose Down")} disabled={runtimeBusy || composeLoading || !composeFile.trim()}>Down</button></div>{composeSnapshot?.services.length ? <div className="resource-list compose-services">{composeSnapshot.services.map((service) => <div className="resource-row" key={service.name}><div><strong>{service.name}</strong><p className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replaceAll("_", " ")}</p>{service.container_id ? <p className="mono muted">{service.container_id}</p> : null}</div><button className="btn btn-secondary" onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}>Follow logs</button></div>)}</div> : <div className="empty-state"><strong>No Compose project loaded</strong><span>Choose and validate a Compose file.</span></div>}<details className="compose-config"><summary>Validated configuration</summary><pre>{composeSnapshot?.config || EMPTY}</pre></details></section> : null}
+
+            {activeSection === "doctor" ? <div className="section-grid"><section className="panel section-panel full-span"><div className="panel-heading"><div><p className="eyebrow">Diagnostics</p><h2>System doctor</h2></div>{doctorResult ? <span className={`count-badge ${doctorResult.ok ? "ok" : "bad"}`}>{doctorResult.ok ? "Healthy" : "Needs attention"}</span> : null}</div><div className="check-row"><label><input type="checkbox" checked={doctorFix} onChange={(event) => setDoctorFix(event.target.checked)} />Fix</label><label><input type="checkbox" checked={doctorBootstrap} onChange={(event) => setDoctorBootstrap(event.target.checked)} />Bootstrap</label><label><input type="checkbox" checked={doctorDryRun} onChange={(event) => setDoctorDryRun(event.target.checked)} />Dry-run</label><label><input type="checkbox" checked={doctorConfirm} onChange={(event) => setDoctorConfirm(event.target.checked)} />Confirm (--yes)</label></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void runDoctor()} disabled={runtimeBusy}>Run doctor</button></div><pre className="data-output">{doctorResult ? JSON.stringify(doctorResult.raw, null, 2) : EMPTY}</pre></section><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Optional VM</p><h2>Runtime controls</h2></div></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void runAction("vm_start", "VM Start")} disabled={runtimeBusy}>Start VM</button><button className="btn btn-secondary" onClick={() => void runAction("vm_stop", "VM Stop")} disabled={runtimeBusy}>Stop VM</button></div><pre className="data-output">{snapshot?.runtime.stdout || EMPTY}</pre>{snapshot?.runtime.stderr ? <p className="muted">{snapshot.runtime.stderr}</p> : null}</section></div> : null}
+
+            {activeSection === "settings" ? <div className="section-grid"><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Paid services</p><h2>Authentication</h2></div></div><p className="muted">Configure issuance endpoints and a short-lived paid session token.</p><div className="form-stack"><input value={releaseBaseUrl} onChange={(event) => setReleaseBaseUrl(event.target.value)} placeholder="release base URL" /><input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} placeholder="token endpoint" /><input value={issuanceEndpoint} onChange={(event) => setIssuanceEndpoint(event.target.value)} placeholder="session issuance endpoint" /></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void saveBackendConfig()}>Save backend config</button></div><div className="form-stack"><input value={customerId} onChange={(event) => setCustomerId(event.target.value)} placeholder="customer id" /><input value={accessToken} onChange={(event) => setAccessToken(event.target.value)} placeholder="optional access token" /></div><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void acquireSessionToken()}>Acquire session token</button></div><div className="field-row"><input value={sessionTokenInput} onChange={(event) => setSessionTokenInput(event.target.value)} placeholder="paste session JWT" /></div><div className="panel-actions"><button className="btn btn-primary" onClick={() => void saveSessionToken()}>Save token</button><button className="btn btn-danger" onClick={() => void clearSessionToken()}>Clear token</button><button className="btn btn-ghost" onClick={() => void refreshAuthState()} disabled={authLoading}>{authLoading ? "Refreshing…" : "Refresh auth"}</button></div><pre className="data-output">{`token_present=${sessionSummary?.token_present ? "yes" : "no"}\nsubject=${sessionSummary?.subject ?? "-"}\nplan=${sessionSummary?.plan ?? "-"}\nexpires_at=${formatUnix(sessionSummary?.expires_at ?? null)}\nexpired=${sessionSummary?.expired == null ? "-" : sessionSummary.expired ? "yes" : "no"}`}</pre><pre className="data-output">{`entitlement_status=${authState?.entitlement?.status ?? "-"}\nentitlement_plan=${authState?.entitlement?.plan ?? "-"}\nentitlement_expires=${formatUnix(authState?.entitlement?.expires_at ?? null)}\nentitlement_message=${authState?.entitlement?.message ?? "-"}`}</pre></section><section className="panel section-panel"><div className="panel-heading"><div><p className="eyebrow">Provisioning</p><h2>Install + bootstrap</h2></div></div><p className="muted">The paid install path uses the saved backend config and session token.</p><div className="panel-actions"><button className="btn btn-secondary" onClick={() => void runInstaller(true, false)} disabled={runtimeBusy}>Dry-run install</button><button className="btn btn-primary" onClick={() => void runInstaller(false, true)} disabled={runtimeBusy}>Run full install</button></div><pre className="data-output">{installerResult ? JSON.stringify(installerResult, null, 2) : EMPTY}</pre></section></div> : null}
+
+            {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : `failed (${lastAction.code})`}</span>{lastAction.stderr ? <span>{lastAction.stderr}</span> : null}</section> : null}
+          </div>
+        </main>
+      </div>
+
+      <footer className="statusbar">
+        <span><b>{containerRows.length}</b> containers · <b>{runningContainers}</b> running</span>
+        <span><b>{imageCount}</b> images</span>
+        <span>engine <b>native</b> — VM optional</span>
+        <div className="status-right"><span>CPU <b>—</b></span><span>MEM <b>—</b></span><span>v0.1.0</span></div>
+      </footer>
 
       {runDialogOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title">
-            <div className="drawer-header">
-              <div>
-                <p className="eyebrow">New workload</p>
-                <h2 id="run-dialog-title">Run container</h2>
-              </div>
-              <button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)} aria-label="Close run container dialog">
-                Cancel
-              </button>
-            </div>
-            <div className="editor-grid">
-              <label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label>
-              <label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label>
-              <label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label>
-              <label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label>
-              <label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label>
-              <label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label>
-            </div>
-            <div className="panel-actions dialog-actions">
-              <button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>
-                Run Detached
-              </button>
-            </div>
-          </section>
-        </div>
+        <div className="modal-backdrop" role="presentation"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="drawer-header"><div><p className="eyebrow">New workload</p><h2 id="run-dialog-title">Run container</h2></div><button className="btn btn-secondary" onClick={() => setRunDialogOpen(false)}>Cancel</button></div><div className="editor-grid"><label><span>Image</span><input value={newContainerImage} onChange={(event) => setNewContainerImage(event.target.value)} placeholder="alpine:latest" /></label><label><span>Name</span><input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="optional name" /></label><label><span>Memory bytes</span><input inputMode="numeric" value={newContainerMemory} onChange={(event) => setNewContainerMemory(event.target.value)} placeholder="unlimited" /></label><label><span>CPU quota</span><input inputMode="numeric" value={newContainerCpuQuota} onChange={(event) => setNewContainerCpuQuota(event.target.value)} placeholder="unlimited" /></label><label><span>CPU period</span><input inputMode="numeric" value={newContainerCpuPeriod} onChange={(event) => setNewContainerCpuPeriod(event.target.value)} placeholder="100000" /></label><label className="detail-span"><span>Environment (one KEY=value per line)</span><textarea value={newContainerEnvironment} onChange={(event) => setNewContainerEnvironment(event.target.value)} rows={6} /></label></div><div className="panel-actions dialog-actions"><button className="btn btn-primary" onClick={() => void runNewContainer()} disabled={runtimeBusy || !newContainerImage.trim()}>Run detached</button></div></section></div>
       ) : null}
-    </main>
+    </div>
   );
+
 }
 
 export default App;

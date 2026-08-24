@@ -15,7 +15,10 @@ export function clearErrorsForNavigation() {
   return {};
 }
 
-export function resourceActionState(action, result, detail) {
+export function resourceActionState(action, result, detail, requestGeneration, currentGeneration) {
+  if (action === "create" && requestGeneration != null && requestGeneration !== currentGeneration) {
+    return null;
+  }
   if (!result.ok && action === "create") {
     return { actionResult: null, dialogError: detail, pageError: null };
   }

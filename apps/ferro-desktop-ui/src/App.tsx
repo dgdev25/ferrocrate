@@ -175,6 +175,7 @@ function App(): JSX.Element {
   const [runDialogError, setRunDialogError] = useState<string | null>(null);
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
   const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
+  const resourceDialogGenerationRef = useRef(0);
   const [newContainerDraft, setNewContainerDraft] = useState<RunContainerDraft>({
     image: "alpine:latest",
     name: "",
@@ -345,6 +346,19 @@ function App(): JSX.Element {
     setActionLabel("");
   }, [activeSection]);
 
+  function openResourceDialog(kind: Exclude<ResourceDialog, null>): void {
+    resourceDialogGenerationRef.current += 1;
+    setError(null);
+    setResourceDialogError(null);
+    setResourceDialog(kind);
+  }
+
+  function closeResourceDialog(): void {
+    resourceDialogGenerationRef.current += 1;
+    setResourceDialog(null);
+    setResourceDialogError(null);
+  }
+
   function dismissDialogs(): void {
     setRunDialogOpen(false);
     setRunDialogError(null);
@@ -353,8 +367,7 @@ function App(): JSX.Element {
     setBuildImageDialogOpen(false);
     setBuildLicensingDialogOpen(false);
     setRegistryDialogOpen(false);
-    setResourceDialog(null);
-    setResourceDialogError(null);
+    closeResourceDialog();
     setLicensingDialogOpen(false);
     setDoctorDialogOpen(false);
     setSettingsDialog(null);
@@ -749,6 +762,7 @@ function App(): JSX.Element {
     label: string,
     target?: string,
   ): Promise<void> {
+    const requestGeneration = action === "create" ? resourceDialogGenerationRef.current : null;
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
@@ -756,7 +770,8 @@ function App(): JSX.Element {
     setActionLabel(label);
     try {
       const result = await invoke<CommandResult>("run_volume_action", { action, target });
-      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`));
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`), requestGeneration ?? undefined, resourceDialogGenerationRef.current);
+      if (!next) return;
       setLastAction(next.actionResult);
       if (!result.ok) {
         if (next.dialogError) setResourceDialogError(next.dialogError);
@@ -765,11 +780,13 @@ function App(): JSX.Element {
       }
       if (action === "create") {
         setVolumeName("");
-        setResourceDialog(null);
+        closeResourceDialog();
       }
       await Promise.all([refreshVolumes(), refresh()]);
     } catch (err) {
-      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
+      if (action === "create") {
+        if (requestGeneration === resourceDialogGenerationRef.current) setResourceDialogError(String(err));
+      } else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -784,6 +801,7 @@ function App(): JSX.Element {
       setResourceDialogError("Custom networks need a privileged (rootful) daemon, or the Ferrocrate AppArmor profile. Open Doctor for guided setup.");
       return;
     }
+    const requestGeneration = action === "create" ? resourceDialogGenerationRef.current : null;
     if (!beginRuntimeAction()) return;
     setError(null);
     if (action === "create") setResourceDialogError(null);
@@ -795,7 +813,8 @@ function App(): JSX.Element {
         target,
         subnet: action === "create" ? networkSubnet.trim() || null : null,
       });
-      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`));
+      const next = resourceActionState(action, result, commandMessage(result, `${label} failed with status ${result.code}`), requestGeneration ?? undefined, resourceDialogGenerationRef.current);
+      if (!next) return;
       setLastAction(next.actionResult);
       if (!result.ok) {
         if (next.dialogError) setResourceDialogError(next.dialogError);
@@ -805,11 +824,13 @@ function App(): JSX.Element {
       if (action === "create") {
         setNetworkName("");
         setNetworkSubnet("");
-        setResourceDialog(null);
+        closeResourceDialog();
       }
       await Promise.all([refreshNetworks(), refresh()]);
     } catch (err) {
-      if (action === "create") setResourceDialogError(String(err)); else setError(String(err));
+      if (action === "create") {
+        if (requestGeneration === resourceDialogGenerationRef.current) setResourceDialogError(String(err));
+      } else setError(String(err));
     } finally {
       finishRuntimeAction();
     }
@@ -1244,7 +1265,7 @@ function App(): JSX.Element {
       closePull: () => setPullImageDialogOpen(false),
       closeBuild: () => { setBuildImageDialogOpen(false); setBuildLicensingDialogOpen(false); },
       closeRegistry: () => setRegistryDialogOpen(false),
-      closeResource: () => { setResourceDialog(null); setResourceDialogError(null); },
+      closeResource: closeResourceDialog,
       closeLicensing: () => setLicensingDialogOpen(false),
     });
   }, [runtimeSurface]);
@@ -1332,9 +1353,9 @@ function App(): JSX.Element {
               ) : activeSection === "images" ? (
                 <ImagePagePullAction hasImages={imageRows.length > 0} disabled={runtimeBusy} onOpen={openPullImageDialog} />
               ) : activeSection === "volumes" ? (
-                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
+                volumePage.primaryAction ? <button className="btn btn-primary" onClick={() => openResourceDialog("volume")} disabled={runtimeBusy || volumesLoading}>Create volume</button> : null
               ) : activeSection === "networks" ? (
-                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} disabled={runtimeBusy || networksLoading || !customNetworksAvailable}>Create network</button> : null
+                networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => openResourceDialog("network")} disabled={runtimeBusy || networksLoading || !customNetworksAvailable}>Create network</button> : null
               ) : activeSection === "compose" ? (
                 composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
@@ -1549,7 +1570,7 @@ function App(): JSX.Element {
             {activeSection === "volumes" ? (
               volumePage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Volumes">
-                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("volume"); }} />
+                  <ResourceEmptyState section="volumes" disabled={runtimeBusy || volumesLoading} onAction={() => openResourceDialog("volume")} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Volumes">
@@ -1575,7 +1596,7 @@ function App(): JSX.Element {
               <NetworkCapabilityNotice customNetworks={customNetworksAvailable} onDoctor={() => setActiveSection("doctor")} />
               {networkPage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Networks">
-                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading || !customNetworksAvailable} onAction={() => { setError(null); setResourceDialogError(null); setResourceDialog("network"); }} />
+                  <ResourceEmptyState section="networks" disabled={runtimeBusy || networksLoading || !customNetworksAvailable} onAction={() => openResourceDialog("network")} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Networks">
@@ -1659,12 +1680,12 @@ function App(): JSX.Element {
         error={resourceDialogError}
         onNameChange={(event) => resourceDialog === "network" ? setNetworkName(event.target.value) : setVolumeName(event.target.value)}
         onSubnetChange={(event) => setNetworkSubnet(event.target.value)}
-        onCancel={() => { setResourceDialogError(null); setResourceDialog(null); }}
+        onCancel={closeResourceDialog}
         onCreate={() => resourceDialog === "network"
           ? void runNetworkAction("create", "Network Create", networkName)
           : void runVolumeAction("create", "Volume Create", volumeName)}
         onStart={() => void recoverFirstRun()}
-        onReviewLicensing={(detail) => { setResourceDialog(null); setLicensingDetail(detail); setLicensingDialogOpen(true); }}
+        onReviewLicensing={(detail) => { closeResourceDialog(); setLicensingDetail(detail); setLicensingDialogOpen(true); }}
       />
 
       {pullImageDialogOpen ? (

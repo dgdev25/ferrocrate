@@ -55,3 +55,13 @@ test("a rejected resource create cannot relabel a previous action result", async
   assert.equal(actionResult, null);
   assert.equal(errorScopes.resourceActionStartState("remove", previous).actionResult, previous);
 });
+
+test("a create completion is ignored after its dialog generation is dismissed", () => {
+  const failedCreate = { ok: false, code: 1, stdout: "", stderr: "late failure", message: "Create failed" };
+  assert.equal(errorScopes.resourceActionState("create", failedCreate, failedCreate.message, 4, 5), null);
+  assert.deepEqual(errorScopes.resourceActionState("create", failedCreate, failedCreate.message, 5, 5), {
+    actionResult: null,
+    dialogError: "Create failed",
+    pageError: null,
+  });
+});

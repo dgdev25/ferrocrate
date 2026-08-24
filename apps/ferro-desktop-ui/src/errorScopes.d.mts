@@ -9,7 +9,7 @@ export type ResourceActionState = {
 export function setSectionError(errors: SectionErrors, section: AppSection, error: unknown): SectionErrors;
 export function errorForSection(errors: SectionErrors, section: AppSection): string | null;
 export function clearErrorsForNavigation(errors: SectionErrors): SectionErrors;
-export function resourceActionState(action: NetworkAction | VolumeAction, result: CommandResult, detail: string): ResourceActionState;
+export function resourceActionState(action: NetworkAction | VolumeAction, result: CommandResult, detail: string, requestGeneration?: number, currentGeneration?: number): ResourceActionState | null;
 export function resourceActionStartState(action: NetworkAction | VolumeAction, actionResult: CommandResult | null): {
   actionResult: CommandResult | null;
 };
@@ -17,4 +17,5 @@ export function navigationTransientState(sectionErrors: SectionErrors): {
   actionLabel: "";
   actionResult: null;
   sectionErrors: SectionErrors;
+  dismissDialogs: true;
 };

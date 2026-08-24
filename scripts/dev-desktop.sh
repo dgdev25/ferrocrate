@@ -4,17 +4,26 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--web] [--listen 127.0.0.1:PORT]" >&2
+  echo "usage: $0 [native | --web [--listen 127.0.0.1:PORT]]" >&2
 }
 
 mode="native"
 listen="127.0.0.1:4190"
+native_seen=false
 web_seen=false
 listen_seen=false
 while (( $# > 0 )); do
   case "$1" in
+    native)
+      if [[ "$native_seen" == true || "$web_seen" == true || "$listen_seen" == true ]]; then
+        usage
+        exit 2
+      fi
+      native_seen=true
+      shift
+      ;;
     --web)
-      if [[ "$web_seen" == true ]]; then
+      if [[ "$web_seen" == true || "$native_seen" == true ]]; then
         usage
         exit 2
       fi
@@ -23,7 +32,7 @@ while (( $# > 0 )); do
       shift
       ;;
     --listen)
-      if [[ "$listen_seen" == true || $# -lt 2 ]]; then
+      if [[ "$listen_seen" == true || "$native_seen" == true || $# -lt 2 ]]; then
         usage
         exit 2
       fi

@@ -477,6 +477,7 @@ pass_count=0
 fail_count=0
 error_count=0
 record_stdin="/dev/null"
+expected_daemon_error_message=""
 
 shell_command() {
   local rendered="docker" argument
@@ -552,7 +553,9 @@ record_expected_daemon_error() {
   ended="$(date +%s%N)"
   duration=$(((ended - started) / 1000000))
   if [[ "$exit_code" != 0 ]] && [[ "$exit_code" != 124 && "$exit_code" != 137 ]] \
-      && grep -q "Error response from daemon" "$stderr_file"; then
+      && grep -q "Error response from daemon" "$stderr_file" \
+      && { [[ -z "$expected_daemon_error_message" ]] \
+        || grep -Fq "$expected_daemon_error_message" "$stderr_file"; }; then
     status=PASS
     pass_count=$((pass_count + 1))
   else
@@ -562,6 +565,7 @@ record_expected_daemon_error() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
+  expected_daemon_error_message=""
 }
 
 # Client identity and engine prerequisites.
@@ -600,6 +604,7 @@ record_command log-driver-create container create --label "$owner_label" \
   --name "$write_only_log_container" --log-driver journald \
   "$image" /bin/busybox true
 record_command log-driver-inspect container inspect "$write_only_log_container"
+expected_daemon_error_message="configured logging driver does not support reading"
 record_expected_daemon_error log-driver-read-rejected container logs "$write_only_log_container"
 record_command log-driver-remove container rm "$write_only_log_container"
 

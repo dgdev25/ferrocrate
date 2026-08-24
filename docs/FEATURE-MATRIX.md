@@ -15,7 +15,7 @@ Status vocabulary (extends `docs/compatibility/reference-index.md`):
 - **Host-blocked** — proof requires a host capability this repository's
   current hosts do not provide; the exact blocker is recorded.
 
-Snapshot: 2026-08-22, `main` at `2aa9715c`.
+Snapshot: 2026-08-24, `feat/log-drivers`.
 
 ## Host tiers
 
@@ -38,6 +38,7 @@ Snapshot: 2026-08-22, `main` at `2aa9715c`.
 | Dockerfile secrets/SSH mounts | Supported (root-qualified on this host) | [`build/2026-08-21-build-secrets-ssh-mounts.md`](evidence/build/2026-08-21-build-secrets-ssh-mounts.md) |
 | Container lifecycle (create/start/stop/kill/wait/restart) | Supported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) |
 | Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
+| Container log drivers | `json-file` supported; `journald` and `syslog` experimental behind crate features; signed manifest plugins experimental. Readback is supported only for `json-file`. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
 | Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |

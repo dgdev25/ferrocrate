@@ -23,6 +23,7 @@ jobs:
         working-directory: apps/ferro-desktop-ui
       - run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        shell: bash
         working-directory: apps/ferro-desktop-ui
       - name: Secret-leak canary
         env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }

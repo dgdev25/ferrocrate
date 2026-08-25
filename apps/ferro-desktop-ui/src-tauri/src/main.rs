@@ -7,7 +7,7 @@ mod webkit_rendering;
 
 use base64::Engine as _;
 use ferro_desktop::backend::{
-    select_backend, Backend, BackendState, BackendStatus, DuplexStream,
+    select_backend, Backend, BackendState, BackendStatus, DuplexStream, ExecStream,
     ExecRequest as BackendExecRequest, TerminalRequest,
 };
 use serde::de::DeserializeOwned;
@@ -50,7 +50,7 @@ const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
-static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static LOG_FOLLOW_PROCESS: Mutex<Option<Box<dyn ExecStream>>> = Mutex::new(None);
 static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
 static DESKTOP_DAEMON_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static DESKTOP_DAEMON_STARTING: AtomicBool = AtomicBool::new(false);
@@ -1813,7 +1813,12 @@ fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> Comm
     }
 }
 
-fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -> CommandResult {
+fn backend_command_request(
+    binary: &str,
+    args: &[String],
+    envs: &[(&str, String)],
+    stdin: Vec<u8>,
+) -> Result<BackendExecRequest, String> {
     let (program, routed_args) =
         if binary == "ferro-desktop" && args.first().is_some_and(|arg| arg == "exec") {
             let split = args
@@ -1823,27 +1828,74 @@ fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -
                 .unwrap_or(1);
             match args.get(split) {
                 Some(program) => (program.clone(), args[split + 1..].to_vec()),
-                None => return command_input_failure("desktop exec command is required"),
+                None => return Err("desktop exec command is required".to_string()),
             }
         } else {
             (binary.to_string(), args.to_vec())
         };
-    let mut request = BackendExecRequest::new(program).args(routed_args);
+    let mut request = BackendExecRequest::new(program).args(routed_args).stdin(stdin);
     for (name, value) in envs {
         request = request.env(*name, value.clone());
     }
-    match desktop_backend()
-        .and_then(|backend| backend.exec(request).map_err(|error| error.to_string()))
-    {
-        Ok(output) => CommandResult {
-            ok: output.code == 0,
-            code: output.code,
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            message: actionable_error(&String::from_utf8_lossy(&output.stderr)),
-        },
+    Ok(request)
+}
+
+fn command_result_from_backend(output: ferro_desktop::backend::ExecResponse) -> CommandResult {
+    CommandResult {
+        ok: output.code == 0,
+        code: output.code,
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        message: actionable_error(&String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
+fn run_backend_command_with(
+    backend: &dyn Backend,
+    binary: &str,
+    args: &[String],
+    envs: &[(&str, String)],
+    stdin: Vec<u8>,
+) -> CommandResult {
+    let request = match backend_command_request(binary, args, envs, stdin) {
+        Ok(request) => request,
+        Err(error) => return command_input_failure(&error),
+    };
+    match backend.exec(request) {
+        Ok(output) => command_result_from_backend(output),
         Err(error) => command_spawn_failure(binary, error),
     }
+}
+
+fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -> CommandResult {
+    match desktop_backend() {
+        Ok(backend) => run_backend_command_with(backend, binary, args, envs, Vec::new()),
+        Err(error) => command_spawn_failure(binary, error),
+    }
+}
+
+fn backend_stream_with(
+    backend: &dyn Backend,
+    binary: &str,
+    args: &[String],
+) -> Result<Box<dyn ExecStream>, String> {
+    let request = backend_command_request(binary, args, &[], Vec::new())?;
+    backend.exec_stream(request).map_err(|error| error.to_string())
+}
+
+fn start_log_follow_stream_with(
+    backend: &dyn Backend,
+    target: &str,
+) -> Result<Box<dyn ExecStream>, String> {
+    backend_stream_with(backend, "ferro-desktop", &log_follow_command(target))
+}
+
+fn start_image_build_stream_with(
+    backend: &dyn Backend,
+    context: &str,
+    tag: &str,
+) -> Result<Box<dyn ExecStream>, String> {
+    backend_stream_with(backend, "ferro-desktop", &build_bridge_command(context, tag)?)
 }
 
 fn log_follow_command(target: &str) -> Vec<String> {
@@ -1941,6 +1993,24 @@ fn emit_terminal_output<R: Read>(mut reader: R, events: EventSink, stderr: bool)
     }
 }
 
+fn clear_terminal_slot_if_matches(
+    slot: &Mutex<Option<TerminalProcess>>,
+    exec_id: &str,
+) -> bool {
+    let Ok(mut current) = slot.lock() else {
+        return false;
+    };
+    if current
+        .as_ref()
+        .is_some_and(|process| process.exec_id == exec_id)
+    {
+        *current = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn start_terminal_impl(
     events: EventSink,
     target: String,
@@ -1977,11 +2047,18 @@ fn start_terminal_impl(
         .stream
         .try_clone_stream()
         .map_err(|error| error.to_string())?;
-    let output_events = events.clone();
-    thread::spawn(move || emit_terminal_output(output, output_events, false));
+    let output_exec_id = session.exec_id.clone();
     *current = Some(TerminalProcess {
         stream: session.stream,
         exec_id: session.exec_id,
+    });
+    drop(current);
+    let output_events = events.clone();
+    thread::spawn(move || {
+        emit_terminal_output(output, output_events.clone(), false);
+        if clear_terminal_slot_if_matches(&TERMINAL_PROCESS, &output_exec_id) {
+            output_events.emit("terminal-ended", true);
+        }
     });
     Ok(())
 }
@@ -2201,20 +2278,14 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
     }
     *current = None;
 
-    let mut child = Command::new("ferro-desktop")
-        .args(log_follow_command(target))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = start_log_follow_stream_with(desktop_backend()?, target)
         .map_err(|err| format!("failed to start container log stream: {err}"))?;
     let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "container log stream stdout missing".to_string())?;
+        .take_stdout()
+        .map_err(|err| format!("container log stream stdout missing: {err}"))?;
     let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "container log stream stderr missing".to_string())?;
+        .take_stderr()
+        .map_err(|err| format!("container log stream stderr missing: {err}"))?;
     let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
     let stdout_events = events.clone();
     thread::spawn(move || publish_log_batches(stdout_events, log_receiver));
@@ -2247,7 +2318,7 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
             }
         };
         if let Some(status) = status {
-            events.emit("container-log-ended", status.success());
+            events.emit("container-log-ended", status == 0);
             return;
         }
         thread::sleep(Duration::from_millis(250));
@@ -2620,21 +2691,14 @@ fn build_image_impl(
     if build_id.is_empty() {
         return Err("build identifier is required".to_string());
     }
-    let args = build_bridge_command(&context, &tag)?;
-    let mut child = Command::new("ferro-desktop")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = start_image_build_stream_with(desktop_backend()?, &context, &tag)
         .map_err(|error| format!("failed to start image build: {error}"))?;
     let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "image build stdout unavailable".to_string())?;
+        .take_stdout()
+        .map_err(|error| format!("image build stdout unavailable: {error}"))?;
     let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "image build stderr unavailable".to_string())?;
+        .take_stderr()
+        .map_err(|error| format!("image build stderr unavailable: {error}"))?;
     let (sender, receiver) = mpsc::channel::<BuildProgressFrame>();
     for (stream, reader) in [
         ("stdout", Box::new(stdout) as Box<dyn Read + Send>),
@@ -2676,12 +2740,12 @@ fn build_image_impl(
         destination.push('\n');
         events.emit("image-build-progress", frame);
     }
-    let status = child
+    let code = child
         .wait()
         .map_err(|error| format!("failed to wait for image build: {error}"))?;
     Ok(CommandResult {
-        ok: status.success(),
-        code: status.code().unwrap_or(1),
+        ok: code == 0,
+        code,
         stdout: stdout_text,
         message: actionable_error(&stderr_text),
         stderr: stderr_text,
@@ -2812,26 +2876,9 @@ fn login_registry(
         return Err("registry password is required".to_string());
     }
     let args = registry_login_command(&registry, &username)?;
-    let mut child = Command::new("ferro-desktop")
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start registry login proxy: {error}"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "registry login stdin unavailable".to_string())?;
-    stdin
-        .write_all(password.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .map_err(|error| format!("failed to send registry password: {error}"))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("failed to wait for registry login: {error}"))?;
-    let result = command_result_from_output(output);
+    let mut stdin = password.as_bytes().to_vec();
+    stdin.push(b'\n');
+    let result = run_backend_command_with(desktop_backend()?, "ferro-desktop", &args, &[], stdin);
     if result.ok {
         set_registry_credential(&StoredRegistryCredential {
             registry,
@@ -3243,22 +3290,152 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Cursor, Read, Write};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use super::{
-        actionable_error, aggregate_container_stats, build_bridge_command, command_failure,
+        actionable_error, aggregate_container_stats, build_bridge_command,
+        clear_terminal_slot_if_matches, command_failure,
         compose_bridge_command, compose_service_rows, container_detail_from_json,
         container_inspect_command, container_update_command, doctor_command,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
-        registry_logout_command, run_backend_command, run_container_bridge_command,
+        registry_logout_command, run_backend_command, run_backend_command_with,
+        run_container_bridge_command, start_image_build_stream_with,
+        start_log_follow_stream_with,
         terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
         CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
         ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
         NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
-        TimedNativeContainerStats, VolumeAction, VolumeListResponse,
+        TerminalProcess, TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
-    use ferro_desktop::backend::{BackendCapabilities, BackendState, BackendStatus, Platform};
+    use ferro_desktop::backend::{
+        Backend, BackendCapabilities, BackendError, BackendState, BackendStatus, DuplexStream,
+        ExecRequest, ExecResponse, ExecStream, Platform, TerminalRequest, TerminalSession,
+        TransportRequest, TransportResponse,
+    };
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        requests: Mutex<Vec<(bool, ExecRequest)>>,
+    }
+
+    impl RecordingBackend {
+        fn requests(&self) -> Vec<(bool, ExecRequest)> {
+            self.requests.lock().expect("requests").clone()
+        }
+    }
+
+    struct TestExecStream {
+        stdout: Option<Cursor<Vec<u8>>>,
+        stderr: Option<Cursor<Vec<u8>>>,
+        stdin: Cursor<Vec<u8>>,
+    }
+
+    impl Default for TestExecStream {
+        fn default() -> Self {
+            Self {
+                stdout: Some(Cursor::new(Vec::new())),
+                stderr: Some(Cursor::new(Vec::new())),
+                stdin: Cursor::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Read for TestExecStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.stdout.as_mut().expect("stdout").read(buffer)
+        }
+    }
+
+    impl Write for TestExecStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.stdin.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ExecStream for TestExecStream {
+        fn take_stdin(&mut self) -> Result<Box<dyn Write + Send>, BackendError> {
+            Ok(Box::new(Cursor::new(Vec::new())))
+        }
+
+        fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+            Ok(Box::new(self.stdout.take().expect("stdout")))
+        }
+
+        fn take_stderr(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+            Ok(Box::new(self.stderr.take().expect("stderr")))
+        }
+
+        fn close_stdin(&mut self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn kill(&mut self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<i32>, BackendError> {
+            Ok(Some(0))
+        }
+
+        fn wait(&mut self) -> Result<i32, BackendError> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct TestDuplex(Cursor<Vec<u8>>);
+
+    impl Read for TestDuplex {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buffer)
+        }
+    }
+
+    impl Write for TestDuplex {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    impl DuplexStream for TestDuplex {
+        fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError> {
+            Ok(Box::new(Self::default()))
+        }
+
+        fn shutdown_write(&self) -> Result<(), BackendError> { Ok(()) }
+    }
+
+    impl Backend for RecordingBackend {
+        fn name(&self) -> &'static str { "recording" }
+        fn platform(&self) -> Platform { Platform::Linux }
+        fn capabilities(&self) -> BackendCapabilities { BackendCapabilities::native() }
+        fn start(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
+        fn stop(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
+        fn status(&self) -> BackendStatus { unimplemented!() }
+        fn health(&self) -> Result<bool, BackendError> { Ok(true) }
+        fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError> {
+            self.requests.lock().expect("requests").push((false, request));
+            Ok(ExecResponse { code: 0, stdout: Vec::new(), stderr: Vec::new() })
+        }
+        fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError> {
+            self.requests.lock().expect("requests").push((true, request));
+            Ok(Box::new(TestExecStream::default()))
+        }
+        fn request(&self, _request: TransportRequest) -> Result<TransportResponse, BackendError> { unimplemented!() }
+        fn open_terminal(&self, _request: TerminalRequest) -> Result<TerminalSession, BackendError> { unimplemented!() }
+        fn resize_terminal(&self, _exec_id: &str, _columns: u16, _rows: u16) -> Result<(), BackendError> { unimplemented!() }
+        fn socket_path(&self) -> Option<PathBuf> { None }
+    }
 
     #[test]
     fn tauri_cli_consumer_routes_exec_through_backend() {
@@ -3275,6 +3452,46 @@ mod tests {
         );
         assert!(result.ok, "{}", result.stderr);
         assert_eq!(result.stdout, "routed");
+    }
+
+    #[test]
+    fn tauri_streaming_and_registry_consumers_route_through_injected_backend() {
+        let backend = RecordingBackend::default();
+        let mut logs = start_log_follow_stream_with(&backend, "container-1").expect("logs");
+        assert_eq!(logs.wait().expect("logs exit"), 0);
+        let mut build = start_image_build_stream_with(&backend, ".", "demo:latest").expect("build");
+        assert_eq!(build.wait().expect("build exit"), 0);
+        let login = run_backend_command_with(
+            &backend,
+            "ferro-desktop",
+            &registry_login_command("registry.example", "alice").expect("login args"),
+            &[],
+            b"secret\n".to_vec(),
+        );
+        assert!(login.ok);
+
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].0);
+        assert_eq!(requests[0].1.program, "ferrocrate");
+        assert_eq!(requests[0].1.args, ["logs", "--follow", "container-1"]);
+        assert!(requests[1].0);
+        assert_eq!(requests[1].1.program, "ferrocrate");
+        assert_eq!(requests[1].1.args.first().map(String::as_str), Some("build"));
+        assert!(!requests[2].0);
+        assert_eq!(requests[2].1.stdin, b"secret\n");
+    }
+
+    #[test]
+    fn terminal_eof_clears_only_the_matching_active_slot() {
+        let slot = Mutex::new(Some(TerminalProcess {
+            stream: Box::new(TestDuplex::default()),
+            exec_id: "exec-1".to_string(),
+        }));
+        assert!(!clear_terminal_slot_if_matches(&slot, "different"));
+        assert!(slot.lock().expect("slot").is_some());
+        assert!(clear_terminal_slot_if_matches(&slot, "exec-1"));
+        assert!(slot.lock().expect("slot").is_none());
     }
 
     #[test]

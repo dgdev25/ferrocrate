@@ -46,6 +46,7 @@ struct FakeHost {
     execs: Mutex<Vec<(CommandSpec, ExecRequest)>>,
     terminals: Mutex<Vec<(Transport, TerminalRequest)>>,
     becomes_healthy_on_start: bool,
+    fail_program: Mutex<Option<String>>,
 }
 
 impl FakeHost {
@@ -66,6 +67,9 @@ impl FakeHost {
 
 impl BackendHost for FakeHost {
     fn start(&self, command: &CommandSpec) -> Result<(), BackendError> {
+        if self.fail_program.lock().unwrap().as_deref() == command.program.to_str() {
+            return Err(BackendError::Command("injected start failure".into()));
+        }
         self.starts.lock().unwrap().push(command.clone());
         *self.running.lock().unwrap() = true;
         if self.becomes_healthy_on_start {
@@ -413,6 +417,26 @@ fn streaming_exec_keeps_stdin_open_for_interactive_round_trips() {
 }
 
 #[test]
+fn streaming_exec_exposes_stdout_and_stderr_as_separate_channels() {
+    let backend = LinuxNativeBackend::new(linux_config());
+    let mut stream = backend
+        .exec_stream(ExecRequest::new("sh").args(["-c", "printf stdout; printf stderr >&2"]))
+        .unwrap();
+    stream.close_stdin().unwrap();
+    let mut stdout = stream.take_stdout().unwrap();
+    let mut stderr = stream.take_stderr().unwrap();
+    let mut stdout_text = String::new();
+    let mut stderr_text = String::new();
+
+    stdout.read_to_string(&mut stdout_text).unwrap();
+    stderr.read_to_string(&mut stderr_text).unwrap();
+
+    assert_eq!(stream.wait().unwrap(), 0);
+    assert_eq!(stdout_text, "stdout");
+    assert_eq!(stderr_text, "stderr");
+}
+
+#[test]
 fn terminal_open_and_resize_route_through_the_backend_transport() {
     let host = FakeHost::healthy(true);
     let backend = Wsl2Backend::with_host(wsl_config(), host.clone());
@@ -433,4 +457,48 @@ fn terminal_open_and_resize_route_through_the_backend_transport() {
         host.requests.lock().unwrap().last().unwrap().1,
         TransportRequest::new("POST", "/exec/exec-123/resize?w=100&h=40")
     );
+}
+
+#[test]
+fn partial_relay_start_rolls_back_every_owned_child() {
+    let host = FakeHost::ready_after_start();
+    *host.fail_program.lock().unwrap() = Some("ssh".into());
+    let backend = MacosVmBackend::with_host(MacosVmConfig::default(), host.clone());
+
+    assert!(backend.start().is_err());
+    assert_eq!(*host.stops.lock().unwrap(), 1);
+    assert!(!*host.running.lock().unwrap());
+}
+
+#[test]
+fn dropping_an_owned_backend_stops_children_but_dropping_an_adopted_one_does_not() {
+    let owned_host = FakeHost::ready_after_start();
+    {
+        let backend = LinuxNativeBackend::with_host(linux_config(), owned_host.clone());
+        backend.start().unwrap();
+    }
+    assert_eq!(*owned_host.stops.lock().unwrap(), 1);
+
+    let adopted_host = FakeHost::healthy(true);
+    {
+        let backend = LinuxNativeBackend::with_host(linux_config(), adopted_host.clone());
+        backend.start().unwrap();
+    }
+    assert_eq!(*adopted_host.stops.lock().unwrap(), 0);
+}
+
+#[test]
+fn system_host_reaps_stale_children_before_reporting_a_restart_running() {
+    let host = ferro_desktop::backend::SystemBackendHost::default();
+    host.start(&CommandSpec::new("sh").args(["-c", "sleep 1"]))
+        .unwrap();
+    let transient = CommandSpec::new("sh").args(["-c", "sleep 0.01"]);
+    host.start(&transient).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(!host.is_running().unwrap());
+
+    host.start(&transient).unwrap();
+
+    assert!(host.is_running().unwrap());
+    host.stop().unwrap();
 }

@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -262,7 +262,10 @@ pub struct TerminalSession {
 
 pub trait ExecStream: Read + Write + Send {
     fn take_stdin(&mut self) -> Result<Box<dyn Write + Send>, BackendError>;
+    fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>, BackendError>;
+    fn take_stderr(&mut self) -> Result<Box<dyn Read + Send>, BackendError>;
     fn close_stdin(&mut self) -> Result<(), BackendError>;
+    fn kill(&mut self) -> Result<(), BackendError>;
     fn try_wait(&mut self) -> Result<Option<i32>, BackendError>;
     fn wait(&mut self) -> Result<i32, BackendError>;
 }
@@ -303,6 +306,9 @@ pub trait BackendHost: Send + Sync {
     ) -> Result<Box<dyn ExecStream>, BackendError>;
     fn readiness_timeout(&self) -> Duration {
         Duration::from_secs(10)
+    }
+    fn maintain(&self) -> Result<(), BackendError> {
+        Ok(())
     }
     fn open_terminal(
         &self,
@@ -457,6 +463,7 @@ impl BackendCore {
                 *self.owned.lock().map_err(|_| BackendError::State)? = true;
                 let deadline = std::time::Instant::now() + self.host.readiness_timeout();
                 loop {
+                    self.host.maintain()?;
                     if self.host.health(&self.transport).unwrap_or(false) {
                         *self.state.lock().map_err(|_| BackendError::State)? =
                             BackendState::Running;
@@ -476,6 +483,8 @@ impl BackendCore {
                 Err(BackendError::Unavailable(reason.into()))
             }
             Err(error) => {
+                let _ = self.host.stop();
+                *self.owned.lock().map_err(|_| BackendError::State)? = false;
                 *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Failed;
                 *self.failure.lock().map_err(|_| BackendError::State)? = Some(error.to_string());
                 Err(error)
@@ -563,14 +572,29 @@ impl BackendCore {
     }
 }
 
+impl Drop for BackendCore {
+    fn drop(&mut self) {
+        if self.owned.lock().map(|owned| *owned).unwrap_or(false) {
+            let _ = self.host.stop();
+        }
+    }
+}
+
 pub struct SystemBackendHost {
-    children: Mutex<Vec<Child>>,
+    children: Mutex<Vec<OwnedChild>>,
+    desired: Mutex<Vec<CommandSpec>>,
+}
+
+struct OwnedChild {
+    command: CommandSpec,
+    child: Child,
 }
 
 impl Default for SystemBackendHost {
     fn default() -> Self {
         Self {
             children: Mutex::new(Vec::new()),
+            desired: Mutex::new(Vec::new()),
         }
     }
 }
@@ -579,10 +603,28 @@ impl SystemBackendHost {
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::default())
     }
+
+    fn reap_stale(&self) -> Result<(), BackendError> {
+        self.children
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .retain_mut(|owned| matches!(owned.child.try_wait(), Ok(None)));
+        Ok(())
+    }
 }
 
 impl BackendHost for SystemBackendHost {
     fn start(&self, command: &CommandSpec) -> Result<(), BackendError> {
+        self.reap_stale()?;
+        if self
+            .children
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .iter()
+            .any(|owned| owned.command == *command)
+        {
+            return Ok(());
+        }
         let child = command
             .to_command()
             .stdin(Stdio::null())
@@ -592,30 +634,53 @@ impl BackendHost for SystemBackendHost {
         self.children
             .lock()
             .map_err(|_| BackendError::State)?
-            .push(child);
+            .push(OwnedChild {
+                command: command.clone(),
+                child,
+            });
+        let mut desired = self.desired.lock().map_err(|_| BackendError::State)?;
+        if !desired.contains(command) {
+            desired.push(command.clone());
+        }
         Ok(())
     }
 
     fn stop(&self) -> Result<(), BackendError> {
         let mut children = self.children.lock().map_err(|_| BackendError::State)?;
-        for mut child in children.drain(..) {
-            child.kill()?;
-            child.wait()?;
+        for mut owned in children.drain(..) {
+            owned.child.kill()?;
+            owned.child.wait()?;
         }
+        self.desired
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .clear();
         Ok(())
     }
 
     fn is_running(&self) -> Result<bool, BackendError> {
-        let mut children = self.children.lock().map_err(|_| BackendError::State)?;
-        if children.is_empty() {
+        self.reap_stale()?;
+        let children = self.children.lock().map_err(|_| BackendError::State)?;
+        let desired = self.desired.lock().map_err(|_| BackendError::State)?;
+        if desired.is_empty() {
             return Ok(false);
         }
-        for child in children.iter_mut() {
-            if child.try_wait()?.is_some() {
-                return Ok(false);
-            }
+        Ok(desired
+            .iter()
+            .all(|command| children.iter().any(|owned| &owned.command == command)))
+    }
+
+    fn maintain(&self) -> Result<(), BackendError> {
+        self.reap_stale()?;
+        let desired = self
+            .desired
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .clone();
+        for command in desired {
+            self.start(&command)?;
         }
-        Ok(true)
+        Ok(())
     }
 
     fn health(&self, transport: &Transport) -> Result<bool, BackendError> {
@@ -679,7 +744,7 @@ impl BackendHost for SystemBackendHost {
             .stdin(Stdio::piped());
         let mut child = process
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()?;
         let mut stdin = child
             .stdin
@@ -692,10 +757,15 @@ impl BackendHost for SystemBackendHost {
             .stdout
             .take()
             .ok_or_else(|| BackendError::Command("stdout is unavailable".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| BackendError::Command("stderr is unavailable".into()))?;
         Ok(Box::new(ProcessExecStream {
             child,
             stdin: Some(stdin),
-            stdout,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
         }))
     }
 }
@@ -703,12 +773,16 @@ impl BackendHost for SystemBackendHost {
 struct ProcessExecStream {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: ChildStdout,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
 }
 
 impl Read for ProcessExecStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.stdout.read(buffer)
+        self.stdout
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("stdout was taken"))?
+            .read(buffer)
     }
 }
 
@@ -738,6 +812,25 @@ impl ExecStream for ProcessExecStream {
 
     fn close_stdin(&mut self) -> Result<(), BackendError> {
         self.stdin.take();
+        Ok(())
+    }
+
+    fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+        self.stdout
+            .take()
+            .map(|stdout| Box::new(stdout) as Box<dyn Read + Send>)
+            .ok_or_else(|| BackendError::Command("stdout was already taken".into()))
+    }
+
+    fn take_stderr(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+        self.stderr
+            .take()
+            .map(|stderr| Box::new(stderr) as Box<dyn Read + Send>)
+            .ok_or_else(|| BackendError::Command("stderr was already taken".into()))
+    }
+
+    fn kill(&mut self) -> Result<(), BackendError> {
+        self.child.kill()?;
         Ok(())
     }
 

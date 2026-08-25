@@ -16,6 +16,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -1421,11 +1422,7 @@ fn proxy_interactive_request(
         .map_err(|error| DesktopError::Invalid(error.to_string()))?;
     let input_stream = stream.try_clone()?;
     thread::spawn(move || copy_interactive_input(input_stream, stdin));
-    forward_backend_stream(stream, process.as_mut())?;
-    let status = process
-        .wait()
-        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
-    write_follow_frame(stream, &FollowFrame::Terminal { status })?;
+    forward_backend_channels(stream, process)?;
     Ok(())
 }
 
@@ -1449,7 +1446,7 @@ fn proxy_follow_request(
         request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
     }
 
-    let mut process = match run_follow_request(&request) {
+    let process = match run_follow_request(&request) {
         Ok(process) => process,
         Err(err) => {
             write_follow_frame(
@@ -1463,32 +1460,56 @@ fn proxy_follow_request(
             return Ok(());
         }
     };
-    forward_backend_stream(stream, process.as_mut())?;
-    let status = process
-        .wait()
-        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
-    write_follow_frame(stream, &FollowFrame::Terminal { status })?;
+    forward_backend_channels(stream, process)?;
     Ok(())
 }
 
-fn forward_backend_stream(
+fn forward_backend_channels(
     stream: &mut TcpStream,
-    process: &mut dyn ferro_desktop::backend::ExecStream,
+    mut process: Box<dyn ferro_desktop::backend::ExecStream>,
 ) -> Result<(), DesktopError> {
+    let stdout = process
+        .take_stdout()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let stderr = process
+        .take_stderr()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let output = Arc::new(Mutex::new(stream.try_clone()?));
+    let stdout_worker = spawn_frame_reader(stdout, FollowChannel::Stdout, output.clone());
+    let stderr_worker = spawn_frame_reader(stderr, FollowChannel::Stderr, output.clone());
+    let status = process
+        .wait()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let _ = stdout_worker.join();
+    let _ = stderr_worker.join();
+    let mut output = output
+        .lock()
+        .map_err(|_| DesktopError::Invalid("follow output state is unavailable".into()))?;
+    write_follow_frame(&mut *output, &FollowFrame::Terminal { status })
+}
+
+fn spawn_frame_reader(
+    mut reader: Box<dyn Read + Send>,
+    channel: FollowChannel,
+    stream: Arc<Mutex<TcpStream>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = process.read(&mut buffer)?;
+            let Ok(read) = reader.read(&mut buffer) else { return };
         if read == 0 {
-            return Ok(());
+                return;
         }
-        write_follow_frame(
-            stream,
+            let Ok(mut stream) = stream.lock() else { return };
+            if write_follow_frame(
+                &mut *stream,
             &FollowFrame::Data {
-                channel: FollowChannel::Stdout,
+                    channel: channel.clone(),
                 data: buffer[..read].to_vec(),
             },
-        )?;
+            ).is_err() { return; }
     }
+    })
 }
 
 fn process_exec_request(
@@ -1608,54 +1629,33 @@ fn run_daemon_pipe(
     pipe_name: &str,
     default_wsl_distro: Option<String>,
 ) -> Result<(), DesktopError> {
-    use std::fs::File;
-    use std::os::windows::io::FromRawHandle;
-    use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
-        PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ServerOptions;
 
     let full_name = normalize_pipe_name(pipe_name);
-    let wide = utf16_null(&full_name);
-    loop {
-        let handle = unsafe {
-            CreateNamedPipeW(
-                wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                MAX_REQUEST_BYTES as u32,
-                MAX_REQUEST_BYTES as u32,
-                0,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(DesktopError::Io(std::io::Error::last_os_error()));
-        }
-
-        let connected = unsafe { ConnectNamedPipe(handle, null_mut()) };
-        if connected == 0 {
-            unsafe {
-                CloseHandle(handle);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(DesktopError::Io)?;
+    runtime.block_on(async move {
+        loop {
+            let server = ServerOptions::new().create(&full_name)?;
+            server.connect().await?;
+            let mut reader = BufReader::new(server);
+            let mut request_raw = String::new();
+            reader.read_line(&mut request_raw).await?;
+            if request_raw.len() > MAX_REQUEST_BYTES {
+                return Err(DesktopError::Invalid("request exceeds size limit".to_string()));
             }
-            continue;
+            let request = serde_json::from_str(request_raw.trim())?;
+            let response = process_exec_request(request, default_wsl_distro.as_deref())?;
+            let payload = serde_json::to_string(&response)? + "\n";
+            let mut server = reader.into_inner();
+            server.write_all(payload.as_bytes()).await?;
+            server.flush().await?;
+            server.disconnect()?;
         }
-
-        let mut file = unsafe { File::from_raw_handle(handle as *mut _) };
-        let request = read_exec_request(&mut file)?;
-        let response = process_exec_request(request, default_wsl_distro.as_deref())?;
-        let payload = serde_json::to_string(&response)? + "\n";
-        file.write_all(payload.as_bytes())?;
-        file.flush()?;
-        std::mem::forget(file);
-        unsafe {
-            DisconnectNamedPipe(handle);
-            CloseHandle(handle);
-        }
-    }
+    })
 }
 
 #[cfg(not(windows))]
@@ -1711,9 +1711,25 @@ fn normalize_pipe_name(pipe_name: &str) -> String {
     }
 }
 
-#[cfg(windows)]
-fn utf16_null(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+
+#[cfg(unix)]
+fn stop_vm_process(pid: u32) -> Result<(), DesktopError> {
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(DesktopError::Invalid(format!("failed to stop vm pid={pid}")))
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_vm_process(_pid: u32) -> Result<(), DesktopError> {
+    Err(DesktopError::Invalid(
+        "vm stop is supported on unix-like hosts only".to_string(),
+    ))
 }
 
 fn run_doctor(wsl_distro: Option<String>) -> Result<(), DesktopError> {
@@ -2177,24 +2193,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                 println!("vm: already stopped");
                 return Ok(());
             }
-            #[cfg(unix)]
-            {
-                let status = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .status()?;
-                if !status.success() {
-                    return Err(DesktopError::Invalid(format!(
-                        "failed to stop vm pid={pid}"
-                    )));
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                return Err(DesktopError::Invalid(
-                    "vm stop is supported on unix-like hosts only".to_string(),
-                ));
-            }
+            stop_vm_process(pid)?;
             state.pid = None;
             state.status = "stopped".to_string();
             save_vm_state(&state_path, &state)?;

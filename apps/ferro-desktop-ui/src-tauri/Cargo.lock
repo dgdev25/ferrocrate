@@ -1218,9 +1218,9 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

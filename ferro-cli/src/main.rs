@@ -19077,6 +19077,13 @@ fn handle_docker_compat_connection(
                     spec.tty.then_some("1"),
                 );
                 let run_inputs = docker_start_run_inputs(&spec);
+                if spec.auto_remove {
+                    state
+                        .auto_remove_results
+                        .lock()
+                        .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                        .insert(id.clone(), None);
+                }
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -19121,6 +19128,11 @@ fn handle_docker_compat_connection(
                     Some(&id),
                 );
                 if let Err(error) = start_result {
+                    if spec.auto_remove {
+                        if let Ok(mut results) = state.auto_remove_results.lock() {
+                            results.remove(&id);
+                        }
+                    }
                     if let Ok(mut pending) = state.pending.lock() {
                         pending.insert(id, spec);
                     }
@@ -19128,11 +19140,6 @@ fn handle_docker_compat_connection(
                     return Err(error);
                 }
                 if spec.auto_remove {
-                    state
-                        .auto_remove_results
-                        .lock()
-                        .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
-                        .insert(id.clone(), None);
                     let remove_runtime = runtime.request_scoped(origin.clone());
                     let remove_state = Arc::clone(&state);
                     let remove_id = id.clone();
@@ -19246,6 +19253,12 @@ fn handle_docker_compat_connection(
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                     docker_resolve_id(&runtime, &pending, requested_id)?
                 };
+                let pending_auto_remove = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .get(&id)
+                    .is_some_and(|spec| spec.auto_remove);
                 // Docker CLI issues `/wait?condition=removed` concurrently
                 // with `/start`, while the create record is still pending.
                 // Reconcile that pre-start window before evaluating exit or
@@ -19299,7 +19312,7 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
-                if condition == "removed" {
+                if condition == "removed" && !pending_auto_remove {
                     let record = runtime.inspect(&id).ok();
                     let body = serde_json::json!({
                         "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
@@ -20173,6 +20186,12 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     Some(None) => return Err(format!("wait: timed out waiting for container {id}")),
+                    None if condition == "removed" => {
+                        // `docker run --rm` opens this wait before `/start`;
+                        // the start handler registers its auto-remove result
+                        // after receiving the already-sent response headers.
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     None => return Ok(None),
                 }
             }

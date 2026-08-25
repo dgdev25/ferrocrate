@@ -74,7 +74,7 @@ create_pki() {
     -extfile <(printf '%s\n' 'subjectAltName=DNS:localhost,IP:127.0.0.1' 'extendedKeyUsage=serverAuth') \
     -out "$state_root/pki/manager.pem" >/dev/null 2>&1
   openssl req -newkey rsa:2048 -nodes -sha256 \
-    -subj "/CN=ferrocrate/${cluster_id}/administrator" \
+    -subj "/CN=ferrocrate\\/${cluster_id}\\/administrator" \
     -keyout "$state_root/pki/operator.key" -out "$state_root/pki/operator.csr" >/dev/null 2>&1
   openssl x509 -req -days 30 -sha256 -in "$state_root/pki/operator.csr" \
     -CA "$state_root/pki/admin-ca.pem" -CAkey "$state_root/pki/admin-ca.key" -CAcreateserial \

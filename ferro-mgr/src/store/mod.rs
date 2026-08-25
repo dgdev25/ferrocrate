@@ -1,7 +1,7 @@
 mod migrations;
 mod models;
 
-pub use models::{Enrollment, Overlay, ScopedToken, Token};
+pub use models::{Enrollment, HostObservation, HostRecord, Overlay, ScopedToken, Token};
 
 use std::{net::Ipv4Addr, path::Path, sync::Mutex};
 
@@ -318,6 +318,76 @@ impl ManagerStore {
             tx.execute("UPDATE nodes SET revoked_at = unixepoch(), revocation_reason = ?2 WHERE node_id = ?1", params![node_id, reason])?;
             Ok(())
         })
+    }
+
+    pub fn record_host_observation(
+        &self,
+        observation: HostObservation,
+    ) -> Result<(), StoreError> {
+        if observation.node_id.trim().is_empty()
+            || observation.version.len() > 128
+            || observation.health.len() > 64
+            || observation.doctor_summary.len() > 64 * 1024
+            || observation.containers_json.len() > 1024 * 1024
+            || !serde_json::from_str::<serde_json::Value>(&observation.containers_json)
+                .is_ok_and(|value| value.is_array())
+        {
+            return Err(StoreError::InvalidNetwork(
+                "host observation is invalid".into(),
+            ));
+        }
+        self.transact(|tx| {
+            tx.execute(
+                "INSERT INTO node_observations
+                 (node_id, last_seen_unix, version, health, doctor_summary, containers_json, acknowledged_revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(node_id) DO UPDATE SET
+                   last_seen_unix = excluded.last_seen_unix,
+                   version = excluded.version,
+                   health = excluded.health,
+                   doctor_summary = excluded.doctor_summary,
+                   containers_json = excluded.containers_json,
+                   acknowledged_revision = excluded.acknowledged_revision",
+                params![
+                    observation.node_id,
+                    observation.last_seen_unix,
+                    observation.version,
+                    observation.health,
+                    observation.doctor_summary,
+                    observation.containers_json,
+                    observation.acknowledged_revision,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_hosts(&self) -> Result<Vec<HostRecord>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT n.node_id, n.endpoint,
+                    CASE WHEN n.revoked_at IS NULL THEN 'enrolled' ELSE 'revoked' END,
+                    n.revocation_reason, o.last_seen_unix, o.version, o.health,
+                    o.doctor_summary, COALESCE(o.containers_json, '[]'),
+                    o.acknowledged_revision
+             FROM nodes n LEFT JOIN node_observations o ON o.node_id = n.node_id
+             ORDER BY n.node_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(HostRecord {
+                node_id: row.get(0)?,
+                endpoint: row.get(1)?,
+                enrollment_state: row.get(2)?,
+                revocation_reason: row.get(3)?,
+                last_seen_unix: row.get(4)?,
+                version: row.get(5)?,
+                health: row.get(6)?,
+                doctor_summary: row.get(7)?,
+                containers_json: row.get(8)?,
+                acknowledged_revision: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
     pub fn node_count(&self) -> Result<u32, StoreError> {

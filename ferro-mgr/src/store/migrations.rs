@@ -54,6 +54,15 @@ pub(super) fn apply(connection: &Connection) -> Result<()> {
              node_id TEXT NOT NULL REFERENCES nodes(node_id),
              revision INTEGER NOT NULL REFERENCES desired_revisions(revision),
              PRIMARY KEY (node_id, revision)
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS node_observations (
+             node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(node_id),
+             last_seen_unix INTEGER NOT NULL,
+             version TEXT NOT NULL,
+             health TEXT NOT NULL,
+             doctor_summary TEXT NOT NULL,
+             containers_json TEXT NOT NULL,
+             acknowledged_revision INTEGER NOT NULL
          ) STRICT;",
     )
 }

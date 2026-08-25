@@ -25,3 +25,28 @@ pub struct Overlay {
     pub id: String,
     pub cidr: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostObservation {
+    pub node_id: String,
+    pub last_seen_unix: i64,
+    pub version: String,
+    pub health: String,
+    pub doctor_summary: String,
+    pub containers_json: String,
+    pub acknowledged_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRecord {
+    pub node_id: String,
+    pub endpoint: String,
+    pub enrollment_state: String,
+    pub revocation_reason: Option<String>,
+    pub last_seen_unix: Option<i64>,
+    pub version: Option<String>,
+    pub health: Option<String>,
+    pub doctor_summary: Option<String>,
+    pub containers_json: String,
+    pub acknowledged_revision: Option<u64>,
+}

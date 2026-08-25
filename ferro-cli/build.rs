@@ -9,9 +9,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_with_config(
             config,
             &[
-                format!(
-                    "{proto_root}/github.com/moby/buildkit/api/services/control/control.proto"
-                ),
+                format!("{proto_root}/github.com/moby/buildkit/api/services/control/control.proto"),
+                format!("{proto_root}/github.com/moby/buildkit/frontend/gateway/pb/gateway.proto"),
                 format!("{proto_root}/github.com/moby/buildkit/util/apicaps/pb/caps.proto"),
             ],
             &[proto_root.to_string()],

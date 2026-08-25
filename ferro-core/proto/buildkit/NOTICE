@@ -1,5 +1,5 @@
 BuildKit protocol files auth.proto and filesync.proto, plus the Control,
-worker, solver, API-capability, and source-policy definitions under
+worker, solver, gateway callback, API-capability, and source-policy definitions under
 github.com/moby/buildkit, are vendored from github.com/moby/buildkit v0.32.2,
 the revision required by docker/buildx v0.36.1. They are licensed under Apache
 License 2.0. A copy of that license is at

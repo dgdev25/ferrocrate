@@ -147,6 +147,9 @@ mod buildkit_proto {
         pub mod buildkit {
             pub mod v1 {
                 tonic::include_proto!("moby.buildkit.v1");
+                pub mod frontend {
+                    tonic::include_proto!("moby.buildkit.v1.frontend");
+                }
                 pub mod apicaps {
                     tonic::include_proto!("moby.buildkit.v1.apicaps");
                 }
@@ -22122,13 +22125,13 @@ async fn handle_buildkit_control_request(
     let mut response_stream = respond
         .send_response(response, false)
         .map_err(|error| format!("buildkit control: response send failed: {error}"))?;
-    if path == "/moby.buildkit.v1.Control/ListWorkers" {
+    if buildkit_control_method(&path) == BuildkitControlMethod::ListWorkers {
         response_stream
             .send_data(grpc_message(&buildkit_list_workers_response()), false)
             .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
-    if path == "/moby.buildkit.v1.Control/Session" {
+    if buildkit_control_method(&path) == BuildkitControlMethod::Session {
         let registration = parse_buildkit_control_session_registration(request.headers())?;
         return run_buildkit_control_session(
             request.into_body(),
@@ -22139,11 +22142,51 @@ async fn handle_buildkit_control_request(
         )
         .await;
     }
+    if buildkit_control_method(&path) == BuildkitControlMethod::GatewayPing {
+        use buildkit_proto::moby::buildkit::v1::frontend::PongResponse;
+        response_stream
+            .send_data(
+                grpc_message(&PongResponse {
+                    workers: buildkit_list_workers_response().record,
+                    ..Default::default()
+                }),
+                false,
+            )
+            .map_err(|error| format!("buildkit control: gateway ping failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
     send_buildkit_grpc_status(
         &mut response_stream,
         12,
         Some("method%20not%20implemented"),
     )
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildkitControlMethod {
+    ListWorkers,
+    Session,
+    Solve,
+    Status,
+    GatewayPing,
+    GatewaySolve,
+    GatewayReturn,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
+    match path {
+        "/moby.buildkit.v1.Control/ListWorkers" => BuildkitControlMethod::ListWorkers,
+        "/moby.buildkit.v1.Control/Session" => BuildkitControlMethod::Session,
+        "/moby.buildkit.v1.Control/Solve" => BuildkitControlMethod::Solve,
+        "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
+        "/moby.buildkit.v1.frontend.LLBBridge/Ping" => BuildkitControlMethod::GatewayPing,
+        "/moby.buildkit.v1.frontend.LLBBridge/Solve" => BuildkitControlMethod::GatewaySolve,
+        "/moby.buildkit.v1.frontend.LLBBridge/Return" => BuildkitControlMethod::GatewayReturn,
+        _ => BuildkitControlMethod::Other,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -30012,6 +30055,22 @@ volumes:
             .expect("control session metadata");
         assert_eq!(registration.uuid, "control-session");
         assert_eq!(registration.methods.len(), 2);
+    }
+
+    #[test]
+    fn buildkit_control_dispatches_gateway_callback_methods() {
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Ping"),
+            super::BuildkitControlMethod::GatewayPing
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Solve"),
+            super::BuildkitControlMethod::GatewaySolve
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Return"),
+            super::BuildkitControlMethod::GatewayReturn
+        );
     }
 
     #[test]

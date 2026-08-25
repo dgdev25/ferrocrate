@@ -320,6 +320,17 @@ pub trait BackendHost: Send + Sync {
     fn maintain(&self) -> Result<(), BackendError> {
         Ok(())
     }
+    fn control(&self, command: &CommandSpec) -> Result<(), BackendError> {
+        let status = command.to_command().status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(BackendError::Command(format!(
+                "{} exited with {status}",
+                command.program.display()
+            )))
+        }
+    }
     fn open_terminal(
         &self,
         transport: &Transport,
@@ -356,6 +367,7 @@ pub(crate) struct BackendCore {
     state: Mutex<BackendState>,
     failure: Mutex<Option<String>>,
     owned: Mutex<bool>,
+    readiness_timeout: Option<Duration>,
 }
 
 impl BackendCore {
@@ -378,6 +390,7 @@ impl BackendCore {
             state: Mutex::new(BackendState::Stopped),
             failure: Mutex::new(None),
             owned: Mutex::new(false),
+            readiness_timeout: None,
         }
     }
 }
@@ -456,6 +469,11 @@ impl BackendCore {
         self
     }
 
+    pub fn with_readiness_timeout(mut self, timeout: Duration) -> Self {
+        self.readiness_timeout = Some(timeout);
+        self
+    }
+
     pub fn start(&self) -> Result<BackendStatus, BackendError> {
         *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Starting;
         if self.host.health(&self.transport).unwrap_or(false) {
@@ -471,7 +489,10 @@ impl BackendCore {
         match start_result {
             Ok(()) => {
                 *self.owned.lock().map_err(|_| BackendError::State)? = true;
-                let deadline = std::time::Instant::now() + self.host.readiness_timeout();
+                let deadline = std::time::Instant::now()
+                    + self
+                        .readiness_timeout
+                        .unwrap_or_else(|| self.host.readiness_timeout());
                 loop {
                     self.host.maintain()?;
                     if self.host.health(&self.transport).unwrap_or(false) {

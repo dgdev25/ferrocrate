@@ -277,6 +277,12 @@ enum VmCommands {
         ssh_private_key_path: Option<String>,
         #[arg(long)]
         cloud_init_image_path: Option<String>,
+        #[arg(long)]
+        vfkit_kernel_path: Option<String>,
+        #[arg(long)]
+        vfkit_initrd_path: Option<String>,
+        #[arg(long, default_value = "5a:94:ef:e4:0c:ee")]
+        vfkit_mac: String,
     },
     Start {
         #[arg(long, default_value_t = false)]
@@ -987,6 +993,8 @@ struct VmConfig {
 struct VmState {
     config: VmConfig,
     pid: Option<u32>,
+    #[serde(default)]
+    auxiliary_pids: Vec<u32>,
     status: String,
     #[serde(default)]
     current_version: Option<String>,
@@ -2023,6 +2031,9 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             guest_user,
             ssh_private_key_path,
             cloud_init_image_path,
+            vfkit_kernel_path,
+            vfkit_initrd_path,
+            vfkit_mac,
         } => {
             let disk_path = disk_path.unwrap_or_else(|| {
                 state_path
@@ -2075,6 +2086,26 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                         cloud_init_image_path = Some(seed.display().to_string());
                     }
                 }
+            } else if backend == "vfkit" {
+                let artifact_dir = Path::new(&disk_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."));
+                fs::create_dir_all(artifact_dir)?;
+                let kernel = vfkit_kernel_path.ok_or_else(|| {
+                    DesktopError::Invalid("vfkit requires --vfkit-kernel-path".to_string())
+                })?;
+                let initrd = vfkit_initrd_path.ok_or_else(|| {
+                    DesktopError::Invalid("vfkit requires --vfkit-initrd-path".to_string())
+                })?;
+                let canonical_kernel = artifact_dir.join("vfkit-kernel");
+                let canonical_initrd = artifact_dir.join("vfkit-initrd");
+                if Path::new(&kernel) != canonical_kernel {
+                    fs::copy(&kernel, &canonical_kernel)?;
+                }
+                if Path::new(&initrd) != canonical_initrd {
+                    fs::copy(&initrd, &canonical_initrd)?;
+                }
+                fs::write(artifact_dir.join("vfkit-mac"), vfkit_mac)?;
             }
             let state = VmState {
                 config: VmConfig {
@@ -2094,6 +2125,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     cloud_init_image_path,
                 },
                 pid: None,
+                auxiliary_pids: Vec::new(),
                 status: "initialized".to_string(),
                 current_version: None,
                 last_error: None,
@@ -2109,6 +2141,11 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
             let mut state = load_vm_state(&state_path)?;
             if let Some(pid) = state.pid {
                 if pid_alive(pid) {
+                    if foreground {
+                        while pid_alive(pid) {
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                    }
                     println!("vm: already running pid={pid}");
                     return Ok(());
                 }
@@ -2130,13 +2167,21 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                                 .to_string(),
                         ));
                     }
+                    state.auxiliary_pids.clear();
                     if state.config.fs_backend == "virtiofs" {
-                        start_virtiofs_daemon(&state.config)?;
+                        state
+                            .auxiliary_pids
+                            .push(start_virtiofs_daemon(&state.config)?);
                     }
                     let mut command = build_vm_command(&state.config, &forwards)?;
                     if foreground {
                         command.arg("-serial").arg("mon:stdio");
-                        let status = command.status()?;
+                        let mut child = command.spawn()?;
+                        state.pid = Some(child.id());
+                        state.status = "running".to_string();
+                        state.last_error = None;
+                        save_vm_state(&state_path, &state)?;
+                        let status = child.wait()?;
                         if !status.success() {
                             return Err(DesktopError::Invalid(format!(
                                 "vm process exited with status {status}"
@@ -2199,6 +2244,48 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     }
                     Ok(())
                 }
+                "vfkit" => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(DesktopError::Invalid(
+                            "vfkit is supported on macOS hosts only".to_string(),
+                        ));
+                    }
+                    let mut command = build_vfkit_command(&state.config)?;
+                    let log_path = state_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("vfkit.log");
+                    let log_file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)?;
+                    let log_file_err = log_file.try_clone()?;
+                    command
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::from(log_file))
+                        .stderr(Stdio::from(log_file_err));
+                    let mut child = command.spawn()?;
+                    state.pid = Some(child.id());
+                    state.auxiliary_pids.clear();
+                    state.status = "starting".to_string();
+                    state.last_error = None;
+                    save_vm_state(&state_path, &state)?;
+                    let guest_address = wait_for_vfkit_guest_address(&state.config, 120)?;
+                    let forward_pid = start_vfkit_ssh_forward(&state.config, &guest_address)?;
+                    state.auxiliary_pids.push(forward_pid);
+                    state.status = "running".to_string();
+                    save_vm_state(&state_path, &state)?;
+                    println!("vm: started pid={} backend=vfkit", child.id());
+                    if foreground {
+                        let status = child.wait()?;
+                        if !status.success() {
+                            return Err(DesktopError::Invalid(format!(
+                                "vfkit exited with status {status}"
+                            )));
+                        }
+                    }
+                    Ok(())
+                }
                 "hyperv" => {
                     start_hyperv_vm(&state.config)?;
                     state.pid = None;
@@ -2223,7 +2310,14 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                 println!("vm: stopped backend=hyperv name={}", state.config.vm_name);
                 return Ok(());
             }
+            for auxiliary_pid in state.auxiliary_pids.drain(..) {
+                if pid_alive(auxiliary_pid) {
+                    stop_vm_process(auxiliary_pid)?;
+                }
+            }
             let Some(pid) = state.pid else {
+                state.status = "stopped".to_string();
+                save_vm_state(&state_path, &state)?;
                 println!("vm: already stopped");
                 return Ok(());
             };
@@ -2660,14 +2754,14 @@ fn backup_path_for_disk(disk: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
+fn start_virtiofs_daemon(config: &VmConfig) -> Result<u32, DesktopError> {
     let socket_path = config.virtiofs_socket_path.as_deref().ok_or_else(|| {
         DesktopError::Invalid("virtiofs backend requires virtiofs_socket_path".to_string())
     })?;
     if fs::metadata(socket_path).is_ok() {
         let _ = fs::remove_file(socket_path);
     }
-    let status = Command::new("virtiofsd")
+    let child = Command::new("virtiofsd")
         .arg("--socket-path")
         .arg(socket_path)
         .arg("--shared-dir")
@@ -2675,12 +2769,67 @@ fn start_virtiofs_daemon(config: &VmConfig) -> Result<(), DesktopError> {
         .arg("--cache")
         .arg("auto")
         .spawn();
-    match status {
-        Ok(_) => Ok(()),
+    match child {
+        Ok(child) => Ok(child.id()),
         Err(err) => Err(DesktopError::Invalid(format!(
             "failed to start virtiofsd: {err}"
         ))),
     }
+}
+
+fn wait_for_vfkit_guest_address(
+    config: &VmConfig,
+    timeout_seconds: u64,
+) -> Result<String, DesktopError> {
+    let artifact_dir = Path::new(&config.disk_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let mac = fs::read_to_string(artifact_dir.join("vfkit-mac"))
+        .unwrap_or_else(|_| "5a:94:ef:e4:0c:ee".to_string());
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        if let Ok(leases) = fs::read_to_string("/var/db/dhcpd_leases") {
+            if let Some(address) = vfkit_address_from_leases(&leases, mac.trim()) {
+                return Ok(address);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(DesktopError::Invalid(format!(
+                "vfkit guest address was not discovered within {timeout_seconds}s"
+            )));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn vfkit_address_from_leases(leases: &str, mac: &str) -> Option<String> {
+    let mac = mac.to_ascii_lowercase();
+    leases.split('}').find_map(|lease| {
+        if !lease.to_ascii_lowercase().contains(&mac) {
+            return None;
+        }
+        lease.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("ip_address=")
+                .map(str::trim)
+                .filter(|address| !address.is_empty())
+                .map(str::to_string)
+        })
+    })
+}
+
+fn start_vfkit_ssh_forward(config: &VmConfig, guest_address: &str) -> Result<u32, DesktopError> {
+    let child = Command::new("socat")
+        .arg(format!(
+            "TCP-LISTEN:{},bind=127.0.0.1,reuseaddr,fork",
+            config.ssh_port
+        ))
+        .arg(format!("TCP:{guest_address}:22"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    Ok(child.id())
 }
 
 fn start_hyperv_vm(config: &VmConfig) -> Result<(), DesktopError> {
@@ -2785,6 +2934,9 @@ fn qemu_escape_option_value(value: &str) -> String {
 }
 
 fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Command, DesktopError> {
+    if config.backend == "vfkit" {
+        return build_vfkit_command(config);
+    }
     let qemu_bin = match config.backend.as_str() {
         "qemu-hvf" | "qemu-tcg-aarch64" => "qemu-system-aarch64",
         "qemu-x86_64" | "qemu-tcg-x86_64" => "qemu-system-x86_64",
@@ -2822,10 +2974,7 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
             cmd.arg("-bios").arg(code);
         }
     }
-    let mut host_forward_specs = vec![format!(
-        "hostfwd=tcp:127.0.0.1:{}-:22",
-        config.ssh_port
-    )];
+    let mut host_forward_specs = vec![format!("hostfwd=tcp:127.0.0.1:{}-:22", config.ssh_port)];
     let mut used_bind_ports = HashSet::new();
     used_bind_ports.insert(("127.0.0.1".to_string(), config.ssh_port));
     for entry in forwards {
@@ -2898,6 +3047,51 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         }
     }
     Ok(cmd)
+}
+
+fn build_vfkit_command(config: &VmConfig) -> Result<Command, DesktopError> {
+    if config.fs_backend != "virtiofs" {
+        return Err(DesktopError::Invalid(
+            "vfkit requires the virtiofs filesystem backend".to_string(),
+        ));
+    }
+    let artifact_dir = Path::new(&config.disk_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let kernel = artifact_dir.join("vfkit-kernel");
+    let initrd = artifact_dir.join("vfkit-initrd");
+    let mac = fs::read_to_string(artifact_dir.join("vfkit-mac"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "5a:94:ef:e4:0c:ee".to_string());
+    let mut command = Command::new("vfkit");
+    command
+        .arg("--cpus")
+        .arg(config.cpus.to_string())
+        .arg("--memory")
+        .arg(config.memory_mb.to_string())
+        .arg("--bootloader")
+        .arg(format!(
+            "linux,kernel={},initrd={},cmdline=console=hvc0 root=/dev/vda1",
+            kernel.display(),
+            initrd.display()
+        ))
+        .arg("--device")
+        .arg(format!("virtio-blk,path={}", config.disk_path))
+        .arg("--device")
+        .arg(format!(
+            "virtio-fs,sharedDir={},mountTag=ferrohost",
+            config.host_share_path
+        ))
+        .arg("--device")
+        .arg(format!("virtio-net,nat,mac={mac}"));
+    if let Some(cloud_init) = config.cloud_init_image_path.as_deref() {
+        command
+            .arg("--device")
+            .arg(format!("virtio-blk,path={cloud_init}"));
+    }
+    Ok(command)
 }
 
 fn find_uefi_firmware(backend: &str) -> Option<(PathBuf, Option<PathBuf>)> {
@@ -3922,6 +4116,7 @@ mod tests {
                 cloud_init_image_path: None,
             },
             pid: None,
+            auxiliary_pids: Vec::new(),
             status: "running".to_string(),
             current_version: None,
             last_error: None,
@@ -3966,6 +4161,7 @@ mod tests {
                 cloud_init_image_path: None,
             },
             pid: None,
+            auxiliary_pids: Vec::new(),
             status: "running".to_string(),
             current_version: None,
             last_error: None,
@@ -4051,6 +4247,7 @@ mod tests {
                 cloud_init_image_path: None,
             },
             pid: None,
+            auxiliary_pids: Vec::new(),
             status: "initialized".to_string(),
             current_version: None,
             last_error: None,
@@ -4279,7 +4476,35 @@ mod tests {
             .expect("QEMU user network");
 
         assert!(netdev.contains("hostfwd=tcp:127.0.0.1:2222-:22"));
-        assert!(!netdev.contains("4288"), "SSH owns the API tunnel: {netdev}");
+        assert!(
+            !netdev.contains("4288"),
+            "SSH owns the API tunnel: {netdev}"
+        );
+    }
+
+    #[test]
+    fn vm_command_builder_supports_installer_vfkit_state() {
+        let cfg = VmConfig {
+            backend: "vfkit".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
+            cpus: 4,
+            memory_mb: 4096,
+            disk_path: "/Users/test/.ferrocrate/vm/ferrocrate-desktop.raw".to_string(),
+            host_share_path: "/Users/test".to_string(),
+            fs_backend: "virtiofs".to_string(),
+            virtiofs_socket_path: None,
+            hyperv_switch: None,
+            ssh_port: 2222,
+            api_port: 4288,
+            guest_user: Some("ferro".to_string()),
+            ssh_private_key_path: Some("/Users/test/.ferrocrate/vm/desktop_vm_ed25519".to_string()),
+            cloud_init_image_path: Some(
+                "/Users/test/.ferrocrate/vm/cloud-init-seed.iso".to_string(),
+            ),
+        };
+
+        let command = build_vm_command(&cfg, &[]).expect("vfkit command from persisted state");
+        assert_eq!(command.get_program().to_string_lossy(), "vfkit");
     }
 
     #[test]

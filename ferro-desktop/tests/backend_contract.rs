@@ -45,6 +45,9 @@ struct FakeHost {
     requests: Mutex<Vec<(Transport, TransportRequest)>>,
     execs: Mutex<Vec<(CommandSpec, ExecRequest)>>,
     terminals: Mutex<Vec<(Transport, TerminalRequest)>>,
+    controls: Mutex<Vec<CommandSpec>>,
+    maintain_calls: Mutex<usize>,
+    healthy_after_maintains: Option<usize>,
     becomes_healthy_on_start: bool,
     fail_program: Mutex<Option<String>>,
 }
@@ -60,6 +63,13 @@ impl FakeHost {
     fn ready_after_start() -> Arc<Self> {
         Arc::new(Self {
             becomes_healthy_on_start: true,
+            ..Self::default()
+        })
+    }
+
+    fn healthy_after_maintains(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_after_maintains: Some(count),
             ..Self::default()
         })
     }
@@ -94,6 +104,23 @@ impl BackendHost for FakeHost {
 
     fn readiness_timeout(&self) -> std::time::Duration {
         std::time::Duration::ZERO
+    }
+
+    fn maintain(&self) -> Result<(), BackendError> {
+        let mut calls = self.maintain_calls.lock().unwrap();
+        *calls += 1;
+        if self
+            .healthy_after_maintains
+            .is_some_and(|required| *calls >= required)
+        {
+            *self.healthy.lock().unwrap() = true;
+        }
+        Ok(())
+    }
+
+    fn control(&self, command: &CommandSpec) -> Result<(), BackendError> {
+        self.controls.lock().unwrap().push(command.clone());
+        Ok(())
     }
 
     fn request(
@@ -329,6 +356,43 @@ fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
         Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
     );
     assert_eq!(backend.stop().unwrap().state, BackendState::Stopped);
+    assert_eq!(
+        host.controls.lock().unwrap().as_slice(),
+        &[CommandSpec::new("/usr/local/bin/ferro-desktop").args([
+            "vm",
+            "--state-file",
+            "/Users/test/.ferrocrate/desktop-vm.json",
+            "stop",
+        ])]
+    );
+}
+
+#[test]
+fn macos_cold_start_gets_a_backend_specific_readiness_window() {
+    let mac_host = FakeHost::healthy_after_maintains(2);
+    let macos = MacosVmBackend::with_host(MacosVmConfig::default(), mac_host.clone());
+    assert_eq!(macos.start().unwrap().state, BackendState::Running);
+    assert_eq!(*mac_host.maintain_calls.lock().unwrap(), 2);
+
+    let linux_host = FakeHost::healthy_after_maintains(2);
+    let linux = LinuxNativeBackend::with_host(linux_config(), linux_host.clone());
+    assert!(linux.start().is_err());
+    assert_eq!(*linux_host.maintain_calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn macos_stop_terminates_a_vm_adopted_from_installer_state() {
+    let host = FakeHost::healthy(true);
+    let backend = MacosVmBackend::with_host(MacosVmConfig::default(), host.clone());
+
+    assert_eq!(backend.start().unwrap().state, BackendState::Running);
+    assert!(host.starts.lock().unwrap().is_empty());
+    assert_eq!(backend.stop().unwrap().state, BackendState::Stopped);
+    assert_eq!(host.controls.lock().unwrap().len(), 1);
+    assert_eq!(
+        host.controls.lock().unwrap()[0].args.last().unwrap(),
+        "stop"
+    );
 }
 
 #[test]

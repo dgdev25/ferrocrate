@@ -30,3 +30,29 @@
 
 - This Linux host cannot execute vfkit, QEMU/HVF, macOS DHCP lease discovery, Homebrew provisioning, or the native SSH tunnel. Native macOS acceptance remains required.
 - vfkit is selected only when Apple virtualization is available and the operator supplies the required kernel/initrd bundle; otherwise the installer uses accelerated QEMU or explicit TCG software emulation.
+
+## Review round 1/5 — Important findings
+
+### Changes
+
+- Persisted `vfkit` as a real desktop VM backend state instead of bypassing the runtime VM command. The installer now creates a raw vfkit disk, copies the supplied kernel/initrd into canonical VM artifacts, and starts both vfkit and QEMU through `ferro-desktop vm`.
+- Added vfkit command reconstruction, DHCP address discovery, SSH port forwarding, and auxiliary PID tracking to the VM lifecycle so a cold runtime restart can recreate the installer-selected path.
+- Added synchronous lifecycle control for macOS backend stop/drop. Both owned and installer-adopted VMs invoke `vm stop`, which terminates recorded SSH/virtiofs helpers before the VM PID; failed cold starts also issue cleanup control.
+- Added a macOS-only 180-second backend readiness window. Linux and WSL continue to use their host-provided bounds.
+
+### Red evidence
+
+- `bash scripts/test-desktop-backend-contracts.sh` — failed with `missing persisted VM initialization contract`.
+- `CARGO_BUILD_JOBS=6 cargo test -p ferro-desktop --bin ferro-desktop vm_command_builder_supports_installer_vfkit_state` — failed because `vfkit` was an unsupported persisted VM backend.
+- `CARGO_BUILD_JOBS=6 cargo test -p ferro-desktop --test backend_contract macos_backend_starts_the_provisioned_vm_and_stops_owned_children -- --exact` — failed because stop issued no VM lifecycle control command.
+- `CARGO_BUILD_JOBS=6 cargo test -p ferro-desktop --test backend_contract macos_cold_start_gets_a_backend_specific_readiness_window -- --exact` — failed at the generic zero-duration fake-host deadline before the second maintenance attempt.
+
+### Green evidence
+
+- `bash -n scripts/install-macos.sh && bash scripts/test-desktop-backend-contracts.sh` — passed.
+- `CARGO_BUILD_JOBS=6 cargo test -p ferro-desktop` — passed: 69 tests, 0 failures (1 library, 48 binary, 20 backend contracts).
+- `git diff --check` and `shellcheck scripts/install-macos.sh scripts/test-desktop-backend-contracts.sh` — passed.
+
+### Additional concern
+
+- Native vfkit/QEMU process execution still requires a macOS acceptance run; this Linux host provides portable command/state/lifecycle coverage only.

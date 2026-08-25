@@ -22,6 +22,7 @@ PAID_ENTITLEMENT_FILE="${PAID_ENTITLEMENT_FILE:-$HOME/.ferrocrate/entitlement.li
 FERROCRATE_CONFIG_DIR="${FERROCRATE_CONFIG_DIR:-$HOME/.ferrocrate}"
 VM_STATE_FILE="${VM_STATE_FILE:-${FERROCRATE_DESKTOP_VM_STATE:-$FERROCRATE_CONFIG_DIR/desktop-vm.json}}"
 VM_DIR="${VM_DIR:-${FERROCRATE_VM_DIR:-$FERROCRATE_CONFIG_DIR/vm}}"
+VM_DISK_PATH_OVERRIDE="${VM_DISK_PATH:-}"
 VM_DISK_PATH="${VM_DISK_PATH:-$VM_DIR/ferrocrate-desktop.qcow2}"
 VM_CLOUD_INIT_PATH="${VM_CLOUD_INIT_PATH:-$VM_DIR/cloud-init-seed.iso}"
 VM_SIZE_GB="${VM_SIZE_GB:-20}"
@@ -591,7 +592,7 @@ base_cloud_image_url() {
 }
 
 prepare_vm_image() {
-  local base_url base_img cache_dir
+  local backend="$1" base_url base_img cache_dir
   cache_dir="$VM_DIR/cache"
   base_url="$(base_cloud_image_url)"
   base_img="$cache_dir/base-cloudimg.qcow2"
@@ -602,7 +603,16 @@ prepare_vm_image() {
     curl -fL "$base_url" -o "$base_img"
   fi
 
-  if [[ ! -f "$VM_DISK_PATH" ]]; then
+  if [[ "$backend" == "vfkit" ]]; then
+    VM_DISK_PATH="${VM_DISK_PATH_OVERRIDE:-$VM_DIR/ferrocrate-desktop.raw}"
+    if [[ ! -f "$VM_DISK_PATH" ]]; then
+      echo "creating raw vfkit desktop VM disk at $VM_DISK_PATH..."
+      qemu-img convert -O raw "$base_img" "$VM_DISK_PATH"
+      qemu-img resize "$VM_DISK_PATH" "${VM_SIZE_GB}G" >/dev/null
+    else
+      echo "reusing existing vfkit VM disk: $VM_DISK_PATH"
+    fi
+  elif [[ ! -f "$VM_DISK_PATH" ]]; then
     echo "creating desktop VM disk at $VM_DISK_PATH..."
     qemu-img create -f qcow2 -F qcow2 -b "$base_img" "$VM_DISK_PATH" "${VM_SIZE_GB}G" >/dev/null
   else
@@ -750,6 +760,7 @@ ensure_guest_daemon_running() {
 
 bootstrap_desktop_vm() {
   local ferro_desktop vm_backend
+  local -a vm_init_args
   ferro_desktop="$PREFIX/ferro-desktop"
   [[ -x "$ferro_desktop" ]] || ferro_desktop="$(command -v ferro-desktop || true)"
   if [[ -z "$ferro_desktop" || ! -x "$ferro_desktop" ]]; then
@@ -757,35 +768,37 @@ bootstrap_desktop_vm() {
     exit 1
   fi
 
-  prepare_vm_image
+  vm_backend="$(vm_backend_for_host)"
+  prepare_vm_image "$vm_backend"
   generate_vm_ssh_key
   generate_cloud_init_seed
-  vm_backend="$(vm_backend_for_host)"
-  if [[ "$vm_backend" == "vfkit" ]]; then
-    echo "starting desktop VM with vfkit and virtiofs..."
-    start_vfkit_vm "$VM_DISK_PATH" "$VM_CLOUD_INIT_PATH"
-    start_vfkit_ssh_forward
-  else
   echo "initializing desktop VM state..."
-  "$ferro_desktop" vm \
-    --state-file "$VM_STATE_FILE" \
-    init \
-    --backend "$vm_backend" \
-    --disk-path "$VM_DISK_PATH" \
-    --host-share-path "$VM_HOST_SHARE" \
-    --fs-backend virtiofs \
-    --ssh-port "$VM_SSH_PORT" \
-    --api-port "$VM_API_PORT" \
-    --guest-user "$VM_GUEST_USER" \
-    --ssh-private-key-path "$VM_SSH_KEY_PATH" \
-    --cloud-init-image-path "$VM_CLOUD_INIT_PATH" >/dev/null
+  vm_init_args=(
+    vm --state-file "$VM_STATE_FILE" init
+    --backend "$vm_backend"
+    --disk-path "$VM_DISK_PATH"
+    --host-share-path "$VM_HOST_SHARE"
+    --fs-backend virtiofs
+    --ssh-port "$VM_SSH_PORT"
+    --api-port "$VM_API_PORT"
+    --guest-user "$VM_GUEST_USER"
+    --ssh-private-key-path "$VM_SSH_KEY_PATH"
+    --cloud-init-image-path "$VM_CLOUD_INIT_PATH"
+  )
+  if [[ "$vm_backend" == "vfkit" ]]; then
+    vm_init_args+=(
+      --vfkit-kernel-path "$FERROCRATE_VFKIT_KERNEL"
+      --vfkit-initrd-path "$FERROCRATE_VFKIT_INITRD"
+      --vfkit-mac "$VFKIT_MAC"
+    )
+  fi
+  "$ferro_desktop" "${vm_init_args[@]}" >/dev/null
 
   echo "starting desktop VM..."
   if ! "$ferro_desktop" vm --state-file "$VM_STATE_FILE" start; then
     echo "desktop VM failed to start; inspect with:" >&2
     echo "  $ferro_desktop vm --state-file $VM_STATE_FILE status --json" >&2
     exit 1
-  fi
   fi
 
   echo "waiting for guest SSH on 127.0.0.1:$VM_SSH_PORT..."

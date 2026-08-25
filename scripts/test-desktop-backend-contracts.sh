@@ -41,6 +41,9 @@ require_text "$macos" 'FERROCRATE_VM_SSH_KEY' 'runtime SSH key override'
 require_text "$macos" 'ferrocrate daemon --socket' 'guest daemon socket'
 require_text "$macos" 'systemctl.*enable.*--now|enable --now.*ferrocrate' 'guest daemon supervision'
 require_text "$macos" 'qemu-tcg-' 'software QEMU acceleration fallback'
+require_text "$macos" 'vm[[:space:]]+\\?[^\n]*init|vm.*init' 'persisted VM initialization'
+require_text "$macos" '--vfkit-kernel-path' 'persisted vfkit kernel configuration'
+require_text "$macos" 'qemu-img convert -O raw' 'vfkit raw disk artifact'
 if grep -Fq 'ferrocrate-desktop-relay' "$macos"; then
   printf 'obsolete macOS relay executable contract remains in %s\n' "$macos" >&2
   exit 1

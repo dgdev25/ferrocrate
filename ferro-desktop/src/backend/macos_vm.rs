@@ -33,11 +33,7 @@ impl Default for MacosVmConfig {
             relay_addr: std::env::var("FERROCRATE_VM_API_PORT")
                 .ok()
                 .and_then(|port| format!("127.0.0.1:{port}").parse().ok())
-                .unwrap_or_else(|| {
-                    "127.0.0.1:4288"
-                        .parse()
-                        .expect("constant loopback address")
-                }),
+                .unwrap_or_else(|| "127.0.0.1:4288".parse().expect("constant loopback address")),
             ssh_port: std::env::var("FERROCRATE_VM_SSH_PORT")
                 .ok()
                 .and_then(|port| port.parse().ok())
@@ -53,6 +49,8 @@ impl Default for MacosVmConfig {
 
 pub struct MacosVmBackend {
     core: BackendCore,
+    stop_command: CommandSpec,
+    managed: std::sync::atomic::AtomicBool,
 }
 
 impl MacosVmBackend {
@@ -66,6 +64,12 @@ impl MacosVmBackend {
             config.vm_config.to_string_lossy().as_ref(),
             "start",
             "--foreground",
+        ]);
+        let stop_command = CommandSpec::new(start.program.clone()).args([
+            "vm",
+            "--state-file",
+            config.vm_config.to_string_lossy().as_ref(),
+            "stop",
         ]);
         let guest_socket = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
         let exec = CommandSpec::new("ssh").args([
@@ -110,7 +114,10 @@ impl MacosVmBackend {
                 Transport::Loopback(config.relay_addr),
                 host,
             )
-            .with_auxiliary_start(tunnel),
+            .with_auxiliary_start(tunnel)
+            .with_readiness_timeout(Duration::from_secs(180)),
+            stop_command,
+            managed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -126,10 +133,27 @@ impl Backend for MacosVmBackend {
         self.core.capabilities
     }
     fn start(&self) -> Result<BackendStatus, BackendError> {
-        self.core.start()
+        match self.core.start() {
+            Ok(status) => {
+                self.managed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Ok(status)
+            }
+            Err(error) => {
+                let _ = self.core.host.control(&self.stop_command);
+                Err(error)
+            }
+        }
     }
     fn stop(&self) -> Result<BackendStatus, BackendError> {
-        self.core.stop()
+        let control = self
+            .managed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+            .then(|| self.core.host.control(&self.stop_command))
+            .transpose();
+        let stopped = self.core.stop();
+        control?;
+        stopped
     }
     fn status(&self) -> BackendStatus {
         self.core.status()
@@ -156,5 +180,16 @@ impl Backend for MacosVmBackend {
     }
     fn socket_path(&self) -> Option<PathBuf> {
         Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
+    }
+}
+
+impl Drop for MacosVmBackend {
+    fn drop(&mut self) {
+        if self
+            .managed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = self.core.host.control(&self.stop_command);
+        }
     }
 }

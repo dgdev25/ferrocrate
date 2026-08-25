@@ -21,6 +21,9 @@ use tokio::sync::{broadcast, oneshot};
 
 use axum_server::tls_rustls::RustlsConfig;
 
+const MAX_REPLAY_EVENTS: usize = 512;
+const MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct EventRecord {
     id: u64,
@@ -51,6 +54,7 @@ pub struct EventReplay {
 struct ReplayState {
     next_id: u64,
     events: VecDeque<EventRecord>,
+    bytes: usize,
 }
 
 #[derive(Clone)]
@@ -87,9 +91,26 @@ impl EventHub {
             name: name.to_string(),
             payload,
         };
-        replay.events.push_back(event.clone());
-        while replay.events.len() > 512 {
-            replay.events.pop_front();
+        let event_bytes = event.name.len()
+            + serde_json::to_vec(&event.payload)
+                .map(|payload| payload.len())
+                .unwrap_or(MAX_REPLAY_BYTES.saturating_add(1));
+        if event_bytes <= MAX_REPLAY_BYTES {
+            replay.bytes = replay.bytes.saturating_add(event_bytes);
+            replay.events.push_back(event.clone());
+            while replay.events.len() > MAX_REPLAY_EVENTS || replay.bytes > MAX_REPLAY_BYTES {
+                if let Some(removed) = replay.events.pop_front() {
+                    replay.bytes = replay.bytes.saturating_sub(
+                        removed.name.len()
+                            + serde_json::to_vec(&removed.payload)
+                                .map(|payload| payload.len())
+                                .unwrap_or(0),
+                    );
+                } else {
+                    replay.bytes = 0;
+                    break;
+                }
+            }
         }
         let _ = self.sender.send(event);
     }
@@ -690,7 +711,7 @@ mod tests {
 
     use super::{
         install_tls_crypto_provider, request_host, CommandDispatcher, CommandRequest, EventHub,
-        RequestGuard, Server, StaticAssets,
+        RequestGuard, Server, StaticAssets, MAX_REPLAY_BYTES,
     };
 
     #[derive(Clone)]
@@ -808,6 +829,24 @@ mod tests {
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.events[0].name(), "container-log-batch");
         assert!(!replay.gap);
+    }
+
+    #[test]
+    fn event_hub_bounds_replay_payload_memory() {
+        let hub = EventHub::new();
+        let payload = "x".repeat(64 * 1024);
+        for _ in 0..512 {
+            hub.emit("container-log-batch", json!({ "text": payload }));
+        }
+
+        let replay = hub.replay_after(0);
+        let retained = replay
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(event.payload()).unwrap().len())
+            .sum::<usize>();
+        assert!(retained <= MAX_REPLAY_BYTES);
+        assert!(replay.gap);
     }
 
     #[tokio::test]

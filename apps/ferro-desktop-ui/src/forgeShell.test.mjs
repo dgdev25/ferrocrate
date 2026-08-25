@@ -173,19 +173,25 @@ test("release ferro-cli Docker list output decodes into actionable desktop rows"
   await Promise.all([mkdir(home), mkdir(runtime), mkdir(state)]);
   const env = { ...process.env, HOME: home, XDG_RUNTIME_DIR: runtime, FERROCRATE_HOME: state, FERROCRATE_RUNTIME_DIR: runtime, FERROCRATE_DESKTOP_FORWARD: "0", FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE: "desktop-shape", FERROCRATE_NETWORK_BACKEND: "iptables" };
   for (const key of ["FERROCRATE_ENTITLEMENT_TOKEN", "FERROCRATE_LICENSE_TOKEN", "FERROCRATE_ENTITLEMENT_FILE", "FERROCRATE_ENTITLEMENT_PUBKEY"]) delete env[key];
-  const daemon = spawn(binary, ["daemon", "--docker-compat", "--socket", join(runtime, "ferrocrate.sock")], { env, stdio: "ignore" });
+  const daemon = spawn(binary, ["daemon", "--docker-compat", "--socket", join(runtime, "ferrocrate.sock")], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let daemonStderr = "";
+  daemon.stderr.on("data", (chunk) => { daemonStderr += chunk; });
+  const daemonFailure = () => `daemon exit=${daemon.exitCode ?? "running"}; stderr=${daemonStderr.trim() || "(none)"}`;
   t.after(async () => { daemon.kill(); await rm(root, { recursive: true, force: true }); });
+  let ping;
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const ping = spawnSync(binary, ["version"], { env });
+    ping = spawnSync(binary, ["version"], { env, encoding: "utf8" });
     if (ping.status === 0) break;
     await new Promise((done) => setTimeout(done, 25));
   }
+  assert.equal(ping.status, 0, `${daemonFailure()}; version stderr=${ping.stderr}`);
   const create = spawnSync(binary, ["create", "--name", "desktop-contract", "busybox", "true"], { env, encoding: "utf8" });
-  assert.equal(create.status, 0, create.stderr);
+  assert.equal(create.status, 0, `${daemonFailure()}; create stderr=${create.stderr}`);
   const list = spawnSync(binary, ["containers", "--all", "--format", "json"], { env, encoding: "utf8" });
-  assert.equal(list.status, 0, list.stderr);
+  assert.equal(list.status, 0, `${daemonFailure()}; list stderr=${list.stderr}`);
   const [row] = parseContainerRows(list.stdout);
-  assert.ok(row.id);
+  assert.ok(row, `${daemonFailure()}; list stdout=${list.stdout}`);
+  assert.ok(row.id, `${daemonFailure()}; list stdout=${list.stdout}`);
   assert.equal(row.name, "desktop-contract");
   assert.equal(row.image, "busybox");
   assert.equal(row.state, "created");

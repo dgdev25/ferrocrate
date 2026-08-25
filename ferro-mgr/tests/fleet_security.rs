@@ -3,7 +3,8 @@
 use std::os::unix::fs::PermissionsExt;
 
 use ferro_mgr::fleet::{
-    request_digest, AuditJournal, AuditResult, BrowserIdentity, FleetRole, SessionStore,
+    certificate_principal, request_digest, AuditJournal, AuditResult, BrowserIdentity, FleetRole,
+    SessionStore,
 };
 use serde_json::json;
 
@@ -67,4 +68,16 @@ fn canonical_request_digest_is_independent_of_object_key_order() {
         request_digest(&json!({"node":"a","action":"stop"})),
         request_digest(&json!({"action":"stop","node":"a"}))
     );
+}
+
+#[test]
+fn operator_certificate_principal_is_a_stable_sha256_fingerprint() {
+    let authority = ferro_mgr::pki::CertificateAuthority::new("operator-root").unwrap();
+    let certificate = authority.issue_admin_certificate("cluster-a").unwrap();
+    let first = certificate_principal(certificate.certificate_pem.as_bytes()).unwrap();
+    let second = certificate_principal(certificate.certificate_pem.as_bytes()).unwrap();
+    assert_eq!(first, second);
+    assert!(first.starts_with("mtls:"));
+    assert_eq!(first.len(), "mtls:".len() + 32);
+    assert!(certificate_principal(b"not pem").is_err());
 }

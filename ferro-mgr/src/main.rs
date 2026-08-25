@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
@@ -6,6 +12,10 @@ use ferro_core::authorization::helper_grant::{GrantIssuer, ResourceBinding};
 use ferro_mgr::{
     controller_authorization::{ControllerGrantIssuer, ControllerPolicy},
     enrollment::EnrollmentService,
+    fleet::{
+        certificate_principal, AuditJournal, BrowserIdentity, FleetAssets, FleetRole, FleetUi,
+        TonicFleetBackend,
+    },
     pki::CertificateAuthority,
     pki::{CertificateIdentity, CertificateRole},
     proto::{
@@ -19,6 +29,9 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("fleet-ui") {
+        return run_fleet_ui().await;
+    }
     ferro_mgr::config::ManagerLimits::default()
         .validate()
         .expect("valid manager limits");
@@ -154,6 +167,175 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(admin_service)
         .serve(admin_bind);
     tokio::try_join!(public, control, admin)?;
+    Ok(())
+}
+
+struct FleetUiOptions {
+    listen: SocketAddr,
+    insecure_loopback: bool,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    admin_endpoint: String,
+    admin_domain: String,
+    admin_server_ca: PathBuf,
+    operator_cert: PathBuf,
+    operator_key: PathBuf,
+    state_dir: PathBuf,
+    cluster_id: String,
+}
+
+impl FleetUiOptions {
+    fn parse() -> Result<Self, String> {
+        let mut listen: SocketAddr = "127.0.0.1:8443".parse().expect("static address");
+        let mut insecure_loopback = false;
+        let mut tls_cert = std::env::var_os("FERROCRATE_MANAGER_TLS_CERT").map(PathBuf::from);
+        let mut tls_key = std::env::var_os("FERROCRATE_MANAGER_TLS_KEY").map(PathBuf::from);
+        let mut admin_endpoint = std::env::var("FERROCRATE_ADMIN_ENDPOINT")
+            .unwrap_or_else(|_| "https://127.0.0.1:50052".into());
+        let mut admin_domain = std::env::var("FERROCRATE_ADMIN_TLS_DOMAIN")
+            .unwrap_or_else(|_| "localhost".into());
+        let mut admin_server_ca = std::env::var_os("FERROCRATE_ADMIN_SERVER_CA_CERT")
+            .map(PathBuf::from);
+        let mut operator_cert =
+            std::env::var_os("FERROCRATE_ADMIN_TLS_CERT").map(PathBuf::from);
+        let mut operator_key = std::env::var_os("FERROCRATE_ADMIN_TLS_KEY").map(PathBuf::from);
+        let mut state_dir = std::env::var_os("FERROCRATE_FLEET_STATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".ferrocrate-fleet"));
+        let cluster_id =
+            std::env::var("FERROCRATE_CLUSTER_ID").unwrap_or_else(|_| "local-cluster".into());
+        let mut arguments = std::env::args().skip(2);
+        while let Some(argument) = arguments.next() {
+            let value = |arguments: &mut std::iter::Skip<std::env::Args>, name: &str| {
+                arguments
+                    .next()
+                    .ok_or_else(|| format!("{name} requires a value"))
+            };
+            match argument.as_str() {
+                "--listen" => {
+                    listen = value(&mut arguments, "--listen")?
+                        .parse()
+                        .map_err(|error| format!("invalid --listen address: {error}"))?;
+                }
+                "--insecure-loopback" => insecure_loopback = true,
+                "--tls-cert" => tls_cert = Some(value(&mut arguments, "--tls-cert")?.into()),
+                "--tls-key" => tls_key = Some(value(&mut arguments, "--tls-key")?.into()),
+                "--admin-endpoint" => {
+                    admin_endpoint = value(&mut arguments, "--admin-endpoint")?
+                }
+                "--admin-domain" => admin_domain = value(&mut arguments, "--admin-domain")?,
+                "--admin-server-ca" => {
+                    admin_server_ca = Some(value(&mut arguments, "--admin-server-ca")?.into())
+                }
+                "--operator-cert" => {
+                    operator_cert = Some(value(&mut arguments, "--operator-cert")?.into())
+                }
+                "--operator-key" => {
+                    operator_key = Some(value(&mut arguments, "--operator-key")?.into())
+                }
+                "--state-dir" => state_dir = value(&mut arguments, "--state-dir")?.into(),
+                _ => return Err(format!("unknown fleet-ui argument {argument}")),
+            }
+        }
+        if insecure_loopback && !listen.ip().is_loopback() {
+            return Err("--insecure-loopback is valid only for a loopback listener".into());
+        }
+        if !insecure_loopback && (tls_cert.is_none() || tls_key.is_none()) {
+            return Err("fleet-ui is TLS-only; --tls-cert and --tls-key are required".into());
+        }
+        Ok(Self {
+            listen,
+            insecure_loopback,
+            tls_cert,
+            tls_key,
+            admin_endpoint,
+            admin_domain,
+            admin_server_ca: admin_server_ca
+                .ok_or_else(|| "--admin-server-ca is required".to_string())?,
+            operator_cert: operator_cert
+                .ok_or_else(|| "--operator-cert is required".to_string())?,
+            operator_key: operator_key
+                .ok_or_else(|| "--operator-key is required".to_string())?,
+            state_dir,
+            cluster_id,
+        })
+    }
+}
+
+async fn run_fleet_ui() -> Result<(), Box<dyn std::error::Error>> {
+    let options = FleetUiOptions::parse()?;
+    std::fs::create_dir_all(&options.state_dir)?;
+    std::fs::set_permissions(
+        &options.state_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let server_ca = std::fs::read(&options.admin_server_ca)?;
+    let operator_cert = std::fs::read(&options.operator_cert)?;
+    let operator_key = std::fs::read(&options.operator_key)?;
+    let principal = certificate_principal(&operator_cert)?;
+    let backend = Arc::new(
+        TonicFleetBackend::connect(
+            options.admin_endpoint,
+            options.admin_domain,
+            server_ca,
+            operator_cert,
+            operator_key,
+            options.cluster_id,
+        )
+        .await?,
+    );
+    let audit = Arc::new(AuditJournal::open(options.state_dir.join("audit.jsonl"))?);
+    let ui = FleetUi::new(Arc::new(FleetAssets), backend, audit, 600)?;
+    let operate_login = ui.mint_login(
+        BrowserIdentity {
+            principal: principal.clone(),
+            role: FleetRole::Operate,
+        },
+        300,
+    )?;
+    let view_login = ui.mint_login(
+        BrowserIdentity {
+            principal,
+            role: FleetRole::View,
+        },
+        300,
+    )?;
+    let operate_path = options.state_dir.join("operate.login");
+    let view_path = options.state_dir.join("view.login");
+    write_secret(&operate_path, &operate_login)?;
+    write_secret(&view_path, &view_login)?;
+    eprintln!(
+        "fleet UI ready on {} (operate login: {}; view login: {})",
+        options.listen,
+        operate_path.display(),
+        view_path.display()
+    );
+    if options.insecure_loopback {
+        ui.spawn_insecure_loopback(options.listen).await?.wait().await?;
+    } else {
+        ui.serve_tls(
+            options.listen,
+            options.tls_cert.as_deref().expect("validated TLS cert"),
+            options.tls_key.as_deref().expect("validated TLS key"),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn write_secret(path: &Path, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".fleet-login-")
+        .tempfile_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    writeln!(temporary, "{value}")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path)?;
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

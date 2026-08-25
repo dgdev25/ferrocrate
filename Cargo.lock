@@ -1117,20 +1117,28 @@ dependencies = [
 name = "ferro-mgr"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "axum-server",
  "base64",
  "ed25519-dalek",
  "ferro-core",
  "ferro-netd",
+ "ferro-web",
  "fs2",
  "getrandom 0.3.4",
  "ipnet",
+ "mime_guess",
  "nix",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
  "rcgen",
+ "reqwest",
  "rusqlite",
+ "rust-embed",
  "rustix",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3110,6 +3118,15 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

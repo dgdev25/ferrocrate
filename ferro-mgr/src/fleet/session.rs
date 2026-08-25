@@ -73,6 +73,17 @@ impl SessionStore {
     }
 }
 
+pub fn certificate_principal(pem: &[u8]) -> Result<String, String> {
+    let mut reader = std::io::Cursor::new(pem);
+    let certificate = rustls_pemfile::certs(&mut reader)
+        .next()
+        .transpose()
+        .map_err(|error| format!("failed to parse operator certificate: {error}"))?
+        .ok_or_else(|| "operator certificate PEM is empty".to_string())?;
+    let digest = Sha256::digest(certificate.as_ref());
+    Ok(format!("mtls:{}", hex(&digest[..16])))
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

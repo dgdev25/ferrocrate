@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 ferro-core = { path = "../ferro-core" }
+ferro-web = { path = "../ferro-web" }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 fs2 = "0.4"
 prost = "0.14"
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }
@@ -30,10 +34,14 @@ ed25519-dalek = "2"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 nix = { workspace = true, features = ["user", "socket", "fs"] }
 rustix = { version = "1", features = ["process"] }
+rustls-pemfile = "2"
+rust-embed = "8"
+mime_guess = "2"
 
 [dev-dependencies]
 ferro-netd = { path = "../ferro-netd", features = ["test-support"] }
 ferro-core = { path = "../ferro-core", features = ["test-support"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

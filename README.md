@@ -5,13 +5,13 @@
 Ferrocrate is a container engine you use exactly like Docker — same commands,
 same Dockerfiles, same images — implemented from scratch in Rust as a single
 binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 60 classic-builder
+conformance suite drives a real Docker client through 60 default-BuildKit
 scenarios, and all 60 pass (rootless and rootful). Images are standard OCI, so anything Ferrocrate
 builds runs under Docker, podman, or Kubernetes, and the other way round.
 
 ## ✨ Highlights
 
-- **Docker-compatible, verified** — 60/60 classic-builder conformance against
+- **Docker-compatible, verified** — 60/60 default-BuildKit conformance against
   the real `docker` client, including multi-network connect/disconnect and
   non-readable log-driver behavior.
 - **Fast** — the dated benchmark register records host-local paired results;
@@ -38,13 +38,13 @@ Build a project the way you always have — a Dockerfile and one command:
 ./target/release/ferro-cli run myapp:1.0
 ```
 
-Or point the real Docker CLI at Ferrocrate's daemon. The classic build protocol
-is supported; BuildKit session builds fail cleanly with an actionable
-`DOCKER_BUILDKIT=0` message while the protocol work remains unimplemented:
+Or point the real Docker CLI at Ferrocrate's daemon. The default build protocol
+is supported through the authenticated Buildx docker driver; the classic path
+remains available and produces the same image digest:
 
 ```bash
 export DOCKER_HOST=unix:///run/ferrocrate/docker.sock
-DOCKER_BUILDKIT=0 docker build -t myapp:1.0 .
+docker build -t myapp:1.0 .
 docker run myapp:1.0
 ```
 
@@ -116,10 +116,10 @@ experimental or unsupported, the matrix says so explicitly.
 ## 🩺 Status
 
 Ferrocrate targets Linux-first local development, not (yet) a universal Docker
-replacement. Coverage is strongest in lifecycle, images, and classic builds.
-Multi-network containers and pluggable log drivers landed in Round 9; BuildKit remains an
-explicit session-protocol boundary with a sized 17–29 engineering-day design
-([`docs/remediation/ROUND-9-HARD-ITEMS.md`](docs/remediation/ROUND-9-HARD-ITEMS.md)).
+replacement. Coverage is strongest in lifecycle, images, and local Dockerfile
+builds. Multi-network containers, pluggable log drivers, and authenticated
+BuildKit session builds are qualified; arbitrary LLB and non-Dockerfile
+frontends remain explicit unsupported boundaries.
 AI-assisted restart/resource signals exist but are local, bounded, and off
 unless enabled (`FERROCRATE_AI=0` disables everything; automatic actions
 need a separate operator gate).

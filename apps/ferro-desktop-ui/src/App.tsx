@@ -76,6 +76,7 @@ import {
   resourceTotalsForSurface,
   shellKeyboardCommand,
   shouldPollContainerStats,
+  tabKeyboardTarget,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
@@ -85,6 +86,7 @@ const EMPTY = "Nothing to show.";
 const THEME_KEY = "ferro_desktop_theme";
 type ThemeMode = "dark" | "light";
 type DetailTab = "logs" | "terminal" | "inspect" | "stats";
+const DETAIL_TABS: DetailTab[] = ["logs", "terminal", "inspect", "stats"];
 type LogBatch = { text: string; truncated: boolean };
 type TerminalOutput = { data: number[]; stderr: boolean };
 type PullFailure = ReturnType<typeof pullFailurePresentation>;
@@ -365,6 +367,7 @@ function App(): JSX.Element {
     setPullImageDialogOpen(false);
     setPullFailure(null);
     setBuildImageDialogOpen(false);
+    setComposeFileDialogOpen(false);
     setBuildLicensingDialogOpen(false);
     setRegistryDialogOpen(false);
     closeResourceDialog();
@@ -1467,13 +1470,32 @@ function App(): JSX.Element {
                     {selectedRow ? <span className="detail-meta">{selectedRow.status}</span> : null}
                   </div>
                   <div className="detail-tabs" role="tablist">
-                    {(["logs", "terminal", "inspect", "stats"] as DetailTab[]).map((tab) => (
-                      <button key={tab} role="tab" aria-selected={detailTab === tab} className={detailTab === tab ? "active" : ""} onClick={() => setDetailTab(tab)}>{tab[0].toUpperCase() + tab.slice(1)}</button>
+                    {DETAIL_TABS.map((tab) => (
+                      <button
+                        key={tab}
+                        id={`container-tab-${tab}`}
+                        data-detail-tab={tab}
+                        role="tab"
+                        aria-controls={`container-panel-${tab}`}
+                        aria-selected={detailTab === tab}
+                        tabIndex={detailTab === tab ? 0 : -1}
+                        className={detailTab === tab ? "active" : ""}
+                        onClick={() => setDetailTab(tab)}
+                        onKeyDown={(event) => {
+                          const next = tabKeyboardTarget(DETAIL_TABS, tab, event.key) as DetailTab | null;
+                          if (!next) return;
+                          event.preventDefault();
+                          setDetailTab(next);
+                          event.currentTarget.parentElement
+                            ?.querySelector<HTMLButtonElement>(`[data-detail-tab="${next}"]`)
+                            ?.focus();
+                        }}
+                      >{tab[0].toUpperCase() + tab.slice(1)}</button>
                     ))}
                   </div>
                   {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
-                  <div className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
+                  <div id="container-panel-logs" role="tabpanel" aria-labelledby="container-tab-logs" className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
                     <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
@@ -1486,7 +1508,7 @@ function App(): JSX.Element {
                     </div>
                   </div>
 
-                  <div className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
+                  <div id="container-panel-terminal" role="tabpanel" aria-labelledby="container-tab-terminal" className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
                     <div className="terminal-config">
                       <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
                       <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
@@ -1501,7 +1523,7 @@ function App(): JSX.Element {
                     </div>
                   </div>
 
-                  <div className={`detail-pane inspect-pane ${detailTab === "inspect" ? "active" : ""}`}>
+                  <div id="container-panel-inspect" role="tabpanel" aria-labelledby="container-tab-inspect" className={`detail-pane inspect-pane ${detailTab === "inspect" ? "active" : ""}`}>
                     {containerDetail ? (
                       <>
                         <dl className="detail-grid">
@@ -1516,7 +1538,7 @@ function App(): JSX.Element {
                     ) : <div className="empty-state"><strong>No inspection loaded</strong><span>Select a container row.</span></div>}
                   </div>
 
-                  <div className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
+                  <div id="container-panel-stats" role="tabpanel" aria-labelledby="container-tab-stats" className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
                     {containerDetail ? (
                       <>
                         {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}

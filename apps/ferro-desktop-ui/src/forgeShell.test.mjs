@@ -23,6 +23,7 @@ import {
   resourceTotalsForSurface,
   shouldPollContainerStats,
   shellKeyboardCommand,
+  tabKeyboardTarget,
   statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
@@ -273,6 +274,14 @@ test("shellKeyboardCommand maps Escape and the advertised search shortcut", () =
   assert.equal(shellKeyboardCommand({ key: "k", metaKey: true, ctrlKey: false }), "focus-search");
   assert.equal(shellKeyboardCommand({ key: "K", metaKey: false, ctrlKey: true }), "focus-search");
   assert.equal(shellKeyboardCommand({ key: "k", metaKey: false, ctrlKey: false }), null);
+});
+
+test("tabKeyboardTarget wraps arrow navigation and ignores unrelated keys", () => {
+  const tabs = ["logs", "terminal", "inspect", "stats"];
+  assert.equal(tabKeyboardTarget(tabs, "logs", "ArrowRight"), "terminal");
+  assert.equal(tabKeyboardTarget(tabs, "logs", "ArrowLeft"), "stats");
+  assert.equal(tabKeyboardTarget(tabs, "stats", "ArrowRight"), "logs");
+  assert.equal(tabKeyboardTarget(tabs, "inspect", "Enter"), null);
 });
 
 test("daemonIsAvailable reflects the real API health state", () => {

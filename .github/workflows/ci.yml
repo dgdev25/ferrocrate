@@ -49,8 +49,8 @@ jobs:
         run: |
           unset FERROCRATE_ENTITLEMENT_PUBLIC_KEY_B64 FERROCRATE_ENTITLEMENT_SIGNING_KEY_B64
           cargo test -p ferro-desktop
-          cargo test --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml
           npm run --prefix apps/ferro-desktop-ui build
+          cargo test --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml
           npm run --prefix apps/ferro-desktop-ui test
       - name: Warning gate
         if: runner.os != 'Windows'

@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 windows="$root/scripts/install-windows.ps1"
 macos="$root/scripts/install-macos.sh"
+real_daemon="$root/scripts/test-desktop-real-daemon.sh"
 
 require_text() {
   local file="$1" pattern="$2" label="$3"
@@ -48,5 +49,10 @@ if grep -Fq 'ferrocrate-desktop-relay' "$macos"; then
   printf 'obsolete macOS relay executable contract remains in %s\n' "$macos" >&2
   exit 1
 fi
+
+require_text "$real_daemon" 'host_os=.*uname' 'host/backend selection'
+require_text "$real_daemon" 'SKIP.*requires.*host' 'unavailable backend skip row'
+require_text "$real_daemon" 'selected backend .* does not match host backend' 'mismatched backend guard'
+require_text "$real_daemon" 'desktop-real-daemon-test' 'scoped desktop test entitlement'
 
 printf 'desktop backend provisioning contracts passed\n'

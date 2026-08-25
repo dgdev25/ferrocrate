@@ -28,8 +28,8 @@ Snapshot: 2026-08-25, Round 10 desktop-backend implementation branch.
 | Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
 | Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md) |
 | Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed; the packaged Ubuntu 24.04+ AppArmor mechanism passes with `kernel.apparmor_restrict_unprivileged_userns=1` | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; the Ubuntu 20.04 boundary is recorded above |
-| Windows 11 via WSL2 backend | Implemented; on-VM acceptance pending | Backend contract and installer tests in `ferro-desktop/tests/backend_contract.rs` and `scripts/test-desktop-backend-contracts.sh`; Windows 11 VM rerun remains recorded in the Round 10 plan |
-| macOS Tahoe via Linux VM backend | Implemented; on-VM acceptance pending | vfkit-first/QEMU-fallback provisioning contract in `scripts/install-macos.sh`; Tahoe VM rerun remains recorded in the Round 10 plan |
+| Windows 11 via WSL2 backend | Implemented; native/browser acceptance on a Windows 11 VM is pending | Backend contract and installer tests in `ferro-desktop/tests/backend_contract.rs` and `scripts/test-desktop-backend-contracts.sh`; a Linux/WSL run is not Windows-host acceptance. The Windows 11 VM rerun remains recorded in the Round 10 plan |
+| macOS Tahoe via Linux VM backend | Implemented; native/browser acceptance on a Tahoe VM is pending | vfkit-first/QEMU-fallback provisioning contract in `scripts/install-macos.sh`; non-macOS runs explicitly skip this row. The Tahoe VM rerun remains recorded in the Round 10 plan |
 
 ## Product areas
 
@@ -69,7 +69,7 @@ Snapshot: 2026-08-25, Round 10 desktop-backend implementation branch.
 | AI assist (monitoring, predictive signals, adaptive restart) | Experimental: `FERROCRATE_AI=0` disables; `FERROCRATE_AI_ACT=1` gates autonomous actions | [`ai/2026-08-22-multi-container-lifecycle-qualification.md`](evidence/ai/2026-08-22-multi-container-lifecycle-qualification.md) |
 | RVF image launcher/QEMU | Experimental (dry-run default) | [`rvf/2026-08-22-launcher-interop.md`](evidence/rvf/2026-08-22-launcher-interop.md) |
 | Node/reconciliation supervisor | Experimental (single-node, no live cluster claim) | [`manager/2026-08-22-node-reconciliation-lifecycle.md`](evidence/manager/2026-08-22-node-reconciliation-lifecycle.md) |
-| Desktop backend seam, loopback web bridge, and daemon-owned UX/API lifecycle | Implemented for `linux-native`, `wsl2`, and `macos-vm`; native acceptance remains bounded by the host-tier rows above | [`desktop/WEB-CONTROL-PLANE.md`](desktop/WEB-CONTROL-PLANE.md), backend contract tests, and `scripts/test-desktop-real-daemon.sh` per-backend rows |
+| Desktop backend seam, loopback web bridge, and daemon-owned UX/API lifecycle | Implemented for `linux-native`, `wsl2`, and `macos-vm`; native acceptance remains bounded by the host-tier rows above | [`desktop/WEB-CONTROL-PLANE.md`](desktop/WEB-CONTROL-PLANE.md), backend contract tests, and `scripts/test-desktop-real-daemon.sh`, which passes only the host-selected backend and explicitly skips unavailable host backends |
 
 ## Explicitly unsupported (fail-closed)
 

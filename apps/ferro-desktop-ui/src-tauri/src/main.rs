@@ -3016,30 +3016,95 @@ fn run_doctor_action(
         Err(error) => doctor_with_backend_error(payload, &error),
     };
     Ok(DoctorSummary {
-        ok: result.ok,
+        ok: result.ok && payload["healthy"].as_bool().unwrap_or(false),
         raw: payload,
     })
 }
 
-fn doctor_with_backend_status(mut payload: JsonValue, status: BackendStatus) -> JsonValue {
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "desktop_backend".to_string(),
-            serde_json::to_value(status).unwrap_or_else(|error| {
-                serde_json::json!({ "state": "failed", "reason": error.to_string() })
-            }),
-        );
-    }
-    payload
+fn doctor_with_backend_status(payload: JsonValue, status: BackendStatus) -> JsonValue {
+    let backend = serde_json::to_value(status).unwrap_or_else(|error| {
+        serde_json::json!({
+            "backend": "unavailable",
+            "state": "failed",
+            "healthy": false,
+            "reason": error.to_string(),
+            "capabilities": {},
+        })
+    });
+    doctor_with_backend_payload(payload, backend)
 }
 
-fn doctor_with_backend_error(mut payload: JsonValue, error: &str) -> JsonValue {
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "desktop_backend".to_string(),
-            serde_json::json!({ "state": "failed", "healthy": false, "reason": error }),
-        );
+fn doctor_with_backend_error(payload: JsonValue, error: &str) -> JsonValue {
+    doctor_with_backend_payload(
+        payload,
+        serde_json::json!({
+            "backend": "unavailable",
+            "platform": "unsupported",
+            "state": "unavailable",
+            "healthy": false,
+            "endpoint": "",
+            "reason": error,
+            "capabilities": {
+                "terminal": false,
+                "registry": false,
+                "containers": false,
+                "networks": false,
+                "volumes": false,
+                "custom_networks": false,
+                "streaming_exec": false,
+            },
+        }),
+    )
+}
+
+fn doctor_with_backend_payload(mut payload: JsonValue, backend: JsonValue) -> JsonValue {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+
+    let state = backend["state"].as_str().unwrap_or("unavailable");
+    let reported_healthy = backend["healthy"].as_bool().unwrap_or(false);
+    let backend_healthy = reported_healthy
+        && !matches!(state, "failed" | "unavailable");
+    let backend_name = backend["backend"].as_str().unwrap_or("desktop");
+    let reason = backend["reason"]
+        .as_str()
+        .filter(|reason| !reason.trim().is_empty());
+    let message = match reason {
+        Some(reason) => format!("{backend_name} backend is {state}: {reason}"),
+        None => format!("{backend_name} backend is {state}"),
+    };
+    let capabilities = backend["capabilities"].as_object().map_or_else(
+        || "none reported".to_string(),
+        |capabilities| {
+            let enabled = capabilities
+                .iter()
+                .filter_map(|(name, enabled)| enabled.as_bool().filter(|enabled| *enabled).map(|_| name.replace('_', " ")))
+                .collect::<Vec<_>>();
+            if enabled.is_empty() {
+                "none".to_string()
+            } else {
+                enabled.join(", ")
+            }
+        },
+    );
+    let checks = object
+        .entry("checks".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    if let Some(checks) = checks.as_array_mut() {
+        checks.retain(|check| check["id"] != "desktop_backend");
+        checks.push(serde_json::json!({
+            "id": "desktop_backend",
+            "ok": backend_healthy,
+            "message": message,
+            "hint": format!("Capabilities: {capabilities}."),
+            "remediated": false,
+            "action": null,
+        }));
     }
+    let doctor_healthy = object["healthy"].as_bool().unwrap_or(false);
+    object.insert("healthy".to_string(), JsonValue::Bool(doctor_healthy && backend_healthy));
+    object.insert("desktop_backend".to_string(), backend);
     payload
 }
 
@@ -3514,7 +3579,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_selected_backend_state_and_health() {
+    fn doctor_backend_failure_is_a_visible_unhealthy_check() {
         let payload = doctor_with_backend_status(
             serde_json::json!({ "healthy": true, "checks": [] }),
             BackendStatus {
@@ -3527,9 +3592,18 @@ mod tests {
                 capabilities: BackendCapabilities::native(),
             },
         );
+        assert_eq!(payload["healthy"], false);
         assert_eq!(payload["desktop_backend"]["backend"], "wsl2");
         assert_eq!(payload["desktop_backend"]["healthy"], false);
         assert_eq!(payload["desktop_backend"]["reason"], "relay unavailable");
+        assert_eq!(payload["desktop_backend"]["capabilities"]["networks"], true);
+        assert_eq!(payload["checks"].as_array().expect("checks").len(), 1);
+        assert_eq!(payload["checks"][0]["id"], "desktop_backend");
+        assert_eq!(payload["checks"][0]["ok"], false);
+        assert!(payload["checks"][0]["message"]
+            .as_str()
+            .expect("backend message")
+            .contains("relay unavailable"));
     }
 
     #[test]

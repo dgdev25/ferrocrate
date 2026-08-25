@@ -104,8 +104,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Host-blocked for the Docker socket: peer-pidfd authentication needs `SO_PEERPIDFD` (Linux 6.5+); native lifecycle gates pass |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified with the restriction active; hosts without `SO_PEERPIDFD` fail closed |
-| Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |
-| macOS (Sonoma, Tahoe) | Builds and full test suite green — development platform, not a container host |
+| Windows 11 (WSL2 backend) | Backend implementation and contract tests are complete; native/browser acceptance on a clean Windows 11 VM remains pending |
+| macOS Tahoe (Linux VM backend) | Backend implementation and provisioning contracts are complete; native/browser acceptance on a Tahoe VM remains pending |
 | Ubuntu 20.04 (HWE kernel 5.15) | Host-blocked: the kernel lacks `SO_PEERPIDFD`; stock kernel 5.4 is also below the enforced 5.10 minimum |
 
 The authoritative support contract is

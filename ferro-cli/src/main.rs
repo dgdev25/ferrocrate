@@ -2074,6 +2074,36 @@ fn doctor_platform_scope_message() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn orphan_bridge_names(link_names: impl IntoIterator<Item = String>, records: &[NetworkRecord]) -> Vec<String> {
+    let owned: std::collections::HashSet<&str> = records.iter().map(|record| record.bridge_name.as_str()).collect();
+    let mut orphans: Vec<_> = link_names
+        .into_iter()
+        .filter(|name| name.starts_with("fc-") && !owned.contains(name.as_str()))
+        .collect();
+    orphans.sort();
+    orphans
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_orphan_bridges_at_daemon_start(runtime_dir: &Path) {
+    let records = load_networks(runtime_dir).unwrap_or_default();
+    let links = std::fs::read_dir("/sys/class/net")
+        .into_iter().flatten().filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok());
+    let kernel = self::network_lifecycle::SystemBridgeKernel;
+    for name in orphan_bridge_names(links, &records) {
+        match self::network_lifecycle::NetworkKernel::observe_bridge(&kernel, &name) {
+            Ok(Some(identity)) => match self::network_lifecycle::NetworkKernel::destroy_bridge(&kernel, &identity) {
+                Ok(()) => tracing::warn!(bridge = %name, "deleted orphan bridge during daemon startup"),
+                Err(error) => tracing::warn!(bridge = %name, %error, "could not delete orphan bridge during daemon startup"),
+            },
+            Ok(None) => {}
+            Err(error) => tracing::warn!(bridge = %name, %error, "could not inspect orphan bridge during daemon startup"),
+        }
+    }
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2311,6 +2341,27 @@ fn handle_doctor(
 
         #[cfg(target_os = "linux")]
         {
+            let records = load_networks(&runtime_dir()).unwrap_or_default();
+            let links = std::fs::read_dir("/sys/class/net")
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok());
+            let orphan_bridges = orphan_bridge_names(links, &records);
+            checks.push(DoctorCheck {
+                id: "orphan_bridges".to_string(),
+                ok: orphan_bridges.is_empty(),
+                message: if orphan_bridges.is_empty() {
+                    "no orphan deterministic network bridges".to_string()
+                } else {
+                    format!("orphan bridges: {}", orphan_bridges.join(", "))
+                },
+                hint: (!orphan_bridges.is_empty()).then_some(
+                    "the daemon reconciles an orphan when its logical network is created again".to_string(),
+                ),
+                remediated: false,
+                action: None,
+            });
             let apparmor_restriction = std::fs::read_to_string(
                 "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
             )
@@ -16868,6 +16919,7 @@ fn run_daemon(
     let mut engine_owner = EngineLockGuard::try_acquire(&runtime_dir)?
         .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
     authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
+    reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     // A daemon owns the request thread independently of each workload. Keep
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
@@ -30150,6 +30202,22 @@ volumes:
             PathBuf::from("/home/user/.ferrocrate")
         );
         assert_eq!(super::persistent_root(None, None), PathBuf::from(".ferrocrate"));
+    }
+
+    #[test]
+    fn doctor_orphan_bridge_row_excludes_owned_and_non_ferro_links() {
+        let owned = super::network_lifecycle::NetworkRecord {
+            name: "blue".into(), driver: "bridge".into(), subnet: "10.0.0.0/24".into(),
+            gateway: "10.0.0.1".into(), bridge_name: "fc-owned000001".into(),
+            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, created_at_unix: 0, generation: 1,
+        };
+        assert_eq!(
+            super::orphan_bridge_names(
+                ["lo", "fc-orphan00001", "fc-owned000001"].into_iter().map(str::to_string),
+                &[owned],
+            ),
+            vec!["fc-orphan00001"]
+        );
     }
 }
 

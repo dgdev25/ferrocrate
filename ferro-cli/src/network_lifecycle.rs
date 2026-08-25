@@ -1154,7 +1154,36 @@ pub(crate) fn run_network_create(
     )?;
     maybe_kill_after_checkpoint(NetworkLifecyclePhase::IntentDurable);
 
-    if let Err(create_error) = kernel.create_bridge(&record.config) {
+    // Deterministic bridge names make crash leftovers recognizable. With no
+    // owning store record (the caller checks that before entering here), an
+    // exact identity is adopted; a mismatched identity is deleted using the
+    // just-observed identity and recreated. Recorded bridges never reach this
+    // path. This makes cleanup bounded to the requested fc-* name.
+    let adopted = match kernel
+        .observe_bridge(&bridge_name)
+        .map_err(NetworkLifecycleError::Kernel)?
+    {
+        Some(observed) if bridge_name.starts_with("fc-") && is_intended_create_observation(&intended, &observed) => {
+            tracing::warn!(bridge = %bridge_name, "adopting orphan deterministic network bridge");
+            Some(observed)
+        }
+        Some(observed) if bridge_name.starts_with("fc-") => {
+            tracing::warn!(bridge = %bridge_name, "deleting mismatched orphan deterministic network bridge");
+            kernel
+                .destroy_bridge(&observed)
+                .map_err(NetworkLifecycleError::Kernel)?;
+            None
+        }
+        Some(_) => return Err(NetworkLifecycleError::Collision(bridge_name)),
+        None => None,
+    };
+
+    let create_result = if adopted.is_none() {
+        kernel.create_bridge(&record.config)
+    } else {
+        Ok(())
+    };
+    if let Err(create_error) = create_result {
         let observed = kernel.observe_bridge(&bridge_name);
         let (observed, observation_detail) = match observed {
             Ok(Some(observed)) => (Some(observed.clone()), format!("observed {:?}", observed)),
@@ -1175,7 +1204,11 @@ pub(crate) fn run_network_create(
         return Err(NetworkLifecycleError::Quarantined(detail));
     }
 
-    match kernel.observe_bridge(&bridge_name) {
+    let post_create_observation = match adopted {
+        Some(observed) => Ok(Some(observed)),
+        None => kernel.observe_bridge(&bridge_name),
+    };
+    match post_create_observation {
         Ok(Some(observed)) => {
             if is_intended_create_observation(&intended, &observed) {
                 append_lifecycle_checkpoint(
@@ -2527,6 +2560,48 @@ mod tests {
         let uuids: std::collections::HashSet<_> =
             ops.iter().map(|op| op.resource.uuid.clone()).collect();
         assert_eq!(uuids.len(), 1, "resource uuid must be stable");
+    }
+
+    #[test]
+    fn create_adopts_matching_orphan_deterministic_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let record = create_network_record_with_bridge(
+            "orphan-adopt",
+            &canonical_bridge_name("orphan-adopt"),
+            Some("10.44.0.1/24"),
+            None,
+        )
+        .unwrap();
+        let mut orphan = record.intended_identity();
+        orphan.ifindex = Some(77);
+        kernel.state.lock().unwrap().insert(orphan.name.clone(), orphan.clone());
+
+        assert_eq!(run_network_create(dir.path(), &record, &kernel).unwrap(), orphan);
+        assert_eq!(kernel.create_call_count(), 0);
+        assert_eq!(kernel.destroy_call_count(), 0);
+    }
+
+    #[test]
+    fn create_replaces_mismatched_orphan_deterministic_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = FakeKernel::new();
+        let record = create_network_record_with_bridge(
+            "orphan-replace",
+            &canonical_bridge_name("orphan-replace"),
+            Some("10.45.0.1/24"),
+            None,
+        )
+        .unwrap();
+        let mut orphan = record.intended_identity();
+        orphan.ifindex = Some(78);
+        orphan.cidr = Some("10.99.0.1/24".into());
+        kernel.state.lock().unwrap().insert(orphan.name.clone(), orphan);
+
+        let created = run_network_create(dir.path(), &record, &kernel).unwrap();
+        assert_eq!(created.cidr.as_deref(), Some("10.45.0.1/24"));
+        assert_eq!(kernel.destroy_call_count(), 1);
+        assert_eq!(kernel.create_call_count(), 1);
     }
 
     #[test]

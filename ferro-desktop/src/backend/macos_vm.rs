@@ -39,7 +39,7 @@ impl Default for MacosVmConfig {
                 .and_then(|port| port.parse().ok())
                 .unwrap_or(2222),
             guest_user: std::env::var("FERROCRATE_VM_GUEST_USER")
-                .unwrap_or_else(|_| "ferro".into()),
+                .unwrap_or_else(|_| "ubuntu".into()),
             ssh_key: std::env::var_os("FERROCRATE_VM_SSH_KEY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| vm_root.join("desktop_vm_ed25519")),

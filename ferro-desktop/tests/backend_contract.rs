@@ -405,7 +405,7 @@ fn macos_vm_defaults_match_the_installer_layout() {
 
     assert_eq!(config.launcher, PathBuf::from("ferro-desktop"));
     assert_eq!(config.vm_config, root.join("desktop-vm.json"));
-    assert_eq!(config.guest_user, "ferro");
+    assert_eq!(config.guest_user, "ubuntu");
     assert_eq!(config.ssh_key, root.join("vm/desktop_vm_ed25519"));
     assert_eq!(config.ssh_port, 2222);
     assert_eq!(config.relay_addr, "127.0.0.1:4288".parse().unwrap());

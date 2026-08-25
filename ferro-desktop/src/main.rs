@@ -2148,7 +2148,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .parent()
                     .map(|p| p.join("virtiofsd.sock").display().to_string())
             });
-            let guest_user = guest_user.unwrap_or_else(|| "ferro".to_string());
+            let guest_user = guest_user.unwrap_or_else(|| "ubuntu".to_string());
             let mut ssh_private_key_path = ssh_private_key_path;
             let mut cloud_init_image_path = cloud_init_image_path;
             if backend.starts_with("qemu") {

@@ -475,6 +475,8 @@ pub enum ContainerStoreError {
     Lock(String),
     #[error("container mutation compare-and-swap failed")]
     MutationConflict,
+    #[error("Conflict. The container name \"/{name}\" is already in use by container \"{container_id}\". You have to remove (or rename) that container to be able to reuse that name.")]
+    NameConflict { name: String, container_id: String },
 }
 
 pub(crate) fn process_start_time(pid: u32) -> Option<u64> {

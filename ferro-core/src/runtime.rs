@@ -1580,6 +1580,26 @@ pub struct ContainerRuntime {
     kernel_ops: Arc<dyn KernelResourceOps>,
 }
 
+struct ContainerNameReservation {
+    store: SqliteContainerStore,
+    container_id: String,
+    release_on_drop: bool,
+}
+
+impl ContainerNameReservation {
+    fn retain(&mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for ContainerNameReservation {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            let _ = self.store.release_reserved_name(&self.container_id);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecyclePhasePoint {
     DecisionDurable,
@@ -2734,6 +2754,14 @@ impl ContainerRuntime {
         let mut candidate =
             ContainerRecord::authorization_candidate(container_id.clone(), pinned_image);
         candidate.name = name.map(str::to_owned);
+        let mut name_reservation = ContainerNameReservation {
+            store: self.store.clone(),
+            container_id: container_id.clone(),
+            release_on_drop: match name {
+                Some(name) => self.store.reserve_name(name, &container_id)?,
+                None => false,
+            },
+        };
         candidate.capabilities = normalized.facts.capabilities.clone();
         candidate.network_name = persisted_network_name(associated_network, network_mode);
         let permit = self
@@ -2763,6 +2791,7 @@ impl ContainerRuntime {
                 );
                 return Err(error.into());
             }
+            name_reservation.retain();
             self.phase_hook
                 .reached("container.run", LifecyclePhasePoint::ReservationDurable)?;
         }
@@ -2854,6 +2883,9 @@ impl ContainerRuntime {
             }
             self.phase_hook
                 .reached("container.run", LifecyclePhasePoint::ReservationCleared)?;
+        }
+        if result.is_ok() {
+            name_reservation.retain();
         }
         result
     }
@@ -4958,16 +4990,6 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        if self
-            .store
-            .list()?
-            .into_iter()
-            .any(|other| other.id != id && other.name.as_deref() == Some(name))
-        {
-            return Err(RuntimeError::InvalidState(format!(
-                "container name is already in use: {name}"
-            )));
-        }
         let previous = record.name.clone();
         record.name = Some(name.to_string());
         let operation_id = record

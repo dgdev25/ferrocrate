@@ -10,6 +10,7 @@ use crate::container_store::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,11 +19,16 @@ const CONTAINERS_SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS containers (
     id TEXT PRIMARY KEY NOT NULL,
-    payload BLOB NOT NULL
+    payload BLOB NOT NULL,
+    name TEXT
 );
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     operation_id BLOB PRIMARY KEY NOT NULL,
     payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS container_name_claims (
+    name TEXT PRIMARY KEY NOT NULL,
+    container_id TEXT NOT NULL
 );
 "#;
 
@@ -63,7 +69,7 @@ impl SqliteContainerStore {
                 return Err(ContainerStoreError::LegacyMigrationRequired);
             }
         }
-        let connection = Connection::open(&sqlite_path)?;
+        let mut connection = Connection::open(&sqlite_path)?;
         // Multiple CLI processes can start together during a parallel
         // workload. SQLite's default busy timeout is zero, so a concurrent
         // schema initialization would surface as a spurious `database is
@@ -71,6 +77,10 @@ impl SqliteContainerStore {
         // while retaining SQLite's transactional locking semantics.
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(CONTAINERS_SCHEMA)?;
+        migrate_container_names(&mut connection)?;
+        connection.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS containers_unique_name ON containers(name) WHERE name IS NOT NULL;",
+        )?;
         // Keep the timeout in force after schema pragmas as well; SQLite
         // resets connection-level busy handlers when certain pragmas are
         // applied on older bundled builds.
@@ -145,6 +155,75 @@ impl SqliteContainerStore {
             .transpose()
     }
 
+    fn claim_name_tx(
+        transaction: &Transaction<'_>,
+        name: &str,
+        container_id: &str,
+    ) -> Result<bool, ContainerStoreError> {
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO container_name_claims(name,container_id) VALUES (?1,?2)",
+            params![name, container_id],
+        )?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let owner: String = transaction.query_row(
+            "SELECT container_id FROM container_name_claims WHERE name=?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        if owner == container_id {
+            Ok(false)
+        } else {
+            Err(ContainerStoreError::NameConflict {
+                name: name.to_owned(),
+                container_id: owner,
+            })
+        }
+    }
+
+    fn sync_record_name_tx(
+        transaction: &Transaction<'_>,
+        record: &ContainerRecord,
+    ) -> Result<(), ContainerStoreError> {
+        if let Some(name) = record.name.as_deref() {
+            Self::claim_name_tx(transaction, name, &record.id)?;
+        }
+        transaction.execute(
+            "DELETE FROM container_name_claims WHERE container_id=?1 AND (?2 IS NULL OR name<>?2)",
+            params![record.id, record.name],
+        )?;
+        Ok(())
+    }
+
+    pub fn reserve_name(&self, name: &str, container_id: &str) -> Result<bool, ContainerStoreError> {
+        self.transaction(|transaction| Self::claim_name_tx(transaction, name, container_id))
+    }
+
+    pub fn rename_reserved_name(
+        &self,
+        container_id: &str,
+        name: &str,
+    ) -> Result<(), ContainerStoreError> {
+        self.transaction(|transaction| {
+            Self::claim_name_tx(transaction, name, container_id)?;
+            transaction.execute(
+                "DELETE FROM container_name_claims WHERE container_id=?1 AND name<>?2",
+                params![container_id, name],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn release_reserved_name(&self, container_id: &str) -> Result<(), ContainerStoreError> {
+        let connection = self.lock()?;
+        connection.execute(
+            "DELETE FROM container_name_claims WHERE container_id=?1",
+            params![container_id],
+        )?;
+        Ok(())
+    }
+
     pub fn put(&self, record: &ContainerRecord) -> Result<(), ContainerStoreError> {
         if record.pending_mutation.is_some() {
             return Err(ContainerStoreError::MutationConflict);
@@ -156,10 +235,11 @@ impl SqliteContainerStore {
                     return Err(ContainerStoreError::MutationConflict);
                 }
             }
+            Self::sync_record_name_tx(transaction, record)?;
             transaction.execute(
-                "INSERT INTO containers(id,payload) VALUES (?1,?2)
-                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
-                params![record.id, encoded],
+                "INSERT INTO containers(id,payload,name) VALUES (?1,?2,?3)
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,name=excluded.name",
+                params![record.id, encoded, record.name],
             )?;
             Ok(())
         })
@@ -182,9 +262,10 @@ impl SqliteContainerStore {
             {
                 return Err(ContainerStoreError::MutationConflict);
             }
+            Self::sync_record_name_tx(transaction, record)?;
             transaction.execute(
-                "UPDATE containers SET payload=?2 WHERE id=?1",
-                params![record.id, payload],
+                "UPDATE containers SET payload=?2,name=?3 WHERE id=?1",
+                params![record.id, payload, record.name],
             )?;
             Ok(())
         })
@@ -219,9 +300,10 @@ impl SqliteContainerStore {
             if existing.is_some() || existing_operation.is_some() {
                 return Err(ContainerStoreError::MutationConflict);
             }
+            Self::sync_record_name_tx(transaction, record)?;
             transaction.execute(
-                "INSERT INTO containers(id,payload) VALUES (?1,?2)",
-                params![record.id, record_payload],
+                "INSERT INTO containers(id,payload,name) VALUES (?1,?2,?3)",
+                params![record.id, record_payload, record.name],
             )?;
             transaction.execute(
                 "INSERT INTO lifecycle_operations(operation_id,payload) VALUES (?1,?2)",
@@ -257,9 +339,10 @@ impl SqliteContainerStore {
             operation.process_start_time_after = process_start_time(record.pid);
             operation.state_after = Some(record.status.clone());
             let operation_payload = Self::encode(&operation)?;
+            Self::sync_record_name_tx(transaction, record)?;
             transaction.execute(
-                "UPDATE containers SET payload=?2 WHERE id=?1",
-                params![record.id, record_payload],
+                "UPDATE containers SET payload=?2,name=?3 WHERE id=?1",
+                params![record.id, record_payload, record.name],
             )?;
             transaction.execute(
                 "UPDATE lifecycle_operations SET payload=?2 WHERE operation_id=?1",
@@ -331,8 +414,14 @@ impl SqliteContainerStore {
     }
 
     pub fn remove(&self, id: &str) -> Result<bool, ContainerStoreError> {
-        let connection = self.lock()?;
-        Ok(connection.execute("DELETE FROM containers WHERE id=?1", params![id])? > 0)
+        self.transaction(|transaction| {
+            let removed = transaction.execute("DELETE FROM containers WHERE id=?1", params![id])? > 0;
+            transaction.execute(
+                "DELETE FROM container_name_claims WHERE container_id=?1",
+                params![id],
+            )?;
+            Ok(removed)
+        })
     }
 
     pub fn list(&self) -> Result<Vec<ContainerRecord>, ContainerStoreError> {
@@ -637,6 +726,10 @@ impl SqliteContainerStore {
                 params![operation_id.as_slice(), payload],
             )?;
             transaction.execute("DELETE FROM containers WHERE id=?1", params![id])?;
+            transaction.execute(
+                "DELETE FROM container_name_claims WHERE container_id=?1",
+                params![id],
+            )?;
             Ok(())
         })
     }
@@ -801,6 +894,111 @@ impl SqliteContainerStore {
     }
 }
 
+fn migrate_container_names(connection: &mut Connection) -> Result<(), ContainerStoreError> {
+    let has_name_column = {
+        let mut statement = connection.prepare("PRAGMA table_info(containers)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        columns
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column == "name")
+    };
+    if !has_name_column {
+        connection.execute("ALTER TABLE containers ADD COLUMN name TEXT", [])?;
+    }
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut records = {
+        let mut statement = transaction.prepare("SELECT payload FROM containers")?;
+        let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|payload| SqliteContainerStore::decode_record(&payload))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let record_ids = records
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut occupied = records
+        .iter()
+        .filter_map(|record| record.name.clone())
+        .collect::<HashSet<_>>();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT name,container_id FROM container_name_claims ORDER BY name,container_id",
+        )?;
+        let claims = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for claim in claims {
+            let (name, owner) = claim?;
+            if !record_ids.contains(owner.as_str()) {
+                occupied.insert(name);
+            }
+        }
+    }
+
+    let mut groups = HashMap::<String, Vec<usize>>::new();
+    for (index, record) in records.iter().enumerate() {
+        if let Some(name) = record.name.as_ref() {
+            groups.entry(name.clone()).or_default().push(index);
+        }
+    }
+    for (name, mut indexes) in groups {
+        if indexes.len() < 2 {
+            continue;
+        }
+        indexes.sort_by(|left, right| {
+            records[*left]
+                .created_at_unix
+                .cmp(&records[*right].created_at_unix)
+                .then_with(|| records[*left].id.cmp(&records[*right].id))
+        });
+        for index in indexes.into_iter().skip(1) {
+            let id = records[index].id.clone();
+            let short_len = id.len().min(12);
+            let base = format!("{name}-{}", &id[..short_len]);
+            let mut replacement = base.clone();
+            let mut discriminator = 2usize;
+            while occupied.contains(&replacement) {
+                replacement = format!("{base}-{discriminator}");
+                discriminator += 1;
+            }
+            occupied.insert(replacement.clone());
+            records[index].name = Some(replacement.clone());
+            log::warn!(
+                "duplicate container name repaired while opening store: original_name={} container_id={} replacement_name={}",
+                name,
+                id,
+                replacement
+            );
+        }
+    }
+
+    for record in &records {
+        transaction.execute(
+            "DELETE FROM container_name_claims WHERE container_id=?1",
+            params![record.id],
+        )?;
+    }
+    for record in &records {
+        let payload = SqliteContainerStore::encode(record)?;
+        transaction.execute(
+            "UPDATE containers SET payload=?2,name=?3 WHERE id=?1",
+            params![record.id, payload, record.name],
+        )?;
+        if let Some(name) = record.name.as_deref() {
+            transaction.execute(
+                "INSERT INTO container_name_claims(name,container_id) VALUES (?1,?2)",
+                params![name, record.id],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 fn lifecycle_operation(
     record: &ContainerRecord,
     operation_id: [u8; 16],
@@ -839,6 +1037,7 @@ fn lifecycle_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn record(id: &str) -> ContainerRecord {
         ContainerRecord::authorization_candidate(id.to_string(), "alpine:latest".to_string())
@@ -974,5 +1173,73 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("legacy-sled-importers"));
+    }
+
+    #[test]
+    fn concurrent_named_creates_have_exactly_one_winner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("containers.db");
+        SqliteContainerStore::open(&path).expect("initialize schema");
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let store = SqliteContainerStore::open(path).expect("open");
+                    let mut candidate = record(&format!("racer-{index}"));
+                    candidate.name = Some("one-name".to_string());
+                    barrier.wait();
+                    store.put(&candidate)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(ContainerStoreError::NameConflict { name, .. }) if name == "one-name"))
+                .count(),
+            7
+        );
+    }
+
+    #[test]
+    fn opening_legacy_store_disambiguates_duplicate_names_deterministically() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("containers.db");
+        let connection = Connection::open(&path).expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE containers (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL);\
+                 CREATE TABLE lifecycle_operations (operation_id BLOB PRIMARY KEY NOT NULL, payload BLOB NOT NULL);",
+            )
+            .expect("legacy schema");
+        for (id, created_at) in [("bbbbbbbb2222", 20), ("aaaaaaaa1111", 10), ("cccccccc3333", 20)] {
+            let mut value = record(id);
+            value.name = Some("duplicate".to_string());
+            value.created_at_unix = created_at;
+            connection
+                .execute(
+                    "INSERT INTO containers(id,payload) VALUES (?1,?2)",
+                    params![id, SqliteContainerStore::encode(&value).expect("encode")],
+                )
+                .expect("legacy row");
+        }
+        drop(connection);
+
+        let store = SqliteContainerStore::open(&path).expect("migrate duplicates");
+        let records = store.list().expect("list");
+        let names = records
+            .into_iter()
+            .map(|record| (record.id, record.name.expect("name")))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(names["aaaaaaaa1111"], "duplicate");
+        assert_eq!(names["bbbbbbbb2222"], "duplicate-bbbbbbbb2222");
+        assert_eq!(names["cccccccc3333"], "duplicate-cccccccc3333");
     }
 }

@@ -21,7 +21,7 @@ import type {
   VolumeAction,
   VolumeSummary,
 } from "./types";
-import { composeLogTarget, composeStatusClass } from "./composeView.mjs";
+import { ComposeFileDialog, composeChooserMode, composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
@@ -30,7 +30,7 @@ import type { RunContainerDraft, RunContainerInvokeArgs } from "./dialogForms.mj
 import { Icon } from "./iconSystem.mjs";
 import { errorForSection, navigationTransientState, resourceActionStartState, resourceActionState, setSectionError } from "./errorScopes.mjs";
 import { appendBuildProgress, buildInvokeArgs, BuildHistoryList, BuildLicensingDialog } from "./imageBuild.mjs";
-import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullFailurePresentation } from "./imageView.mjs";
+import { formatImageCreated, imageIsUsed, ImagePagePullAction, parseImageRows, PullImageDialog, pullCompletionState, pullFailurePresentation } from "./imageView.mjs";
 import { customNetworkCreateAvailable, formatNetworkAttachment, NetworkCapabilityNotice, networkIsRemovable } from "./networkView.mjs";
 import { RegistryAccountControl, registryStatusText } from "./registryAuth.mjs";
 import { completeDoctorRun, DoctorPage, SettingsPage } from "./systemPages.mjs";
@@ -159,6 +159,7 @@ function App(): JSX.Element {
   const [networkSubnet, setNetworkSubnet] = useState("");
   const [networksLoading, setNetworksLoading] = useState(false);
   const [composeFile, setComposeFile] = useState("");
+  const [composeFileDialogOpen, setComposeFileDialogOpen] = useState(false);
   const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
   const [composeLoading, setComposeLoading] = useState(false);
   const [buildContext, setBuildContext] = useState("");
@@ -487,6 +488,15 @@ function App(): JSX.Element {
     }
   }
 
+  function openComposeChooser(): void {
+    setError(null);
+    if (composeChooserMode(dialogAvailable) === "native-dialog") {
+      void chooseComposeFile();
+      return;
+    }
+    setComposeFileDialogOpen(true);
+  }
+
   async function loadComposeHostPath(): Promise<void> {
     const file = composeFile.trim();
     const validationError = hostPathError(file, "file");
@@ -498,6 +508,7 @@ function App(): JSX.Element {
     setError(null);
     try {
       await readComposeSnapshot(file);
+      setComposeFileDialogOpen(false);
     } catch (err) {
       setError(String(err));
     }
@@ -611,12 +622,12 @@ function App(): JSX.Element {
       );
       if (result.ok) {
         setLastAction(result);
-        setPullProgress("Pull completed.");
-      } else {
-        setPullProgress("");
-        setPullFailure(pullFailurePresentation(result.stderr));
       }
       await refresh();
+      const completion = pullCompletionState(result);
+      setPullImageDialogOpen(completion.open);
+      setPullProgress(completion.progress);
+      setPullFailure(completion.failure);
     } catch (err) {
       setPullProgress("");
       setPullFailure(pullFailurePresentation(err));
@@ -1357,7 +1368,7 @@ function App(): JSX.Element {
               ) : activeSection === "networks" ? (
                 networkPage.primaryAction ? <button className="btn btn-primary" onClick={() => openResourceDialog("network")} disabled={runtimeBusy || networksLoading || !customNetworksAvailable}>Create network</button> : null
               ) : activeSection === "compose" ? (
-                composePage.primaryAction ? <button className="btn btn-primary" onClick={() => void chooseComposeFile()} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
+                composePage.primaryAction ? <button className="btn btn-primary" onClick={openComposeChooser} disabled={runtimeBusy || composeLoading}>Choose file</button> : null
               ) : activeSection === "builds" ? (
                 null
               ) : activeSection === "doctor" || activeSection === "settings" ? (
@@ -1618,9 +1629,7 @@ function App(): JSX.Element {
             {activeSection === "compose" ? (
               composePage.content === "empty" ? (
                 <section className="panel empty-page-panel" aria-label="Compose">
-                  {dialogAvailable
-                    ? <ResourceEmptyState section="compose" disabled={runtimeBusy || composeLoading} onAction={() => void chooseComposeFile()} />
-                    : <HostPathField label="Compose file" kind="file" value={composeFile} dialogAvailable={false} busy={runtimeBusy || composeLoading} submitLabel={composeLoading ? "Loading…" : "Load Compose file"} onChange={(event) => { setComposeFile(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} />}
+                  <ResourceEmptyState section="compose" disabled={runtimeBusy || composeLoading} onAction={openComposeChooser} />
                 </section>
               ) : (
                 <section className="panel table-panel resource-table-panel" aria-label="Compose services">
@@ -1691,6 +1700,7 @@ function App(): JSX.Element {
       {pullImageDialogOpen ? (
         <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
+      <ComposeFileDialog open={composeFileDialogOpen} value={composeFile} busy={runtimeBusy || composeLoading} onChange={(event) => { setComposeFile(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} onCancel={() => setComposeFileDialogOpen(false)} />
 
       <BuildImageDialog open={buildImageDialogOpen} context={buildContext} tag={buildTag} dialogAvailable={dialogAvailable} busy={runtimeBusy} onContextChange={(event) => setBuildContext(event.target.value)} onChooseContext={() => void chooseBuildContext()} onTagChange={(event) => setBuildTag(event.target.value)} onCancel={() => setBuildImageDialogOpen(false)} onBuild={() => void buildImage()} />
 

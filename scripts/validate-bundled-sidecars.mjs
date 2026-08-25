@@ -14,7 +14,7 @@ try {
   // The diagnostic below intentionally covers a fresh checkout too.
 }
 
-for (const name of ["ferrocrate", "ferro-desktop"]) {
+for (const name of ["ferrocrate", "ferro-desktop-sidecar"]) {
   const matches = entries.filter((entry) => entry.startsWith(`${name}-`));
   if (matches.length === 0) {
     throw new Error(`missing bundled ${name} sidecar; run scripts/bundle-sidecars.sh`);

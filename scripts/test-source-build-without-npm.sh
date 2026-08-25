@@ -7,6 +7,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 checkout="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-source-build.XXXXXX")"
 tool_path="$(mktemp -d "${TMPDIR:-/tmp}/ferrocrate-no-node-path.XXXXXX")"
+target_dir="$repo_root/target/source-build-without-npm"
 
 cleanup() {
     git -C "$repo_root" worktree remove --force "$checkout" 2>/dev/null || true
@@ -24,10 +25,11 @@ done
 
 PATH="$HOME/.cargo/bin:$tool_path" \
     CARGO_BUILD_JOBS=6 \
+    CARGO_TARGET_DIR="$target_dir" \
     cargo build -p ferro-cli --manifest-path "$checkout/Cargo.toml"
 
 set +e
-output="$(PATH="$HOME/.cargo/bin:$tool_path" "$checkout/target/debug/ferro-cli" dashboard 2>&1)"
+output="$(PATH="$HOME/.cargo/bin:$tool_path" "$target_dir/debug/ferro-cli" dashboard 2>&1)"
 status=$?
 set -e
 if [[ $status -ne 2 ]]; then

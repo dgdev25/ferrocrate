@@ -147,7 +147,7 @@ use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Weak};
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
 use std::time::Duration;
@@ -7648,6 +7648,7 @@ fn attach_local_container(
                 &[],
                 &worker_detach_keys,
                 !stdin_requested,
+                false,
             );
             trace_attached_run_phase(trace_started, "stream_loop", stream_started.elapsed());
             result
@@ -16399,10 +16400,38 @@ fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Default)]
+struct DockerAttachReadiness {
+    ready: Mutex<bool>,
+    condition: Condvar,
+}
+
+#[cfg(target_os = "linux")]
+impl DockerAttachReadiness {
+    fn mark_ready(&self) {
+        if let Ok(mut ready) = self.ready.lock() {
+            *ready = true;
+            self.condition.notify_all();
+        }
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let Ok(ready) = self.ready.lock() else {
+            return false;
+        };
+        self.condition
+            .wait_timeout_while(ready, timeout, |ready| !*ready)
+            .map(|(ready, _)| *ready)
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
     starting: Mutex<std::collections::HashSet<String>>,
+    attach_readiness: Mutex<HashMap<String, Vec<Weak<DockerAttachReadiness>>>>,
     pending_path: PathBuf,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
@@ -16454,6 +16483,7 @@ impl DockerCompatState {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(pending),
             starting: Mutex::new(std::collections::HashSet::new()),
+            attach_readiness: Mutex::new(HashMap::new()),
             pending_path,
             name_store,
             execs: Mutex::new(HashMap::new()),
@@ -16509,6 +16539,50 @@ impl DockerCompatState {
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| error.to_string())
+    }
+
+    fn register_pre_start_attach(
+        &self,
+        id: &str,
+    ) -> Result<Arc<DockerAttachReadiness>, String> {
+        let readiness = Arc::new(DockerAttachReadiness::default());
+        self.attach_readiness
+            .lock()
+            .map_err(|error| format!("docker: attach readiness lock poisoned: {error}"))?
+            .entry(id.to_string())
+            .or_default()
+            .push(Arc::downgrade(&readiness));
+        Ok(readiness)
+    }
+
+    fn wait_for_pre_start_attaches(&self, id: &str, timeout: Duration) -> Result<(), String> {
+        let registrations = {
+            let mut all = self
+                .attach_readiness
+                .lock()
+                .map_err(|error| format!("docker: attach readiness lock poisoned: {error}"))?;
+            let registrations = all
+                .get_mut(id)
+                .map(|entries| {
+                    entries.retain(|entry| entry.strong_count() > 0);
+                    entries.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if all.get(id).is_some_and(Vec::is_empty) {
+                all.remove(id);
+            }
+            registrations
+        };
+        let started = Instant::now();
+        for readiness in registrations {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() || !readiness.wait(remaining) {
+                return Err(format!(
+                    "docker: timed out wiring pre-start attach for container {id}"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -17570,7 +17644,17 @@ type DockerEventRequest = (String, String, HashMap<String, String>, Vec<u8>);
 /// Hijacked attach session: container id, the five request flags (logs,
 /// stream, stdin, stdout, stderr), and the initial stdin payload.
 #[cfg(target_os = "linux")]
-type DockerAttachHijack = (String, bool, bool, bool, bool, bool, Vec<u8>, Vec<u8>);
+type DockerAttachHijack = (
+    String,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Arc<DockerAttachReadiness>>,
+);
 
 #[cfg(target_os = "linux")]
 fn daemon_request_scope(
@@ -18450,6 +18534,9 @@ fn handle_docker_compat_connection(
                     .get("upgrade")
                     .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
                 if upgraded {
+                    let readiness = pending_attach
+                        .then(|| state.register_pre_start_attach(&id))
+                        .transpose()?;
                     // Docker creates and attaches before it starts a
                     // `docker run` container. Return the 101 handshake
                     // immediately for that pending record so the client can
@@ -18466,6 +18553,7 @@ fn handle_docker_compat_connection(
                         stderr_requested,
                         request.body.clone(),
                         detach_keys,
+                        readiness,
                     ));
                     docker_hijack_headers()
                 } else {
@@ -19092,6 +19180,14 @@ fn handle_docker_compat_connection(
                     if !starting.insert(id.clone()) {
                         return Err(format!("docker: container start already in progress: {id}"));
                     }
+                }
+                if let Err(error) =
+                    state.wait_for_pre_start_attaches(&id, Duration::from_secs(30))
+                {
+                    if let Ok(mut starting) = state.starting.lock() {
+                        starting.remove(&id);
+                    }
+                    return Err(error);
                 }
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
@@ -20340,8 +20436,12 @@ fn handle_docker_compat_connection(
         stderr_requested,
         initial_stdin,
         detach_keys,
+        readiness,
     )) = attach_hijack
     {
+        if let Some(readiness) = readiness.as_ref() {
+            readiness.mark_ready();
+        }
         let follow_runtime = daemon_runtime.as_ref();
         stream_docker_attach(
             &mut stream,
@@ -20355,6 +20455,7 @@ fn handle_docker_compat_connection(
             &initial_stdin,
             &detach_keys,
             false,
+            readiness.is_some(),
         )?;
         return Ok(());
     }
@@ -22895,6 +22996,7 @@ fn stream_docker_attach(
     initial_stdin: &[u8],
     detach_keys: &[u8],
     fast_local_exit: bool,
+    pending_at_registration: bool,
 ) -> Result<(), String> {
     // Docker attaches before `/containers/{id}/start` for `docker run`. Wait
     // briefly for the pending record to become a real runtime record instead
@@ -22902,7 +23004,23 @@ fn stream_docker_attach(
     let deadline = Instant::now() + Duration::from_secs(30);
     let record = loop {
         match runtime.inspect(id) {
-            Ok(record) => break record,
+            Ok(record)
+                if docker_attach_record_is_published(
+                    pending_at_registration,
+                    record.pid,
+                    &record.status,
+                ) =>
+            {
+                break record;
+            }
+            Ok(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "docker: timed out waiting for container {id} launch publication"
+                ));
+            }
             Err(error) if Instant::now() < deadline => {
                 let _ = error;
                 std::thread::sleep(Duration::from_millis(25));
@@ -23085,6 +23203,15 @@ fn stream_docker_attach(
         };
         std::thread::sleep(interval);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_attach_record_is_published(
+    pending_at_registration: bool,
+    pid: u32,
+    status: &str,
+) -> bool {
+    !pending_at_registration || pid != 0 || status != "created"
 }
 
 #[cfg(target_os = "linux")]
@@ -23285,6 +23412,30 @@ mod tests {
             &mut previous,
             (10_001, 0)
         ));
+    }
+
+    #[test]
+    fn pre_start_attach_does_not_treat_created_reservation_as_a_started_process() {
+        assert!(!super::docker_attach_record_is_published(true, 0, "created"));
+        assert!(super::docker_attach_record_is_published(true, 42, "running"));
+        assert!(super::docker_attach_record_is_published(true, 42, "exited"));
+        assert!(super::docker_attach_record_is_published(false, 0, "created"));
+    }
+
+    #[test]
+    fn start_waits_until_the_pre_start_hijack_relay_is_ready() {
+        let readiness = std::sync::Arc::new(super::DockerAttachReadiness::default());
+        let waiter = std::sync::Arc::clone(&readiness);
+        let (sent, received) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            sent.send(waiter.wait(Duration::from_secs(1))).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(20)).is_err());
+        readiness.mark_ready();
+        assert!(received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("readiness result"));
+        thread.join().expect("readiness waiter");
     }
 
     #[test]

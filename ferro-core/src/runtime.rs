@@ -6964,7 +6964,7 @@ fn spawn_process_with_logs(
         &tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let (child_id, child, pidfd) = spawn_child_with_logs(
+    let (child_id, child, pidfd, log_relays) = spawn_child_with_logs(
         command,
         stdout_path,
         stderr_path,
@@ -6991,6 +6991,7 @@ fn spawn_process_with_logs(
         supervise_child(
             child,
             pidfd,
+            log_relays,
             store,
             container_id,
             cmd_owned,
@@ -7679,6 +7680,20 @@ fn resolve_rootfs_command(rootfs: &Path, cmd: &str) -> String {
 }
 
 // Process, terminal, and log-driver settings form one atomic spawn operation.
+struct ChildLogRelays(Vec<thread::JoinHandle<()>>);
+
+impl ChildLogRelays {
+    fn new(handles: Vec<thread::JoinHandle<()>>) -> Self {
+        Self(handles)
+    }
+
+    fn drain(&mut self) {
+        for relay in self.0.drain(..) {
+            let _ = relay.join();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_child_with_logs(
     mut command: Command,
@@ -7690,7 +7705,7 @@ fn spawn_child_with_logs(
     runtime_dir: &Path,
     container_id: &str,
     log_driver: &str,
-) -> Result<(u32, Child, OwnedFd), RuntimeError> {
+) -> Result<(u32, Child, OwnedFd, ChildLogRelays), RuntimeError> {
     let rotation = rotation.or_else(log_rotation_from_env);
     let driver = load_log_driver(
         log_driver,
@@ -7717,6 +7732,7 @@ fn spawn_child_with_logs(
         .read(true)
         .write(true)
         .open(&stdin_path)?;
+    let mut log_relays = Vec::new();
     let child = if tty {
         let pair = PtyPair::new(24, 80).map_err(RuntimeError::Io)?;
         let tty_device = pair.slave_name().map_err(RuntimeError::Io)?;
@@ -7729,9 +7745,9 @@ fn spawn_child_with_logs(
         let mut master_writer = master_reader.try_clone()?;
         let slave = std::fs::File::from(slave);
         let capture = LogCapture::new(driver.open(&context)?, 1);
-        thread::spawn(move || {
+        log_relays.push(thread::spawn(move || {
             let _ = capture_stream(&mut master_reader, capture, LogStream::Stdout);
-        });
+        }));
         drop(stdin_file);
         let mut input = OpenOptions::new()
             .read(true)
@@ -7781,14 +7797,14 @@ fn spawn_child_with_logs(
             .spawn()?;
         if let Some(mut pipe) = child.stdout.take() {
             let stdout_capture = capture.clone();
-            thread::spawn(move || {
+            log_relays.push(thread::spawn(move || {
                 let _ = capture_stream(&mut pipe, stdout_capture, LogStream::Stdout);
-            });
+            }));
         }
         if let Some(mut pipe) = child.stderr.take() {
-            thread::spawn(move || {
+            log_relays.push(thread::spawn(move || {
                 let _ = capture_stream(&mut pipe, capture, LogStream::Stderr);
-            });
+            }));
         }
         child
     } else {
@@ -7829,7 +7845,7 @@ fn spawn_child_with_logs(
     }
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
-    Ok((child_id, child, pidfd))
+    Ok((child_id, child, pidfd, ChildLogRelays::new(log_relays)))
 }
 
 /// stdout/stderr with optional per-line timestamp resolution.
@@ -8216,6 +8232,7 @@ fn release_prepared_child(pid: u32) -> Result<(), RuntimeError> {
 fn supervise_child(
     mut child: Child,
     mut _pidfd: OwnedFd,
+    mut log_relays: ChildLogRelays,
     store: SqliteContainerStore,
     container_id: String,
     cmd: Vec<String>,
@@ -8301,6 +8318,10 @@ fn supervise_child(
 
     loop {
         let status = child.wait();
+        // EOF on the child pipes follows process exit. Join every capture
+        // thread before publishing terminal status so attach clients can use
+        // that status as a definitive log-relay drain barrier.
+        log_relays.drain();
         let exit_code = status
             .ok()
             .and_then(|status| {
@@ -8467,7 +8488,7 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd) = match spawn_child_with_logs(
+        let (pid, new_child, new_pidfd, new_log_relays) = match spawn_child_with_logs(
             command,
             &stdout_path,
             &stderr_path,
@@ -8478,27 +8499,27 @@ fn supervise_child(
             &container_id,
             &log_driver,
         ) {
-                Ok(tuple) => tuple,
-                Err(error) => {
-                    warn!(
-                        container = %container_id,
-                        error = %error,
-                        "restart supervisor stopping: respawn spawn failed"
+            Ok(tuple) => tuple,
+            Err(error) => {
+                warn!(
+                    container = %container_id,
+                    error = %error,
+                    "restart supervisor stopping: respawn spawn failed"
+                );
+                if ai_enabled {
+                    log_ai_restart_lifecycle(
+                        &container_id,
+                        "ai_restart_failed",
+                        exit_code,
+                        restart_count,
+                        delay_secs,
+                        "spawn-child",
+                        None,
                     );
-                    if ai_enabled {
-                        log_ai_restart_lifecycle(
-                            &container_id,
-                            "ai_restart_failed",
-                            exit_code,
-                            restart_count,
-                            delay_secs,
-                            "spawn-child",
-                            None,
-                        );
-                    }
-                    break;
                 }
-            };
+                break;
+            }
+        };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
             if ai_enabled {
@@ -8533,6 +8554,7 @@ fn supervise_child(
         }
         child = new_child;
         _pidfd = new_pidfd;
+        log_relays = new_log_relays;
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             log_ai_restart_lifecycle(
@@ -14594,6 +14616,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_file_io_error_names_operation_and_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("missing-parent/network.hosts");
+        let error = super::write_runtime_file_atomically(&path, b"hosts")
+            .expect_err("missing parent must fail");
+        let message = error.to_string();
+        assert!(message.contains("create runtime file staging file"), "{message}");
+        assert!(message.contains("missing-parent"), "{message}");
+        assert!(message.contains("network.hosts"), "{message}");
+    }
+
+    #[test]
+    fn terminal_status_waits_for_every_log_relay_to_drain() {
+        let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles = (0..2)
+            .map(|_| {
+                let drained = Arc::clone(&drained);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    drained.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .collect();
+        let mut relays = super::ChildLogRelays::new(handles);
+        relays.drain();
+        assert_eq!(drained.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn embedded_dns_returns_nodata_for_known_name_without_requested_family() {
         let directory = tempfile::tempdir().expect("tempdir");
         let hosts = directory.path().join("network.hosts");
@@ -18881,7 +18932,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -18900,6 +18951,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         );
         super::release_prepared_child(pid).unwrap();
         assert!(child.wait().unwrap().success());
+        log_relays.drain();
         assert!(marker.exists());
     }
 
@@ -18925,7 +18977,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -18939,6 +18991,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
+        log_relays.drain();
         for _ in 0..50 {
             if std::fs::read_to_string(&stdout)
                 .map(|value| value.contains("tty-ready"))
@@ -19101,7 +19154,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, _child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, _child, _pidfd, _log_relays) = super::spawn_child_with_logs(
             command,
             &root.path().join("stdout.log"),
             &root.path().join("stderr.log"),

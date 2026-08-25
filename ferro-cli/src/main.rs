@@ -60,7 +60,7 @@ use ferro_compose::{
 #[cfg(target_os = "linux")]
 use ferro_core::authorization::surface::{SurfaceAuthorization, SurfacePermit};
 #[cfg(target_os = "linux")]
-use ferro_core::authorization::{Action as AuthorizationAction, RequestOrigin, ResourceKind};
+use ferro_core::authorization::{Action as AuthorizationAction, PeerAuthMode, RequestOrigin, ResourceKind};
 #[cfg(target_os = "linux")]
 use ferro_core::container_store::ResourceLimitRecord;
 #[cfg(target_os = "linux")]
@@ -650,6 +650,9 @@ pub enum Commands {
         docker_compat: bool,
         #[arg(long)]
         metrics_addr: Option<String>,
+        /// Local peer authentication (`pidfd` or opt-in `legacy-peercred`).
+        #[arg(long)]
+        peer_auth: Option<String>,
     },
     /// Print shell completion scripts.
     Completion {
@@ -1778,6 +1781,26 @@ fn doctor_apparmor_userns_check(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn peer_authentication_status(configured: Option<&str>, pidfd_available: bool) -> &'static str {
+    if configured == Some("legacy-peercred") {
+        "legacy-peercred"
+    } else if pidfd_available {
+        "pidfd"
+    } else {
+        "unavailable"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_has_peer_pidfd() -> bool {
+    use nix::sys::socket::{getsockopt, sockopt};
+    UnixStream::pair()
+        .ok()
+        .and_then(|(socket, _)| getsockopt(&socket, sockopt::PeerPidfd).ok())
+        .is_some()
+}
+
 #[allow(dead_code)]
 fn run_command_status(mut cmd: std::process::Command) -> bool {
     cmd.status().map(|status| status.success()).unwrap_or(false)
@@ -2112,6 +2135,22 @@ fn handle_doctor(
     json: bool,
 ) -> Result<(), String> {
     let mut checks = Vec::<DoctorCheck>::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        let configured = std::env::var("FERROCRATE_PEER_AUTH").ok();
+        let status = peer_authentication_status(configured.as_deref(), kernel_has_peer_pidfd());
+        checks.push(DoctorCheck {
+            id: "peer_authentication".to_string(),
+            ok: status != "unavailable",
+            message: format!("peer authentication: {status}"),
+            hint: (status == "unavailable").then_some(
+                "upgrade to a kernel with SO_PEERPIDFD or explicitly accept the PID-reuse risk with FERROCRATE_PEER_AUTH=legacy-peercred".to_string(),
+            ),
+            remediated: false,
+            action: None,
+        });
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -4606,9 +4645,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
             ref socket,
             docker_compat,
             ref metrics_addr,
+            ref peer_auth,
         } = command
         {
-            return run_daemon(socket, docker_compat, metrics_addr.as_deref());
+            return run_daemon(socket, docker_compat, metrics_addr.as_deref(), peer_auth.as_deref());
         }
 
         let _engine_owner = if CommandOwnership::for_command(&command) == CommandOwnership::Engine {
@@ -4990,7 +5030,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             #[cfg(target_os = "linux")]
             Commands::Info => {
-                let body = docker_info_payload(&runtime, &image_store)?;
+                let body = docker_info_payload(&runtime, &image_store, PeerAuthMode::Pidfd)?;
                 println!("Containers: {}\n Running: {}\n Paused: {}\n Stopped: {}\nImages: {}\nServer Version: {}\nStorage Driver: {}\nArchitecture: {}\nOperating System: {}", body["Containers"], body["ContainersRunning"], body["ContainersPaused"], body["ContainersStopped"], body["Images"], env!("CARGO_PKG_VERSION"), body["Driver"], body["Architecture"], body["OperatingSystem"]);
                 Ok(())
             }
@@ -16909,11 +16949,16 @@ fn run_daemon(
     socket: &str,
     docker_compat: bool,
     metrics_addr: Option<&str>,
+    peer_auth: Option<&str>,
 ) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
+    }
+    let peer_auth_mode = resolve_peer_auth_mode(peer_auth)?;
+    if peer_auth_mode == PeerAuthMode::LegacyPeercred {
+        eprintln!("WARN peer authentication legacy-peercred active; PID reuse can race identity resolution");
     }
     let runtime_dir = runtime_dir();
     let engine_runtime_dir = engine_runtime_dir();
@@ -16987,6 +17032,7 @@ fn run_daemon(
                         store,
                         volume_store,
                         state,
+                        peer_auth_mode,
                     ) {
                         // Hijacked/streaming requests have already sent their
                         // upgrade headers before the lifecycle loop runs. A
@@ -17001,6 +17047,26 @@ fn run_daemon(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_peer_auth_mode(flag: Option<&str>) -> Result<PeerAuthMode, String> {
+    let selected = flag
+        .map(str::to_owned)
+        .or_else(|| std::env::var("FERROCRATE_PEER_AUTH").ok())
+        .unwrap_or_else(|| "pidfd".to_string());
+    parse_peer_auth_mode(&selected)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_peer_auth_mode(selected: &str) -> Result<PeerAuthMode, String> {
+    match selected {
+        "pidfd" => Ok(PeerAuthMode::Pidfd),
+        "legacy-peercred" => Ok(PeerAuthMode::LegacyPeercred),
+        _ => Err(format!(
+            "daemon: invalid peer authentication mode `{selected}`; expected pidfd or legacy-peercred"
+        )),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -17095,6 +17161,7 @@ fn handle_docker_compat_connection(
     store: Arc<LocalImageStore>,
     volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
+    peer_auth_mode: PeerAuthMode,
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let mut event_request: Option<DockerEventRequest> = None;
@@ -17106,9 +17173,10 @@ fn handle_docker_compat_connection(
     let mut exec_hijack_session = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
-            ferro_cli::authorization_surfaces::authenticate_docker_peer(
+            ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
                 socket,
                 ferro_cli::authorization_surfaces::DockerTelemetry::new(),
+                peer_auth_mode,
             )
             .map(|peer| peer.request_origin())
             .map_err(|error| format!("docker peer authentication failed: {error}"))
@@ -17481,7 +17549,7 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/info") => {
-                let body = docker_info_payload(&runtime, &store)?;
+                let body = docker_info_payload(&runtime, &store, peer_auth_mode)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/system/df") => {
@@ -20345,20 +20413,21 @@ fn docker_version_payload() -> serde_json::Value {
 }
 
 #[cfg(target_os = "linux")]
-fn docker_info_capabilities(is_root: bool) -> serde_json::Value {
+fn docker_info_capabilities(is_root: bool, peer_auth_mode: PeerAuthMode) -> serde_json::Value {
     serde_json::json!({
         "SecurityOptions": if is_root { Vec::<String>::new() } else { vec!["name=rootless".to_string()] },
         "FerrocrateCapabilities": {
             "CustomNetworks": is_root,
+            "PeerAuthentication": peer_auth_mode.to_string(),
         },
     })
 }
 
 #[cfg(target_os = "linux")]
-fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore) -> Result<serde_json::Value, String> {
+fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore, peer_auth_mode: PeerAuthMode) -> Result<serde_json::Value, String> {
     let containers = runtime.list().map_err(|error| error.to_string())?;
     let images = store.list_references().map_err(|error| error.to_string())?;
-    let capabilities = docker_info_capabilities(nix::unistd::Uid::effective().is_root());
+    let capabilities = docker_info_capabilities(nix::unistd::Uid::effective().is_root(), peer_auth_mode);
     Ok(serde_json::json!({
         "ID": "ferrocrate", "Containers": containers.len(),
         "ContainersRunning": containers.iter().filter(|c| c.status == "running").count(),
@@ -22436,18 +22505,37 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn docker_info_capabilities_report_rootless_network_truth() {
-        let rootless = super::docker_info_capabilities(false);
+        let rootless = super::docker_info_capabilities(false, super::PeerAuthMode::Pidfd);
         assert_eq!(rootless["SecurityOptions"], serde_json::json!(["name=rootless"]));
         assert_eq!(
             rootless["FerrocrateCapabilities"]["CustomNetworks"],
             false
         );
 
-        let rootful = super::docker_info_capabilities(true);
+        let rootful = super::docker_info_capabilities(true, super::PeerAuthMode::LegacyPeercred);
         assert_eq!(rootful["SecurityOptions"], serde_json::json!([]));
+        assert_eq!(rootless["FerrocrateCapabilities"]["PeerAuthentication"], "pidfd");
+        assert_eq!(rootful["FerrocrateCapabilities"]["PeerAuthentication"], "legacy-peercred");
         assert_eq!(
             rootful["FerrocrateCapabilities"]["CustomNetworks"],
             true
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_auth_modes_are_explicit_and_doctor_reports_the_boundary() {
+        assert_eq!(super::parse_peer_auth_mode("pidfd").unwrap(), super::PeerAuthMode::Pidfd);
+        assert_eq!(
+            super::parse_peer_auth_mode("legacy-peercred").unwrap(),
+            super::PeerAuthMode::LegacyPeercred
+        );
+        assert!(super::parse_peer_auth_mode("legacy").is_err());
+        assert_eq!(super::peer_authentication_status(None, true), "pidfd");
+        assert_eq!(super::peer_authentication_status(None, false), "unavailable");
+        assert_eq!(
+            super::peer_authentication_status(Some("legacy-peercred"), false),
+            "legacy-peercred"
         );
     }
 

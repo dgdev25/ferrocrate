@@ -14,6 +14,11 @@ grep -Fq 'FERROCRATE NON-BUNDLE SIDECAR PLACEHOLDER' \
   "$repo_root/apps/ferro-desktop-ui/src-tauri/build.rs"
 grep -Fq 'validate-bundled-sidecars.mjs' \
   "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json"
+windows_icon="$repo_root/apps/ferro-desktop-ui/src-tauri/icons/icon.ico"
+grep -Fq '"icons/icon.ico"' \
+  "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json"
+test -s "$windows_icon"
+test "$(od -An -tx1 -N4 "$windows_icon" | tr -d '[:space:]')" = "00000100"
 grep -Fq 'scripts/bundle-sidecars.sh' "$repo_root/scripts/dev-desktop.sh"
 test -f "$repo_root/scripts/validate-bundled-sidecars.mjs"
 test -x "$repo_root/scripts/fix-appimage.sh"

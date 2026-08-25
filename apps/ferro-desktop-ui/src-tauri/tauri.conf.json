@@ -35,7 +35,8 @@
       "../../../packaging/windows/install-supervisor-task.ps1": "packaging/windows/install-supervisor-task.ps1"
     },
     "icon": [
-      "../public/icon.png"
+      "../public/icon.png",
+      "icons/icon.ico"
     ],
     "linux": {
       "deb": {

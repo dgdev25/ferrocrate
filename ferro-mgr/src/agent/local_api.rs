@@ -637,6 +637,7 @@ impl LocalApi {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn matches_delegated_identity(&self, request: &DelegatedManagedOverlayRequest) -> bool {
         let Some((expected, boot)) = &self.authorization_identity else {
             return false;
@@ -743,6 +744,7 @@ fn receive_without_descriptors(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn decode_disabled_legacy(
     body: &[u8],
     expected_identity: Option<&(AuthorizationServiceMode, String)>,
@@ -799,7 +801,7 @@ fn proposed_child(parent: &ParentGrantKey) -> Result<ChildIdentity, LocalApiErro
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn monotonic_millis() -> u64 {
     std::fs::read_to_string("/proc/uptime")
         .ok()

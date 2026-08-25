@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod web_bridge;
+#[cfg(target_os = "linux")]
+mod webkit_rendering;
 
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
@@ -3111,6 +3113,11 @@ where
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = webkit_rendering::apply() {
+        eprintln!("ferro-desktop-ui: {error}");
+        std::process::exit(2);
+    }
     let web_mode = match parse_web_mode(std::env::args()) {
         Ok(mode) => mode,
         Err(error) => {
@@ -3145,6 +3152,7 @@ fn main() {
     }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|_| {
             start_desktop_daemon().map_err(std::io::Error::other)?;
             Ok(())

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=FerroCrate Desktop
+Exec=ferro-desktop-ui
+Icon=ferro-desktop-ui
+Categories=Development;System;

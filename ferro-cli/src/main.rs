@@ -2074,6 +2074,19 @@ fn doctor_platform_scope_message() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn doctor_webkit_rendering_mode(appimage: bool, nvidia: bool, safe: bool) -> &'static str {
+    if safe {
+        "safe (shared-memory, compositing disabled)"
+    } else if appimage {
+        "shared-memory (AppImage preflight)"
+    } else if nvidia {
+        "shared-memory (NVIDIA preflight)"
+    } else {
+        "automatic"
+    }
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2311,6 +2324,31 @@ fn handle_doctor(
 
         #[cfg(target_os = "linux")]
         {
+            let safe_rendering = std::env::args_os().any(|arg| arg == "--safe-rendering");
+            let nvidia = std::fs::read_dir("/sys/class/drm").is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    std::fs::read_to_string(entry.path().join("device/vendor"))
+                        .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case("0x10de"))
+                })
+            });
+            checks.push(DoctorCheck {
+                id: "webkit_rendering".to_string(),
+                ok: true,
+                message: format!(
+                    "WebKitGTK rendering mode: {}",
+                    doctor_webkit_rendering_mode(
+                        std::env::var_os("APPIMAGE").is_some(),
+                        nvidia,
+                        safe_rendering,
+                    )
+                ),
+                hint: Some(
+                    "desktop-only preflight; use --safe-rendering if WebKitGTK cannot start"
+                        .to_string(),
+                ),
+                remediated: false,
+                action: None,
+            });
             let apparmor_restriction = std::fs::read_to_string(
                 "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
             )
@@ -25421,6 +25459,15 @@ volumes:
         assert_eq!(message, "doctor performs Windows current-host compatibility checks");
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         assert_eq!(message, "doctor performs compatibility checks for the current host");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_reports_appimage_webkit_shared_memory_mode() {
+        assert_eq!(
+            super::doctor_webkit_rendering_mode(true, false, false),
+            "shared-memory (AppImage preflight)"
+        );
     }
 
     #[cfg(target_os = "linux")]

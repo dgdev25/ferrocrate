@@ -24,9 +24,33 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm"],
+    "targets": ["appimage", "deb", "dmg", "nsis", "msi"],
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/ferrocrate", "binaries/ferro-desktop"],
+    "resources": {
+      "../../../packaging/apparmor/usr.local.bin.ferrocrate": "packaging/apparmor/usr.local.bin.ferrocrate",
+      "../../../packaging/debian/postinst": "packaging/debian/postinst",
+      "../../../packaging/systemd/ferrocrate.service": "packaging/systemd/ferrocrate.service",
+      "../../../packaging/macos/io.ferrocrate.desktop.plist": "packaging/macos/io.ferrocrate.desktop.plist",
+      "../../../packaging/windows/install-supervisor-task.ps1": "packaging/windows/install-supervisor-task.ps1"
+    },
     "icon": [
       "../public/icon.png"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/etc/apparmor.d/usr.local.bin.ferrocrate": "../../../packaging/apparmor/usr.local.bin.ferrocrate",
+          "/etc/systemd/system/ferrocrate.service": "../../../packaging/systemd/ferrocrate.service"
+        },
+        "desktopTemplate": "packaging/debian/ferrocrate-desktop.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/ferrocrate/ferrocrate/releases/latest/download/latest.json"],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
+    }
   }
 }

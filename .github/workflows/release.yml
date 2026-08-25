@@ -21,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain present (self-hosted)
+        shell: bash
         run: rustup show active-toolchain && rustup target add ${{ matrix.target }}
       - name: Linux ARM linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -47,10 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain present (self-hosted)
+        shell: bash
         run: rustup show active-toolchain && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Linux build deps present (self-hosted)
+        shell: bash
         run: pkg-config --exists webkit2gtk-4.1 gtk+-3.0 && echo ok
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
@@ -88,6 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain present (self-hosted)
+        shell: bash
         run: rustup show active-toolchain && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
@@ -141,6 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain present (self-hosted)
+        shell: bash
         run: rustup show active-toolchain && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }

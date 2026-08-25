@@ -12,6 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain present (self-hosted)
+        shell: bash
         run: rustup show active-toolchain && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }

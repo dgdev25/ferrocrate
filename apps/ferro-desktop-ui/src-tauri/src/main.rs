@@ -3808,6 +3808,10 @@ mod tests {
 
     #[test]
     fn image_build_uses_selected_context_through_desktop_bridge() {
+        let dockerfile = PathBuf::from("/tmp/build context")
+            .join("Dockerfile")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             build_bridge_command("/tmp/build context", "demo/app:dev").expect("build command"),
             vec![
@@ -3816,7 +3820,7 @@ mod tests {
                 "ferrocrate",
                 "build",
                 "--dockerfile",
-                "/tmp/build context/Dockerfile",
+                dockerfile.as_str(),
                 "--tag",
                 "demo/app:dev",
             ]

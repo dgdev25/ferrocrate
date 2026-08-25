@@ -22,12 +22,15 @@ use super::ipam::{Allocation, Ipam, IpamError};
 use super::netd_client::{
     endpoint_live_identity_digest, DelegationBridge, NetdResponse, UnixNetdClient,
 };
-use ferro_core::authorization::{
-    helper_grant::GrantAction, AuthorizationMode, AuthorizationServiceMode,
-};
+#[cfg(target_os = "linux")]
+use ferro_core::authorization::AuthorizationMode;
+use ferro_core::authorization::{helper_grant::GrantAction, AuthorizationServiceMode};
 use ferro_core::managed_overlay::{
-    DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedCleanupProvenance,
-    ManagedOverlayCompatibilityMode, ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
+    DelegatedManagedOverlayRequest, ManagedCleanupProvenance, ManagedOverlayDelegation,
+};
+#[cfg(target_os = "linux")]
+use ferro_core::managed_overlay::{
+    LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode, MANAGED_OVERLAY_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

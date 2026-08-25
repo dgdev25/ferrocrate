@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
@@ -6,9 +7,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use ferro_desktop::backend::{select_backend, Backend, DuplexStream, TerminalRequest};
+use ferro_core::docker_auth::resolve_auth_for_registry;
+use ferro_desktop::backend::{
+    select_backend, Backend, DuplexStream, TerminalRequest, TransportRequest,
+};
 use ferro_web::{CommandDispatcher, CommandRequest, EventHub, Server, StaticAssets};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
@@ -128,7 +132,7 @@ fn ensure_daemon() -> Result<OwnedDaemon, String> {
         .arg(&socket)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("failed to start desktop supervisor: {error}"))?;
     for _ in 0..100 {
@@ -216,6 +220,88 @@ fn run_json(args: &[&str]) -> Result<Value, String> {
         .map_err(|error| format!("dashboard command returned invalid JSON: {error}"))
 }
 
+fn volume_summaries(value: &Value) -> Vec<Value> {
+    value
+        .get("Volumes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|volume| {
+            json!({
+                "name": volume["Name"],
+                "driver": volume["Driver"],
+                "mountpoint": volume["Mountpoint"],
+                "created_at": volume["CreatedAt"],
+                "mounts": volume.get("FerrocrateMounts").and_then(Value::as_array).cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn network_summaries(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|network| {
+            let subnets = network
+                .pointer("/IPAM/Config")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|config| config.get("Subnet").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            json!({
+                "name": network["Name"],
+                "driver": network["Driver"],
+                "subnets": subnets,
+                "containers": [],
+            })
+        })
+        .collect()
+}
+
+fn container_detail(value: &Value) -> Value {
+    if value.get("id").is_some() {
+        return value.clone();
+    }
+    let mounts = value
+        .get("Mounts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mount| {
+            json!({
+                "kind": mount.get("Type").and_then(Value::as_str).unwrap_or("bind"),
+                "source": mount.get("Source").and_then(Value::as_str).unwrap_or(""),
+                "destination": mount.get("Destination").and_then(Value::as_str).unwrap_or(""),
+                "access": if mount.get("RW").and_then(Value::as_bool).unwrap_or(true) { "rw" } else { "ro" },
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "id": value["Id"],
+        "name": value["Name"].as_str().unwrap_or("").trim_start_matches('/'),
+        "image": value.pointer("/Config/Image").cloned().unwrap_or(Value::Null),
+        "status": value.pointer("/State/Status").cloned().unwrap_or(Value::Null),
+        "command": value.pointer("/Config/Cmd").cloned().unwrap_or_else(|| json!([])),
+        "environment": value.pointer("/Config/Env").cloned().unwrap_or_else(|| json!([])),
+        "working_dir": value.pointer("/Config/WorkingDir").cloned().unwrap_or_else(|| json!("")),
+        "user": value.pointer("/Config/User").cloned().unwrap_or_else(|| json!("")),
+        "mounts": mounts,
+        "health": value.pointer("/State/Health").cloned().unwrap_or(Value::Null),
+        "resources": {
+            "memory": value.pointer("/HostConfig/Memory").and_then(Value::as_u64).unwrap_or(0),
+            "cpu_quota": value.pointer("/HostConfig/CpuQuota").and_then(Value::as_u64).unwrap_or(0),
+            "cpu_period": value.pointer("/HostConfig/CpuPeriod").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "restart_policy": {
+            "name": value.pointer("/HostConfig/RestartPolicy/Name").and_then(Value::as_str).unwrap_or("no"),
+            "maximum_retry_count": value.pointer("/HostConfig/RestartPolicy/MaximumRetryCount").and_then(Value::as_u64).unwrap_or(0),
+        },
+    })
+}
+
 struct TerminalState {
     stream: Box<dyn DuplexStream>,
     exec_id: String,
@@ -226,6 +312,7 @@ struct ProcessDispatcher {
     log_process: Arc<Mutex<Option<Child>>>,
     terminal: Arc<Mutex<Option<TerminalState>>>,
     backend: Arc<dyn Backend>,
+    restart_specs: Arc<Mutex<HashMap<String, (String, Vec<String>)>>>,
 }
 
 impl ProcessDispatcher {
@@ -234,6 +321,7 @@ impl ProcessDispatcher {
             log_process: Arc::new(Mutex::new(None)),
             terminal: Arc::new(Mutex::new(None)),
             backend: Arc::from(select_backend().map_err(|error| error.to_string())?),
+            restart_specs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -425,33 +513,125 @@ impl CommandDispatcher for ProcessDispatcher {
         match request {
             CommandRequest::GetDesktopSnapshot => self.snapshot(),
             CommandRequest::GetContainerStats(args) => {
+                let started = Instant::now();
+                let first = args
+                    .ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            run_json(&["stats", id, "--format", "json"]).ok(),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                thread::sleep(Duration::from_millis(100));
+                let elapsed = started.elapsed().as_micros() as f64;
                 let mut samples = Vec::new();
                 for id in args.ids {
                     let value = run_json(&["stats", &id, "--format", "json"]).ok();
+                    let before = first
+                        .get(&id)
+                        .and_then(Option::as_ref)
+                        .and_then(|item| item.pointer("/cpu_stats/cpu_usage/total_usage"))
+                        .and_then(Value::as_u64);
+                    let after = value
+                        .as_ref()
+                        .and_then(|item| item.pointer("/cpu_stats/cpu_usage/total_usage"))
+                        .and_then(Value::as_u64);
+                    let cpu_percent =
+                        before
+                            .zip(after)
+                            .filter(|_| elapsed > 0.0)
+                            .map(|(before, after)| {
+                                after.saturating_sub(before) as f64 / 1_000.0 / elapsed * 100.0
+                            });
+                    let memory_usage = value.as_ref().and_then(|item| {
+                        item.pointer("/memory_stats/usage").and_then(Value::as_u64)
+                    });
                     samples.push(json!({
                         "id": id,
-                        "available": value.is_some(),
-                        "memory_usage": value.as_ref().and_then(|item| item.pointer("/memory_stats/usage")).and_then(Value::as_u64),
+                        "available": cpu_percent.is_some() && memory_usage.is_some(),
+                        "memory_usage": memory_usage,
                         "memory_limit": value.as_ref().and_then(|item| item.pointer("/memory_stats/limit")).and_then(Value::as_u64),
-                        "cpu_percent": null
+                        "cpu_percent": cpu_percent
                     }));
                 }
                 Ok(json!({ "samples": samples }))
             }
-            CommandRequest::GetVolumes => run_json(&["volume", "ls", "--format", "json"]),
-            CommandRequest::GetNetworks => run_json(&["network", "ls", "--format", "json"]),
-            CommandRequest::GetContainerDetail(args) => {
-                run_json(&["inspect", &args.target, "--format", "json"])
-            }
+            CommandRequest::GetVolumes => Ok(Value::Array(volume_summaries(&run_json(&[
+                "volume", "ls", "--format", "json",
+            ])?))),
+            CommandRequest::GetNetworks => Ok(Value::Array(network_summaries(&run_json(&[
+                "network", "ls", "--format", "json",
+            ])?))),
+            CommandRequest::GetContainerDetail(args) => Ok(container_detail(&run_json(&[
+                "inspect",
+                &args.target,
+                "--format",
+                "json",
+            ])?)),
             CommandRequest::GetComposeSnapshot(args) => {
                 let config = run_command_result(&["compose", "-f", &args.file, "config"])?;
-                Ok(json!({ "config": config["stdout"], "services": [] }))
+                if !config["ok"].as_bool().unwrap_or(false) {
+                    return Err(config["message"]
+                        .as_str()
+                        .unwrap_or("compose config failed")
+                        .to_string());
+                }
+                let yaml = config["stdout"].as_str().unwrap_or("");
+                let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)
+                    .map_err(|error| format!("compose config returned invalid YAML: {error}"))?;
+                let services = parsed
+                    .get("services")
+                    .and_then(serde_yaml::Value::as_mapping)
+                    .into_iter()
+                    .flat_map(|mapping| mapping.keys())
+                    .filter_map(serde_yaml::Value::as_str)
+                    .map(|name| json!({ "name": name, "status": "not_created", "container_id": null }))
+                    .collect::<Vec<_>>();
+                Ok(json!({ "config": yaml, "services": services }))
             }
             CommandRequest::BuildImage(args) => {
-                run_command_result(&["build", &args.context, "--tag", &args.tag])
+                let values = ["build", &args.context, "--tag", &args.tag]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let output = desktop_command(&values, None)?;
+                for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+                    for line in String::from_utf8_lossy(bytes).lines() {
+                        events.emit(
+                            "image-build-progress",
+                            json!({ "build_id": args.build_id, "stream": stream, "text": line }),
+                        );
+                    }
+                }
+                Ok(command_result(output))
             }
             CommandRequest::RunDesktopAction(args) => {
                 let target = args.target.unwrap_or_default();
+                if value_string(&args.action)? == "stop_container" {
+                    if let Ok(detail) = run_json(&["inspect", &target, "--format", "json"]) {
+                        let image = detail
+                            .pointer("/Config/Image")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let command = detail
+                            .pointer("/Config/Cmd")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        if !image.is_empty() {
+                            self.restart_specs
+                                .lock()
+                                .map_err(|_| "restart state is unavailable".to_string())?
+                                .insert(target.clone(), (image, command));
+                        }
+                    }
+                }
                 let command = match value_string(&args.action)? {
                     "pull_image" => vec!["pull", &target],
                     "remove_image" => vec!["rmi", &target],
@@ -472,7 +652,29 @@ impl CommandDispatcher for ProcessDispatcher {
                     }
                     action => return Err(format!("unsupported desktop action: {action}")),
                 };
-                run_command_result(&command)
+                let result = run_command_result(&command)?;
+                if value_string(&args.action)? == "start_container"
+                    && !result["ok"].as_bool().unwrap_or(false)
+                {
+                    let spec = self
+                        .restart_specs
+                        .lock()
+                        .map_err(|_| "restart state is unavailable".to_string())?
+                        .get(&target)
+                        .cloned();
+                    if let Some((image, command)) = spec {
+                        let mut values = vec![
+                            "run".to_string(),
+                            "--detach".to_string(),
+                            "--name".to_string(),
+                            target,
+                            image,
+                        ];
+                        values.extend(command);
+                        return desktop_command(&values, None).map(command_result);
+                    }
+                }
+                Ok(result)
             }
             CommandRequest::RunComposeAction(args) => {
                 let action = value_string(&args.action)?;
@@ -501,17 +703,32 @@ impl CommandDispatcher for ProcessDispatcher {
                 run_command_result(&values)
             }
             CommandRequest::UpdateContainerResources(args) => {
-                let mut values = vec!["update".to_string(), args.target];
-                for (flag, value) in [
-                    ("--memory", args.memory),
-                    ("--cpu-quota", args.cpu_quota),
-                    ("--cpu-period", args.cpu_period),
-                ] {
-                    if let Some(value) = value {
-                        values.extend([flag.to_string(), value.to_string()]);
-                    }
-                }
-                desktop_command(&values, None).map(command_result)
+                let body = serde_json::to_vec(&json!({
+                    "Memory": args.memory,
+                    "CpuQuota": args.cpu_quota,
+                    "CpuPeriod": args.cpu_period,
+                }))
+                .map_err(|error| format!("failed to encode resource update: {error}"))?;
+                let response = self
+                    .backend
+                    .request(
+                        TransportRequest::new(
+                            "POST",
+                            format!("/containers/{}/update", args.target),
+                        )
+                        .header("Content-Type", "application/json")
+                        .body(body),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let ok = (200..300).contains(&response.status);
+                let output = String::from_utf8_lossy(&response.body).to_string();
+                Ok(json!({
+                    "ok": ok,
+                    "code": if ok { 0 } else { 1 },
+                    "stdout": if ok { output.clone() } else { String::new() },
+                    "stderr": if ok { String::new() } else { output.clone() },
+                    "message": if ok { String::new() } else { output },
+                }))
             }
             CommandRequest::RunNewContainer(args) => {
                 let mut values = vec!["run".to_string(), "--detach".to_string()];
@@ -541,7 +758,13 @@ impl CommandDispatcher for ProcessDispatcher {
                 desktop_command(&values, None).map(command_result)
             }
             CommandRequest::GetRegistryAuthStatus(args) => {
-                Ok(json!({ "registry": args.registry, "logged_in": false, "username": null }))
+                let credential =
+                    resolve_auth_for_registry(&args.registry).map_err(|error| error.to_string())?;
+                Ok(json!({
+                    "registry": args.registry,
+                    "logged_in": credential.is_some(),
+                    "username": credential.map(|auth| auth.username),
+                }))
             }
             CommandRequest::LoginRegistry(args) => {
                 let values = vec![
@@ -652,5 +875,22 @@ mod tests {
         assert!(mime.starts_with("text/html"));
         assert!(<DashboardAssets as RustEmbed>::iter()
             .any(|path| path.starts_with("assets/index-") && path.ends_with(".js")));
+    }
+
+    #[test]
+    fn docker_resource_payloads_are_normalized_for_the_shared_frontend() {
+        let volumes = volume_summaries(&json!({ "Volumes": [{
+            "Name": "data", "Driver": "local", "Mountpoint": "/data",
+            "CreatedAt": "1", "FerrocrateMounts": []
+        }] }));
+        assert_eq!(volumes[0]["name"], "data");
+        let networks = network_summaries(&json!([{ "Name": "bridge", "Driver": "bridge" }]));
+        assert_eq!(networks[0]["containers"], json!([]));
+        let detail = container_detail(&json!({
+            "Id": "abc", "Name": "/worker", "Config": { "Image": "alpine", "Cmd": ["sh"] },
+            "State": { "Status": "running" }, "HostConfig": {}, "Mounts": []
+        }));
+        assert_eq!(detail["name"], "worker");
+        assert_eq!(detail["command"], json!(["sh"]));
     }
 }

@@ -264,48 +264,6 @@ install_linux_release() {
   log_info "Installed to $install_dir/ferrocrate"
 }
 
-download_binary() {
-  local os arch version binary_name download_url file
-
-  os="$1"
-  arch="$2"
-  version="$3"
-
-  # Determine binary name based on platform
-  case "$os" in
-    linux)
-      binary_name="ferrocrate-${version}-${arch}.AppImage"
-      ;;
-    macos)
-      binary_name="ferrocrate-${version}-universal.dmg"
-      ;;
-    windows)
-      binary_name="ferrocrate-${version}-x64-portable.exe"
-      ;;
-  esac
-
-  download_url="${GITHUB_RELEASE_BASE}/${version}/${binary_name}"
-  file=$(mktemp)
-
-  log_info "Downloading ${binary_name}..."
-  if ! curl -fsSL -o "$file" "$download_url"; then
-    log_error "Failed to download binary from $download_url"
-    rm -f "$file"
-    exit 1
-  fi
-
-  # Try to download checksum
-  if curl -fsSL -o "${file}.sha256" "${download_url}.sha256" 2>/dev/null; then
-    verify_checksum "$file"
-  else
-    log_error "Checksum not available; refusing unverified release"
-    rm -f "$file" "${file}.sha256"
-    exit 1
-  fi
-
-  echo "$file"
-}
-
 platform_archive_name() {
   local os="$1" arch="$2" version="$3"
   [[ "$arch" == "arm64" ]] && arch="aarch64"
@@ -396,34 +354,6 @@ install_platform_archive() {
   [[ -z "$backup" ]] || rm -f "$backup"
   backup=""
   log_info "Installed to $install_dir/$binary_name"
-}
-
-install_binary() {
-  local os file install_path
-
-  os="$1"
-  file="$2"
-
-  case "$os" in
-    linux)
-      log_info "Installing AppImage..."
-      mkdir -p "$INSTALL_DIR"
-      chmod +x "$file"
-      mv "$file" "$INSTALL_DIR/ferrocrate"
-      log_info "Installed to $INSTALL_DIR/ferrocrate"
-      ;;
-    macos)
-      log_info "Opening disk image (.dmg)..."
-      hdiutil attach "$file" -quiet
-      # Note: User interaction required for macOS
-      log_info "Mounted at /Volumes/FerroCrate. Drag FerroCrate.app to Applications folder."
-      ;;
-    windows)
-      log_info "Running Windows installer..."
-      chmod +x "$file"
-      "$file"
-      ;;
-  esac
 }
 
 main() {

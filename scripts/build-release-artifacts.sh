@@ -329,6 +329,23 @@ PY
   echo "created artifact: $OUTPUT_DIR/$archive_name"
   echo "created checksums: $OUTPUT_DIR/$checksum_name"
   echo "created provenance: $OUTPUT_DIR/$provenance_name"
+
+  if [[ "$os" == "linux" && "$TARGET_LIBC" == "gnu" ]]; then
+    local deb_arch deb_version deb_path
+    case "$arch" in
+      x86_64) deb_arch="amd64" ;;
+      aarch64) deb_arch="arm64" ;;
+    esac
+    deb_version="${VERSION#v}"
+    bash "$(dirname -- "$0")/build-deb-package.sh" \
+      --version "$deb_version" \
+      --architecture "$deb_arch" \
+      --binary "$cli_bin" \
+      --output-dir "$OUTPUT_DIR"
+    deb_path="$OUTPUT_DIR/ferrocrate_${deb_version}_${deb_arch}.deb"
+    write_sha256_file "$deb_path" "${deb_path}.sha256"
+    echo "created Debian checksum: ${deb_path}.sha256"
+  fi
 }
 
 main "$@"

@@ -30360,6 +30360,13 @@ volumes:
         assert!(validate_wait_condition("bogus").is_err());
     }
 
+    fn remote_dispatch_error(args: &[&str]) -> String {
+        let command = Cli::try_parse_from(args).expect("parse remote command").command;
+        dispatch_remote_context(&command)
+            .expect("remote context should claim command")
+            .expect_err("remote command must be rejected")
+    }
+
     #[test]
     fn remote_run_rejects_unrepresentable_options_and_routes_cache_prune() {
         let _guard = ENV_MUTEX.lock().expect("env lock");
@@ -30377,65 +30384,46 @@ volumes:
             name: "remote".to_string(),
         })
         .expect("select context");
-        let command = Cli::try_parse_from(["ferrocrate", "run", "alpine", "--profile", "prod"])
-            .expect("parse run")
-            .command;
-        let result = dispatch_remote_context(&command)
-            .expect("remote context should claim run")
-            .expect_err("local-only option must be rejected");
+        let result = remote_dispatch_error(&[
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--profile",
+            "prod",
+        ]);
         assert!(result.contains("--profile"), "error={result}");
 
-        let conflicting =
-            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--read-only", "--read-write"])
-                .expect("parse conflicting rootfs flags")
-                .command;
-        let result = dispatch_remote_context(&conflicting)
-            .expect("remote context should claim run")
-            .expect_err("conflicting rootfs flags must be rejected");
+        let result = remote_dispatch_error(&[
+            "ferrocrate",
+            "run",
+            "alpine",
+            "--read-only",
+            "--read-write",
+        ]);
         assert!(
             result.contains("read-only and --read-write"),
             "error={result}"
         );
 
-        let invalid_name =
-            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--name", "bad/name"])
-                .expect("parse invalid remote name")
-                .command;
-        let result = dispatch_remote_context(&invalid_name)
-            .expect("remote context should claim run")
-            .expect_err("invalid Docker names must be rejected");
+        let result =
+            remote_dispatch_error(&["ferrocrate", "run", "alpine", "--name", "bad/name"]);
         assert!(result.contains("container name"), "error={result}");
 
-        let invalid_cap = Cli::try_parse_from([
+        let result = remote_dispatch_error(&[
             "ferrocrate",
             "run",
             "alpine",
             "--cap-add",
             "NOT_A_CAPABILITY",
-        ])
-        .expect("parse invalid remote capability")
-        .command;
-        let result = dispatch_remote_context(&invalid_cap)
-            .expect("remote context should claim run")
-            .expect_err("invalid capabilities must be rejected");
+        ]);
         assert!(result.contains("unknown capability"), "error={result}");
 
-        let invalid_bind =
-            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--bind", "/host-only"])
-                .expect("parse invalid remote bind")
-                .command;
-        let result = dispatch_remote_context(&invalid_bind)
-            .expect("remote context should claim run")
-            .expect_err("invalid bind mounts must be rejected");
+        let result =
+            remote_dispatch_error(&["ferrocrate", "run", "alpine", "--bind", "/host-only"]);
         assert!(result.contains("bind mount"), "error={result}");
 
-        let invalid_volume =
-            Cli::try_parse_from(["ferrocrate", "run", "alpine", "--volume", "data-only"])
-                .expect("parse invalid remote volume")
-                .command;
-        let result = dispatch_remote_context(&invalid_volume)
-            .expect("remote context should claim run")
-            .expect_err("invalid volumes must be rejected");
+        let result =
+            remote_dispatch_error(&["ferrocrate", "run", "alpine", "--volume", "data-only"]);
         assert!(result.contains("volume must be"), "error={result}");
 
         let cache_prune =

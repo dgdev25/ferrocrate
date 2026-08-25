@@ -4,21 +4,28 @@ use std::{env, ffi::OsString, fs, path::PathBuf, process::Command};
 #[cfg(target_os = "linux")]
 use aya_build::{build_ebpf, Package, Toolchain};
 
+#[cfg(target_os = "linux")]
 const BPF_TOOLCHAIN: &str = "nightly-2026-02-11";
+#[cfg(target_os = "linux")]
 const BPF_LINKER_VERSION: &str = "0.10.4";
+#[cfg(target_os = "linux")]
 const BPF_PACKAGE: &str = "ferro-net-ebpf";
+#[cfg(target_os = "linux")]
 const SECURITY_BPF_PACKAGE: &str = "ferro-security-ebpf";
+#[cfg(target_os = "linux")]
 const BPF_INPUTS: &[&str] = &[
     "../ferro-net-ebpf/Cargo.toml",
     "../ferro-net-ebpf/src",
     "../ferro-net-ebpf/src/main.rs",
     "../ferro-net-ebpf/src/abi.rs",
 ];
+#[cfg(target_os = "linux")]
 const SECURITY_BPF_INPUTS: &[&str] = &[
     "../ferro-security-ebpf/Cargo.toml",
     "../ferro-security-ebpf/src",
     "../ferro-security-ebpf/src/main.rs",
 ];
+#[cfg(target_os = "linux")]
 const BPF_ENVIRONMENT: &[&str] = &[
     "AYA_BUILD_SKIP",
     "AYA_BPF_TARGET_ARCH",

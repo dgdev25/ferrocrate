@@ -680,9 +680,12 @@ fn system_host_reaps_stale_children_before_reporting_a_restart_running() {
     let host = ferro_desktop::backend::SystemBackendHost::default();
     host.start(&CommandSpec::new("sh").args(["-c", "sleep 1"]))
         .unwrap();
-    let transient = CommandSpec::new("sh").args(["-c", "sleep 0.01"]);
+    let transient = CommandSpec::new("sh").args(["-c", "sleep 0.1"]);
     host.start(&transient).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while host.is_running().unwrap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(!host.is_running().unwrap());
 
     host.start(&transient).unwrap();

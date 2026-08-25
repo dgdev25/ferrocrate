@@ -8820,7 +8820,7 @@ fn dispatch_remote_socket(
                 "Driver": "bridge",
                 "EnableIPv6": ipv6_subnet.is_some(),
                 "IPAM": {"Config": configs},
-                "Labels": match parse_key_values("network: label", &labels) {
+                "Labels": match parse_key_values("network: label", labels) {
                     Ok(labels) => labels,
                     Err(error) => return Some(Err(error)),
                 },

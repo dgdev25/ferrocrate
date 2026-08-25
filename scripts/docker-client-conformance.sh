@@ -129,13 +129,22 @@ if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
   exec 8<>"$namespace_sync/go"
   exec 9<>"$namespace_sync/ready"
   unshare --user --map-root-user --mount --net bash -c '
-    mount -t tmpfs tmpfs /run/netns
+    mkdir -p "$5/read-only-run" "$5/xdg"
+    resolv_link="$(readlink /etc/resolv.conf 2>/dev/null || true)"
+    if [[ "$resolv_link" == ../run/* ]]; then
+      resolv_relative="${resolv_link#../run/}"
+      mkdir -p "$5/read-only-run/$(dirname "$resolv_relative")"
+      printf "nameserver 10.0.2.3\n" >"$5/read-only-run/$resolv_relative"
+    else
+      printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
+      mount --bind "$5/resolv.conf" /etc/resolv.conf
+    fi
+    mount --bind "$5/read-only-run" /run
+    mount -o remount,bind,ro /run
     ip link set lo up
-    printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
-    mount --bind "$5/resolv.conf" /etc/resolv.conf
     printf r >"$6"
     IFS= read -r -n1 <"$1"
-    exec env FERROCRATE_CONFORMANCE_USERNS=1 FERROCRATE_PEER_AUTH="$7" bash "$2" --output "$3" --log "$4"
+    exec env XDG_RUNTIME_DIR="$5/xdg" FERROCRATE_CONFORMANCE_USERNS=1 FERROCRATE_PEER_AUTH="$7" bash "$2" --output "$3" --log "$4"
   ' bash "$namespace_sync/go" "$0" "$output" "$execution_log" "$namespace_sync" \
     "$namespace_sync/child-ready" "$peer_auth_mode" &
   namespace_pid=$!
@@ -163,7 +172,11 @@ if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
   exec 7>&-
   exec 8>&-
   exec 9>&-
-  rm -rf -- "$namespace_sync"
+  if [[ "${FERROCRATE_CONFORMANCE_KEEP_WORKDIR:-0}" != 1 ]]; then
+    rm -rf -- "$namespace_sync"
+  else
+    printf 'conformance work directory retained under %s\n' "$namespace_sync" >&2
+  fi
   exit "$namespace_status"
 fi
 if [[ "${FERROCRATE_CONFORMANCE_USERNS:-0}" == 1 ]]; then

@@ -1591,6 +1591,7 @@ pub struct ContainerRuntime {
     store: SqliteContainerStore,
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
+    active_supervisors: Arc<DashMap<String, u32>>,
     health_cancel: DashMap<String, Arc<AtomicBool>>,
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
@@ -1805,6 +1806,7 @@ impl ContainerRuntime {
             store: self.store.clone(),
             runtime_dir: self.runtime_dir.clone(),
             cgroup_root: self.cgroup_root.clone(),
+            active_supervisors: Arc::clone(&self.active_supervisors),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization: self.authorization.with_origin(origin),
@@ -1861,6 +1863,7 @@ impl ContainerRuntime {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
+            active_supervisors: Arc::new(DashMap::new()),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization,
@@ -2038,6 +2041,10 @@ impl ContainerRuntime {
         for record in self.store.list()? {
             if !matches!(record.status.as_str(), "running" | "paused")
                 || pid_identity_matches(&record)
+                || self
+                    .active_supervisors
+                    .get(&record.id)
+                    .is_some_and(|pid| *pid == record.pid)
             {
                 continue;
             }
@@ -3305,6 +3312,7 @@ impl ContainerRuntime {
             false,
             tty,
             self.store.clone_db(),
+            Arc::clone(&self.active_supervisors),
             container_id.clone(),
             Some(rootfs_dir.clone()),
             no_new_privs,
@@ -5134,6 +5142,7 @@ impl ContainerRuntime {
             true,
             record.tty,
             self.store.clone_db(),
+            Arc::clone(&self.active_supervisors),
             record.id.clone(),
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
@@ -6931,6 +6940,7 @@ fn spawn_process_with_logs(
     append: bool,
     tty: bool,
     store: SqliteContainerStore,
+    active_supervisors: Arc<DashMap<String, u32>>,
     container_id: String,
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
@@ -6987,12 +6997,14 @@ fn spawn_process_with_logs(
     let netns_name = netns_name.map(|val| val.to_string());
     let seccomp_for_restart = seccomp_profile.cloned();
     let oom_kills = oom_kill_count(&container_id);
+    active_supervisors.insert(container_id.clone(), child_id);
     thread::spawn(move || {
         supervise_child(
             child,
             pidfd,
             log_relays,
             store,
+            active_supervisors,
             container_id,
             cmd_owned,
             env_owned,
@@ -7706,6 +7718,25 @@ fn spawn_child_with_logs(
     container_id: &str,
     log_driver: &str,
 ) -> Result<(u32, Child, OwnedFd, ChildLogRelays), RuntimeError> {
+    // Rootless launchers such as bubblewrap may retain helper descendants
+    // after their recorded leader is killed. Give non-TTY workloads an
+    // isolated process group so the supervisor can close every inherited log
+    // writer before waiting for the capture relays to reach EOF. TTY setup
+    // owns its session/process-group arrangement separately.
+    if !tty {
+        unsafe {
+            command.pre_exec(|| {
+                if nix::libc::setpgid(0, 0) != 0 {
+                    let error = io::Error::last_os_error();
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("create workload process group: {error}"),
+                    ));
+                }
+                Ok(())
+            });
+        }
+    }
     let rotation = rotation.or_else(log_rotation_from_env);
     let driver = load_log_driver(
         log_driver,
@@ -8234,6 +8265,7 @@ fn supervise_child(
     mut _pidfd: OwnedFd,
     mut log_relays: ChildLogRelays,
     store: SqliteContainerStore,
+    active_supervisors: Arc<DashMap<String, u32>>,
     container_id: String,
     cmd: Vec<String>,
     env: Vec<String>,
@@ -8318,6 +8350,12 @@ fn supervise_child(
 
     loop {
         let status = child.wait();
+        if !tty {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-(child.id() as i32)),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
         // EOF on the child pipes follows process exit. Join every capture
         // thread before publishing terminal status so attach clients can use
         // that status as a definitive log-relay drain barrier.
@@ -8555,6 +8593,7 @@ fn supervise_child(
         child = new_child;
         _pidfd = new_pidfd;
         log_relays = new_log_relays;
+        active_supervisors.insert(container_id.clone(), pid);
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             log_ai_restart_lifecycle(
@@ -8587,6 +8626,12 @@ fn supervise_child(
                 .unwrap_or_default(),
             std::iter::empty::<(&str, String)>(),
         );
+    }
+    let owns_registration = active_supervisors
+        .get(&container_id)
+        .is_some_and(|pid| *pid == child.id());
+    if owns_registration {
+        active_supervisors.remove(&container_id);
     }
 }
 

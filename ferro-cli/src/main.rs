@@ -15981,10 +15981,41 @@ struct DockerIpamSpec {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Deserialize)]
 struct DockerIpamConfig {
-    #[serde(rename = "Subnet")]
+    #[serde(rename = "Subnet", default, deserialize_with = "deserialize_nonempty_string")]
     subnet: Option<String>,
-    #[serde(rename = "Gateway")]
+    #[serde(rename = "Gateway", default, deserialize_with = "deserialize_nonempty_string")]
     gateway: Option<String>,
+    #[serde(rename = "IPRange", default, deserialize_with = "deserialize_nonempty_string")]
+    ip_range: Option<String>,
+    #[serde(
+        rename = "AuxiliaryAddresses",
+        default,
+        deserialize_with = "deserialize_auxiliary_addresses"
+    )]
+    auxiliary_addresses: HashMap<String, Option<String>>,
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .filter(|value| !value.trim().is_empty()))
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_auxiliary_addresses<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<HashMap<String, Option<String>>>::deserialize(deserializer)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| (name, value.filter(|address| !address.trim().is_empty())))
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -21384,6 +21415,25 @@ fn parse_docker_network_create_spec(body: &[u8]) -> Result<DockerNetworkCreateSp
     if spec.name.trim().is_empty() {
         return Err("docker: network name is required".to_string());
     }
+    for config in spec.ipam.iter().flat_map(|ipam| &ipam.config) {
+        if let Some(gateway) = config.gateway.as_deref() {
+            gateway
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| format!("network: invalid gateway {gateway}"))?;
+        }
+        if let Some(ip_range) = config.ip_range.as_deref() {
+            if ip_range.contains(':') {
+                parse_ipv6_cidr(ip_range)?;
+            } else {
+                parse_ipv4_cidr(ip_range)?;
+            }
+        }
+        for address in config.auxiliary_addresses.values().flatten() {
+            address
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| format!("network: invalid auxiliary address {address}"))?;
+        }
+    }
     Ok(spec)
 }
 
@@ -25926,6 +25976,55 @@ volumes:
                 .and_then(|config| config.subnet.as_deref()),
             Some("fd42:4242::/64")
         );
+    }
+
+    #[test]
+    fn parses_captured_docker_network_create_ipam_shapes() {
+        let legacy = parse_docker_network_create_spec(
+            br#"{"Name":"captured-net","Driver":"bridge","Scope":"","IPAM":{"Driver":"default","Options":{},"Config":[{"Subnet":"172.30.240.0/24","IPRange":"","Gateway":""}]},"Internal":false,"Attachable":false,"Ingress":false,"ConfigOnly":false,"ConfigFrom":null,"Options":{},"Labels":{}}"#,
+        )
+        .expect("Docker 29.1.3 payload");
+        let current = parse_docker_network_create_spec(
+            br#"{"Name":"captured-new","Driver":"bridge","Scope":"","IPAM":{"Driver":"default","Options":{},"Config":[{"Subnet":"172.30.241.0/24"}]},"Internal":false,"Attachable":false,"Ingress":false,"ConfigOnly":false,"ConfigFrom":null,"Options":{},"Labels":{}}"#,
+        )
+        .expect("Docker 29.7.2 payload");
+
+        let legacy_config = &legacy.ipam.expect("legacy IPAM").config[0];
+        assert_eq!(legacy_config.subnet.as_deref(), Some("172.30.240.0/24"));
+        assert_eq!(legacy_config.gateway, None);
+        let current_config = &current.ipam.expect("current IPAM").config[0];
+        assert_eq!(current_config.subnet.as_deref(), Some("172.30.241.0/24"));
+        assert_eq!(current_config.gateway, None);
+    }
+
+    #[test]
+    fn network_create_normalizes_null_ipam_optionals_and_rejects_invalid_values() {
+        let normalized = parse_docker_network_create_spec(
+            br#"{"Name":"nullable","IPAM":{"Config":[{"Subnet":"172.30.242.0/24","Gateway":null,"IPRange":null,"AuxiliaryAddresses":{"empty":"","null":null}}]}}"#,
+        )
+        .expect("null and empty optional IPAM values");
+        let config = &normalized.ipam.expect("IPAM").config[0];
+        assert_eq!(config.gateway, None);
+        assert_eq!(config.ip_range, None);
+        assert!(config.auxiliary_addresses.values().all(Option::is_none));
+
+        for payload in [
+            br#"{"Name":"bad-gateway","IPAM":{"Config":[{"Subnet":"172.30.242.0/24","Gateway":"not-an-ip"}]}}"#.as_slice(),
+            br#"{"Name":"bad-range","IPAM":{"Config":[{"Subnet":"172.30.242.0/24","IPRange":"not-a-cidr"}]}}"#.as_slice(),
+            br#"{"Name":"bad-aux","IPAM":{"Config":[{"Subnet":"172.30.242.0/24","AuxiliaryAddresses":{"host":"not-an-ip"}}]}}"#.as_slice(),
+        ] {
+            assert!(parse_docker_network_create_spec(payload).is_err());
+        }
+    }
+
+    #[test]
+    fn container_create_accepts_default_shaped_networking_config_ipam() {
+        let spec = super::parse_docker_create_spec(
+            br#"{"Image":"alpine:3.20","NetworkingConfig":{"EndpointsConfig":{"app":{"IPAMConfig":{"IPv4Address":"","IPv6Address":"","LinkLocalIPs":null},"Links":null,"Aliases":null}}}}"#,
+            None,
+        )
+        .expect("default-shaped NetworkingConfig");
+        assert_eq!(spec.network_mode, "bridge");
     }
 
     #[test]

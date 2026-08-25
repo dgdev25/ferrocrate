@@ -113,9 +113,19 @@ export function createWebBridgeRuntime(options = {}) {
             body: JSON.stringify(args ?? {}),
             signal: controller.signal,
           });
-          const payload = await response.json();
+          const responseText = typeof response.text === "function" ? await response.text() : undefined;
+          let payload;
+          if (responseText !== undefined) {
+            try {
+              payload = responseText.trim() ? JSON.parse(responseText) : undefined;
+            } catch {
+              payload = undefined;
+            }
+          } else {
+            payload = await response.json();
+          }
           if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
-            throw new Error(String(payload?.error ?? `command ${command} failed`));
+            throw new Error(String(payload?.error ?? `command ${command} failed (HTTP ${response.status ?? "unknown"})`));
           }
           return payload;
         } catch (error) {

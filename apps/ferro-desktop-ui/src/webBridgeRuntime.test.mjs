@@ -47,6 +47,18 @@ test("web bridge invoke posts JSON args and surfaces command errors", async () =
   await assert.rejects(runtime.invoke("broken"), /daemon unavailable/);
 });
 
+test("web bridge invoke handles an empty non-JSON response without a JSON parser error", async () => {
+  const runtime = createWebBridgeRuntime({
+    fetchImpl: async () => ({ ok: false, status: 401, text: async () => "" }),
+    eventSourceFactory: () => { throw new Error("not used"); },
+  });
+
+  await assert.rejects(
+    runtime.invoke("get_fleet_snapshot"),
+    /command get_fleet_snapshot failed \(HTTP 401\)/,
+  );
+});
+
 test("N web bridge listeners share one named-event SSE connection", async () => {
   const sources = [];
   let unload;

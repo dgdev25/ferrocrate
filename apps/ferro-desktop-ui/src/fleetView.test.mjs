@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   canOperateFleet,
+  chooseRunHost,
   fleetContainerRows,
   fleetHostState,
   normalizeFleetSnapshot,
+  shouldShowFleetRefreshError,
 } from "./fleetView.mjs";
 
 test("fleet roles preserve read access while exposing actions only to operate", () => {
@@ -55,4 +57,19 @@ test("malformed fleet snapshot fails closed to empty lists", () => {
     hosts: [],
     deploys: [],
   });
+});
+
+test("fleet refresh preserves an explicitly selected connected run host", () => {
+  const refreshedHosts = [
+    { node_id: "lab-x86", connected: true },
+    { node_id: "oracle-arm", connected: true },
+  ];
+
+  assert.equal(chooseRunHost("oracle-arm", refreshedHosts), "oracle-arm");
+  assert.equal(chooseRunHost("", refreshedHosts), "lab-x86");
+});
+
+test("unauthenticated automatic fleet refresh stays silent until sign-in", () => {
+  assert.equal(shouldShowFleetRefreshError(null), false);
+  assert.equal(shouldShowFleetRefreshError("operate"), true);
 });

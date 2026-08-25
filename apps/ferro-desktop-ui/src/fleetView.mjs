@@ -4,6 +4,14 @@ export function canOperateFleet(role) {
   return role === "operate";
 }
 
+export function chooseRunHost(currentHost, hosts) {
+  return currentHost || hosts.find((host) => host?.connected)?.node_id || "";
+}
+
+export function shouldShowFleetRefreshError(role) {
+  return role === "view" || role === "operate";
+}
+
 export function normalizeFleetSnapshot(value) {
   if (!value || typeof value !== "object") {
     return { cluster_epoch: 0, hosts: [], deploys: [] };

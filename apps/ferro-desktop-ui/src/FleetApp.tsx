@@ -5,10 +5,12 @@ import { DesktopTabBar } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
 import {
   canOperateFleet,
+  chooseRunHost,
   FLEET_SECTIONS,
   fleetContainerRows,
   fleetHostState,
   normalizeFleetSnapshot,
+  shouldShowFleetRefreshError,
 } from "./fleetView.mjs";
 import type { FleetRole, FleetSection } from "./fleetView.mjs";
 import { tabKeyboardTarget } from "./forgeShell.mjs";
@@ -93,12 +95,12 @@ export function FleetApp(): JSX.Element {
       const next = normalizeFleetSnapshot(await invoke<unknown>("get_fleet_snapshot", {}));
       setSnapshot(next as FleetSnapshot);
       setError("");
-      if (!runHost && next.hosts[0]?.node_id) setRunHost(String(next.hosts[0].node_id));
+      setRunHost((current) => chooseRunHost(current, next.hosts as FleetHost[]));
       if (!deployHosts.length) {
         setDeployHosts(next.hosts.filter((host: FleetHost) => host.connected).map((host: FleetHost) => host.node_id));
       }
     } catch (nextError) {
-      setError(String(nextError));
+      if (shouldShowFleetRefreshError(role)) setError(String(nextError));
       setSnapshot(null);
     } finally {
       setLoading(false);
@@ -121,7 +123,15 @@ export function FleetApp(): JSX.Element {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ credential: credential.trim() }),
       });
-      const payload = await response.json() as LoginResponse & { error?: string };
+      const body = await response.text();
+      let payload: LoginResponse & { error?: string } = {} as LoginResponse & { error?: string };
+      if (body.trim()) {
+        try {
+          payload = JSON.parse(body) as LoginResponse & { error?: string };
+        } catch {
+          // The login surface only reports a response error after explicit submission.
+        }
+      }
       if (!response.ok) throw new Error(payload.error || "Login rejected");
       sessionStorage.setItem(ROLE_KEY, payload.role);
       window.location.hash = new URLSearchParams({ token: payload.token }).toString();

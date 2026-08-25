@@ -3105,15 +3105,162 @@ fn docker_compat_auth_validates_credentials_with_registry() {
 }
 
 #[test]
-fn docker_compat_buildkit_routes_name_the_supported_classic_mode() {
+fn docker_compat_buildkit_version_two_names_the_supported_classic_mode_until_solve_lands() {
     const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
     let harness = DaemonHarness::spawn();
-    for (method, path) in [("POST", "/build?version=2"), ("POST", "/session")] {
-        let (status, body) = harness.request(method, path);
-        assert_eq!(status, 501, "{path} response={body}");
-        let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
-        assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+    let (status, body) = harness.request("POST", "/build?version=2");
+    assert_eq!(status, 501, "/build response={body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
+    assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+}
+
+#[test]
+fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
+    stream
+        .write_all(
+            b"POST /session HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nX-Docker-Expose-Session-Uuid: integration-session\r\nX-Docker-Expose-Session-Grpc-Method: /moby.filesync.v1.FileSync/DiffCopy\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("write session request");
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).expect("read hijack response");
+        response.push(byte[0]);
     }
+    let response = String::from_utf8(response).expect("hijack response is utf8");
+    assert!(response.starts_with("HTTP/1.1 101 UPGRADED\r\n"), "{response}");
+    assert!(response.contains("Upgrade: h2c\r\n"), "{response}");
+
+    stream.set_nonblocking(true).expect("nonblocking session");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("h2 test runtime");
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream).expect("tokio session stream");
+        let _connection = h2::server::handshake(stream)
+            .await
+            .expect("FerroCrate must emit the h2 prior-knowledge client preface");
+    });
+}
+
+#[test]
+fn docker_compat_buildkit_control_hijacks_on_bare_and_versioned_paths() {
+    let harness = DaemonHarness::spawn();
+    for path in ["/grpc", "/v1.52/grpc"] {
+        let mut stream = UnixStream::connect(&harness.socket_path).expect("connect docker socket");
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .expect("write control request");
+        let mut response = [0_u8; 128];
+        let read = stream.read(&mut response).expect("read control response");
+        let response = String::from_utf8_lossy(&response[..read]);
+        assert!(
+            response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "path={path} response={response}"
+        );
+        assert!(response.contains("Connection: Upgrade\r\n"), "{response}");
+        assert!(response.contains("Upgrade: h2c\r\n"), "{response}");
+    }
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitPlatform {
+    #[prost(string, tag = "1")]
+    architecture: String,
+    #[prost(string, tag = "2")]
+    os: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitWorker {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(map = "string, string", tag = "2")]
+    labels: std::collections::HashMap<String, String>,
+    #[prost(message, repeated, tag = "3")]
+    platforms: Vec<TestBuildkitPlatform>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitWorkers {
+    #[prost(message, repeated, tag = "1")]
+    records: Vec<TestBuildkitWorker>,
+}
+
+#[test]
+fn docker_compat_buildkit_control_lists_a_running_worker() {
+    use bytes::Bytes;
+    use prost::Message;
+
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
+    stream
+        .write_all(b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n")
+        .expect("write control request");
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read control upgrade");
+        response.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"));
+    stream.set_nonblocking(true).expect("nonblocking control");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("control runtime");
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream).expect("tokio control stream");
+        let (mut sender, connection) = h2::client::handshake(stream).await.expect("h2 handshake");
+        tokio::spawn(async move { connection.await.expect("h2 control connection") });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/moby.buildkit.v1.Control/ListWorkers")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .expect("list workers request");
+        let (response, mut request_body) = sender
+            .send_request(request, false)
+            .expect("send list workers request");
+        request_body
+            .send_data(Bytes::from_static(&[0, 0, 0, 0, 0]), true)
+            .expect("send empty grpc request");
+        let response = response.await.expect("list workers response");
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.data().await {
+            bytes.extend_from_slice(&chunk.expect("grpc response data"));
+        }
+        assert!(bytes.len() >= 5, "missing grpc response frame");
+        let size = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let workers = TestBuildkitWorkers::decode(&bytes[5..5 + size]).expect("workers protobuf");
+        assert_eq!(workers.records.len(), 1);
+        let worker = &workers.records[0];
+        assert!(!worker.id.is_empty());
+        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.executor"], "oci");
+        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.snapshotter"], "overlayfs");
+        assert!(worker
+            .labels
+            .contains_key("org.mobyproject.buildkit.worker.moby.host-gateway-ip"));
+        let expected_architecture = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            architecture => architecture,
+        };
+        assert!(worker.platforms.iter().any(|platform| {
+            platform.os == "linux" && platform.architecture == expected_architecture
+        }));
+    });
 }
 
 #[test]
@@ -3624,6 +3771,77 @@ fn docker_compat_network_labels_persist_and_filter() {
     let listed: serde_json::Value = serde_json::from_str(&body).expect("list JSON");
     assert_eq!(listed.as_array().expect("network list").len(), 1, "{listed}");
     assert_eq!(listed[0]["Labels"]["com.docker.compose.network"], "default");
+}
+
+#[test]
+fn docker_compat_compose_labeled_networks_remain_resolvable_at_container_start() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/compose-networks:latest");
+
+    for (name, logical, subnet) in [
+        ("cu_frontend", "frontend", "172.30.243.0/24"),
+        ("cu_backend", "backend", "172.30.244.0/24"),
+    ] {
+        let body = serde_json::json!({
+            "Name": name,
+            "Driver": "bridge",
+            "Labels": {
+                "com.docker.compose.network": logical,
+                "com.docker.compose.project": "cu",
+                "com.docker.compose.version": "2.40.0"
+            },
+            "IPAM": {"Config": [{"Subnet": subnet}]}
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            "/v1.45/networks/create",
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "create {name} response={response}");
+    }
+
+    for (name, network) in [("cu-web-1", "cu_frontend"), ("cu-db-1", "cu_backend")] {
+        let body = serde_json::json!({
+            "Image": "compat/compose-networks:latest",
+            "Cmd": ["/bin/busybox", "sleep", "30"],
+            "Labels": {
+                "com.docker.compose.project": "cu",
+                "com.docker.compose.service": name
+            },
+            "HostConfig": {"NetworkMode": network},
+            "NetworkingConfig": {
+                "EndpointsConfig": {
+                    (network): {"Aliases": [name]}
+                }
+            }
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "create {name} response={response}");
+        let (status, response) =
+            harness.request("POST", &format!("/v1.45/containers/{name}/start"));
+        assert_eq!(
+            status, 204,
+            "Compose-labeled network {network} must resolve at START: {response}"
+        );
+    }
+
+    for name in ["cu-web-1", "cu-db-1"] {
+        let (status, response) =
+            harness.request("DELETE", &format!("/v1.45/containers/{name}?force=true"));
+        assert_eq!(status, 204, "remove {name} response={response}");
+    }
+    for network in ["cu_frontend", "cu_backend"] {
+        let (status, response) = harness.request("DELETE", &format!("/v1.45/networks/{network}"));
+        assert_eq!(status, 204, "remove {network} response={response}");
+    }
 }
 
 #[test]

@@ -46,6 +46,8 @@ use self::network_lifecycle::{
 };
 #[cfg(target_os = "linux")]
 use base64::Engine;
+#[cfg(target_os = "linux")]
+use bytes::Bytes;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
@@ -85,7 +87,7 @@ use ferro_core::image_tagging::{
     canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
 };
 use ferro_core::layer_compression::{open_decompressed_layer_reader, CompressionFormat};
-use ferro_core::registry::{parse_image_reference, RegistryClient};
+use ferro_core::registry::{parse_image_reference, RegistryAuth, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
@@ -115,6 +117,8 @@ use flate2::{write::GzEncoder, Compression};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use owo_colors::OwoColorize;
+#[cfg(target_os = "linux")]
+use prost::Message;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
@@ -130,6 +134,38 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod buildkit_proto {
+    pub mod pb {
+        tonic::include_proto!("pb");
+    }
+    pub mod google {
+        pub mod rpc {
+            tonic::include_proto!("google.rpc");
+        }
+    }
+    pub mod moby {
+        pub mod buildkit {
+            pub mod v1 {
+                tonic::include_proto!("moby.buildkit.v1");
+                pub mod frontend {
+                    tonic::include_proto!("moby.buildkit.v1.frontend");
+                }
+                pub mod apicaps {
+                    tonic::include_proto!("moby.buildkit.v1.apicaps");
+                }
+                pub mod sourcepolicy {
+                    tonic::include_proto!("moby.buildkit.v1.sourcepolicy");
+                }
+                pub mod types {
+                    tonic::include_proto!("moby.buildkit.v1.types");
+                }
+            }
+        }
+    }
+}
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
 #[cfg(target_os = "macos")]
@@ -146,7 +182,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::str::FromStr;
 #[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
@@ -10609,6 +10645,13 @@ fn execute_build(
                     .map_err(|err| format!("failed to get current directory: {err}"))?
                     .join(dockerfile)
             };
+            prefetch_dockerfile_bases(
+                store,
+                origin,
+                authorization,
+                &dockerfile_path,
+                None,
+            )?;
             let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
                 &dockerfile_path,
                 Some(tag),
@@ -10736,6 +10779,58 @@ fn execute_build(
         "build: {} tag={} layer_digest={} config_digest={}\n",
         source_desc, result.reference, result.layer_digest, result.config_digest
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn prefetch_dockerfile_bases(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    dockerfile: &Path,
+    session_auth: Option<&HashMap<String, RegistryAuth>>,
+) -> Result<Vec<String>, String> {
+    let mut pulled = Vec::new();
+    for base in ferro_core::dockerfile_build::dockerfile_external_base_images(dockerfile)
+        .map_err(|error| error.to_string())?
+    {
+        if resolve_reference(store, &base)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            continue;
+        }
+        let parsed = parse_image_reference(&base).map_err(|error| error.to_string())?;
+        let supplied_auth = session_auth.and_then(|auth| auth.get(&parsed.registry));
+        let binding = match supplied_auth {
+            Some(auth) => ferro_core::image_fetch::inspect_image_binding_with_auth(
+                &base,
+                Some(auth),
+            ),
+            None => ferro_core::image_fetch::inspect_image_binding(&base),
+        }
+        .map_err(|error| format!("build: pull base {base}: {error}"))?;
+        let permit = authorization
+            .authorize_image_fetch_plan(origin, &binding, 1)
+            .map_err(|error| error.to_string())?;
+        match supplied_auth {
+            Some(auth) => ferro_core::image_fetch::pull_image_with_store_authorized_with_auth(
+                &runtime_dir(),
+                &binding,
+                store,
+                permit,
+                Some(auth),
+            ),
+            None => ferro_core::image_fetch::pull_image_with_store_authorized(
+                &runtime_dir(),
+                &binding,
+                store,
+                permit,
+            ),
+        }
+        .map_err(|error| format!("build: pull base {base}: {error}"))?;
+        pulled.push(base);
+    }
+    Ok(pulled)
 }
 
 #[cfg(target_os = "linux")]
@@ -16442,6 +16537,153 @@ fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone)]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+struct BuildkitSessionHandle {
+    commands: tokio::sync::mpsc::Sender<BuildkitSessionCommand>,
+    methods: Arc<HashSet<String>>,
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitSessionRegistration {
+    uuid: String,
+    methods: HashSet<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitBuild {
+    request: buildkit_proto::moby::buildkit::v1::SolveRequest,
+    gateway_solve:
+        Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::SolveRequest>>,
+    returned: Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest>>,
+    result: Mutex<Option<BuildkitBuildResult>>,
+    error: Mutex<Option<String>>,
+    is_completed: AtomicBool,
+    completed: tokio::sync::Notify,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitBuildResult {
+    image_name: String,
+    image_digest: String,
+    output: String,
+    steps: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitExecutionContext {
+    runtime_dir: Arc<PathBuf>,
+    store: Arc<LocalImageStore>,
+    origin: RequestOrigin,
+    authorization: SurfaceAuthorization,
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+enum BuildkitSessionCommand {
+    ReceiveLocal {
+        name: String,
+        destination: PathBuf,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    Credentials {
+        host: String,
+        reply: tokio::sync::oneshot::Sender<Result<Option<RegistryAuth>, String>>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+async fn receive_buildkit_session_local(
+    state: &DockerCompatState,
+    uuid: &str,
+    name: &str,
+    destination: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session {
+            break session;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
+    if !session.methods.contains("/moby.filesync.v1.FileSync/DiffCopy") {
+        return Err("buildkit session: FileSync.DiffCopy was not exposed".to_string());
+    }
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    session
+        .commands
+        .send(BuildkitSessionCommand::ReceiveLocal {
+            name: name.to_string(),
+            destination: destination.to_path_buf(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
+        .map_err(|_| "buildkit session: filesync timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_buildkit_session_credentials(
+    state: &DockerCompatState,
+    uuid: &str,
+    host: &str,
+    timeout: Duration,
+) -> Result<Option<RegistryAuth>, String> {
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session {
+            break session;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
+    if !session
+        .methods
+        .contains("/moby.session.auth.v1.Auth/Credentials")
+    {
+        return Ok(None);
+    }
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    session
+        .commands
+        .send(BuildkitSessionCommand::Credentials {
+            host: host.to_string(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
+        .map_err(|_| "buildkit session: credentials timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
@@ -16451,6 +16693,9 @@ struct DockerCompatState {
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     auto_remove_results: Mutex<HashMap<String, Option<i32>>>,
     events: Mutex<DockerEventStore>,
+    buildkit_sessions: Mutex<HashMap<String, BuildkitSessionHandle>>,
+    buildkit_builds: Mutex<HashMap<String, Arc<BuildkitBuild>>>,
+    buildkit_build_registered: tokio::sync::Notify,
 }
 
 #[cfg(target_os = "linux")]
@@ -16502,7 +16747,113 @@ impl DockerCompatState {
             execs: Mutex::new(HashMap::new()),
             auto_remove_results: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
+            buildkit_sessions: Mutex::new(HashMap::new()),
+            buildkit_builds: Mutex::new(HashMap::new()),
+            buildkit_build_registered: tokio::sync::Notify::new(),
         })
+    }
+
+    fn register_buildkit_solve(
+        &self,
+        request: buildkit_proto::moby::buildkit::v1::SolveRequest,
+    ) -> Result<Arc<BuildkitBuild>, String> {
+        if request.r#ref.is_empty() || request.r#ref.len() > 128 {
+            return Err("buildkit solve: missing valid build ref".to_string());
+        }
+        if request.definition.is_some()
+            || (!request.frontend.is_empty() && request.frontend != "dockerfile.v0")
+        {
+            return Err("buildkit solve: arbitrary direct solves are unsupported".to_string());
+        }
+        let build = Arc::new(BuildkitBuild {
+            request,
+            gateway_solve: Mutex::new(None),
+            returned: Mutex::new(None),
+            result: Mutex::new(None),
+            error: Mutex::new(None),
+            is_completed: AtomicBool::new(false),
+            completed: tokio::sync::Notify::new(),
+        });
+        let mut builds = self
+            .buildkit_builds
+            .lock()
+            .map_err(|error| format!("buildkit solve registry poisoned: {error}"))?;
+        if builds.contains_key(&build.request.r#ref) {
+            return Err("buildkit solve: duplicate build ref".to_string());
+        }
+        builds.insert(build.request.r#ref.clone(), build.clone());
+        drop(builds);
+        self.buildkit_build_registered.notify_waiters();
+        Ok(build)
+    }
+
+    fn buildkit_build(&self, build_id: &str) -> Result<Arc<BuildkitBuild>, String> {
+        self.buildkit_builds
+            .lock()
+            .map_err(|error| format!("buildkit solve registry poisoned: {error}"))?
+            .get(build_id)
+            .cloned()
+            .ok_or_else(|| format!("buildkit gateway: unknown build id {build_id}"))
+    }
+
+    async fn wait_for_buildkit_build(
+        &self,
+        build_id: &str,
+        timeout: Duration,
+    ) -> Result<Arc<BuildkitBuild>, String> {
+        let wait = async {
+            loop {
+                let notified = self.buildkit_build_registered.notified();
+                if let Ok(build) = self.buildkit_build(build_id) {
+                    return Ok(build);
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait)
+            .await
+            .map_err(|_| format!("buildkit gateway: unknown build id {build_id}"))?
+    }
+
+    fn record_buildkit_gateway_solve(
+        &self,
+        build_id: &str,
+        request: buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
+    ) -> Result<Arc<BuildkitBuild>, String> {
+        if request.frontend != "dockerfile.v0" || request.definition.is_some() {
+            return Err("buildkit gateway: only dockerfile.v0 frontend solves are supported".to_string());
+        }
+        let build = self.buildkit_build(build_id)?;
+        let mut callback = build
+            .gateway_solve
+            .lock()
+            .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?;
+        if callback.is_some() {
+            return Err("buildkit gateway: duplicate frontend solve".to_string());
+        }
+        *callback = Some(request);
+        drop(callback);
+        Ok(build)
+    }
+
+    fn record_buildkit_gateway_return(
+        &self,
+        build_id: &str,
+        request: buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest,
+    ) -> Result<(), String> {
+        let build = self.buildkit_build(build_id)?;
+        let mut returned = build
+            .returned
+            .lock()
+            .map_err(|error| format!("buildkit gateway return poisoned: {error}"))?;
+        if returned.is_some() {
+            return Err("buildkit gateway: duplicate return".to_string());
+        }
+        *returned = Some(request);
+        drop(returned);
+        build.is_completed.store(true, Ordering::Release);
+        build.completed.notify_waiters();
+        Ok(())
     }
 
     fn persist_pending(&self) -> Result<(), String> {
@@ -17643,6 +17994,8 @@ fn handle_docker_compat_connection(
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
+    let mut buildkit_session_hijack: Option<BuildkitSessionRegistration> = None;
+    let mut buildkit_control_hijack: Option<Arc<BuildkitExecutionContext>> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
@@ -19551,10 +19904,19 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
                 http_response(200, &body, "application/json")
             }
-            ("POST", "/session") => docker_error_response(
-                501,
-                "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
-            ),
+            ("POST", "/session") => {
+                buildkit_session_hijack = Some(parse_buildkit_session_registration(&request.headers)?);
+                docker_buildkit_session_hijack_headers()
+            }
+            ("POST", "/grpc") => {
+                buildkit_control_hijack = Some(Arc::new(BuildkitExecutionContext {
+                    runtime_dir: runtime_dir.clone(),
+                    store: store.clone(),
+                    origin: origin.clone(),
+                    authorization: surface_authorization,
+                }));
+                docker_buildkit_control_hijack_headers()
+            }
             ("POST", "/build") => {
                 if query.get("version").is_some_and(|value| value == "2") {
                     return Ok(docker_error_response(
@@ -20199,6 +20561,22 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some(execution) = buildkit_control_hijack {
+        return run_buildkit_control_transport(
+            stream,
+            state,
+            execution,
+            Duration::from_secs(30 * 60),
+        );
+    }
+    if let Some(registration) = buildkit_session_hijack {
+        return run_buildkit_session_transport(
+            stream,
+            state,
+            registration,
+            Duration::from_secs(30 * 60),
+        );
+    }
     if let Some(output) = websocket_attach {
         use tokio_tungstenite::tungstenite::{protocol::Role, Message, WebSocket};
         let mut websocket = WebSocket::from_raw_socket(stream, Role::Server, None);
@@ -22484,7 +22862,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
 
     let mut content_length = 0usize;
     let mut chunked = false;
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     for line in lines {
         if line.contains('\0') {
             return Err("docker: invalid request header".to_string());
@@ -22495,7 +22873,17 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
         if let Some((key, value)) = line.split_once(':') {
             let normalized_key = key.trim().to_ascii_lowercase();
             let normalized_value = value.trim().to_string();
-            headers.insert(normalized_key.clone(), normalized_value.clone());
+            if normalized_key == "x-docker-expose-session-grpc-method" {
+                headers
+                    .entry(normalized_key.clone())
+                    .and_modify(|current| {
+                        current.push('\n');
+                        current.push_str(&normalized_value);
+                    })
+                    .or_insert_with(|| normalized_value.clone());
+            } else {
+                headers.insert(normalized_key.clone(), normalized_value.clone());
+            }
             if normalized_key == "content-length" {
                 content_length = normalized_value
                     .trim()
@@ -22626,6 +23014,1301 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_buildkit_session_hijack_headers() -> Vec<u8> {
+    b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_buildkit_control_hijack_headers() -> Vec<u8> {
+    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn run_buildkit_control_transport(
+    stream: UnixStream,
+    state: Arc<DockerCompatState>,
+    execution: Arc<BuildkitExecutionContext>,
+    lifetime: Duration,
+) -> Result<(), String> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("buildkit control: set nonblocking failed: {error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("buildkit control: runtime failed: {error}"))?;
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|error| format!("buildkit control: socket handoff failed: {error}"))?;
+        let mut connection = h2::server::Builder::new()
+            .max_concurrent_streams(32)
+            .max_frame_size(16 * 1024)
+            .handshake::<_, Bytes>(stream)
+            .await
+            .map_err(|error| format!("buildkit control: h2 handshake failed: {error}"))?;
+        tokio::time::timeout(lifetime, async move {
+            while let Some(result) = connection.accept().await {
+                let (request, respond) = result
+                    .map_err(|error| format!("buildkit control: accept failed: {error}"))?;
+                let request_state = state.clone();
+                let request_execution = execution.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_buildkit_control_request(
+                        request,
+                        respond,
+                        request_state,
+                        request_execution,
+                        lifetime,
+                    )
+                    .await
+                    {
+                        tracing::error!("buildkit control request failed: {error}");
+                    }
+                });
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap_or(Ok(()))
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_buildkit_control_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    state: Arc<DockerCompatState>,
+    execution: Arc<BuildkitExecutionContext>,
+    lifetime: Duration,
+) -> Result<(), String> {
+    let path = request.uri().path().to_string();
+    tracing::debug!(method = %path, "dispatching authenticated BuildKit control request");
+    let method = buildkit_control_method(&path);
+    let build_id = request
+        .headers()
+        .get("buildkit-controlapi-buildid")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let response = http::Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc")
+        .body(())
+        .map_err(|error| format!("buildkit control: response failed: {error}"))?;
+    let mut response_stream = respond
+        .send_response(response, false)
+        .map_err(|error| format!("buildkit control: response send failed: {error}"))?;
+    if method == BuildkitControlMethod::ListWorkers {
+        response_stream
+            .send_data(grpc_message(&buildkit_list_workers_response()), false)
+            .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::Session {
+        let registration = parse_buildkit_control_session_registration(request.headers())?;
+        return run_buildkit_control_session(
+            request.into_body(),
+            response_stream,
+            state,
+            registration,
+            lifetime,
+        )
+        .await;
+    }
+    if method == BuildkitControlMethod::GatewayPing {
+        response_stream
+            .send_data(
+                grpc_message(&buildkit_gateway_pong()),
+                false,
+            )
+            .map_err(|error| format!("buildkit control: gateway ping failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::Solve {
+        use buildkit_proto::moby::buildkit::v1::SolveRequest;
+        let solve = receive_buildkit_unary::<SolveRequest>(request.into_body()).await?;
+        tracing::debug!(
+            build_ref = %solve.r#ref,
+            session = %solve.session,
+            frontend = %solve.frontend,
+            exporters = solve.exporters.len(),
+            exporter_deprecated = %solve.exporter_deprecated,
+            exporter_attrs_deprecated = solve.exporter_attrs_deprecated.len(),
+            attrs = solve.frontend_attrs.len(),
+            "received BuildKit outer solve"
+        );
+        let build = state.register_buildkit_solve(solve)?;
+        if build.request.frontend == "dockerfile.v0" {
+            let frontend = buildkit_proto::moby::buildkit::v1::frontend::SolveRequest {
+                frontend: build.request.frontend.clone(),
+                frontend_opt: build.request.frontend_attrs.clone(),
+                ..Default::default()
+            };
+            let result = execute_buildkit_frontend(
+                state.as_ref(),
+                execution.as_ref(),
+                build.as_ref(),
+                &frontend,
+            )
+            .await;
+            match result {
+                Ok(result) => {
+                    *build
+                        .result
+                        .lock()
+                        .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
+                        Some(result);
+                }
+                Err(error) => {
+                    *build
+                        .error
+                        .lock()
+                        .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                        Some(error);
+                }
+            }
+            build.is_completed.store(true, Ordering::Release);
+            build.completed.notify_waiters();
+        }
+        wait_for_buildkit_completion(&build, lifetime).await?;
+        let solve_response = match buildkit_outer_solve_response(&build) {
+            Ok(response) => response,
+            Err(error) => {
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    13,
+                    Some(&buildkit_grpc_message(&error)),
+                )
+            }
+        };
+        response_stream
+            .send_data(grpc_message(&solve_response), false)
+            .map_err(|error| format!("buildkit solve: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::Status {
+        use buildkit_proto::moby::buildkit::v1::StatusRequest;
+        let status = receive_buildkit_unary::<StatusRequest>(request.into_body()).await?;
+        let build = state
+            .wait_for_buildkit_build(&status.r#ref, Duration::from_secs(3))
+            .await?;
+        wait_for_buildkit_completion(&build, lifetime).await?;
+        if let Some(result) = build
+            .result
+            .lock()
+            .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+            .clone()
+        {
+            let timestamp = buildkit_timestamp_now();
+            let vertexes = result
+                .steps
+                .iter()
+                .map(|step| {
+                    use buildkit_proto::moby::buildkit::v1::Vertex;
+                    Vertex {
+                        digest: format!("sha256:{:x}", Sha256::digest(step.as_bytes())),
+                        name: step.clone(),
+                        started: Some(timestamp),
+                        completed: Some(timestamp),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            let logs = result
+                .steps
+                .first()
+                .map(|step| {
+                    use buildkit_proto::moby::buildkit::v1::VertexLog;
+                    VertexLog {
+                        vertex: format!("sha256:{:x}", Sha256::digest(step.as_bytes())),
+                        timestamp: Some(timestamp),
+                        stream: 1,
+                        msg: result.output.into_bytes(),
+                    }
+                })
+                .into_iter()
+                .collect();
+            use buildkit_proto::moby::buildkit::v1::StatusResponse;
+            response_stream
+                .send_data(
+                    grpc_message(&StatusResponse {
+                        vertexes,
+                        logs,
+                        ..Default::default()
+                    }),
+                    false,
+                )
+                .map_err(|error| format!("buildkit status: response failed: {error}"))?;
+        }
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::GatewaySolve {
+        use buildkit_proto::moby::buildkit::v1::frontend::{
+            result, Ref, Result as GatewayResult, SolveRequest, SolveResponse,
+        };
+        let build_id = build_id
+            .as_deref()
+            .ok_or_else(|| "buildkit gateway: missing build id".to_string())?;
+        let solve = receive_buildkit_unary::<SolveRequest>(request.into_body()).await?;
+        state
+            .wait_for_buildkit_build(build_id, Duration::from_secs(3))
+            .await?;
+        let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
+        let result = execute_buildkit_frontend(
+            state.as_ref(),
+            execution.as_ref(),
+            build.as_ref(),
+            &solve,
+        )
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                *build
+                    .error
+                    .lock()
+                    .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                    Some(error.clone());
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    13,
+                    Some(&buildkit_grpc_message(&error)),
+                );
+            }
+        };
+        *build
+            .result
+            .lock()
+            .map_err(|error| format!("buildkit solve result poisoned: {error}"))? = Some(result);
+        let result = GatewayResult {
+            result: Some(result::Result::Ref(Ref {
+                id: format!("ferrocrate-{build_id}"),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        response_stream
+            .send_data(
+                grpc_message(&SolveResponse {
+                    result: Some(result),
+                    ..Default::default()
+                }),
+                false,
+            )
+            .map_err(|error| format!("buildkit gateway solve: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::GatewayReturn {
+        use buildkit_proto::moby::buildkit::v1::frontend::{ReturnRequest, ReturnResponse};
+        let build_id = build_id
+            .as_deref()
+            .ok_or_else(|| "buildkit gateway: missing build id".to_string())?;
+        let returned = receive_buildkit_unary::<ReturnRequest>(request.into_body()).await?;
+        let returned_shape = returned
+            .result
+            .as_ref()
+            .and_then(|result| result.result.as_ref())
+            .map(|result| match result {
+                buildkit_proto::moby::buildkit::v1::frontend::result::Result::RefDeprecated(_) => "ref-deprecated",
+                buildkit_proto::moby::buildkit::v1::frontend::result::Result::RefsDeprecated(_) => "refs-deprecated",
+                buildkit_proto::moby::buildkit::v1::frontend::result::Result::Ref(_) => "ref",
+                buildkit_proto::moby::buildkit::v1::frontend::result::Result::Refs(_) => "refs",
+            })
+            .unwrap_or("empty");
+        let (returned_ref, returned_has_definition, returned_metadata) = returned
+            .result
+            .as_ref()
+            .map(|result| {
+                let (id, definition) = match result.result.as_ref() {
+                    Some(buildkit_proto::moby::buildkit::v1::frontend::result::Result::Ref(value)) => {
+                        (value.id.as_str(), value.def.is_some())
+                    }
+                    Some(buildkit_proto::moby::buildkit::v1::frontend::result::Result::RefDeprecated(value)) => {
+                        (value.as_str(), false)
+                    }
+                    _ => ("", false),
+                };
+                (id.to_string(), definition, result.metadata.len())
+            })
+            .unwrap_or_default();
+        tracing::debug!(
+            build_id,
+            has_result = returned.result.is_some(),
+            error_code = returned.error.as_ref().map(|error| error.code).unwrap_or_default(),
+            error_message = returned.error.as_ref().map(|error| error.message.as_str()).unwrap_or_default(),
+            result_shape = returned_shape,
+            returned_ref,
+            returned_has_definition,
+            returned_metadata,
+            "received BuildKit gateway return"
+        );
+        state
+            .wait_for_buildkit_build(build_id, Duration::from_secs(3))
+            .await?;
+        state.record_buildkit_gateway_return(build_id, returned)?;
+        response_stream
+            .send_data(grpc_message(&ReturnResponse::default()), false)
+            .map_err(|error| format!("buildkit gateway return: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    send_buildkit_grpc_status(
+        &mut response_stream,
+        12,
+        Some("method%20not%20implemented"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::PongResponse {
+    use buildkit_proto::moby::buildkit::v1::apicaps::ApiCap;
+    use buildkit_proto::moby::buildkit::v1::frontend::PongResponse;
+
+    let enabled = |id: &str| ApiCap {
+        id: id.to_string(),
+        enabled: true,
+        ..Default::default()
+    };
+    PongResponse {
+        frontend_api_caps: [
+            "solve.base",
+            "solve.inlinereturn",
+            "resolveimage",
+            "resolveimage.resolvemode",
+            "readfile",
+            "return",
+            "returnmap",
+            "readdir",
+            "statfile",
+            "importcaches",
+            "proto.refarray",
+            "reference.output",
+            "frontend.inputs",
+            "gateway.solve.metadata",
+            "frontend.caps",
+            "gateway.solve.evaluate",
+            "gateway.evaluate",
+            "gateway.warnings",
+            "reference.attestations",
+        ]
+        .into_iter()
+        .map(enabled)
+        .collect(),
+        llb_caps: [
+            "source.image",
+            "source.image.resolvemode",
+            "source.local",
+            "source.local.unique",
+            "source.local.sessionid",
+            "source.local.sharedkeyhint",
+            "exec.meta.base",
+            "exec.meta.network",
+            "exec.meta.proxyenv",
+            "exec.mount.bind",
+            "file.base",
+            "constraints",
+            "platform",
+        ]
+        .into_iter()
+        .map(enabled)
+        .collect(),
+        workers: buildkit_list_workers_response().record,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_outer_solve_response(
+    build: &BuildkitBuild,
+) -> Result<buildkit_proto::moby::buildkit::v1::SolveResponse, String> {
+    use buildkit_proto::moby::buildkit::v1::SolveResponse;
+
+    if let Some(error) = build
+        .error
+        .lock()
+        .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))?
+        .clone()
+    {
+        return Err(error);
+    }
+
+    let returned = build
+        .returned
+        .lock()
+        .map_err(|error| format!("buildkit gateway return poisoned: {error}"))?;
+    if let Some(error) = returned.as_ref().and_then(|returned| returned.error.as_ref()) {
+        if error.code != 0 {
+            return Err(format!("buildkit solve: {}", error.message));
+        }
+    }
+    drop(returned);
+    let result = build
+        .result
+        .lock()
+        .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+        .clone();
+    if let Some(result) = result {
+        return Ok(SolveResponse {
+            exporter_response: HashMap::from([
+                ("containerimage.digest".to_string(), result.image_digest),
+                ("image.name".to_string(), result.image_name),
+            ]),
+        });
+    }
+    if build.request.internal
+        && build.request.frontend.is_empty()
+        && build.request.definition.is_none()
+        && build.request.exporters.is_empty()
+        && build.request.exporter_deprecated.is_empty()
+    {
+        return Ok(SolveResponse::default());
+    }
+    Err("buildkit solve: frontend returned no image".to_string())
+}
+
+#[cfg(target_os = "linux")]
+async fn execute_buildkit_frontend(
+    state: &DockerCompatState,
+    execution: &BuildkitExecutionContext,
+    build: &BuildkitBuild,
+    request: &buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
+) -> Result<BuildkitBuildResult, String> {
+    let filename = request
+        .frontend_opt
+        .get("filename")
+        .map(String::as_str)
+        .unwrap_or("Dockerfile");
+    let filename_path = Path::new(filename);
+    if filename_path.is_absolute()
+        || filename_path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::Prefix(_))
+        })
+    {
+        return Err("buildkit solve: Dockerfile path must stay within its local".to_string());
+    }
+    let staging = tempfile::Builder::new()
+        .prefix("buildkit-")
+        .tempdir_in(execution.runtime_dir.as_ref())
+        .map_err(|error| format!("buildkit solve: create staging directory failed: {error}"))?;
+    let context = staging.path().join("context");
+    let dockerfile_local = staging.path().join("dockerfile");
+    receive_buildkit_session_local(
+        state,
+        &build.request.session,
+        "context",
+        &context,
+        Duration::from_secs(120),
+    )
+    .await?;
+    receive_buildkit_session_local(
+        state,
+        &build.request.session,
+        "dockerfile",
+        &dockerfile_local,
+        Duration::from_secs(120),
+    )
+    .await?;
+    let source_dockerfile = dockerfile_local.join(filename_path);
+    if !source_dockerfile.is_file() {
+        return Err(format!("buildkit solve: Dockerfile not found: {filename}"));
+    }
+    let dockerfile = context.join(filename_path);
+    if let Some(parent) = dockerfile.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("buildkit solve: create Dockerfile parent failed: {error}"))?;
+    }
+    std::fs::copy(&source_dockerfile, &dockerfile)
+        .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
+    let dockerfile_contents = std::fs::read_to_string(&dockerfile)
+        .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
+    let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
+        .map_err(|error| error.to_string())?;
+    let mut session_auth = HashMap::new();
+    for base in &external_bases {
+        if resolve_reference(execution.store.as_ref(), base)
+            .map_err(|error| format!("buildkit solve: inspect base failed: {error}"))?
+            .is_some()
+        {
+            continue;
+        }
+        let registry = parse_image_reference(base)
+            .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?
+            .registry;
+        if let Some(auth) = receive_buildkit_session_credentials(
+            state,
+            &build.request.session,
+            &registry,
+            Duration::from_secs(30),
+        )
+        .await?
+        {
+            session_auth.insert(registry, auth);
+        }
+    }
+    let pulled_bases = prefetch_dockerfile_bases(
+        execution.store.as_ref(),
+        &execution.origin,
+        &execution.authorization,
+        &dockerfile,
+        Some(&session_auth),
+    )?;
+
+    let exporter = build
+        .request
+        .exporters
+        .iter()
+        .find(|exporter| exporter.r#type == "moby" || exporter.r#type == "image");
+    let image_name = exporter
+        .and_then(|exporter| exporter.attrs.get("name"))
+        .or_else(|| build.request.exporter_attrs_deprecated.get("name"))
+        .and_then(|names| names.split(',').next())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("local/build:latest")
+        .to_string();
+    let platform = request.frontend_opt.get("platform").map(String::as_str);
+    let mut steps = dockerfile_contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for base in pulled_bases.iter().rev() {
+        steps.insert(0, format!(
+            "[internal] load metadata for {}",
+            buildkit_metadata_reference(base)?
+        ));
+    }
+    let build_output = execute_build(
+        execution.store.as_ref(),
+        &execution.origin,
+        &execution.authorization,
+        Some(dockerfile.to_str().ok_or_else(|| {
+            "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
+        })?),
+        None,
+        Some(&image_name),
+        "gzip",
+        "oci",
+        None,
+        platform,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+    )?;
+    let mut output = pulled_bases
+        .iter()
+        .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))
+        .collect::<String>();
+    output.push_str(&build_output);
+    let image = resolve_reference(execution.store.as_ref(), &image_name)
+        .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
+        .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
+    Ok(BuildkitBuildResult {
+        image_name,
+        image_digest: image.digest,
+        output,
+        steps,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_metadata_reference(base: &str) -> Result<String, String> {
+    let parsed = parse_image_reference(base).map_err(|error| error.to_string())?;
+    let registry = if parsed.registry == "registry-1.docker.io" {
+        "docker.io"
+    } else {
+        parsed.registry.as_str()
+    };
+    Ok(format!(
+        "{registry}/{}{}{}",
+        parsed.repository,
+        match parsed.separator {
+            ferro_core::registry::ReferenceSeparator::Tag => ":",
+            ferro_core::registry::ReferenceSeparator::Digest => "@",
+        },
+        parsed.reference
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_timestamp_now() -> prost_types::Timestamp {
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    prost_types::Timestamp {
+        seconds: now.as_secs() as i64,
+        nanos: now.subsec_nanos() as i32,
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_buildkit_unary<M: Message + Default>(
+    mut incoming: h2::RecvStream,
+) -> Result<M, String> {
+    let mut buffer = Vec::new();
+    while let Some(chunk) = incoming.data().await {
+        let chunk = chunk.map_err(|error| format!("buildkit control: request failed: {error}"))?;
+        incoming
+            .flow_control()
+            .release_capacity(chunk.len())
+            .map_err(|error| format!("buildkit control: flow control failed: {error}"))?;
+        buffer.extend_from_slice(&chunk);
+        if buffer.len() >= 5 {
+            if buffer[0] != 0 {
+                return Err("buildkit control: compressed messages are unsupported".to_string());
+            }
+            let size = u32::from_be_bytes(buffer[1..5].try_into().unwrap()) as usize;
+            if size > 16 * 1024 * 1024 {
+                return Err("buildkit control: request exceeds message limit".to_string());
+            }
+            if buffer.len() >= size + 5 {
+                if buffer.len() != size + 5 {
+                    return Err("buildkit control: unary request has extra data".to_string());
+                }
+                return M::decode(&buffer[5..])
+                    .map_err(|error| format!("buildkit control: invalid request: {error}"));
+            }
+        }
+    }
+    Err("buildkit control: truncated unary request".to_string())
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_buildkit_completion(
+    build: &BuildkitBuild,
+    lifetime: Duration,
+) -> Result<(), String> {
+    if build.is_completed.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    tokio::time::timeout(lifetime, build.completed.notified())
+        .await
+        .map_err(|_| "buildkit solve: callback timed out".to_string())?;
+    if build.is_completed.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err("buildkit solve: callback ended without return".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildkitControlMethod {
+    ListWorkers,
+    Session,
+    Solve,
+    Status,
+    GatewayPing,
+    GatewaySolve,
+    GatewayReturn,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
+    match path {
+        "/moby.buildkit.v1.Control/ListWorkers" => BuildkitControlMethod::ListWorkers,
+        "/moby.buildkit.v1.Control/Session" => BuildkitControlMethod::Session,
+        "/moby.buildkit.v1.Control/Solve" => BuildkitControlMethod::Solve,
+        "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
+        "/moby.buildkit.v1.frontend.LLBBridge/Ping" => BuildkitControlMethod::GatewayPing,
+        "/moby.buildkit.v1.frontend.LLBBridge/Solve" => BuildkitControlMethod::GatewaySolve,
+        "/moby.buildkit.v1.frontend.LLBBridge/Return" => BuildkitControlMethod::GatewayReturn,
+        _ => BuildkitControlMethod::Other,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_buildkit_grpc_status(
+    response: &mut h2::SendStream<Bytes>,
+    status: u16,
+    message: Option<&str>,
+) -> Result<(), String> {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        "grpc-status",
+        http::HeaderValue::from_str(&status.to_string())
+            .map_err(|error| format!("buildkit control: invalid gRPC status: {error}"))?,
+    );
+    if let Some(message) = message {
+        trailers.insert(
+            "grpc-message",
+            http::HeaderValue::from_str(message)
+                .map_err(|error| format!("buildkit control: invalid gRPC message: {error}"))?,
+        );
+    }
+    response
+        .send_trailers(trailers)
+        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_grpc_message(message: &str) -> String {
+    let mut encoded = String::with_capacity(message.len());
+    for byte in message.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_list_workers_response() -> buildkit_proto::moby::buildkit::v1::ListWorkersResponse {
+    use buildkit_proto::moby::buildkit::v1::{types::WorkerRecord, ListWorkersResponse};
+    use buildkit_proto::pb::Platform;
+
+    let gateway = std::env::var("FERROCRATE_BRIDGE_CIDR")
+        .unwrap_or_else(|_| "10.0.0.1/24".to_string())
+        .split('/')
+        .next()
+        .unwrap_or("10.0.0.1")
+        .to_string();
+    let mut labels = HashMap::new();
+    labels.insert(
+        "org.mobyproject.buildkit.worker.executor".to_string(),
+        "oci".to_string(),
+    );
+    labels.insert(
+        "org.mobyproject.buildkit.worker.snapshotter".to_string(),
+        "overlayfs".to_string(),
+    );
+    labels.insert(
+        "org.mobyproject.buildkit.worker.moby.host-gateway-ip".to_string(),
+        gateway,
+    );
+    #[allow(unused_mut)]
+    let mut platforms = vec![Platform {
+        architecture: "amd64".to_string(),
+        os: "linux".to_string(),
+        ..Default::default()
+    }];
+    #[cfg(target_arch = "aarch64")]
+    platforms.push(Platform {
+        architecture: "arm64".to_string(),
+        os: "linux".to_string(),
+        ..Default::default()
+    });
+    ListWorkersResponse {
+        record: vec![WorkerRecord {
+            id: "ferrocrate-oci-worker".to_string(),
+            labels,
+            platforms,
+            ..Default::default()
+        }],
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_buildkit_session_registration(
+    headers: &HashMap<String, String>,
+) -> Result<BuildkitSessionRegistration, String> {
+    let uuid = headers
+        .get("x-docker-expose-session-uuid")
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "buildkit session: missing valid session UUID".to_string())?
+        .to_owned();
+    if !uuid
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("buildkit session: invalid session UUID".to_string());
+    }
+    let methods = headers
+        .get("x-docker-expose-session-grpc-method")
+        .into_iter()
+        .flat_map(|values| values.lines())
+        .filter(|value| value.starts_with('/') && value.len() <= 256)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    Ok(BuildkitSessionRegistration { uuid, methods })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_buildkit_control_session_registration(
+    headers: &http::HeaderMap,
+) -> Result<BuildkitSessionRegistration, String> {
+    let mut values = HashMap::new();
+    if let Some(value) = headers
+        .get("x-docker-expose-session-uuid")
+        .and_then(|value| value.to_str().ok())
+    {
+        values.insert(
+            "x-docker-expose-session-uuid".to_string(),
+            value.to_string(),
+        );
+    }
+    let methods = headers
+        .get_all("x-docker-expose-session-grpc-method")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !methods.is_empty() {
+        values.insert(
+            "x-docker-expose-session-grpc-method".to_string(),
+            methods,
+        );
+    }
+    parse_buildkit_session_registration(&values)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct BuildkitCredentialsRequest {
+    #[prost(string, tag = "1")]
+    host: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct BuildkitCredentialsResponse {
+    #[prost(string, tag = "1")]
+    username: String,
+    #[prost(string, tag = "2")]
+    secret: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct FsutilStat {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(uint32, tag = "2")]
+    mode: u32,
+    #[prost(uint32, tag = "3")]
+    uid: u32,
+    #[prost(uint32, tag = "4")]
+    gid: u32,
+    #[prost(int64, tag = "5")]
+    size: i64,
+    #[prost(int64, tag = "6")]
+    mod_time: i64,
+    #[prost(string, tag = "7")]
+    linkname: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct FsutilPacket {
+    #[prost(enumeration = "FsutilPacketType", tag = "1")]
+    packet_type: i32,
+    #[prost(message, optional, tag = "2")]
+    stat: Option<FsutilStat>,
+    #[prost(uint32, tag = "3")]
+    id: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    data: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+enum FsutilPacketType {
+    Stat = 0,
+    Req = 1,
+    Data = 2,
+    Fin = 3,
+    Err = 4,
+}
+
+#[cfg(target_os = "linux")]
+fn grpc_message<M: Message>(message: &M) -> Bytes {
+    let payload = message.encode_to_vec();
+    let mut framed = Vec::with_capacity(payload.len() + 5);
+    framed.push(0);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
+    Bytes::from(framed)
+}
+
+#[cfg(target_os = "linux")]
+fn drain_grpc_packets(buffer: &mut Vec<u8>) -> Result<Vec<FsutilPacket>, String> {
+    let mut packets = Vec::new();
+    while buffer.len() >= 5 {
+        if buffer[0] != 0 {
+            return Err("buildkit filesync: compressed gRPC messages are unsupported".to_string());
+        }
+        let size = u32::from_be_bytes(buffer[1..5].try_into().expect("fixed frame prefix")) as usize;
+        if size > 16 * 1024 * 1024 {
+            return Err("buildkit filesync: packet exceeds transfer limit".to_string());
+        }
+        if buffer.len() < size + 5 {
+            break;
+        }
+        let packet = FsutilPacket::decode(&buffer[5..5 + size])
+            .map_err(|error| format!("buildkit filesync: invalid packet: {error}"))?;
+        buffer.drain(..5 + size);
+        packets.push(packet);
+    }
+    Ok(packets)
+}
+
+#[cfg(target_os = "linux")]
+fn drain_buildkit_session_bytes(buffer: &mut Vec<u8>) -> Result<Vec<Vec<u8>>, String> {
+    use buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+    let mut messages = Vec::new();
+    while buffer.len() >= 5 {
+        if buffer[0] != 0 {
+            return Err("buildkit session: compressed gRPC messages are unsupported".to_string());
+        }
+        let size = u32::from_be_bytes(buffer[1..5].try_into().expect("fixed frame prefix")) as usize;
+        if size > 16 * 1024 * 1024 {
+            return Err("buildkit session: message exceeds transfer limit".to_string());
+        }
+        if buffer.len() < size + 5 {
+            break;
+        }
+        let message = BytesMessage::decode(&buffer[5..5 + size])
+            .map_err(|error| format!("buildkit session: invalid tunnel message: {error}"))?;
+        buffer.drain(..5 + size);
+        messages.push(message.data);
+    }
+    Ok(messages)
+}
+
+/// Switch an authenticated, hijacked Docker session socket into the daemon's
+/// HTTP/2 client role. BuildKit deliberately reverses the usual RPC direction:
+/// the Docker CLI hosts the gRPC services and FerroCrate calls them.
+#[cfg(target_os = "linux")]
+fn run_buildkit_session_transport(
+    stream: UnixStream,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("buildkit session: set nonblocking failed: {error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("buildkit session: runtime failed: {error}"))?;
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|error| format!("buildkit session: socket handoff failed: {error}"))?;
+        let handshake = h2::client::handshake(stream);
+        let (requests, connection) = tokio::time::timeout(lifetime, handshake)
+            .await
+            .map_err(|_| "buildkit session: h2 handshake timed out".to_string())?
+            .map_err(|error| format!("buildkit session: h2 handshake failed: {error}"))?;
+        run_buildkit_session_worker(requests, connection, state, registration, lifetime).await
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn run_buildkit_control_session(
+    mut incoming: h2::RecvStream,
+    mut outgoing: h2::SendStream<Bytes>,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (daemon_io, tunnel_io) = tokio::io::duplex(64 * 1024);
+    let (mut tunnel_read, mut tunnel_write) = tokio::io::split(tunnel_io);
+    let input = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        while let Some(chunk) = incoming.data().await {
+            let chunk = chunk.map_err(|error| format!("buildkit session: tunnel receive failed: {error}"))?;
+            incoming
+                .flow_control()
+                .release_capacity(chunk.len())
+                .map_err(|error| format!("buildkit session: tunnel flow control failed: {error}"))?;
+            buffer.extend_from_slice(&chunk);
+            for message in drain_buildkit_session_bytes(&mut buffer)? {
+                tunnel_write
+                    .write_all(&message)
+                    .await
+                    .map_err(|error| format!("buildkit session: tunnel write failed: {error}"))?;
+            }
+        }
+        if !buffer.is_empty() {
+            return Err("buildkit session: truncated tunnel message".to_string());
+        }
+        tunnel_write
+            .shutdown()
+            .await
+            .map_err(|error| format!("buildkit session: tunnel shutdown failed: {error}"))
+    });
+    let output = tokio::spawn(async move {
+        use buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+        let mut buffer = vec![0_u8; 32 * 1024];
+        loop {
+            let read = tunnel_read
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("buildkit session: tunnel read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            outgoing
+                .send_data(
+                    grpc_message(&BytesMessage {
+                        data: buffer[..read].to_vec(),
+                    }),
+                    false,
+                )
+                .map_err(|error| format!("buildkit session: tunnel response failed: {error}"))?;
+        }
+        send_buildkit_grpc_status(&mut outgoing, 0, None)
+    });
+    let handshake = h2::client::Builder::new()
+        .max_frame_size(16 * 1024)
+        .handshake(daemon_io);
+    let (requests, connection) = tokio::time::timeout(lifetime, handshake)
+        .await
+        .map_err(|_| "buildkit session: tunneled h2 handshake timed out".to_string())?
+        .map_err(|error| format!("buildkit session: tunneled h2 handshake failed: {error}"))?;
+    let worker = run_buildkit_session_worker(requests, connection, state, registration, lifetime).await;
+    input.abort();
+    let input_result = input.await;
+    let output_result = output.await;
+    worker?;
+    if let Ok(Err(error)) = input_result {
+        return Err(error);
+    }
+    output_result
+        .map_err(|error| format!("buildkit session: tunnel output task failed: {error}"))?
+}
+
+#[cfg(target_os = "linux")]
+async fn run_buildkit_session_worker<T>(
+    requests: h2::client::SendRequest<Bytes>,
+    connection: h2::client::Connection<T, Bytes>,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(8);
+        let handle = BuildkitSessionHandle {
+            commands: command_tx,
+            methods: Arc::new(registration.methods),
+        };
+        state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .insert(registration.uuid.clone(), handle);
+        let result = tokio::time::timeout(lifetime, async move {
+            let mut requests = requests;
+            let connection_task = tokio::spawn(async move {
+                match connection.await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.is_io() || error.is_go_away() || error.is_reset() => Ok(()),
+                    Err(error) => Err(format!("buildkit session: h2 connection failed: {error}")),
+                }
+            });
+            tokio::pin!(connection_task);
+            loop {
+                tokio::select! {
+                    connection_result = &mut connection_task => {
+                        return connection_result
+                            .map_err(|error| format!("buildkit session: connection task failed: {error}"))?;
+                    }
+                    command = command_rx.recv() => {
+                        let Some(command) = command else { return Ok(()); };
+                        match command {
+                            BuildkitSessionCommand::ReceiveLocal { name, destination, reply } => {
+                                let result = receive_buildkit_local(&mut requests, &name, &destination).await;
+                                let _ = reply.send(result);
+                            }
+                            BuildkitSessionCommand::Credentials { host, reply } => {
+                                let result = request_buildkit_credentials(&mut requests, &host).await;
+                                let _ = reply.send(result);
+                            }
+                        }
+                    }
+                }
+            }
+        }).await;
+        state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .remove(&registration.uuid);
+        match result {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
+}
+
+#[cfg(target_os = "linux")]
+async fn request_buildkit_credentials(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    host: &str,
+) -> Result<Option<RegistryAuth>, String> {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/moby.session.auth.v1.Auth/Credentials")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(())
+        .map_err(|error| format!("buildkit auth: request failed: {error}"))?;
+    let mut ready_requests = requests
+        .clone()
+        .ready()
+        .await
+        .map_err(|error| format!("buildkit auth: h2 client unavailable: {error}"))?;
+    let (response, mut outgoing) = ready_requests
+        .send_request(request, false)
+        .map_err(|error| format!("buildkit auth: start RPC failed: {error}"))?;
+    outgoing
+        .send_data(
+            grpc_message(&BuildkitCredentialsRequest {
+                host: host.to_string(),
+            }),
+            true,
+        )
+        .map_err(|error| format!("buildkit auth: request body failed: {error}"))?;
+    let response = response
+        .await
+        .map_err(|error| format!("buildkit auth: response failed: {error}"))?;
+    if response.status() != http::StatusCode::OK {
+        return Err(format!(
+            "buildkit auth: credentials returned HTTP {}",
+            response.status()
+        ));
+    }
+    let credentials = receive_buildkit_unary::<BuildkitCredentialsResponse>(response.into_body())
+        .await
+        .map_err(|error| format!("buildkit auth: {error}"))?;
+    if credentials.username.is_empty() && credentials.secret.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(RegistryAuth {
+            username: credentials.username,
+            password: credentials.secret,
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_buildkit_local(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    name: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    const MODE_DIR: u32 = 1 << 31;
+    const MODE_SYMLINK: u32 = 1 << 27;
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/moby.filesync.v1.FileSync/DiffCopy")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("dir-name", name)
+        .body(())
+        .map_err(|error| format!("buildkit filesync: request failed: {error}"))?;
+    let mut ready_requests = requests
+        .clone()
+        .ready()
+        .await
+        .map_err(|error| format!("buildkit filesync: h2 client unavailable: {error}"))?;
+    let (response, mut outgoing) = ready_requests
+        .send_request(request, false)
+        .map_err(|error| format!("buildkit filesync: start RPC failed: {error}"))?;
+    let mut incoming = response
+        .await
+        .map_err(|error| format!("buildkit filesync: response failed: {error}"))?
+        .into_body();
+    let limits = TransferArchiveLimits::default();
+    let mut frame_buffer = Vec::new();
+    let mut stats: Vec<FsutilStat> = Vec::new();
+    let mut listing_done = false;
+    let mut open_files: HashMap<u32, (std::fs::File, u64, u64)> = HashMap::new();
+    let mut file_count = 0usize;
+    let mut total_size = 0u64;
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("buildkit filesync: create staging directory: {error}"))?;
+    while let Some(chunk) = incoming.data().await {
+        let chunk = chunk.map_err(|error| format!("buildkit filesync: receive failed: {error}"))?;
+        incoming
+            .flow_control()
+            .release_capacity(chunk.len())
+            .map_err(|error| format!("buildkit filesync: flow control failed: {error}"))?;
+        frame_buffer.extend_from_slice(&chunk);
+        for packet in drain_grpc_packets(&mut frame_buffer)? {
+            match FsutilPacketType::try_from(packet.packet_type).ok() {
+                Some(FsutilPacketType::Stat) if !listing_done => {
+                    let Some(stat) = packet.stat else {
+                        listing_done = true;
+                        for (id, stat) in stats.iter().enumerate() {
+                            if stat.mode & MODE_DIR != 0 { continue; }
+                            let request = FsutilPacket { packet_type: FsutilPacketType::Req as i32, stat: None, id: id as u32, data: Vec::new() };
+                            outgoing.send_data(grpc_message(&request), false)
+                                .map_err(|error| format!("buildkit filesync: request file failed: {error}"))?;
+                        }
+                        continue;
+                    };
+                    let relative = Path::new(&stat.path);
+                    if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_))) {
+                        return Err(format!("buildkit filesync: context path escapes root: {}", stat.path));
+                    }
+                    if stat.mode & MODE_SYMLINK != 0 || !stat.linkname.is_empty() {
+                        return Err(format!("buildkit filesync: symlinks are not supported: {}", stat.path));
+                    }
+                    if stat.size < 0 || stat.size as u64 > limits.max_entry_bytes {
+                        return Err(format!("buildkit filesync: entry size exceeds transfer limit: {}", stat.path));
+                    }
+                    if stat.mode & MODE_DIR == 0 {
+                        file_count += 1;
+                        total_size = total_size.saturating_add(stat.size as u64);
+                        if file_count > limits.max_files || total_size > limits.max_total_bytes {
+                            return Err("buildkit filesync: context exceeds transfer limit".to_string());
+                        }
+                    }
+                    let target = destination.join(relative);
+                    if stat.mode & MODE_DIR != 0 {
+                        std::fs::create_dir_all(&target).map_err(|error| format!("buildkit filesync: create directory: {error}"))?;
+                    } else {
+                        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
+                        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)
+                            .map_err(|error| format!("buildkit filesync: create file: {error}"))?;
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(stat.mode & 0o7777))
+                            .map_err(|error| format!("buildkit filesync: set mode: {error}"))?;
+                        open_files.insert(stats.len() as u32, (file, 0, stat.size as u64));
+                    }
+                    stats.push(stat);
+                }
+                Some(FsutilPacketType::Data) if listing_done => {
+                    let (file, written, expected) = open_files.get_mut(&packet.id)
+                        .ok_or_else(|| format!("buildkit filesync: DATA for unknown file {}", packet.id))?;
+                    if packet.data.is_empty() {
+                        if *written != *expected { return Err(format!("buildkit filesync: short file {}", packet.id)); }
+                        open_files.remove(&packet.id);
+                    } else {
+                        *written = written.saturating_add(packet.data.len() as u64);
+                        if *written > *expected { return Err(format!("buildkit filesync: oversized file {}", packet.id)); }
+                        file.write_all(&packet.data).map_err(|error| format!("buildkit filesync: write file: {error}"))?;
+                    }
+                }
+                Some(FsutilPacketType::Err) => return Err(format!("buildkit filesync: client error: {}", String::from_utf8_lossy(&packet.data))),
+                Some(FsutilPacketType::Fin) => break,
+                _ => return Err("buildkit filesync: invalid packet ordering".to_string()),
+            }
+        }
+        if listing_done && open_files.is_empty() {
+            let fin = FsutilPacket { packet_type: FsutilPacketType::Fin as i32, stat: None, id: 0, data: Vec::new() };
+            outgoing.send_data(grpc_message(&fin), true)
+                .map_err(|error| format!("buildkit filesync: finish failed: {error}"))?;
+            return Ok(());
+        }
+    }
+    Err("buildkit filesync: client disconnected before FIN".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -30005,6 +31688,540 @@ volumes:
         assert!(headers.contains("Connection: Upgrade\r\n"));
         assert!(headers.contains("Upgrade: tcp\r\n"));
         assert!(headers.contains("application/vnd.docker.raw-stream"));
+    }
+
+    #[test]
+    fn buildkit_session_hijack_switches_to_h2c() {
+        let headers = String::from_utf8(super::docker_buildkit_session_hijack_headers())
+            .expect("headers are utf8");
+        assert!(headers.starts_with("HTTP/1.1 101 UPGRADED\r\n"));
+        assert!(headers.contains("Connection: Upgrade\r\n"));
+        assert!(headers.contains("Upgrade: h2c\r\n"));
+        assert!(!headers.contains("Content-Length"));
+    }
+
+    #[test]
+    fn buildkit_control_session_decodes_fragmented_bytes_messages() {
+        use super::buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+        let first = super::grpc_message(&BytesMessage {
+            data: b"client settings".to_vec(),
+        });
+        let second = super::grpc_message(&BytesMessage {
+            data: b"session payload".to_vec(),
+        });
+        let mut wire = [first.as_ref(), second.as_ref()].concat();
+        let tail = wire.split_off(first.len() + 2);
+        assert_eq!(
+            super::drain_buildkit_session_bytes(&mut wire).expect("first fragment"),
+            vec![b"client settings".to_vec()]
+        );
+        wire.extend_from_slice(&tail);
+        assert_eq!(
+            super::drain_buildkit_session_bytes(&mut wire).expect("second fragment"),
+            vec![b"session payload".to_vec()]
+        );
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn buildkit_control_session_preserves_repeated_exposed_methods() {
+        let request = http::Request::builder()
+            .header("x-docker-expose-session-uuid", "control-session")
+            .header(
+                "x-docker-expose-session-grpc-method",
+                "/moby.filesync.v1.FileSync/DiffCopy",
+            )
+            .header(
+                "x-docker-expose-session-grpc-method",
+                "/moby.session.auth.v1.Auth/Credentials",
+            )
+            .body(())
+            .expect("session request");
+        let registration = super::parse_buildkit_control_session_registration(request.headers())
+            .expect("control session metadata");
+        assert_eq!(registration.uuid, "control-session");
+        assert_eq!(registration.methods.len(), 2);
+    }
+
+    #[test]
+    fn buildkit_control_dispatches_gateway_callback_methods() {
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Ping"),
+            super::BuildkitControlMethod::GatewayPing
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Solve"),
+            super::BuildkitControlMethod::GatewaySolve
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Return"),
+            super::BuildkitControlMethod::GatewayReturn
+        );
+    }
+
+    #[test]
+    fn buildkit_gateway_return_completes_the_matching_outer_solve() {
+        use super::buildkit_proto::moby::buildkit::v1::frontend;
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "build-ref".to_string(),
+                session: "session-id".to_string(),
+                ..Default::default()
+            })
+            .expect("register outer solve");
+        state
+            .record_buildkit_gateway_solve(
+                "build-ref",
+                frontend::SolveRequest {
+                    frontend: "dockerfile.v0".to_string(),
+                    frontend_opt: HashMap::from([(
+                        "filename".to_string(),
+                        "Dockerfile.custom".to_string(),
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .expect("record gateway solve");
+        state
+            .record_buildkit_gateway_return("build-ref", frontend::ReturnRequest::default())
+            .expect("record gateway return");
+
+        assert_eq!(
+            build.gateway_solve.lock().expect("gateway solve").as_ref().expect("callback").frontend,
+            "dockerfile.v0"
+        );
+        assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_probe_return_produces_an_empty_outer_solve_response() {
+        use super::buildkit_proto::moby::buildkit::v1::frontend;
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "probe-ref".to_string(),
+                session: "probe-session".to_string(),
+                internal: true,
+                ..Default::default()
+            })
+            .expect("register probe solve");
+        state
+            .record_buildkit_gateway_return("probe-ref", frontend::ReturnRequest::default())
+            .expect("record empty probe return");
+
+        let response = super::buildkit_outer_solve_response(&build).expect("probe response");
+        assert!(response.exporter_response.is_empty());
+    }
+
+    #[test]
+    fn buildkit_gateway_ping_advertises_required_frontend_and_llb_caps() {
+        use std::collections::HashSet;
+
+        let pong = super::buildkit_gateway_pong();
+        let frontend_caps = pong
+            .frontend_api_caps
+            .iter()
+            .filter(|cap| cap.enabled)
+            .map(|cap| cap.id.as_str())
+            .collect::<HashSet<_>>();
+        for required in [
+            "solve.base",
+            "solve.inlinereturn",
+            "resolveimage",
+            "resolveimage.resolvemode",
+            "readfile",
+            "return",
+            "returnmap",
+            "readdir",
+            "statfile",
+            "importcaches",
+            "proto.refarray",
+            "reference.output",
+            "frontend.inputs",
+            "gateway.solve.metadata",
+            "frontend.caps",
+            "gateway.solve.evaluate",
+            "gateway.evaluate",
+            "gateway.warnings",
+            "reference.attestations",
+        ] {
+            assert!(frontend_caps.contains(required), "missing frontend cap {required}");
+        }
+        assert!(pong
+            .llb_caps
+            .iter()
+            .any(|cap| cap.enabled && cap.id == "source.local.sessionid"));
+    }
+
+    #[test]
+    fn buildkit_grpc_message_encodes_step_errors() {
+        assert_eq!(
+            super::buildkit_grpc_message("RUN exited with status 23: bad % step"),
+            "RUN%20exited%20with%20status%2023%3A%20bad%20%25%20step"
+        );
+    }
+
+    #[test]
+    fn buildkit_metadata_vertex_uses_docker_hub_display_name() {
+        assert_eq!(
+            super::buildkit_metadata_reference("alpine:3.20").expect("metadata reference"),
+            "docker.io/library/alpine:3.20"
+        );
+    }
+
+    #[test]
+    fn buildkit_session_requests_ephemeral_registry_credentials() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+            let (mut requests, client_connection) =
+                h2::client::handshake(client_io).await.expect("client handshake");
+            let client = tokio::spawn(async move {
+                client_connection.await.expect("client connection");
+            });
+            let server = tokio::spawn(async move {
+                let mut connection = h2::server::handshake(server_io).await.expect("server handshake");
+                let (request, mut respond) = connection
+                    .accept()
+                    .await
+                    .expect("request result")
+                    .expect("credentials request");
+                assert_eq!(
+                    request.uri().path(),
+                    "/moby.session.auth.v1.Auth/Credentials"
+                );
+                let credentials_request =
+                    super::receive_buildkit_unary::<super::BuildkitCredentialsRequest>(
+                        request.into_body(),
+                    )
+                    .await
+                    .expect("decode credentials request");
+                assert_eq!(credentials_request.host, "registry.example.test");
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .expect("credentials response");
+                let mut stream = respond.send_response(response, false).expect("send response");
+                stream
+                    .send_data(
+                        super::grpc_message(&super::BuildkitCredentialsResponse {
+                            username: "session-user".to_string(),
+                            secret: "session-secret".to_string(),
+                        }),
+                        true,
+                    )
+                    .expect("send credentials");
+                drop(stream);
+                while connection.accept().await.is_some() {}
+            });
+
+            let credentials = super::request_buildkit_credentials(
+                &mut requests,
+                "registry.example.test",
+            )
+            .await
+            .expect("credentials RPC")
+            .expect("credentials present");
+            assert_eq!(credentials.username, "session-user");
+            assert_eq!(credentials.password, "session-secret");
+            drop(requests);
+            server.await.expect("server task");
+            client.await.expect("client task");
+        });
+    }
+
+    #[test]
+    fn buildkit_direct_dockerfile_solve_is_registered() {
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "direct-build".to_string(),
+                session: "session-id".to_string(),
+                frontend: "dockerfile.v0".to_string(),
+                frontend_attrs: HashMap::from([(
+                    "filename".to_string(),
+                    "Dockerfile.custom".to_string(),
+                )]),
+                ..Default::default()
+            })
+            .expect("register direct dockerfile solve");
+
+        assert_eq!(build.request.frontend, "dockerfile.v0");
+        assert_eq!(
+            build.request.frontend_attrs["filename"],
+            "Dockerfile.custom"
+        );
+    }
+
+    #[test]
+    fn buildkit_gateway_waits_for_concurrent_outer_solve_registration() {
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let register_state = state.clone();
+        let register = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            register_state
+                .register_buildkit_solve(SolveRequest {
+                    r#ref: "late-build".to_string(),
+                    ..Default::default()
+                })
+                .expect("register solve");
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let build = runtime
+            .block_on(state.wait_for_buildkit_build("late-build", Duration::from_secs(1)))
+            .expect("wait for solve registration");
+        register.join().expect("registration thread");
+        assert_eq!(build.request.r#ref, "late-build");
+    }
+
+    #[test]
+    fn buildkit_session_registration_allows_health_only_discovery_session() {
+        let headers = HashMap::from([
+            (
+                "x-docker-expose-session-uuid".to_string(),
+                "health-session".to_string(),
+            ),
+            (
+                "x-docker-expose-session-grpc-method".to_string(),
+                "/grpc.health.v1.Health/Check".to_string(),
+            ),
+        ]);
+        let registration = super::parse_buildkit_session_registration(&headers)
+            .expect("health-only sessions are valid until filesync is requested");
+        assert_eq!(registration.uuid, "health-session");
+        assert_eq!(registration.methods.len(), 1);
+    }
+
+    #[test]
+    fn buildkit_filesync_waits_for_concurrent_session_registration() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let register_state = state.clone();
+        let destination = temp.path().join("context");
+        let register = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+            register_state
+                .buildkit_sessions
+                .lock()
+                .expect("session registry")
+                .insert(
+                    "late-session".to_string(),
+                    super::BuildkitSessionHandle {
+                        commands,
+                        methods: Arc::new(HashSet::from([
+                            "/moby.filesync.v1.FileSync/DiffCopy".to_string(),
+                        ])),
+                    },
+                );
+            let command = receiver.blocking_recv().expect("filesync command");
+            match command {
+                super::BuildkitSessionCommand::ReceiveLocal { reply, .. } => {
+                    reply.send(Ok(())).expect("filesync reply");
+                }
+                super::BuildkitSessionCommand::Credentials { .. } => {
+                    panic!("unexpected credentials request")
+                }
+            }
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime
+            .block_on(async {
+                super::receive_buildkit_session_local(
+                    state.as_ref(),
+                    "late-session",
+                    "context",
+                    &destination,
+                    Duration::from_secs(1),
+                )
+                .await
+            })
+            .expect("wait for session registration inside async runtime");
+        register.join().expect("registration thread");
+    }
+
+    #[test]
+    fn buildkit_session_transport_emits_h2_prior_knowledge_and_is_bounded() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (daemon, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let client_thread = std::thread::spawn(move || {
+            client.set_nonblocking(true).expect("nonblocking client");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("client runtime");
+            runtime.block_on(async move {
+                let client = tokio::net::UnixStream::from_std(client).expect("tokio client");
+                let _connection = h2::server::handshake(client)
+                    .await
+                    .expect("daemon must start an h2 prior-knowledge client");
+                ready_tx.send(()).expect("report handshake");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+        });
+
+        let started = std::time::Instant::now();
+        let temp = tempfile::tempdir().expect("state root");
+        let state = std::sync::Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let registration = super::BuildkitSessionRegistration {
+            uuid: "raw-h2-test".to_string(),
+            methods: ["/moby.filesync.v1.FileSync/DiffCopy".to_string()].into_iter().collect(),
+        };
+        super::run_buildkit_session_transport(
+            daemon,
+            state,
+            registration,
+            Duration::from_millis(150),
+        )
+            .expect("bounded idle session");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("h2 handshake completed");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        client_thread.join().expect("client thread");
+    }
+
+    #[test]
+    fn buildkit_filesync_receives_a_fake_client_packet_sequence() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (daemon, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            super::run_buildkit_session_transport(
+                daemon,
+                worker_state,
+                super::BuildkitSessionRegistration {
+                    uuid: "filesync-fixture".to_string(),
+                    methods: ["/moby.filesync.v1.FileSync/DiffCopy".to_string()]
+                        .into_iter()
+                        .collect(),
+                },
+                Duration::from_secs(3),
+            )
+            .expect("session worker");
+        });
+        let server = std::thread::spawn(move || {
+            client.set_nonblocking(true).expect("nonblocking client");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("server runtime");
+            runtime.block_on(async move {
+                let client = tokio::net::UnixStream::from_std(client).expect("tokio client");
+                let mut connection = h2::server::handshake(client).await.expect("h2 server");
+                let (request, mut respond) = connection.accept().await.expect("request").expect("valid request");
+                let handler = tokio::spawn(async move {
+                assert_eq!(request.uri().path(), "/moby.filesync.v1.FileSync/DiffCopy");
+                assert_eq!(request.headers()["dir-name"], "context");
+                let mut incoming = request.into_body();
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .expect("response");
+                let mut outgoing = respond.send_response(response, false).expect("send response");
+                let file = super::FsutilPacket {
+                    packet_type: super::FsutilPacketType::Stat as i32,
+                    stat: Some(super::FsutilStat { path: "hello.txt".to_string(), mode: 0o644, uid: 0, gid: 0, size: 5, mod_time: 0, linkname: String::new() }),
+                    id: 0,
+                    data: Vec::new(),
+                };
+                let end = super::FsutilPacket {
+                    packet_type: super::FsutilPacketType::Stat as i32,
+                    stat: None,
+                    id: 0,
+                    data: Vec::new(),
+                };
+                outgoing.send_data(super::grpc_message(&file), false).expect("file stat");
+                outgoing.send_data(super::grpc_message(&end), false).expect("end stat");
+                let mut buffer = Vec::new();
+                loop {
+                    let data = incoming.data().await.expect("request data").expect("valid data");
+                    buffer.extend_from_slice(&data);
+                    let packets = super::drain_grpc_packets(&mut buffer).expect("request packets");
+                    if packets.iter().any(|packet| packet.packet_type == super::FsutilPacketType::Req as i32) {
+                        break;
+                    }
+                }
+                for data in [b"hello".as_slice(), b"".as_slice()] {
+                    let packet = super::FsutilPacket { packet_type: super::FsutilPacketType::Data as i32, stat: None, id: 0, data: data.to_vec() };
+                    outgoing.send_data(super::grpc_message(&packet), false).expect("file data");
+                }
+                let _ = incoming.data().await;
+                });
+                tokio::pin!(handler);
+                loop {
+                    tokio::select! {
+                        result = &mut handler => { result.expect("stream handler"); break; }
+                        accepted = connection.accept() => {
+                            if accepted.is_none() { break; }
+                        }
+                    }
+                }
+            });
+        });
+
+        for _ in 0..100 {
+            if state.buildkit_sessions.lock().expect("registry").contains_key("filesync-fixture") { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let destination = temp.path().join("received");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("receiver runtime");
+        let receive_result = runtime.block_on(super::receive_buildkit_session_local(
+            state.as_ref(),
+            "filesync-fixture",
+            "context",
+            &destination,
+            Duration::from_secs(2),
+        ));
+        let server_result = server.join();
+        let worker_result = worker.join();
+        receive_result.expect("receive local");
+        server_result.expect("server thread");
+        worker_result.expect("worker thread");
+        assert_eq!(std::fs::read(destination.join("hello.txt")).expect("file"), b"hello");
     }
 
     #[test]

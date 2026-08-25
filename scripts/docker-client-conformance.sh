@@ -7,12 +7,12 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/process-tree-ownership.sh"
 ferro_bin="${FERROCRATE_BIN:-$repo_root/target/debug/ferro-cli}"
 fixture="$repo_root/tests/fixtures/real-app/compose.yml"
-if [[ "${DOCKER_BUILDKIT:-}" == 1 ]]; then
-  output="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.md"
-  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-24-buildkit-fallback.tsv"
-else
+if [[ "${DOCKER_BUILDKIT+x}" != x ]]; then
   output="$repo_root/docs/compatibility/parity-scoreboard.md"
   execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-23-parity-scoreboard.tsv"
+else
+  output="$repo_root/docs/evidence/docker-client-conformance/2026-08-25-classic-builder.md"
+  execution_log="$repo_root/docs/evidence/docker-client-conformance/2026-08-25-classic-builder.tsv"
 fi
 command_timeout="${FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS:-240}"
 daemon_timeout="${FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS:-20}"
@@ -30,9 +30,8 @@ Options:
   -h, --help       Show this help
 
 Required environment:
-  DOCKER_BUILDKIT=0  Run and require the supported classic build row.
-  DOCKER_BUILDKIT=1  Run the same matrix, qualifying the expected BuildKit
-                     compatibility error on the build row only.
+  DOCKER_BUILDKIT unset  Run and require the default BuildKit build row.
+  DOCKER_BUILDKIT=0      Run and require the classic build row.
 
 Optional environment:
   FERROCRATE_BIN                                  ferro-cli executable
@@ -79,9 +78,13 @@ done
   harness_error "FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS must be an integer in 1..600"
 [[ "$daemon_timeout" =~ ^[1-9][0-9]*$ ]] && (( daemon_timeout <= 120 )) ||
   harness_error "FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS must be an integer in 1..120"
-builder_mode="${DOCKER_BUILDKIT:-}"
-[[ "$builder_mode" == 0 || "$builder_mode" == 1 ]] ||
-  harness_error "DOCKER_BUILDKIT must be 0 (classic) or 1 (BuildKit fallback qualification)"
+if [[ "${DOCKER_BUILDKIT+x}" == x ]]; then
+  [[ "$DOCKER_BUILDKIT" == 0 ]] ||
+    harness_error "DOCKER_BUILDKIT must be unset (BuildKit default) or 0 (classic)"
+  builder_mode="classic"
+else
+  builder_mode="buildkit"
+fi
 peer_auth_mode="${FERROCRATE_PEER_AUTH:-pidfd}"
 [[ "$peer_auth_mode" == pidfd || "$peer_auth_mode" == legacy-peercred ]] ||
   harness_error "FERROCRATE_PEER_AUTH must be pidfd or legacy-peercred"
@@ -229,10 +232,14 @@ runtime_dir="$work_root/runtime"
 state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
+failure_context_dir="$work_root/failure-context"
+cold_base_context_dir="$work_root/cold-base-context"
 compose_parity_dir="$work_root/compose-parity"
 outputs_dir="$work_root/outputs"
 cgroup_root="$work_root/cgroup"
-mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$compose_parity_dir/watch-source" "$outputs_dir" "$cgroup_root" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" \
+  "$failure_context_dir" "$cold_base_context_dir" "$compose_parity_dir/watch-source" \
+  "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
 printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
   harness_error "cannot initialize isolated cgroup controller fixture"
@@ -270,6 +277,7 @@ run_id="scoreboard"
 run_prefix="ferrocrate-conformance-$run_id"
 owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
+cold_base_image="$run_prefix-cold-base:latest"
 tagged_image="$run_prefix:tagged"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
@@ -502,9 +510,22 @@ trap 'exit 143' TERM
 cp "$busybox_bin" "$context_dir/busybox" || harness_error "cannot copy $busybox_bin into build fixture"
 chmod 0755 "$context_dir/busybox" || harness_error "cannot make build fixture executable"
 printf 'offline conformance fixture\n' >"$context_dir/marker.txt" || harness_error "cannot write build fixture"
-printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
-  "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+busybox_loader="/lib/ld-musl-$(uname -m).so.1"
+if [[ -f "$busybox_loader" ]]; then
+  mkdir -p "$context_dir/lib" || harness_error "cannot create loader fixture directory"
+  cp -L -- "$busybox_loader" "$context_dir/lib/$(basename "$busybox_loader")" ||
+    harness_error "cannot copy the musl loader into the offline image fixture"
+  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY lib/ /lib/\nRUN ["/bin/busybox", "sh", "-c", "printf buildkit-run-ok > /run-marker.txt"]\nCOPY marker.txt /marker.txt\n' \
+    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+else
+  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nRUN ["/bin/busybox", "sh", "-c", "printf buildkit-run-ok > /run-marker.txt"]\nCOPY marker.txt /marker.txt\n' \
+    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
+fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
+printf 'cold base pull marker\n' >"$cold_base_context_dir/marker.txt" ||
+  harness_error "cannot write cold base build fixture"
+printf 'FROM alpine:3.20\nCOPY marker.txt /cold-base-marker.txt\n' >"$cold_base_context_dir/Dockerfile" ||
+  harness_error "cannot write cold base Dockerfile fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 printf 'initial\n' >"$compose_parity_dir/watch-source/marker.txt" || harness_error "cannot write watch fixture"
 cat >"$compose_parity_dir/compose.yml" <<EOF || harness_error "cannot write Compose parity fixture"
@@ -567,7 +588,7 @@ fail_count=0
 error_count=0
 record_stdin="/dev/null"
 expected_daemon_error_message=""
-record_docker_buildkit=0
+record_docker_buildkit="$builder_mode"
 record_env=()
 
 shell_command() {
@@ -598,9 +619,10 @@ record_command() {
   fi
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" "${record_env[@]}")
+  if [[ "$record_docker_buildkit" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" "${record_env[@]}" \
-        FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
+      "${client_env[@]}" FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
@@ -625,7 +647,7 @@ record_command() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
-  record_docker_buildkit=0
+  record_docker_buildkit="$builder_mode"
   record_env=()
 }
 
@@ -641,12 +663,16 @@ record_command_expect() {
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
   command_text="$(shell_command "$@") [expected stdout: $expected_stdout]"
+  if ((${#record_env[@]})); then
+    command_text="${record_env[*]} $command_text"
+  fi
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" "${record_env[@]}")
+  if [[ "$record_docker_buildkit" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
-      >"$stdout_file" 2>"$stderr_file"; then
+      "${client_env[@]}" FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
+      <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
     exit_code=$?
@@ -665,16 +691,20 @@ record_command_expect() {
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+  record_stdin="/dev/null"
+  record_docker_buildkit="$builder_mode"
+  record_env=()
 }
 
 record_created_container_wait() {
   local starter_pid
+  local -a starter_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then starter_env+=(DOCKER_BUILDKIT=0); fi
   record_command created-container-create container create --name "$created_wait_container" \
     "$image" /bin/busybox true
   (
     sleep 1
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker start "$created_wait_container" >/dev/null 2>&1
+    "${starter_env[@]}" docker start "$created_wait_container" >/dev/null 2>&1
   ) &
   starter_pid=$!
   record_command_expect created-container-wait container 0 0 wait "$created_wait_container"
@@ -695,9 +725,10 @@ record_expected_daemon_error() {
   command_text="$(shell_command "$@") [expected daemon error]"
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$record_docker_buildkit" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
-        FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
+      "${client_env[@]}" FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
@@ -719,7 +750,7 @@ record_expected_daemon_error() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
   expected_daemon_error_message=""
-  record_docker_buildkit=0
+  record_docker_buildkit="$builder_mode"
 }
 
 record_compose_watch_sync() {
@@ -733,9 +764,10 @@ record_compose_watch_sync() {
   (sleep 2; printf 'synced\n' >"$compose_parity_dir/watch-source/marker.txt") &
   modifier_pid=$!
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned 8 3 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        "${compose_client[@]}" --ansi never --project-name "$compose_parity_project" \
+      "${client_env[@]}" "${compose_client[@]}" --ansi never --project-name "$compose_parity_project" \
           --file "$compose_parity_dir/compose.yml" watch --no-up \
       >"$stdout_file" 2>"$stderr_file"; then
     watch_exit=0
@@ -744,8 +776,7 @@ record_compose_watch_sync() {
   fi
   wait "$modifier_pid" 2>/dev/null || true
   if run_bounded_owned 10 3 "$command_token-proof" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker cp "${compose_parity_project}-watcher-1:/marker.txt" \
+      "${client_env[@]}" docker cp "${compose_parity_project}-watcher-1:/marker.txt" \
           "$work_root/watch-proof.txt" \
       >>"$stdout_file" 2>>"$stderr_file" \
       && grep -Fxq synced "$work_root/watch-proof.txt"; then
@@ -805,16 +836,16 @@ record_foreground_output() {
   command_text="docker run --rm alpine:3.20 echo hi && docker run --rm -t alpine:3.20 echo hi [stdout exact]"
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   exit_code=0
   run_bounded_owned "$command_timeout" 5 "$command_token" \
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker run --rm alpine:3.20 echo hi \
+    "${client_env[@]}" docker run --rm alpine:3.20 echo hi \
     >"$stdout_file" 2>"$stderr_file" || exit_code=$?
   if [[ "$exit_code" == 0 && "$(tr -d '\r' <"$stdout_file")" == hi && ! -s "$stderr_file" ]]; then
     tty_output="$work_root/foreground-tty.stdout"
     run_bounded_owned "$command_timeout" 5 "$command_token-tty" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker run --rm -t alpine:3.20 echo hi \
+      "${client_env[@]}" docker run --rm -t alpine:3.20 echo hi \
       >"$tty_output" 2>>"$stderr_file" || exit_code=$?
     [[ "$exit_code" == 0 && "$(tr -d '\r' <"$tty_output")" == hi && ! -s "$stderr_file" ]] || exit_code=1
     printf '\nTTY invocation:\n' >>"$stdout_file"
@@ -844,10 +875,11 @@ record_foreground_stderr() {
   command_text="docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' [stderr exact]"
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   exit_code=0
   run_bounded_owned "$command_timeout" 5 "$command_token" \
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
+    "${client_env[@]}" docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
     >"$stdout_file" 2>"$stderr_file" || exit_code=$?
   [[ "$exit_code" == 0 && ! -s "$stdout_file" && "$(tr -d '\r' <"$stderr_file")" == foreground-error ]] || exit_code=1
   ended="$(date +%s%N)"
@@ -870,22 +902,48 @@ record_command engine-info client info
 
 # Offline image and broad container lifecycle prerequisites. These calls are
 # deliberately unconditional: one failed command must not suppress later rows.
-if [[ "$builder_mode" == 1 ]]; then
-  # The recorded BuildKit probe is expected to reject before producing an
-  # image. Seed the shared lifecycle fixture through the supported reference
-  # path so later, unrelated rows remain independently meaningful.
-  bootstrap_token="$process_token_base-buildkit-classic-bootstrap"
-  if ! run_bounded_owned "$command_timeout" 5 "$bootstrap_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker build --tag "$image" "$context_dir" >/dev/null 2>&1; then
-    harness_error "classic fixture bootstrap failed before BuildKit qualification"
-  fi
-  record_docker_buildkit=1
-  expected_daemon_error_message="BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder"
-  record_expected_daemon_error image-build image build --tag "$image" "$context_dir"
+bootstrap_token="$process_token_base-builder-parity-bootstrap"
+if [[ "$builder_mode" == buildkit ]]; then
+  bootstrap_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0)
 else
-  record_command image-build image build --tag "$image" "$context_dir"
+  bootstrap_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
 fi
+if ! run_bounded_owned "$command_timeout" 5 "$bootstrap_token" \
+    "${bootstrap_env[@]}" docker build --tag "$image" "$context_dir" >/dev/null 2>&1; then
+  harness_error "builder parity bootstrap failed"
+fi
+parity_digest="$(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+  docker image inspect --format '{{.Id}}' "$image")" || harness_error "cannot inspect parity bootstrap image"
+record_command image-build image build --tag "$image" "$context_dir"
+recorded_digest="$(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+  docker image inspect --format '{{.Id}}' "$image")" || harness_error "cannot inspect recorded build image"
+[[ "$recorded_digest" == "$parity_digest" ]] ||
+  harness_error "classic/BuildKit digest mismatch: $parity_digest != $recorded_digest"
+if env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+    docker image inspect alpine:3.20 >/dev/null 2>&1; then
+  harness_error "cold-base fixture unexpectedly found alpine:3.20 in the isolated image store"
+fi
+record_command image-build-cold-base image build --tag "$cold_base_image" "$cold_base_context_dir"
+printf -v cold_base_stderr '%s/%03d.stderr' "$outputs_dir" "$sequence"
+if [[ "$builder_mode" == buildkit ]]; then
+  grep -Fq '[internal] load metadata for docker.io/library/alpine:3.20' "$cold_base_stderr" ||
+    harness_error "cold-base BuildKit build did not emit the metadata vertex"
+fi
+printf 'FROM %s\nRUN ["/bin/busybox", "sh", "-c", "echo buildkit-expected-failure >&2; exit 23"]\n' \
+  "$image" >"$failure_context_dir/Dockerfile" || harness_error "cannot write failing build fixture"
+failure_token="$process_token_base-builder-failure"
+failure_stderr="$work_root/failing-build.stderr"
+if [[ "$builder_mode" == buildkit ]]; then
+  failure_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+else
+  failure_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0)
+fi
+if run_bounded_owned "$command_timeout" 5 "$failure_token" \
+    "${failure_env[@]}" docker build "$failure_context_dir" >/dev/null 2>"$failure_stderr"; then
+  harness_error "failing Dockerfile unexpectedly succeeded"
+fi
+grep -Fq "RUN failed with status" "$failure_stderr" ||
+  harness_error "failing Dockerfile did not preserve the RUN step error"
 record_command image-inspect image image inspect "$image"
 record_command foreground-image-pull image pull alpine:3.20
 record_command_expect detached-run-no-stderr container __NONEMPTY__ 1 run --detach \
@@ -1034,10 +1092,10 @@ record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"
 host_metadata="$(uname -srm)"
-if [[ "$builder_mode" == 0 ]]; then
+if [[ "$builder_mode" == classic ]]; then
   builder_label='`DOCKER_BUILDKIT=0`'
 else
-  builder_label='BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)'
+  builder_label='BuildKit default (`DOCKER_BUILDKIT` unset)'
 fi
 version_token="$process_token_base-version"
 ferro_version="$(run_bounded_owned "$command_timeout" 5 "$version_token" \

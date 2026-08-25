@@ -150,6 +150,36 @@ pub fn prepare_dockerfile_build(
     )
 }
 
+/// Return registry-backed `FROM` references in first-use order.
+///
+/// Scratch stages and references to aliases declared by earlier stages are
+/// build-graph inputs, not registry images, and are deliberately excluded.
+pub fn dockerfile_external_base_images(
+    dockerfile_path: &Path,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    if !dockerfile_path.exists() {
+        return Err(DockerfileBuildError::MissingDockerfile(
+            dockerfile_path.display().to_string(),
+        ));
+    }
+    let stages = parse_stages(&fs::read_to_string(dockerfile_path)?)?;
+    let mut aliases = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut bases = Vec::new();
+    for stage in stages {
+        if !stage.base.eq_ignore_ascii_case("scratch")
+            && !aliases.contains(&stage.base)
+            && seen.insert(stage.base.clone())
+        {
+            bases.push(stage.base.clone());
+        }
+        if let Some(name) = stage.name {
+            aliases.insert(name);
+        }
+    }
+    Ok(bases)
+}
+
 pub fn prepare_dockerfile_build_with_contexts(
     dockerfile_path: &Path,
     tag: Option<&str>,
@@ -5860,18 +5890,18 @@ mod tests {
         apply_onbuild_triggers, build_cache_key, build_cache_path,
         build_from_dockerfile_with_store_and_compression, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
-        dockerignore_matches, export_build_cache, export_build_cache_to_registry,
-        file_matches_digest, import_build_cache, import_build_cache_from_registry, layer_blob_path,
-        load_build_cache, load_build_journal, load_stage_checkpoints, parse_env,
-        parse_exposed_ports, parse_healthcheck, parse_labels, parse_limit_value, parse_maintainer,
-        parse_onbuild, parse_run, parse_stages, parse_stop_signal, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner,
-        run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
-        stage_checkpoint_path, stage_content_identities, validate_mount_target, BaseImageInfo,
-        BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits, CacheSharing, CopyOwner,
-        DockerfileBuildError, BUILD_CACHE_PLATFORM, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION,
+        dockerfile_external_base_images, dockerignore_matches, export_build_cache,
+        export_build_cache_to_registry, file_matches_digest, import_build_cache,
+        import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
+        load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
+        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
+        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
+        prune_build_cache, registry_cache_descriptor, registry_cache_reference,
+        reject_cache_path_symlinks, resolve_copy_owner, run_stage_worker_pool, save_build_cache,
+        save_build_journal, sha256_digest_bytes, stage_checkpoint_path, stage_content_identities,
+        validate_mount_target, BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournalState,
+        BuildLimits, CacheSharing, CopyOwner, DockerfileBuildError, BUILD_CACHE_PLATFORM,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use sha2::Digest;
     use std::collections::HashMap;
@@ -5880,6 +5910,22 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn dockerfile_external_bases_exclude_scratch_and_prior_stage_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            "FROM alpine:3.20 AS base\nFROM base AS packaged\nFROM registry.example/app:1\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            dockerfile_external_base_images(&dockerfile).unwrap(),
+            vec!["alpine:3.20", "registry.example/app:1"]
+        );
+    }
 
     #[test]
     fn build_scratch_is_scoped_to_runtime_directory() {

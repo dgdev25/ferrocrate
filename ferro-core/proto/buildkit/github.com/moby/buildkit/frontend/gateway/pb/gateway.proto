@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package moby.buildkit.v1.frontend;
+
+option go_package = "github.com/moby/buildkit/frontend/gateway/pb;moby_buildkit_v1_frontend";
+
+import "github.com/moby/buildkit/api/types/worker.proto";
+import "github.com/moby/buildkit/solver/pb/ops.proto";
+import "github.com/moby/buildkit/sourcepolicy/pb/policy.proto";
+import "github.com/moby/buildkit/util/apicaps/pb/caps.proto";
+import "google/rpc/status.proto";
+
+// This is the callback subset used by BuildKit's Client.Build gateway
+// forwarder. Field numbers match moby/buildkit v0.32.2.
+service LLBBridge {
+  rpc Solve(SolveRequest) returns (SolveResponse);
+  rpc Ping(PingRequest) returns (PongResponse);
+  rpc Return(ReturnRequest) returns (ReturnResponse);
+}
+
+message Result {
+  oneof result {
+    string refDeprecated = 1;
+    RefMapDeprecated refsDeprecated = 2;
+    Ref ref = 3;
+    RefMap refs = 4;
+  }
+  map<string, bytes> metadata = 10;
+  map<string, Attestations> attestations = 12;
+}
+
+message RefMapDeprecated { map<string, string> refs = 1; }
+message Ref { string id = 1; pb.Definition def = 2; }
+message RefMap { map<string, Ref> refs = 1; }
+message Attestations { repeated Attestation attestation = 1; }
+message Attestation {
+  int32 kind = 1;
+  map<string, bytes> metadata = 2;
+  Ref ref = 3;
+  string path = 4;
+  string inTotoPredicateType = 5;
+  repeated InTotoSubject inTotoSubjects = 6;
+}
+message InTotoSubject { int32 kind = 1; repeated string digest = 2; string name = 3; }
+
+message ReturnRequest { Result result = 1; google.rpc.Status error = 2; }
+message ReturnResponse {}
+
+message SolveRequest {
+  pb.Definition Definition = 1;
+  string Frontend = 2;
+  map<string, string> FrontendOpt = 3;
+  bool allowResultReturn = 5;
+  bool allowResultArrayRef = 6;
+  bool Final = 10;
+  bytes ExporterAttr = 11;
+  repeated CacheOptionsEntry CacheImports = 12;
+  map<string, pb.Definition> FrontendInputs = 13;
+  bool Evaluate = 14;
+  repeated moby.buildkit.v1.sourcepolicy.Policy SourcePolicies = 15;
+}
+message CacheOptionsEntry { string Type = 1; map<string, string> Attrs = 2; }
+message SolveResponse { string ref = 1; Result result = 3; }
+
+message PingRequest {}
+message PongResponse {
+  repeated moby.buildkit.v1.apicaps.APICap FrontendAPICaps = 1;
+  repeated moby.buildkit.v1.apicaps.APICap LLBCaps = 2;
+  repeated moby.buildkit.v1.types.WorkerRecord Workers = 3;
+}

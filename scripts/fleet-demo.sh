@@ -8,6 +8,7 @@ state_root="${FLEET_DEMO_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ferroc
 guest_name="${FLEET_DEMO_GUEST_NAME:-ferro-ubuntu-01}"
 guest_user="${FLEET_DEMO_GUEST_USER:-lyle}"
 guest_host="${FLEET_DEMO_GUEST_HOST:-192.168.122.9}"
+guest_manager_host="${FLEET_DEMO_GUEST_MANAGER_HOST:-192.168.122.1}"
 arm_user="${FLEET_DEMO_ARM_USER:-ubuntu}"
 arm_host="${FLEET_DEMO_ARM_HOST:-132.145.25.108}"
 arm_repo="${FLEET_DEMO_ARM_REPO:-~/ferrocrate-fleet}"
@@ -198,9 +199,9 @@ enroll_guest() {
     local enrollment; enrollment="$(issue_token "$token" lab-x86 "$guest_host")"
     guest_ssh "mkdir -p \$HOME/$remote_state; chmod 700 \$HOME/$remote_state"
     scp -q "$state_root/pki/node-ca.pem" "${guest_user}@${guest_host}:/var/tmp/fleet-node-ca.pem"
-    guest_ssh "/var/tmp/ferro-agent enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
+    guest_ssh "/var/tmp/ferro-agent enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_manager_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
   fi
-  guest_ssh "pkill -f '/var/tmp/ferro-agent fleet --node-id lab-x86' || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 &"
+  guest_ssh "pkill -f '/var/tmp/ferro-agent fleet --node-id lab-x86' || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_manager_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 &"
 }
 
 enroll_arm() {

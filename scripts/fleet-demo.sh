@@ -107,7 +107,7 @@ start_manager() {
   note "starting ferro-mgr"
   local manager_signing
   manager_signing="$(base64 -w0 "$state_root/pki/manager-signing.key")"
-  env \
+  setsid env \
     FERROCRATE_CLUSTER_ID="$cluster_id" \
     FERROCRATE_MANAGER_SIGNING_KEY="$manager_signing" \
     FERROCRATE_MANAGER_ADDR=0.0.0.0:55051 \
@@ -139,7 +139,7 @@ start_ui() {
     stop_pid "$state_root/pids/ui" 'Fleet UI' || die "Fleet UI did not stop before restart"
   fi
   note "starting Fleet browser UI"
-  env FERROCRATE_CLUSTER_ID="$cluster_id" \
+  setsid env FERROCRATE_CLUSTER_ID="$cluster_id" \
     nohup "$repo_root/target/release/ferro-mgr" fleet-ui --listen "$ui_addr" --insecure-loopback \
       --admin-endpoint https://127.0.0.1:55052 --admin-domain localhost \
       --admin-server-ca "$state_root/pki/node-ca.pem" \
@@ -252,7 +252,7 @@ print_logins() {
 }
 
 up() {
-  require cargo; require curl; require jq; require openssl; require ssh; require scp; require git
+  require cargo; require curl; require jq; require openssl; require ssh; require scp; require git; require setsid
   ensure_layout; create_pki; build_local; start_manager; ensure_guest; prepare_arm_repo; start_reverse_forwards; start_ui
   local token; token="$(operate_session)"
   enroll_guest "$token"; enroll_arm "$token"; wait_connected; print_logins

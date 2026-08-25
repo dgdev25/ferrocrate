@@ -21,6 +21,7 @@ grep -Fq 'FERROCRATE_RUNTIME_DIR=\$HOME/$arm_state/runtime' "$script"
 # TTL has elapsed instead of printing a URL that cannot be logged into.
 grep -Fq 'Fleet UI login expired; restarting it' "$script"
 grep -Fq 'wait_for_pid_exit' "$script"
+grep -Fq 'setsid env' "$script"
 
 # Re-runs keep the already staged matching guest binaries.  The guest has a
 # deliberately small disk, so copying a byte-identical release again is both

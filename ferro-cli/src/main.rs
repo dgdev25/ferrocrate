@@ -2626,13 +2626,13 @@ fn handle_doctor(
         message: if lan_enabled {
             format!(
                 "LAN image mirror enabled (peers={lan_peers}, auth={})",
-                if lan_config.lan_mirror_secret.is_some() { "shared-secret" } else { "none" }
+                if lan_config.lan_mirror_secret.is_some() { "challenge-response HMAC-SHA256" } else { "none" }
             )
         } else {
             "LAN image mirror disabled (default)".to_string()
         },
         hint: lan_enabled.then_some(
-            "listener is restricted to the configured private LAN address".to_string(),
+            "listener is restricted to the configured private LAN address; configured secrets are never transmitted".to_string(),
         ),
         remediated: false,
         action: None,
@@ -17271,6 +17271,7 @@ fn start_lan_mirror_server(
     let serving_instance_id = instance_id.clone();
     let runtime_dir = runtime_dir.to_path_buf();
     let secret = secret.map(str::to_owned);
+    let nonces = Arc::new(std::sync::Mutex::new(ferro_core::lan_mirror::MirrorNonceStore::default()));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { break };
@@ -17279,8 +17280,9 @@ fn start_lan_mirror_server(
             let secret = secret.clone();
             let instance_id = serving_instance_id.clone();
             let advertised_digests = advertised_digests.clone();
+            let nonces = nonces.clone();
             std::thread::spawn(move || {
-                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref(), &instance_id, &advertised_digests) {
+                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref(), &nonces, &instance_id, &advertised_digests) {
                     tracing::debug!(%error, "lan mirror request rejected");
                 }
             });
@@ -17296,6 +17298,7 @@ fn handle_lan_mirror_connection(
     runtime_dir: &Path,
     store: &LocalImageStore,
     secret: Option<&str>,
+    nonces: &std::sync::Mutex<ferro_core::lan_mirror::MirrorNonceStore>,
     instance_id: &str,
     advertised_digests: &str,
 ) -> Result<(), String> {
@@ -17317,17 +17320,32 @@ fn handle_lan_mirror_connection(
         return Ok(());
     }
     let path = parts.next().unwrap_or("/");
-    if let Some(expected) = secret {
-        let supplied = lines.find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("x-ferrocrate-mirror-secret")).map(|(_, value)| value.trim()));
-        if supplied != Some(expected) {
-            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+    let headers = lines.filter_map(|line| line.split_once(':')).map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim())).collect::<std::collections::BTreeMap<_, _>>();
+    if path == "/lan/v1/challenge" {
+        let Some(secret) = secret else {
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
             return Ok(());
-        }
+        };
+        let nonce = nonces.lock().map_err(|_| "lan mirror: nonce store poisoned".to_string())?.issue();
+        let proof = ferro_core::lan_mirror::mirror_peer_proof(secret, &nonce);
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: no-store\r\nX-Ferrocrate-Mirror-Nonce: {nonce}\r\nX-Ferrocrate-Mirror-Proof: {proof}\r\n\r\n");
+        stream.write_all(response.as_bytes()).map_err(|error| error.to_string())?;
+        return Ok(());
     }
     if path == "/v2/" {
         let header = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Ferrocrate-Instance: {instance_id}\r\nX-Ferrocrate-Digests: {advertised_digests}\r\n\r\n");
         stream.write_all(header.as_bytes()).map_err(|error| error.to_string())?;
         return Ok(());
+    }
+    if let Some(expected) = secret {
+        let nonce = headers.get("x-ferrocrate-mirror-nonce").copied().unwrap_or("");
+        let supplied = headers.get("x-ferrocrate-mirror-auth").copied().unwrap_or("");
+        let request_digest = path.rsplit('/').next().unwrap_or("");
+        if !nonces.lock().map_err(|_| "lan mirror: nonce store poisoned".to_string())?
+            .verify_and_consume(expected, nonce, request_digest, supplied) {
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+            return Ok(());
+        }
     }
     let (body, content_type) = if let Some((name, reference)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/manifests/")) {
         let record = store.list_references().map_err(|error| error.to_string())?.into_iter().find(|record| {

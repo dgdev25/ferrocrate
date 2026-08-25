@@ -1,11 +1,108 @@
 //! Opt-in LAN image mirror discovery and integrity helpers.
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 pub const SERVICE_TYPE: &str = "_ferrocrate-registry._tcp.local.";
+const MIRROR_NONCE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+pub struct MirrorNonceStore {
+    issued: HashMap<String, Instant>,
+}
+
+impl MirrorNonceStore {
+    pub fn issue(&mut self) -> String {
+        self.issue_at(Instant::now())
+    }
+
+    fn issue_at(&mut self, now: Instant) -> String {
+        self.issued.retain(|_, issued| now.duration_since(*issued) <= MIRROR_NONCE_TTL);
+        let nonce = hex::encode(rand::random::<[u8; 32]>());
+        self.issued.insert(nonce.clone(), now);
+        nonce
+    }
+
+    pub fn verify_and_consume(
+        &mut self,
+        secret: &str,
+        nonce: &str,
+        digest: &str,
+        supplied_auth: &str,
+    ) -> bool {
+        self.verify_and_consume_at(secret, nonce, digest, supplied_auth, Instant::now())
+    }
+
+    fn verify_and_consume_at(
+        &mut self,
+        secret: &str,
+        nonce: &str,
+        digest: &str,
+        supplied_auth: &str,
+        now: Instant,
+    ) -> bool {
+        let Some(issued) = self.issued.remove(nonce) else { return false };
+        if now.duration_since(issued) > MIRROR_NONCE_TTL { return false; }
+        constant_time_eq(
+            mirror_request_auth(secret, nonce, digest).as_bytes(),
+            supplied_auth.as_bytes(),
+        )
+    }
+}
+
+pub fn mirror_request_auth(secret: &str, nonce: &str, digest: &str) -> String {
+    let mut message = Vec::with_capacity(nonce.len() + digest.len());
+    message.extend_from_slice(nonce.as_bytes());
+    message.extend_from_slice(digest.as_bytes());
+    hex::encode(hmac_sha256(secret.as_bytes(), &message))
+}
+
+pub fn mirror_peer_proof(secret: &str, nonce: &str) -> String {
+    let mut message = Vec::with_capacity(4 + nonce.len());
+    message.extend_from_slice(b"peer");
+    message.extend_from_slice(nonce.as_bytes());
+    hex::encode(hmac_sha256(secret.as_bytes(), &message))
+}
+
+pub fn verify_peer_proof(secret: &str, nonce: &str, supplied: Option<&str>) -> bool {
+    supplied.is_some_and(|proof| {
+        constant_time_eq(mirror_peer_proof(secret, nonce).as_bytes(), proof.as_bytes())
+    })
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut normalized = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_key = [0x36u8; BLOCK];
+    let mut outer_key = [0x5cu8; BLOCK];
+    for index in 0..BLOCK {
+        inner_key[index] ^= normalized[index];
+        outer_key[index] ^= normalized[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= usize::from(left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0));
+    }
+    difference == 0
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerAdvertisement {
@@ -298,5 +395,43 @@ mod tests {
             discovery_summary(Duration::from_millis(5000), 0, true),
             "lan mirror: browsed 5000 ms, 0 peers; unicast /24 probe attempted"
         );
+    }
+
+    #[test]
+    fn mirror_auth_rejects_wrong_secret_and_consumes_nonce() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut nonces = MirrorNonceStore::default();
+        let nonce = nonces.issue_at(Instant::now());
+        let wrong = mirror_request_auth("wrong", &nonce, &digest);
+        assert!(!nonces.verify_and_consume_at("right", &nonce, &digest, &wrong, Instant::now()));
+        let nonce = nonces.issue_at(Instant::now());
+        let right = mirror_request_auth("right", &nonce, &digest);
+        assert!(nonces.verify_and_consume_at("right", &nonce, &digest, &right, Instant::now()));
+        assert!(!nonces.verify_and_consume_at("right", &nonce, &digest, &right, Instant::now()));
+    }
+
+    #[test]
+    fn mirror_auth_rejects_expired_nonce() {
+        let issued = Instant::now();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let mut nonces = MirrorNonceStore::default();
+        let nonce = nonces.issue_at(issued);
+        let auth = mirror_request_auth("secret", &nonce, &digest);
+        assert!(!nonces.verify_and_consume_at(
+            "secret",
+            &nonce,
+            &digest,
+            &auth,
+            issued + Duration::from_secs(31),
+        ));
+    }
+
+    #[test]
+    fn client_rejects_missing_or_invalid_peer_proof() {
+        let nonce = "00".repeat(32);
+        assert!(!verify_peer_proof("secret", &nonce, None));
+        assert!(!verify_peer_proof("secret", &nonce, Some(&"00".repeat(32))));
+        let proof = mirror_peer_proof("secret", &nonce);
+        assert!(verify_peer_proof("secret", &nonce, Some(&proof)));
     }
 }

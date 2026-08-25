@@ -23,6 +23,7 @@ grep -Fq 'Fleet UI login expired; restarting it' "$script"
 grep -Fq 'wait_for_pid_exit' "$script"
 grep -Fq 'setsid env' "$script"
 grep -Fq 'kill -- "-$pid"' "$script"
+grep -Fq 'kill -KILL -- "-$pid"' "$script"
 grep -Fq 'fleet/refresh-login' "$script"
 
 # Re-runs keep the already staged matching guest binaries.  The guest has a

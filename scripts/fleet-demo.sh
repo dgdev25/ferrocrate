@@ -306,7 +306,11 @@ stop_pid() {
   if pid_alive "$path"; then
     local pid; pid="$(<"$path")"
     kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-    wait_for_pid_exit "$path" "$label" || return
+    if ! wait_for_pid_exit "$path" "$label"; then
+      note "forcing $label to stop"
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      wait_for_pid_exit "$path" "$label" || return
+    fi
   fi
   rm -f "$path"
   note "stopped $label"

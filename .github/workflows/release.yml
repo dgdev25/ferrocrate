@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - { runner: [self-hosted, linux, ferro-lab], target: x86_64-unknown-linux-gnu, target_os: linux, arch: x86_64 }
-          - { runner: [self-hosted, linux, ferro-lab], target: aarch64-unknown-linux-gnu, target_os: linux, arch: aarch64 }
+          - { runner: [self-hosted, linux, arm64, ferro-lab], target: aarch64-unknown-linux-gnu, target_os: linux, arch: aarch64 }
           - { runner: [self-hosted, macos, ferro-lab], target: x86_64-apple-darwin, target_os: macos, arch: x86_64 }
           - { runner: [self-hosted, macos, ferro-lab], target: aarch64-apple-darwin, target_os: macos, arch: aarch64 }
           - { runner: [self-hosted, windows, ferro-lab], target: x86_64-pc-windows-msvc, target_os: windows, arch: x86_64 }
@@ -23,9 +23,6 @@ jobs:
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && rustup target add ${{ matrix.target }}
-      - name: Linux ARM linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: which aarch64-linux-gnu-gcc
       - name: Build archive, checksum, provenance, and Linux deb
         shell: bash
         env:

@@ -9,6 +9,7 @@ import {
   FLEET_SECTIONS,
   fleetContainerRows,
   fleetHostState,
+  isFleetSessionExpired,
   normalizeFleetSnapshot,
   shouldShowFleetRefreshError,
 } from "./fleetView.mjs";
@@ -100,7 +101,14 @@ export function FleetApp(): JSX.Element {
         setDeployHosts(next.hosts.filter((host: FleetHost) => host.connected).map((host: FleetHost) => host.node_id));
       }
     } catch (nextError) {
-      if (shouldShowFleetRefreshError(role)) setError(String(nextError));
+      if (isFleetSessionExpired(nextError)) {
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(ROLE_KEY);
+        setRole(null);
+        setError("Session expired — sign in again");
+      } else if (shouldShowFleetRefreshError(role)) {
+        setError(String(nextError));
+      }
       setSnapshot(null);
     } finally {
       setLoading(false);

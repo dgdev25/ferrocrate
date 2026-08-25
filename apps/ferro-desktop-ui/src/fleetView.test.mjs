@@ -6,6 +6,7 @@ import {
   chooseRunHost,
   fleetContainerRows,
   fleetHostState,
+  isFleetSessionExpired,
   normalizeFleetSnapshot,
   shouldShowFleetRefreshError,
 } from "./fleetView.mjs";
@@ -57,6 +58,12 @@ test("malformed fleet snapshot fails closed to empty lists", () => {
     hosts: [],
     deploys: [],
   });
+});
+
+test("expired snapshot authorization is recognized without masking other refresh errors", () => {
+  assert.equal(isFleetSessionExpired("Error: command get_fleet_snapshot failed (HTTP 401)"), true);
+  assert.equal(isFleetSessionExpired("Error: command fleet_command failed (HTTP 401)"), false);
+  assert.equal(isFleetSessionExpired("Error: command get_fleet_snapshot failed (HTTP 502)"), false);
 });
 
 test("fleet refresh preserves an explicitly selected connected run host", () => {

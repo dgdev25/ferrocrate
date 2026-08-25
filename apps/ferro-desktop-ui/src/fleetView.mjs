@@ -12,6 +12,10 @@ export function shouldShowFleetRefreshError(role) {
   return role === "view" || role === "operate";
 }
 
+export function isFleetSessionExpired(error) {
+  return /command get_fleet_snapshot failed \(HTTP 401\)/i.test(String(error));
+}
+
 export function normalizeFleetSnapshot(value) {
   if (!value || typeof value !== "object") {
     return { cluster_epoch: 0, hosts: [], deploys: [] };

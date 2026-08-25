@@ -1,0 +1,10 @@
+BuildKit protocol files auth.proto and filesync.proto are derived from
+github.com/moby/buildkit and are licensed under Apache License 2.0. A copy of
+that license is at https://www.apache.org/licenses/LICENSE-2.0.
+
+fsutil protocol files wire.proto and stat.proto are derived from
+github.com/tonistiigi/fsutil, Copyright 2017 Tonis Tiigi, and are licensed
+under the MIT License: permission is granted, free of charge, to any person
+obtaining a copy to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies, subject to inclusion of the copyright and permission
+notice. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

@@ -33,7 +33,9 @@ caps = { workspace = true }
 nix = { workspace = true }
 h2 = "0.4"
 http = "1"
-tokio = { version = "1", features = ["io-util", "net", "rt", "time"] }
+bytes = "1"
+prost = "0.14"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }

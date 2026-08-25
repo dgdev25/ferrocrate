@@ -43,6 +43,8 @@ use self::network_lifecycle::{
 };
 #[cfg(target_os = "linux")]
 use base64::Engine;
+#[cfg(target_os = "linux")]
+use bytes::Bytes;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 #[cfg(target_os = "linux")]
@@ -112,6 +114,8 @@ use flate2::{write::GzEncoder, Compression};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use owo_colors::OwoColorize;
+#[cfg(target_os = "linux")]
+use prost::Message;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
@@ -16229,6 +16233,63 @@ fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone)]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+struct BuildkitSessionHandle {
+    commands: tokio::sync::mpsc::Sender<BuildkitSessionCommand>,
+    methods: Arc<HashSet<String>>,
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitSessionRegistration {
+    uuid: String,
+    methods: HashSet<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+enum BuildkitSessionCommand {
+    ReceiveLocal {
+        name: String,
+        destination: PathBuf,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
+fn receive_buildkit_session_local(
+    state: &DockerCompatState,
+    uuid: &str,
+    name: &str,
+    destination: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let session = state
+        .buildkit_sessions
+        .lock()
+        .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+        .get(uuid)
+        .cloned()
+        .ok_or_else(|| format!("buildkit session: unknown or expired session {uuid}"))?;
+    if !session.methods.contains("/moby.filesync.v1.FileSync/DiffCopy") {
+        return Err("buildkit session: FileSync.DiffCopy was not exposed".to_string());
+    }
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    session
+        .commands
+        .blocking_send(BuildkitSessionCommand::ReceiveLocal {
+            name: name.to_string(),
+            destination: destination.to_path_buf(),
+            reply: reply_tx,
+        })
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    reply_rx
+        .recv_timeout(timeout)
+        .map_err(|_| "buildkit session: filesync timed out".to_string())?
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
@@ -16236,6 +16297,7 @@ struct DockerCompatState {
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     events: Mutex<DockerEventStore>,
+    buildkit_sessions: Mutex<HashMap<String, BuildkitSessionHandle>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16285,6 +16347,7 @@ impl DockerCompatState {
             name_store,
             execs: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
+            buildkit_sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -17213,7 +17276,7 @@ fn handle_docker_compat_connection(
     let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_session = None;
-    let mut buildkit_session_hijack = false;
+    let mut buildkit_session_hijack: Option<BuildkitSessionRegistration> = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
@@ -19013,7 +19076,7 @@ fn handle_docker_compat_connection(
                 http_response(200, &body, "application/json")
             }
             ("POST", "/session") => {
-                buildkit_session_hijack = true;
+                buildkit_session_hijack = Some(parse_buildkit_session_registration(&request.headers)?);
                 docker_buildkit_session_hijack_headers()
             }
             ("POST", "/build") => {
@@ -19630,8 +19693,13 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
-    if buildkit_session_hijack {
-        return run_buildkit_session_transport(stream, Duration::from_secs(30 * 60));
+    if let Some(registration) = buildkit_session_hijack {
+        return run_buildkit_session_transport(
+            stream,
+            state,
+            registration,
+            Duration::from_secs(30 * 60),
+        );
     }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
@@ -21789,7 +21857,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
 
     let mut content_length = 0usize;
     let mut chunked = false;
-    let mut headers = HashMap::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     for line in lines {
         if line.contains('\0') {
             return Err("docker: invalid request header".to_string());
@@ -21800,7 +21868,17 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
         if let Some((key, value)) = line.split_once(':') {
             let normalized_key = key.trim().to_ascii_lowercase();
             let normalized_value = value.trim().to_string();
-            headers.insert(normalized_key.clone(), normalized_value.clone());
+            if normalized_key == "x-docker-expose-session-grpc-method" {
+                headers
+                    .entry(normalized_key.clone())
+                    .and_modify(|current| {
+                        current.push('\n');
+                        current.push_str(&normalized_value);
+                    })
+                    .or_insert_with(|| normalized_value.clone());
+            } else {
+                headers.insert(normalized_key.clone(), normalized_value.clone());
+            }
             if normalized_key == "content-length" {
                 content_length = normalized_value
                     .trim()
@@ -21938,11 +22016,119 @@ fn docker_buildkit_session_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
 }
 
+#[cfg(target_os = "linux")]
+fn parse_buildkit_session_registration(
+    headers: &HashMap<String, String>,
+) -> Result<BuildkitSessionRegistration, String> {
+    let uuid = headers
+        .get("x-docker-expose-session-uuid")
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "buildkit session: missing valid session UUID".to_string())?
+        .to_owned();
+    if !uuid
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("buildkit session: invalid session UUID".to_string());
+    }
+    let methods = headers
+        .get("x-docker-expose-session-grpc-method")
+        .into_iter()
+        .flat_map(|values| values.lines())
+        .filter(|value| value.starts_with('/') && value.len() <= 256)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    if !methods.contains("/moby.filesync.v1.FileSync/DiffCopy") {
+        return Err("buildkit session: client does not expose FileSync.DiffCopy".to_string());
+    }
+    Ok(BuildkitSessionRegistration { uuid, methods })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct FsutilStat {
+    #[prost(string, tag = "1")]
+    path: String,
+    #[prost(uint32, tag = "2")]
+    mode: u32,
+    #[prost(uint32, tag = "3")]
+    uid: u32,
+    #[prost(uint32, tag = "4")]
+    gid: u32,
+    #[prost(int64, tag = "5")]
+    size: i64,
+    #[prost(int64, tag = "6")]
+    mod_time: i64,
+    #[prost(string, tag = "7")]
+    linkname: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct FsutilPacket {
+    #[prost(enumeration = "FsutilPacketType", tag = "1")]
+    packet_type: i32,
+    #[prost(message, optional, tag = "2")]
+    stat: Option<FsutilStat>,
+    #[prost(uint32, tag = "3")]
+    id: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    data: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+enum FsutilPacketType {
+    Stat = 0,
+    Req = 1,
+    Data = 2,
+    Fin = 3,
+    Err = 4,
+}
+
+#[cfg(target_os = "linux")]
+fn grpc_message<M: Message>(message: &M) -> Bytes {
+    let payload = message.encode_to_vec();
+    let mut framed = Vec::with_capacity(payload.len() + 5);
+    framed.push(0);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
+    Bytes::from(framed)
+}
+
+#[cfg(target_os = "linux")]
+fn drain_grpc_packets(buffer: &mut Vec<u8>) -> Result<Vec<FsutilPacket>, String> {
+    let mut packets = Vec::new();
+    while buffer.len() >= 5 {
+        if buffer[0] != 0 {
+            return Err("buildkit filesync: compressed gRPC messages are unsupported".to_string());
+        }
+        let size = u32::from_be_bytes(buffer[1..5].try_into().expect("fixed frame prefix")) as usize;
+        if size > 16 * 1024 * 1024 {
+            return Err("buildkit filesync: packet exceeds transfer limit".to_string());
+        }
+        if buffer.len() < size + 5 {
+            break;
+        }
+        let packet = FsutilPacket::decode(&buffer[5..5 + size])
+            .map_err(|error| format!("buildkit filesync: invalid packet: {error}"))?;
+        buffer.drain(..5 + size);
+        packets.push(packet);
+    }
+    Ok(packets)
+}
+
 /// Switch an authenticated, hijacked Docker session socket into the daemon's
 /// HTTP/2 client role. BuildKit deliberately reverses the usual RPC direction:
 /// the Docker CLI hosts the gRPC services and FerroCrate calls them.
 #[cfg(target_os = "linux")]
-fn run_buildkit_session_transport(stream: UnixStream, lifetime: Duration) -> Result<(), String> {
+fn run_buildkit_session_transport(
+    stream: UnixStream,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String> {
     stream
         .set_nonblocking(true)
         .map_err(|error| format!("buildkit session: set nonblocking failed: {error}"))?;
@@ -21955,16 +22141,174 @@ fn run_buildkit_session_transport(stream: UnixStream, lifetime: Duration) -> Res
         let stream = tokio::net::UnixStream::from_std(stream)
             .map_err(|error| format!("buildkit session: socket handoff failed: {error}"))?;
         let handshake = h2::client::handshake(stream);
-        let (_requests, connection) = tokio::time::timeout(lifetime, handshake)
+        let (requests, connection) = tokio::time::timeout(lifetime, handshake)
             .await
             .map_err(|_| "buildkit session: h2 handshake timed out".to_string())?
             .map_err(|error| format!("buildkit session: h2 handshake failed: {error}"))?;
-        match tokio::time::timeout(lifetime, connection).await {
-            Ok(Ok(())) | Err(_) => Ok(()),
-            Ok(Err(error)) if error.is_io() || error.is_go_away() || error.is_reset() => Ok(()),
-            Ok(Err(error)) => Err(format!("buildkit session: h2 connection failed: {error}")),
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(8);
+        let handle = BuildkitSessionHandle {
+            commands: command_tx,
+            methods: Arc::new(registration.methods),
+        };
+        state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .insert(registration.uuid.clone(), handle);
+        let result = tokio::time::timeout(lifetime, async move {
+            let mut requests = requests;
+            let connection_task = tokio::spawn(async move {
+                match connection.await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.is_io() || error.is_go_away() || error.is_reset() => Ok(()),
+                    Err(error) => Err(format!("buildkit session: h2 connection failed: {error}")),
+                }
+            });
+            tokio::pin!(connection_task);
+            loop {
+                tokio::select! {
+                    connection_result = &mut connection_task => {
+                        return connection_result
+                            .map_err(|error| format!("buildkit session: connection task failed: {error}"))?;
+                    }
+                    command = command_rx.recv() => {
+                        let Some(command) = command else { return Ok(()); };
+                        match command {
+                            BuildkitSessionCommand::ReceiveLocal { name, destination, reply } => {
+                                let result = receive_buildkit_local(&mut requests, &name, &destination).await;
+                                let _ = reply.send(result);
+                            }
+                        }
+                    }
+                }
+            }
+        }).await;
+        state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .remove(&registration.uuid);
+        match result {
+            Ok(result) => result,
+            Err(_) => Ok(()),
         }
     })
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_buildkit_local(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    name: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    const MODE_DIR: u32 = 1 << 31;
+    const MODE_SYMLINK: u32 = 1 << 27;
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/moby.filesync.v1.FileSync/DiffCopy")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("dir-name", name)
+        .body(())
+        .map_err(|error| format!("buildkit filesync: request failed: {error}"))?;
+    let mut ready_requests = requests
+        .clone()
+        .ready()
+        .await
+        .map_err(|error| format!("buildkit filesync: h2 client unavailable: {error}"))?;
+    let (response, mut outgoing) = ready_requests
+        .send_request(request, false)
+        .map_err(|error| format!("buildkit filesync: start RPC failed: {error}"))?;
+    let mut incoming = response
+        .await
+        .map_err(|error| format!("buildkit filesync: response failed: {error}"))?
+        .into_body();
+    let limits = TransferArchiveLimits::default();
+    let mut frame_buffer = Vec::new();
+    let mut stats: Vec<FsutilStat> = Vec::new();
+    let mut listing_done = false;
+    let mut open_files: HashMap<u32, (std::fs::File, u64, u64)> = HashMap::new();
+    let mut file_count = 0usize;
+    let mut total_size = 0u64;
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("buildkit filesync: create staging directory: {error}"))?;
+    while let Some(chunk) = incoming.data().await {
+        let chunk = chunk.map_err(|error| format!("buildkit filesync: receive failed: {error}"))?;
+        incoming
+            .flow_control()
+            .release_capacity(chunk.len())
+            .map_err(|error| format!("buildkit filesync: flow control failed: {error}"))?;
+        frame_buffer.extend_from_slice(&chunk);
+        for packet in drain_grpc_packets(&mut frame_buffer)? {
+            match FsutilPacketType::try_from(packet.packet_type).ok() {
+                Some(FsutilPacketType::Stat) if !listing_done => {
+                    let stat = packet.stat.ok_or_else(|| "buildkit filesync: STAT missing metadata".to_string())?;
+                    if stat.path.is_empty() {
+                        listing_done = true;
+                        for (id, stat) in stats.iter().enumerate() {
+                            if stat.mode & MODE_DIR != 0 { continue; }
+                            let request = FsutilPacket { packet_type: FsutilPacketType::Req as i32, stat: None, id: id as u32, data: Vec::new() };
+                            outgoing.send_data(grpc_message(&request), false)
+                                .map_err(|error| format!("buildkit filesync: request file failed: {error}"))?;
+                        }
+                        continue;
+                    }
+                    let relative = Path::new(&stat.path);
+                    if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_))) {
+                        return Err(format!("buildkit filesync: context path escapes root: {}", stat.path));
+                    }
+                    if stat.mode & MODE_SYMLINK != 0 || !stat.linkname.is_empty() {
+                        return Err(format!("buildkit filesync: symlinks are not supported: {}", stat.path));
+                    }
+                    if stat.size < 0 || stat.size as u64 > limits.max_entry_bytes {
+                        return Err(format!("buildkit filesync: entry size exceeds transfer limit: {}", stat.path));
+                    }
+                    if stat.mode & MODE_DIR == 0 {
+                        file_count += 1;
+                        total_size = total_size.saturating_add(stat.size as u64);
+                        if file_count > limits.max_files || total_size > limits.max_total_bytes {
+                            return Err("buildkit filesync: context exceeds transfer limit".to_string());
+                        }
+                    }
+                    let target = destination.join(relative);
+                    if stat.mode & MODE_DIR != 0 {
+                        std::fs::create_dir_all(&target).map_err(|error| format!("buildkit filesync: create directory: {error}"))?;
+                    } else {
+                        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
+                        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)
+                            .map_err(|error| format!("buildkit filesync: create file: {error}"))?;
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(stat.mode & 0o7777))
+                            .map_err(|error| format!("buildkit filesync: set mode: {error}"))?;
+                        open_files.insert(stats.len() as u32, (file, 0, stat.size as u64));
+                    }
+                    stats.push(stat);
+                }
+                Some(FsutilPacketType::Data) if listing_done => {
+                    let (file, written, expected) = open_files.get_mut(&packet.id)
+                        .ok_or_else(|| format!("buildkit filesync: DATA for unknown file {}", packet.id))?;
+                    if packet.data.is_empty() {
+                        if *written != *expected { return Err(format!("buildkit filesync: short file {}", packet.id)); }
+                        open_files.remove(&packet.id);
+                    } else {
+                        *written = written.saturating_add(packet.data.len() as u64);
+                        if *written > *expected { return Err(format!("buildkit filesync: oversized file {}", packet.id)); }
+                        file.write_all(&packet.data).map_err(|error| format!("buildkit filesync: write file: {error}"))?;
+                    }
+                }
+                Some(FsutilPacketType::Err) => return Err(format!("buildkit filesync: client error: {}", String::from_utf8_lossy(&packet.data))),
+                Some(FsutilPacketType::Fin) => break,
+                _ => return Err("buildkit filesync: invalid packet ordering".to_string()),
+            }
+        }
+        if listing_done && open_files.is_empty() {
+            let fin = FsutilPacket { packet_type: FsutilPacketType::Fin as i32, stat: None, id: 0, data: Vec::new() };
+            outgoing.send_data(grpc_message(&fin), true)
+                .map_err(|error| format!("buildkit filesync: finish failed: {error}"))?;
+            return Ok(());
+        }
+    }
+    Err("buildkit filesync: client disconnected before FIN".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -29307,13 +29651,129 @@ volumes:
         });
 
         let started = std::time::Instant::now();
-        super::run_buildkit_session_transport(daemon, Duration::from_millis(150))
+        let temp = tempfile::tempdir().expect("state root");
+        let state = std::sync::Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let registration = super::BuildkitSessionRegistration {
+            uuid: "raw-h2-test".to_string(),
+            methods: ["/moby.filesync.v1.FileSync/DiffCopy".to_string()].into_iter().collect(),
+        };
+        super::run_buildkit_session_transport(
+            daemon,
+            state,
+            registration,
+            Duration::from_millis(150),
+        )
             .expect("bounded idle session");
         ready_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("h2 handshake completed");
         assert!(started.elapsed() < Duration::from_secs(1));
         client_thread.join().expect("client thread");
+    }
+
+    #[test]
+    fn buildkit_filesync_receives_a_fake_client_packet_sequence() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (daemon, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            super::run_buildkit_session_transport(
+                daemon,
+                worker_state,
+                super::BuildkitSessionRegistration {
+                    uuid: "filesync-fixture".to_string(),
+                    methods: ["/moby.filesync.v1.FileSync/DiffCopy".to_string()]
+                        .into_iter()
+                        .collect(),
+                },
+                Duration::from_secs(3),
+            )
+            .expect("session worker");
+        });
+        let server = std::thread::spawn(move || {
+            client.set_nonblocking(true).expect("nonblocking client");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("server runtime");
+            runtime.block_on(async move {
+                let client = tokio::net::UnixStream::from_std(client).expect("tokio client");
+                let mut connection = h2::server::handshake(client).await.expect("h2 server");
+                let (request, mut respond) = connection.accept().await.expect("request").expect("valid request");
+                let handler = tokio::spawn(async move {
+                assert_eq!(request.uri().path(), "/moby.filesync.v1.FileSync/DiffCopy");
+                assert_eq!(request.headers()["dir-name"], "context");
+                let mut incoming = request.into_body();
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .expect("response");
+                let mut outgoing = respond.send_response(response, false).expect("send response");
+                let file = super::FsutilPacket {
+                    packet_type: super::FsutilPacketType::Stat as i32,
+                    stat: Some(super::FsutilStat { path: "hello.txt".to_string(), mode: 0o644, uid: 0, gid: 0, size: 5, mod_time: 0, linkname: String::new() }),
+                    id: 0,
+                    data: Vec::new(),
+                };
+                let end = super::FsutilPacket {
+                    packet_type: super::FsutilPacketType::Stat as i32,
+                    stat: Some(super::FsutilStat { path: String::new(), mode: 0, uid: 0, gid: 0, size: 0, mod_time: 0, linkname: String::new() }),
+                    id: 0,
+                    data: Vec::new(),
+                };
+                outgoing.send_data(super::grpc_message(&file), false).expect("file stat");
+                outgoing.send_data(super::grpc_message(&end), false).expect("end stat");
+                let mut buffer = Vec::new();
+                loop {
+                    let data = incoming.data().await.expect("request data").expect("valid data");
+                    buffer.extend_from_slice(&data);
+                    let packets = super::drain_grpc_packets(&mut buffer).expect("request packets");
+                    if packets.iter().any(|packet| packet.packet_type == super::FsutilPacketType::Req as i32) {
+                        break;
+                    }
+                }
+                for data in [b"hello".as_slice(), b"".as_slice()] {
+                    let packet = super::FsutilPacket { packet_type: super::FsutilPacketType::Data as i32, stat: None, id: 0, data: data.to_vec() };
+                    outgoing.send_data(super::grpc_message(&packet), false).expect("file data");
+                }
+                let _ = incoming.data().await;
+                });
+                tokio::pin!(handler);
+                loop {
+                    tokio::select! {
+                        result = &mut handler => { result.expect("stream handler"); break; }
+                        accepted = connection.accept() => {
+                            if accepted.is_none() { break; }
+                        }
+                    }
+                }
+            });
+        });
+
+        for _ in 0..100 {
+            if state.buildkit_sessions.lock().expect("registry").contains_key("filesync-fixture") { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let destination = temp.path().join("received");
+        let receive_result = super::receive_buildkit_session_local(
+            state.as_ref(),
+            "filesync-fixture",
+            "context",
+            &destination,
+            Duration::from_secs(2),
+        );
+        let server_result = server.join();
+        let worker_result = worker.join();
+        receive_result.expect("receive local");
+        server_result.expect("server thread");
+        worker_result.expect("worker thread");
+        assert_eq!(std::fs::read(destination.join("hello.txt")).expect("file"), b"hello");
     }
 
     #[test]

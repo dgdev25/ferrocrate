@@ -3049,7 +3049,7 @@ fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
     stream
         .write_all(
-            b"POST /session HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n",
+            b"POST /session HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nX-Docker-Expose-Session-Uuid: integration-session\r\nX-Docker-Expose-Session-Grpc-Method: /moby.filesync.v1.FileSync/DiffCopy\r\nContent-Length: 0\r\n\r\n",
         )
         .expect("write session request");
     let mut response = Vec::new();

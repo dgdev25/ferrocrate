@@ -1,0 +1,11 @@
+// Copyright The Moby Authors. Licensed under the Apache License, Version 2.0.
+// Vendored from github.com/moby/buildkit/session/filesync/filesync.proto.
+syntax = "proto3";
+package moby.filesync.v1;
+import "buildkit/wire.proto";
+service FileSync {
+  rpc DiffCopy(stream fsutil.types.Packet) returns (stream fsutil.types.Packet);
+  rpc TarStream(stream fsutil.types.Packet) returns (stream fsutil.types.Packet);
+}
+service FileSend { rpc DiffCopy(stream BytesMessage) returns (stream BytesMessage); }
+message BytesMessage { bytes data = 1; }

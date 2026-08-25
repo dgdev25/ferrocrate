@@ -842,6 +842,7 @@ name = "ferro-cli"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "caps",
  "clap",
  "clap_complete",
@@ -856,6 +857,7 @@ dependencies = [
  "nix",
  "owo-colors",
  "proptest",
+ "prost",
  "rusqlite",
  "serde",
  "serde_json",

@@ -426,7 +426,7 @@ fn macos_exec_quotes_semicolons_in_remote_programs() {
     let (ssh, request) =
         captured_macos_remote_command(ExecRequest::new("x; touch /home/ferro/pwned #"));
 
-    assert_eq!(ssh.args.last().unwrap(), "ferro@127.0.0.1");
+    assert_eq!(ssh.args.last().unwrap(), "ubuntu@127.0.0.1");
     assert_eq!(
         request.program,
         "exec env -- 'x; touch /home/ferro/pwned #'"

@@ -136,7 +136,7 @@ start_ui() {
       return
     fi
     note "Fleet UI login expired; restarting it"
-    stop_pid "$state_root/pids/ui" 'Fleet UI'
+    stop_pid "$state_root/pids/ui" 'Fleet UI' || die "Fleet UI did not stop before restart"
   fi
   note "starting Fleet browser UI"
   env FERROCRATE_CLUSTER_ID="$cluster_id" \
@@ -258,9 +258,22 @@ up() {
   enroll_guest "$token"; enroll_arm "$token"; wait_connected; print_logins
 }
 
+wait_for_pid_exit() {
+  local path="$1" label="$2"
+  for _ in $(seq 1 50); do
+    pid_alive "$path" || return
+    sleep 0.1
+  done
+  note "$label did not exit after SIGTERM"
+  return 1
+}
+
 stop_pid() {
   local path="$1" label="$2"
-  if pid_alive "$path"; then kill "$(<"$path")" 2>/dev/null || true; fi
+  if pid_alive "$path"; then
+    kill "$(<"$path")" 2>/dev/null || true
+    wait_for_pid_exit "$path" "$label" || return
+  fi
   rm -f "$path"
   note "stopped $label"
 }
@@ -269,9 +282,9 @@ down() {
   [[ -d "$state_root" ]] || exit 0
   guest_ssh 'pkill -x ferro-agent || true' >/dev/null 2>&1 || true
   arm_ssh 'pkill -x ferro-agent || true' >/dev/null 2>&1 || true
-  stop_pid "$state_root/pids/arm-forward" 'Oracle reverse forwards'
-  stop_pid "$state_root/pids/ui" 'Fleet UI'
-  stop_pid "$state_root/pids/manager" 'manager'
+  stop_pid "$state_root/pids/arm-forward" 'Oracle reverse forwards' || true
+  stop_pid "$state_root/pids/ui" 'Fleet UI' || true
+  stop_pid "$state_root/pids/manager" 'manager' || true
   if command -v virsh >/dev/null 2>&1 && [[ "$(virsh domstate "$guest_name" 2>/dev/null || true)" == running ]]; then
     virsh shutdown "$guest_name" >/dev/null || true
     note "requested shutdown for $guest_name"

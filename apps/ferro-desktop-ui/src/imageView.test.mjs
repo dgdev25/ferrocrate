@@ -45,6 +45,23 @@ test("pull failures give people a recovery path while retaining the technical de
   });
 });
 
+test("a successful pull closes the blocking dialog while a failed pull stays actionable", () => {
+  assert.deepEqual(imageView.pullCompletionState({ ok: true, stderr: "" }), {
+    open: false,
+    progress: "",
+    failure: null,
+  });
+  assert.deepEqual(imageView.pullCompletionState({ ok: false, stderr: "registry timed out" }), {
+    open: true,
+    progress: "",
+    failure: {
+      kind: "generic",
+      message: "Something went wrong",
+      detail: "registry timed out",
+    },
+  });
+});
+
 test("rendered pull dialog exposes progress and accessible recovery actions", () => {
   assert.equal(typeof imageView.PullImageDialog, "function");
   const loading = renderToStaticMarkup(createElement(imageView.PullImageDialog, {

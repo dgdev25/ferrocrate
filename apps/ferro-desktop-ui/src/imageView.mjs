@@ -42,6 +42,15 @@ export function pullFailurePresentation(error) {
   });
 }
 
+export function pullCompletionState(result) {
+  if (result.ok) return { open: false, progress: "", failure: null };
+  return {
+    open: true,
+    progress: "",
+    failure: pullFailurePresentation(result.stderr || result.message),
+  };
+}
+
 export function ImagePagePullAction({ hasImages, disabled, onOpen }) {
   if (!hasImages) return null;
   return createElement("button", { className: "btn btn-primary", onClick: onOpen, disabled }, "Pull image");

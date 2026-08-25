@@ -19,6 +19,17 @@ use thiserror::Error;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
+fn desktop_addr_default_from(value: Option<std::ffi::OsString>) -> String {
+    value
+        .and_then(|address| address.into_string().ok())
+        .filter(|address| !address.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1:4288".to_string())
+}
+
+fn desktop_addr_default() -> String {
+    desktop_addr_default_from(std::env::var_os("FERROCRATE_DESKTOP_ADDR"))
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ferro-desktop",
@@ -33,7 +44,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Daemon {
-        #[arg(long, default_value = "127.0.0.1:4288")]
+        #[arg(long, default_value_t = desktop_addr_default())]
         addr: String,
         #[arg(long)]
         pipe_name: Option<String>,
@@ -43,7 +54,7 @@ enum Commands {
         allow_remote: bool,
     },
     Exec {
-        #[arg(long, default_value = "127.0.0.1:4288")]
+        #[arg(long, default_value_t = desktop_addr_default())]
         addr: String,
         #[arg(long)]
         pipe_name: Option<String>,
@@ -3579,7 +3590,7 @@ mod tests {
     use super::{
         backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
-        copy_interactive_input, exec_mode_from_env, gather_phase0_check,
+        copy_interactive_input, desktop_addr_default_from, exec_mode_from_env, gather_phase0_check,
         is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
         load_forward_entries, load_vm_state, network_proxy_request, parse_exec_mode,
         read_exec_request, registry_login_request, render_macos_launch_agent_plist,
@@ -4125,6 +4136,15 @@ mod tests {
         assert!(validate_daemon_addr("[::1]:4288", false).is_ok());
         assert!(validate_daemon_addr("0.0.0.0:4288", false).is_err());
         assert!(validate_daemon_addr("192.168.1.10:4288", false).is_err());
+    }
+
+    #[test]
+    fn desktop_addr_default_accepts_an_isolated_proxy_override() {
+        assert_eq!(
+            desktop_addr_default_from(Some("127.0.0.1:4399".into())),
+            "127.0.0.1:4399"
+        );
+        assert_eq!(desktop_addr_default_from(None), "127.0.0.1:4288");
     }
 
     #[test]

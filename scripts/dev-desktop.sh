@@ -102,7 +102,7 @@ say "building UI"
 ( cd "$ui/src-tauri" && cargo build -q )
 
 # 4. run (the native Tauri shell owns its helper; web mode owns the same helper here)
-export PATH="$root/target/release:$root/target/debug:$PATH"
+export PATH="$root/target/debug:$root/target/release:$PATH"
 if [[ "$mode" == "web" ]]; then
   say "starting desktop supervisor (Ferrocrate socket: $FERROCRATE_RUNTIME_DIR/ferrocrate.sock)"
   "$root/target/debug/ferro-desktop" daemon &

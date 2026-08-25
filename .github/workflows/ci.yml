@@ -32,7 +32,7 @@ jobs:
           cache-dependency-path: apps/ferro-desktop-ui/package-lock.json
       - name: Linux Tauri dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+        run: pkg-config --exists webkit2gtk-4.1 gtk+-3.0 librsvg-2.0 && which patchelf
       - name: Frontend dependencies
         working-directory: apps/ferro-desktop-ui
         run: npm ci

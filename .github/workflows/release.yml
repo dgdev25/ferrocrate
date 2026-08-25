@@ -24,7 +24,7 @@ jobs:
         run: rustup show active-toolchain && rustup target add ${{ matrix.target }}
       - name: Linux ARM linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: which aarch64-linux-gnu-gcc
       - name: Build archive, checksum, provenance, and Linux deb
         shell: bash
         env:

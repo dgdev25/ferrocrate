@@ -14545,10 +14545,9 @@ mod tests {
         let hosts = directory.path().join("network.hosts");
         std::fs::write(&hosts, "172.30.245.42 conformance-alias\n").expect("write hosts");
         let mut query = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-        for label in ["conformance-alias"] {
-            query.push(label.len() as u8);
-            query.extend_from_slice(label.as_bytes());
-        }
+        let label = "conformance-alias";
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
         query.push(0);
         query.extend_from_slice(&28_u16.to_be_bytes());
         query.extend_from_slice(&1_u16.to_be_bytes());

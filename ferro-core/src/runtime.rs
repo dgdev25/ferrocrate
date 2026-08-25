@@ -1517,6 +1517,13 @@ pub enum RuntimeError {
     Cgroup(#[from] crate::cgroups::CgroupError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("io error during {operation} on {path}: {source}")]
+    PathIo {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("image store error: {0}")]
     ImageStore(#[from] crate::image_store::ImageStoreError),
     #[error("exec error: {0}")]
@@ -1555,6 +1562,17 @@ pub enum RuntimeError {
     Witness(#[from] crate::witness::JournalError),
     #[error("kernel effect completed but lifecycle state persistence failed: {0}")]
     PostEffectPersistence(ContainerStoreError),
+}
+
+fn path_io<'a>(
+    operation: &'static str,
+    path: &'a Path,
+) -> impl FnOnce(std::io::Error) -> RuntimeError + 'a {
+    move |source| RuntimeError::PathIo {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 impl From<MediationError> for RuntimeError {
@@ -3001,7 +3019,7 @@ impl ContainerRuntime {
         let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
         let log_dir = container_dir.join("logs");
-        fs::create_dir_all(&log_dir)?;
+        fs::create_dir_all(&log_dir).map_err(path_io("create log directory", &log_dir))?;
         rollback.track_container_dir(container_dir.clone());
 
         let stdout_path = log_dir.join("stdout.log");
@@ -3057,7 +3075,8 @@ impl ContainerRuntime {
                 &layer_cache_root,
             )?;
         } else {
-            fs::create_dir_all(&rootfs_dir)?;
+            fs::create_dir_all(&rootfs_dir)
+                .map_err(path_io("create container rootfs directory", &rootfs_dir))?;
         }
         if let Some(workdir) = resolved_workdir.as_deref() {
             ensure_rootfs_workdir(&rootfs_dir, workdir)?;
@@ -3089,11 +3108,14 @@ impl ContainerRuntime {
                 &rootfs_dir,
             )
             .map_err(RuntimeError::InvalidState)?;
-            let source_is_dir = fs::metadata(&mount.source)?.is_dir();
+            let source_is_dir = fs::metadata(&mount.source)
+                .map_err(path_io("inspect bind mount source", &mount.source))?
+                .is_dir();
             let _target =
                 open_mount_target_beneath_for_source(&rootfs_dir, &mount.target, source_is_dir)?;
             let target = path_resource_identity(&rootfs_dir.join(&mount.target))?;
-            let source_metadata = fs::metadata(&mount.source)?;
+            let source_metadata = fs::metadata(&mount.source)
+                .map_err(path_io("inspect bind mount source", &mount.source))?;
             let ResourceIdentity::Path {
                 device,
                 inode,
@@ -3253,7 +3275,8 @@ impl ContainerRuntime {
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
             rollback.track_cgroup(cgroup_name)?;
-            let cgroup_metadata = fs::metadata(&group)?;
+            let cgroup_metadata = fs::metadata(&group)
+                .map_err(path_io("inspect container cgroup", &group))?;
             rollback.mark_typed_resource(
                 cgroup_plan.expect("cgroup plan exists"),
                 ResourceIdentity::Cgroup {

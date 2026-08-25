@@ -74,9 +74,11 @@ struct DesktopVolumeRecord {
     mounts: Vec<serde_json::Value>,
 }
 
+type DesktopCommandAssertion = (&'static [&'static str], fn(&[u8]));
+
 #[test]
 fn desktop_proxied_list_commands_emit_parseable_machine_output() {
-    let commands: &[(&[&str], fn(&[u8]))] = &[
+    let commands: &[DesktopCommandAssertion] = &[
         (&["network", "ls", "--format", "json"], |stdout| {
             assert!(
                 serde_json::from_slice::<serde_json::Value>(stdout)

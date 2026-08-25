@@ -338,7 +338,7 @@ fn supervisor_process_state() -> (bool, Option<String>) {
 fn daemon_status() -> DaemonStatus {
     #[cfg(target_os = "linux")]
     {
-        return match desktop_socket_path() {
+        match desktop_socket_path() {
             Ok(socket) => match ping_daemon(&socket) {
                 Ok(()) => {
                     let capabilities = daemon_capabilities(&socket).unwrap_or(DaemonCapabilities {
@@ -369,7 +369,7 @@ fn daemon_status() -> DaemonStatus {
                 platform: "linux-native".to_string(),
                 custom_networks: false,
             },
-        };
+        }
     }
     #[cfg(not(target_os = "linux"))]
     DaemonStatus {
@@ -1398,6 +1398,8 @@ fn container_update_command(
     Ok(command)
 }
 
+// Each argument maps directly to an independent container-create protocol field.
+#[allow(clippy::too_many_arguments)]
 fn run_container_bridge_command(
     image: &str,
     name: Option<&str>,
@@ -2697,6 +2699,8 @@ fn update_container_resources(
 }
 
 #[tauri::command]
+// Tauri IPC requires the command signature to expose each frontend field by name.
+#[allow(clippy::too_many_arguments)]
 fn run_new_container(
     image: String,
     name: Option<String>,

@@ -19993,11 +19993,32 @@ fn handle_docker_compat_connection(
                     .authorize_volume_create_plan(&origin, &plan)
                     .map_err(|error| error.to_string())?;
                 execute_volume_create(&volume_store, plan, proof)?;
+                let labels = body
+                    .get("Labels")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .map(|(key, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (key.clone(), value.to_string()))
+                                    .ok_or_else(|| {
+                                        "docker: volume Labels values must be strings".to_string()
+                                    })
+                            })
+                            .collect::<Result<BTreeMap<_, _>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                volume_store
+                    .set_labels(name, labels)
+                    .map_err(|error| error.to_string())?;
                 let record = volume_store
                     .get(name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
-                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
+                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path, "Labels": record.labels});
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/volumes/prune") => {
@@ -20061,6 +20082,7 @@ fn handle_docker_compat_connection(
                             "Driver": record.driver,
                             "Mountpoint": record.path,
                             "CreatedAt": record.created_at_unix.to_string(),
+                            "Labels": record.labels,
                             "Status": serde_json::Value::Null,
                             "UsageData": {"RefCount": mounts.len(), "Size": 0},
                             "FerrocrateMounts": mounts,
@@ -20081,6 +20103,7 @@ fn handle_docker_compat_connection(
                     "Driver": record.driver,
                     "Mountpoint": record.path,
                     "CreatedAt": record.created_at_unix.to_string(),
+                    "Labels": record.labels,
                     "Status": serde_json::Value::Null,
                     "UsageData": serde_json::Value::Null,
                 });
@@ -21149,11 +21172,11 @@ fn docker_volume_matches_filters(
             return false;
         }
     }
-    // Volume records do not persist labels; a label selector matches only
-    // when it selects nothing (compose probes for its project volumes this
-    // way and creates them on an empty result).
     if let Some(labels) = filters.get("label") {
-        if !labels.is_empty() {
+        if !labels.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        }) {
             return false;
         }
     }
@@ -29631,6 +29654,7 @@ volumes:
             path: "/var/lib/ferrocrate/volumes/database".to_string(),
             driver: "local".to_string(),
             driver_opts: Default::default(),
+            labels: BTreeMap::from([("tier".to_string(), "frontend".to_string())]),
             created_at_unix: 1,
         };
         let filters = serde_json::from_value(serde_json::json!({

@@ -1040,7 +1040,7 @@ fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, Bac
                 ));
             }
             let mut child = Command::new("wsl.exe")
-                .args(["-d", distro, "--", "sh", "-lc"])
+                .args(["-d", distro, "--exec", "sh", "-lc"])
                 .arg("exec socat STDIO \"UNIX-CONNECT:$HOME/$1\"")
                 .arg("ferrocrate-wsl")
                 .arg(path)

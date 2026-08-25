@@ -1514,21 +1514,29 @@ fn spawn_frame_reader(
     stream: Arc<Mutex<TcpStream>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-    let mut buffer = [0_u8; 8192];
-    loop {
-            let Ok(read) = reader.read(&mut buffer) else { return };
-        if read == 0 {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let Ok(read) = reader.read(&mut buffer) else {
                 return;
-        }
-            let Ok(mut stream) = stream.lock() else { return };
+            };
+            if read == 0 {
+                return;
+            }
+            let Ok(mut stream) = stream.lock() else {
+                return;
+            };
             if write_follow_frame(
                 &mut *stream,
-            &FollowFrame::Data {
+                &FollowFrame::Data {
                     channel: channel.clone(),
-                data: buffer[..read].to_vec(),
-            },
-            ).is_err() { return; }
-    }
+                    data: buffer[..read].to_vec(),
+                },
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
     })
 }
 
@@ -1707,7 +1715,9 @@ fn run_daemon_pipe(
             let mut request_raw = String::new();
             reader.read_line(&mut request_raw).await?;
             if request_raw.len() > MAX_REQUEST_BYTES {
-                return Err(DesktopError::Invalid("request exceeds size limit".to_string()));
+                return Err(DesktopError::Invalid(
+                    "request exceeds size limit".to_string(),
+                ));
             }
             let request = serde_json::from_str(request_raw.trim())?;
             let response = process_exec_request(request, default_wsl_distro.as_deref())?;
@@ -1773,7 +1783,6 @@ fn normalize_pipe_name(pipe_name: &str) -> String {
     }
 }
 
-
 #[cfg(unix)]
 fn stop_vm_process(pid: u32) -> Result<(), DesktopError> {
     let status = Command::new("kill")
@@ -1783,7 +1792,9 @@ fn stop_vm_process(pid: u32) -> Result<(), DesktopError> {
     if status.success() {
         Ok(())
     } else {
-        Err(DesktopError::Invalid(format!("failed to stop vm pid={pid}")))
+        Err(DesktopError::Invalid(format!(
+            "failed to stop vm pid={pid}"
+        )))
     }
 }
 
@@ -3216,12 +3227,25 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(any(windows, test))]
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.contains(&0) {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+        return String::from_utf16_lossy(&units.collect::<Vec<_>>())
+            .trim_start_matches('\u{feff}')
+            .to_string();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, DesktopError> {
     #[cfg(windows)]
     {
         let output = Command::new("wsl.exe").args(["-l", "-q"]).output()?;
         let status = output.status.code();
-        let distros = String::from_utf8_lossy(&output.stdout)
+        let distros = decode_wsl_output(&output.stdout)
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
@@ -3263,7 +3287,7 @@ fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, 
                     "uname -r; command -v ferrocrate >/dev/null && echo FC_PRESENT=1 || echo FC_PRESENT=0",
                 ])
                 .output()?;
-            let text = String::from_utf8_lossy(&probe.stdout);
+            let text = decode_wsl_output(&probe.stdout);
             let mut lines = text.lines();
             check.guest_kernel = lines.next().map(ToOwned::to_owned);
             let found = lines.any(|line| line.trim() == "FC_PRESENT=1");
@@ -3279,7 +3303,7 @@ fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, 
                 .push("no WSL distro available; install/import distro first".to_string());
         }
 
-        return Ok(check);
+        Ok(check)
     }
 
     #[cfg(not(windows))]
@@ -3311,10 +3335,21 @@ fn backend_exec_request(cmd: &[String]) -> Result<BackendExecRequest, DesktopErr
         .env("NO_COLOR", "1"))
 }
 
+fn select_exec_backend(_cmd: &[String]) -> Result<Box<dyn Backend>, DesktopError> {
+    #[cfg(target_os = "macos")]
+    if !should_route_to_macos_guest(_cmd, exec_mode_from_env()) {
+        return Ok(Box::new(LinuxNativeBackend::new(
+            LinuxNativeConfig::default(),
+        )));
+    }
+
+    select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))
+}
+
 fn run_request(
     request: &ExecRequest,
 ) -> Result<ferro_desktop::backend::ExecResponse, DesktopError> {
-    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let backend = select_exec_backend(&request.cmd)?;
     backend
         .exec(backend_exec_request(&request.cmd)?)
         .map_err(|error| DesktopError::Invalid(error.to_string()))
@@ -3323,7 +3358,7 @@ fn run_request(
 fn run_follow_request(
     request: &ExecRequest,
 ) -> Result<Box<dyn ferro_desktop::backend::ExecStream>, DesktopError> {
-    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let backend = select_exec_backend(&request.cmd)?;
     backend
         .exec_stream(backend_exec_request(&request.cmd)?)
         .map_err(|error| DesktopError::Invalid(error.to_string()))
@@ -3416,16 +3451,15 @@ fn vm_state_running(state: &VmState) -> bool {
     state.pid.map(pid_alive).unwrap_or(false)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
-        copy_interactive_input, desktop_addr_default_from, exec_mode_from_env, gather_phase0_check,
-        is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
-        load_forward_entries, load_vm_state, network_proxy_request, parse_exec_mode,
-        process_exec_request, read_exec_request, registry_login_request,
+        copy_interactive_input, decode_wsl_output, desktop_addr_default_from, exec_mode_from_env,
+        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
+        parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
@@ -3796,8 +3830,19 @@ mod tests {
 
     #[test]
     fn command_exists_treats_binary_name_as_literal_argv() {
-        assert!(command_exists("true"));
-        assert!(!command_exists("true; printf injected"));
+        assert!(command_exists("rustc"));
+        assert!(!command_exists("rustc; printf injected"));
+    }
+
+    #[test]
+    fn decodes_wsl_utf16_output_without_embedded_nuls() {
+        let encoded = "Ubuntu\r\nDebian\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        assert_eq!(decode_wsl_output(&encoded), "Ubuntu\r\nDebian\r\n");
+        assert_eq!(decode_wsl_output(b"Ubuntu\n"), "Ubuntu\n");
     }
 
     #[test]
@@ -4039,10 +4084,12 @@ mod tests {
             state_file: None,
             command: Box::new(VmCommands::Status { json: true }),
         }));
-        assert!(command_requires_desktop_entitlement(&Commands::BackendSmoke {
-            start: true,
-            json: true,
-        }));
+        assert!(command_requires_desktop_entitlement(
+            &Commands::BackendSmoke {
+                start: true,
+                json: true,
+            }
+        ));
         assert!(!command_requires_desktop_entitlement(&Commands::Doctor {
             wsl_distro: None,
         }));

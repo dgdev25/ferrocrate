@@ -334,9 +334,9 @@ fn validate_private_key_path(path: &Path) -> Result<(), WireGuardError> {
     #[cfg(not(unix))]
     {
         let _ = path;
-        return Err(WireGuardError::UnsafeKeyPath(
+        Err(WireGuardError::UnsafeKeyPath(
             "WireGuard key validation requires a Unix host".to_string(),
-        ));
+        ))
     }
     #[cfg(unix)]
     {

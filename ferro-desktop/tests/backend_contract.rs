@@ -290,7 +290,7 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
         &[CommandSpec::new("wsl.exe").args([
             "-d",
             "Ubuntu",
-            "--",
+            "--exec",
             "sh",
             "-lc",
             "exec ferrocrate daemon --socket \"$HOME/$1\" --docker-compat",
@@ -423,9 +423,8 @@ fn captured_macos_remote_command(request: ExecRequest) -> (CommandSpec, ExecRequ
 
 #[test]
 fn macos_exec_quotes_semicolons_in_remote_programs() {
-    let (ssh, request) = captured_macos_remote_command(ExecRequest::new(
-        "x; touch /home/ferro/pwned #",
-    ));
+    let (ssh, request) =
+        captured_macos_remote_command(ExecRequest::new("x; touch /home/ferro/pwned #"));
 
     assert_eq!(ssh.args.last().unwrap(), "ferro@127.0.0.1");
     assert_eq!(
@@ -465,10 +464,7 @@ fn macos_exec_escapes_single_quotes_in_remote_arguments() {
     let (_, request) =
         captured_macos_remote_command(ExecRequest::new("printf").args(["it's literal"]));
 
-    assert_eq!(
-        request.program,
-        "exec env -- 'printf' 'it'\"'\"'s literal'"
-    );
+    assert_eq!(request.program, "exec env -- 'printf' 'it'\"'\"'s literal'");
 }
 
 #[test]
@@ -565,6 +561,34 @@ fn exec_request_names_the_real_program_without_linux_argv_duplication() {
 }
 
 #[test]
+fn wsl_exec_forwards_environment_inside_the_guest() {
+    let host = FakeHost::healthy(true);
+    let backend = Wsl2Backend::with_host(
+        Wsl2Config {
+            distro: "FerrocrateDesktop".into(),
+            ..wsl_config()
+        },
+        host.clone(),
+    );
+    let request = ExecRequest::new("sh")
+        .args(["-c", "printf '%s' \"$NO_COLOR\""])
+        .env("NO_COLOR", "1")
+        .stdin(b"input".to_vec());
+
+    backend.exec(request).unwrap();
+
+    assert_eq!(
+        host.execs.lock().unwrap().as_slice(),
+        &[(
+            CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec"]),
+            ExecRequest::new("env")
+                .args(["NO_COLOR=1", "sh", "-c", "printf '%s' \"$NO_COLOR\"",])
+                .stdin(b"input".to_vec()),
+        )]
+    );
+}
+
+#[test]
 fn streaming_exec_keeps_stdin_open_for_interactive_round_trips() {
     let backend = LinuxNativeBackend::new(linux_config());
     let mut stream = backend
@@ -656,9 +680,12 @@ fn system_host_reaps_stale_children_before_reporting_a_restart_running() {
     let host = ferro_desktop::backend::SystemBackendHost::default();
     host.start(&CommandSpec::new("sh").args(["-c", "sleep 1"]))
         .unwrap();
-    let transient = CommandSpec::new("sh").args(["-c", "sleep 0.01"]);
+    let transient = CommandSpec::new("sh").args(["-c", "sleep 0.1"]);
     host.start(&transient).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while host.is_running().unwrap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(!host.is_running().unwrap());
 
     host.start(&transient).unwrap();

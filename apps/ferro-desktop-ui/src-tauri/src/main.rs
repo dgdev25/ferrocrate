@@ -10,6 +10,8 @@ use ferro_desktop::backend::{
     select_backend, Backend, BackendState, BackendStatus, DuplexStream, ExecStream,
     ExecRequest as BackendExecRequest, TerminalRequest,
 };
+#[cfg(target_os = "macos")]
+use ferro_desktop::backend::{LinuxNativeBackend, LinuxNativeConfig};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
@@ -17,6 +19,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1826,6 +1830,24 @@ fn run_backend_command_with(
 }
 
 fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -> CommandResult {
+    #[cfg(target_os = "macos")]
+    {
+        let request = match backend_command_request(binary, args, envs, Vec::new()) {
+            Ok(request) => request,
+            Err(error) => return command_input_failure(&error),
+        };
+        let program = Path::new(&request.program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&request.program);
+        if !matches!(program, "ferrocrate" | "ferro-cli") {
+            let backend = LinuxNativeBackend::new(LinuxNativeConfig::default());
+            return match backend.exec(request) {
+                Ok(output) => command_result_from_backend(output),
+                Err(error) => command_spawn_failure(binary, error),
+            };
+        }
+    }
     match desktop_backend() {
         Ok(backend) => run_backend_command_with(backend, binary, args, envs, Vec::new()),
         Err(error) => command_spawn_failure(binary, error),
@@ -3808,6 +3830,10 @@ mod tests {
 
     #[test]
     fn image_build_uses_selected_context_through_desktop_bridge() {
+        let dockerfile = PathBuf::from("/tmp/build context")
+            .join("Dockerfile")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             build_bridge_command("/tmp/build context", "demo/app:dev").expect("build command"),
             vec![
@@ -3816,7 +3842,7 @@ mod tests {
                 "ferrocrate",
                 "build",
                 "--dockerfile",
-                "/tmp/build context/Dockerfile",
+                dockerfile.as_str(),
                 "--tag",
                 "demo/app:dev",
             ]

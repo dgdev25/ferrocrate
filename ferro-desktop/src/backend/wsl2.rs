@@ -21,13 +21,30 @@ pub struct Wsl2Backend {
     core: BackendCore,
 }
 
+fn guest_exec_request(request: ExecRequest) -> ExecRequest {
+    let ExecRequest {
+        program,
+        args,
+        env,
+        stdin,
+    } = request;
+    let mut guest_args = Vec::with_capacity(env.len() + args.len() + 1);
+    guest_args.extend(
+        env.into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    guest_args.push(program);
+    guest_args.extend(args);
+    ExecRequest::new("env").args(guest_args).stdin(stdin)
+}
+
 impl Wsl2Backend {
     pub fn new(config: Wsl2Config) -> Self {
         Self::with_host(config, SystemBackendHost::shared())
     }
     pub fn with_host(config: Wsl2Config, host: Arc<dyn BackendHost>) -> Self {
         let socket_path = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
-        let prefix = ["-d", config.distro.as_str(), "--"];
+        let prefix = ["-d", config.distro.as_str(), "--exec"];
         let start = CommandSpec::new("wsl.exe").args(prefix).args([
             "sh",
             "-lc",
@@ -75,12 +92,14 @@ impl Backend for Wsl2Backend {
         self.core.host.health(&self.core.transport)
     }
     fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError> {
-        self.core.host.exec(&self.core.exec_command, &request)
+        self.core
+            .host
+            .exec(&self.core.exec_command, &guest_exec_request(request))
     }
     fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError> {
         self.core
             .host
-            .exec_stream(&self.core.exec_command, &request)
+            .exec_stream(&self.core.exec_command, &guest_exec_request(request))
     }
     fn request(&self, request: TransportRequest) -> Result<TransportResponse, BackendError> {
         self.core.host.request(&self.core.transport, &request)

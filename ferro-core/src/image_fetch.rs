@@ -517,12 +517,22 @@ fn peer_get(image: &str, kind: &str, value: &str, wanted: Option<&str>) -> Optio
     let reference = parse_image_reference(image).ok()?;
     let timeout_ms = std::env::var("FERROCRATE_LAN_MIRROR_TIMEOUT_MS")
         .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1200).clamp(100, 5000);
-    let peers = crate::lan_mirror::discover(Duration::from_millis(timeout_ms), wanted).ok()?;
+    let report = match crate::lan_mirror::discover_report(Duration::from_millis(timeout_ms), wanted) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("lan mirror: browse failed after {timeout_ms} ms, 0 peers: {error}");
+            return None;
+        }
+    };
+    eprintln!(
+        "{}",
+        crate::lan_mirror::discovery_summary(report.elapsed, report.peers.len(), report.probed)
+    );
     let http = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_millis(500))
         .timeout(Duration::from_secs(5))
         .build().ok()?;
-    for peer in peers {
+    for peer in report.peers {
         let url = format!("{}/v2/{}/{kind}/{value}", peer.base_url(), reference.repository);
         let mut request = http.get(url);
         if let Ok(secret) = std::env::var("FERROCRATE_LAN_MIRROR_SECRET") {

@@ -2,7 +2,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 pub const SERVICE_TYPE: &str = "_ferrocrate-registry._tcp.local.";
@@ -21,6 +21,14 @@ pub struct MirrorPeer {
     pub digests: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DiscoveryReport {
+    pub peers: Vec<MirrorPeer>,
+    pub elapsed: Duration,
+    pub mdns_peers: usize,
+    pub probed: bool,
+}
+
 impl MirrorPeer {
     pub fn base_url(&self) -> String {
         match self.address {
@@ -31,7 +39,15 @@ impl MirrorPeer {
 }
 
 pub fn discover(timeout: Duration, wanted_digest: Option<&str>) -> Result<Vec<MirrorPeer>, String> {
+    discover_report(timeout, wanted_digest).map(|report| report.peers)
+}
+
+pub fn discover_report(
+    timeout: Duration,
+    wanted_digest: Option<&str>,
+) -> Result<DiscoveryReport, String> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
+    let started = Instant::now();
     let daemon = ServiceDaemon::new().map_err(|error| error.to_string())?;
     let receiver = daemon.browse(SERVICE_TYPE).map_err(|error| error.to_string())?;
     let deadline = Instant::now() + timeout;
@@ -66,12 +82,94 @@ pub fn discover(timeout: Duration, wanted_digest: Option<&str>) -> Result<Vec<Mi
             }
         }
     }
+    let mdns_peers = peers.len();
+    let probe_port = std::env::var("FERROCRATE_LAN_MIRROR_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(7422);
+    let mut probe_peers = probe_local_slash24(probe_port);
+    let probed = !probe_peers.is_empty();
+    peers.append(&mut probe_peers);
     peers.sort_by_key(|peer| {
         let preferred = wanted_digest.is_some_and(|digest| peer.digests.contains(digest));
         (!preferred, peer.instance_id.clone(), peer.address)
     });
     peers.dedup_by(|left, right| left.address == right.address && left.port == right.port);
-    Ok(peers)
+    Ok(DiscoveryReport {
+        peers,
+        elapsed: started.elapsed(),
+        mdns_peers,
+        probed,
+    })
+}
+
+pub fn probe_candidates(local: Ipv4Addr) -> Vec<Ipv4Addr> {
+    let [a, b, c, _] = local.octets();
+    (1..=254)
+        .map(|last| Ipv4Addr::new(a, b, c, last))
+        .filter(|candidate| *candidate != local)
+        .collect()
+}
+
+pub fn parse_probe_headers(instance: &str, digests: &str) -> Option<PeerAdvertisement> {
+    parse_txt([
+        ("instance".to_string(), instance.to_string()),
+        ("digests".to_string(), digests.to_string()),
+    ])
+}
+
+pub fn discovery_summary(elapsed: Duration, peers: usize, probed: bool) -> String {
+    format!(
+        "lan mirror: browsed {} ms, {peers} peers{}",
+        elapsed.as_millis(),
+        if probed { "; unicast /24 probe attempted" } else { "" }
+    )
+}
+
+fn probe_local_slash24(port: u16) -> Vec<MirrorPeer> {
+    use std::sync::mpsc;
+    let local_addresses = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|interface| match interface.ip() {
+            IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() => Some(ip),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let candidates = local_addresses
+        .iter()
+        .flat_map(|address| probe_candidates(*address))
+        .collect::<BTreeSet<_>>();
+    let (sender, receiver) = mpsc::channel();
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_millis(200))
+        .timeout(Duration::from_millis(200))
+        .build()
+    else {
+        return Vec::new();
+    };
+    std::thread::scope(|scope| {
+        for address in candidates {
+            let sender = sender.clone();
+            let client = client.clone();
+            scope.spawn(move || {
+                let Ok(response) = client.get(format!("http://{address}:{port}/v2/")).send() else { return };
+                if !response.status().is_success() { return; }
+                let instance = response.headers().get("x-ferrocrate-instance").and_then(|value| value.to_str().ok()).unwrap_or("");
+                let digests = response.headers().get("x-ferrocrate-digests").and_then(|value| value.to_str().ok()).unwrap_or("");
+                if let Some(advertisement) = parse_probe_headers(instance, digests) {
+                    let _ = sender.send(MirrorPeer {
+                        instance_id: advertisement.instance_id,
+                        address: IpAddr::V4(address),
+                        port,
+                        digests: advertisement.digests,
+                    });
+                }
+            });
+        }
+    });
+    drop(sender);
+    receiver.into_iter().collect()
 }
 
 pub fn register(
@@ -173,5 +271,32 @@ mod tests {
         ).expect("fallback succeeds");
         assert_eq!(bytes, b"registry");
         assert!(!from_peer);
+    }
+
+    #[test]
+    fn probe_candidates_cover_local_slash24_but_not_self_or_network_edges() {
+        let candidates = probe_candidates("192.168.122.9".parse().unwrap());
+        assert_eq!(candidates.len(), 253);
+        assert!(!candidates.contains(&"192.168.122.0".parse().unwrap()));
+        assert!(!candidates.contains(&"192.168.122.9".parse().unwrap()));
+        assert!(!candidates.contains(&"192.168.122.255".parse().unwrap()));
+        assert!(candidates.contains(&"192.168.122.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn probe_metadata_parses_instance_and_digest_hints() {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let advert = parse_probe_headers("host-a", &digest).expect("probe metadata");
+        assert_eq!(advert.instance_id, "host-a");
+        assert_eq!(advert.digests, BTreeSet::from([digest]));
+        assert!(parse_probe_headers("", "").is_none());
+    }
+
+    #[test]
+    fn discovery_summary_keeps_zero_peer_result_visible() {
+        assert_eq!(
+            discovery_summary(Duration::from_millis(5000), 0, true),
+            "lan mirror: browsed 5000 ms, 0 peers; unicast /24 probe attempted"
+        );
     }
 }

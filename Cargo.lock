@@ -894,6 +894,7 @@ dependencies = [
  "flate2",
  "hex",
  "httptest",
+ "if-addrs",
  "libseccomp",
  "log",
  "lzma-rust2",

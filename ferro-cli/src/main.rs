@@ -17085,7 +17085,7 @@ fn start_lan_mirror_server(
             })
             .next()
             .ok_or_else(|| "lan mirror: no private LAN IPv4 address found; use --lan-mirror-addr".to_string())?;
-        SocketAddr::new(IpAddr::V4(ip), 0)
+        SocketAddr::new(IpAddr::V4(ip), 7422)
     };
     if address.ip().is_loopback() || address.ip().is_unspecified() || address.ip().is_multicast() {
         return Err("lan mirror: listener must bind a specific non-loopback LAN address".to_string());
@@ -17105,6 +17105,8 @@ fn start_lan_mirror_server(
         format!("sha256:{:x}", Sha256::digest(record.manifest_json.as_bytes()))
     }).collect::<Vec<_>>();
     let registration = ferro_core::lan_mirror::register(&instance_id, bound.ip(), bound.port(), &digests)?;
+    let advertised_digests = digests.iter().take(6).cloned().collect::<Vec<_>>().join(",");
+    let serving_instance_id = instance_id.clone();
     let runtime_dir = runtime_dir.to_path_buf();
     let secret = secret.map(str::to_owned);
     std::thread::spawn(move || {
@@ -17113,8 +17115,10 @@ fn start_lan_mirror_server(
             let store = store.clone();
             let runtime_dir = runtime_dir.clone();
             let secret = secret.clone();
+            let instance_id = serving_instance_id.clone();
+            let advertised_digests = advertised_digests.clone();
             std::thread::spawn(move || {
-                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref()) {
+                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref(), &instance_id, &advertised_digests) {
                     tracing::debug!(%error, "lan mirror request rejected");
                 }
             });
@@ -17130,6 +17134,8 @@ fn handle_lan_mirror_connection(
     runtime_dir: &Path,
     store: &LocalImageStore,
     secret: Option<&str>,
+    instance_id: &str,
+    advertised_digests: &str,
 ) -> Result<(), String> {
     use std::time::Duration;
     stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|error| error.to_string())?;
@@ -17155,6 +17161,11 @@ fn handle_lan_mirror_connection(
             stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
             return Ok(());
         }
+    }
+    if path == "/v2/" {
+        let header = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Ferrocrate-Instance: {instance_id}\r\nX-Ferrocrate-Digests: {advertised_digests}\r\n\r\n");
+        stream.write_all(header.as_bytes()).map_err(|error| error.to_string())?;
+        return Ok(());
     }
     let (body, content_type) = if let Some((name, reference)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/manifests/")) {
         let record = store.list_references().map_err(|error| error.to_string())?.into_iter().find(|record| {

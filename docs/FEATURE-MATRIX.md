@@ -34,7 +34,7 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 
 | Area | Status | Boundary / evidence |
 |---|---|---|
-| Image pull (warm), list, inspect, tag, remove | Supported | [`performance/benchmark-register.md`](evidence/performance/benchmark-register.md) (paired ten-feature snapshot at `4e515d87`) |
+| Image pull (warm), list, inspect, tag, remove, and Docker Hub search proxy | Supported; Hub search uses a five-second total timeout and returns a clean 503-class offline error | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md) (`registry-search`) |
 | Image save/load, export/import | Supported | [`docker-api/2026-08-21-api-endpoint-completion.md`](evidence/docker-api/2026-08-21-api-endpoint-completion.md) |
 | Registry auth/TLS, transient retry (429/5xx/timeout) | Supported (local fixture scope) | [`verification/2026-08-21-registry-transient-retry-current-head.md`](evidence/verification/2026-08-21-registry-transient-retry-current-head.md) |
 | LAN image mirror (mDNS discovery, read-only registry-v2 pulls) | Experimental: opt-in, private-IPv4 listener, digest verified with registry fallback | [`networking/2026-08-25-lan-image-mirror.md`](evidence/networking/2026-08-25-lan-image-mirror.md), [`design/lan-image-mirror.md`](design/lan-image-mirror.md) |
@@ -43,12 +43,12 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 | BuildKit session builds | Unsupported: `/session` and `/build?version=2` fail cleanly and direct clients to `DOCKER_BUILDKIT=0`; implementation is sized at 17–29 engineering days | [`docker-client-conformance/2026-08-24-buildkit-fallback.md`](evidence/docker-client-conformance/2026-08-24-buildkit-fallback.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md), merge `c59f6e2a` |
 | Dockerfile secrets/SSH mounts | Supported (root-qualified on this host) | [`build/2026-08-21-build-secrets-ssh-mounts.md`](evidence/build/2026-08-21-build-secrets-ssh-mounts.md) |
 | Container lifecycle (create/start/stop/kill/wait/restart) | Supported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) |
-| Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
+| Logs, exec, attach (TCP hijack and WebSocket), TTY, resize | Supported | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md) (`container-attach-websocket`); PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
 | Container log drivers | `json-file` supported; `journald` and `syslog` supported behind crate features with live proofs; signed manifest plugins supported (fixture scope). Readback is supported only for `json-file`, matching Docker. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
 | Docker-client classic-builder conformance | Supported: 60/60 pass, rootless and rootful, on every qualified row of the 2026-08-25 matrix re-run | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), merge `363a7b24` |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
-| Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |
+| Multi-network containers, Docker connect/disconnect, Compose multi-network services, and per-network DNS aliases | Supported on the rootful qualified tier; aliases are durable endpoint metadata and resolve only for peers sharing that network | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md) (`network-alias-nslookup`) |
 | Published IPv4 ports (rootful and rootless) | Supported | [`verification/2026-08-19-rootless-published-port-fedora-rocky-current-head.md`](evidence/verification/2026-08-19-rootless-published-port-fedora-rocky-current-head.md) |
 | DNS, firewall allow/deny, MTU, WireGuard overlay | Supported | four-distro privileged rerun witness (host tiers above) |
 | IPv6 address lifecycle | Supported | [`performance/2026-08-21-docker-ipv6-comparison.md`](evidence/performance/2026-08-21-docker-ipv6-comparison.md) |
@@ -56,7 +56,7 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 | eBPF published ports | Experimental: opt-in (`FERROCRATE_EBPF_ALLOW_PUBLISHED_PORTS=1` + two host sysctls); iptables/nftables stay the supported path | [`verification/2026-08-22-ebpf-published-port-reverse-path-resolved.md`](evidence/verification/2026-08-22-ebpf-published-port-reverse-path-resolved.md) |
 | Rootless run/pull/volumes/slirp/Compose/CRI | Supported on the qualified tier; hosts denying nested user namespaces fail closed with diagnostics. Ubuntu 24.04+ uses the shipped AppArmor profile instead of a host-wide sysctl relaxation. | [`rootless/2026-08-21-context-socket-diagnostics.md`](evidence/rootless/2026-08-21-context-socket-diagnostics.md), [restricted-policy profile proof](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) |
 | Compose (up/down, volumes, secrets/configs, health, read-only rootfs, shared project network) | Supported on qualified tier | six-case corpus witness (volumes row above) |
-| Compose profiles/scale/watch paired measurement | Not yet measured | planned row in [`performance/benchmark-register.md`](evidence/performance/benchmark-register.md) |
+| Compose profiles (`--profile`, `COMPOSE_PROFILES`), scale, and watch sync | Supported; genuine Compose-client rows are measured locally | [`performance/2026-08-25-compose-profiles-scale-watch.md`](evidence/performance/2026-08-25-compose-profiles-scale-watch.md), benchmark row B-068 |
 | Docker Engine API | Supported: 89 declared cases, 86 implemented, 0 partial, 3 explicitly unsupported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) (count refreshed 2026-08-22) |
 | Native CLI / Docker API unified engine state | Supported: daemon is the sole concurrent writer; containers, images, volumes, and networks are durable and visible across both surfaces and daemon restart | [`compatibility/unified-engine-state.md`](compatibility/unified-engine-state.md), [`verification/2026-08-24-unified-engine-state.md`](evidence/verification/2026-08-24-unified-engine-state.md) |
 | CRI socket lifecycle (image + sandbox + container) | Supported (fixture scope; cross-distribution open) | [`verification/2026-08-21-rootless-compose-cri-current-head-5da6664c.md`](evidence/verification/2026-08-21-rootless-compose-cri-current-head-5da6664c.md) |
@@ -77,8 +77,6 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 |---|---|---|
 | `POST /plugins/pull` | 404 with explicit message | matrix test in [`ferro-cli/tests/api_compat_matrix.rs`](../ferro-cli/tests/api_compat_matrix.rs) |
 | `POST /auth` | 501 | same matrix test |
-| `POST /containers/{id}/attach/ws` | 501 | same matrix test |
-| Remote Docker Hub image search | local catalog only | [`verification/2026-08-19-docker-image-search-current-head.md`](evidence/verification/2026-08-19-docker-image-search-current-head.md) |
 | Cross-platform native execution (Windows/macOS) | deferred; cross-target compile evidence only | cross-target witness (host tiers above) |
 
 ## Performance snapshot

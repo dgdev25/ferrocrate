@@ -2169,6 +2169,25 @@ fn handle_doctor(
 
     #[cfg(target_os = "linux")]
     {
+        let packet_filter = packet_filter_backend();
+        checks.push(DoctorCheck {
+            id: "packet_filter_backend".to_string(),
+            ok: packet_filter.is_some(),
+            message: packet_filter.as_ref().map_or_else(
+                || "packet-filter backend unavailable: install the iptables or nftables package"
+                    .to_string(),
+                |(backend, path)| {
+                    format!("packet-filter backend: {backend} ({})", path.display())
+                },
+            ),
+            hint: packet_filter.is_none().then_some(
+                "install the iptables or nftables package before starting containers with published ports"
+                    .to_string(),
+            ),
+            remediated: false,
+            action: None,
+        });
+
         let configured = std::env::var("FERROCRATE_PEER_AUTH").ok();
         let status = peer_authentication_status(configured.as_deref(), kernel_has_peer_pidfd());
         checks.push(DoctorCheck {
@@ -10933,6 +10952,20 @@ fn command_exists(bin: &str) -> bool {
     resolve_command_path(bin).is_some()
 }
 
+#[cfg(target_os = "linux")]
+fn packet_filter_backend_with(
+    mut resolve: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<(&'static str, PathBuf)> {
+    resolve("nft")
+        .map(|path| ("nft", path))
+        .or_else(|| resolve("iptables").map(|path| ("iptables", path)))
+}
+
+#[cfg(target_os = "linux")]
+fn packet_filter_backend() -> Option<(&'static str, PathBuf)> {
+    packet_filter_backend_with(resolve_command_path)
+}
+
 fn validate_compression(value: &str) -> Result<String, String> {
     match value {
         "gzip" | "zstd" => Ok(value.to_string()),
@@ -12897,6 +12930,7 @@ fn docker_named_endpoint_config(
             ipv4_subnet: format!("{subnet}/{prefix}"),
             ipv4_gateway: gateway.to_string(),
             ipv6_gateway_cidr: std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok(),
+            aliases: Vec::new(),
         });
     }
     let record = resolve_named_network(runtime_dir, name)?;
@@ -12907,6 +12941,7 @@ fn docker_named_endpoint_config(
         ipv4_subnet: record.subnet,
         ipv4_gateway: record.gateway,
         ipv6_gateway_cidr: record.ipv6_cidr,
+        aliases: Vec::new(),
     })
 }
 
@@ -15830,6 +15865,15 @@ struct DockerCreateRequest {
     tty: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
+    #[serde(rename = "NetworkingConfig", default)]
+    networking_config: DockerNetworkingConfig,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, serde::Deserialize)]
+struct DockerNetworkingConfig {
+    #[serde(rename = "EndpointsConfig", default)]
+    endpoints: HashMap<String, DockerEndpointConfig>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16032,6 +16076,8 @@ struct DockerCreateSpec {
     name: Option<String>,
     network_mode: String,
     #[serde(default)]
+    network_aliases: Vec<String>,
+    #[serde(default)]
     tty: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
@@ -16083,6 +16129,12 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if !spec.network_aliases.is_empty() {
+        annotations.push(format!(
+            "io.ferrocrate.network.aliases={}",
+            spec.network_aliases.join(",")
+        ));
+    }
 
     DockerStartRunInputs {
         path_binds,
@@ -16249,10 +16301,28 @@ struct DockerNetworkConnectWireRequest {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default, Deserialize)]
 struct DockerEndpointConfig {
-    #[serde(rename = "Aliases", default)]
+    #[serde(rename = "Aliases", default, deserialize_with = "deserialize_null_aliases")]
     aliases: Vec<String>,
-    #[serde(rename = "IPAMConfig", default)]
+    #[serde(rename = "IPAMConfig", default, deserialize_with = "deserialize_null_endpoint_ipam")]
     ipam: DockerEndpointIpamConfig,
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_aliases<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_endpoint_ipam<'de, D>(
+    deserializer: D,
+) -> Result<DockerEndpointIpamConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<DockerEndpointIpamConfig>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[cfg(target_os = "linux")]
@@ -17081,6 +17151,11 @@ fn run_daemon(
     if peer_auth_mode == PeerAuthMode::LegacyPeercred {
         eprintln!("WARN peer authentication legacy-peercred active; PID reuse can race identity resolution");
     }
+    if packet_filter_backend().is_none() {
+        eprintln!(
+            "WARN packet-filter backend unavailable; install the iptables or nftables package before starting containers with published ports"
+        );
+    }
     let runtime_dir = runtime_dir();
     let engine_runtime_dir = engine_runtime_dir();
     let mut engine_owner = EngineLockGuard::try_acquire(&engine_runtime_dir)?
@@ -17495,6 +17570,7 @@ fn handle_docker_compat_connection(
     let mut stats_follow: Option<String> = None;
     let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
+    let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
@@ -18227,16 +18303,42 @@ fn handle_docker_compat_connection(
                     http_response(200, &body, "application/vnd.docker.raw-stream")
                 }
             }
-            ("GET", path)
+            ("GET", path) | ("POST", path)
                 if path.starts_with("/containers/") && path.ends_with("/attach/ws") =>
             {
-                // The websocket attach variant is a recognized Docker route
-                // with no local implementation; report the boundary
-                // explicitly instead of a generic unknown-route 404.
-                docker_error_response(
-                    501,
-                    "websocket attach is unsupported: use the TCP hijack attach endpoint",
-                )
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/attach/ws");
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let key = request
+                    .headers
+                    .get("sec-websocket-key")
+                    .ok_or_else(|| "docker: websocket attach requires Sec-WebSocket-Key".to_string())?;
+                if request
+                    .headers
+                    .get("sec-websocket-version")
+                    .is_none_or(|version| version != "13")
+                {
+                    return Err("docker: websocket attach requires Sec-WebSocket-Version 13".into());
+                }
+                let stdout_requested = query
+                    .get("stdout")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdout"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let stderr_requested = query
+                    .get("stderr")
+                    .map(|value| parse_docker_bool_query(Some(value), "stderr"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let (stdout, stderr) = runtime.logs_split(&id).unwrap_or_default();
+                let tty = runtime.inspect(&id).map_err(|error| error.to_string())?.tty;
+                websocket_attach = Some(docker_attach_output(
+                    tty,
+                    if stdout_requested { &stdout } else { "" },
+                    if stderr_requested { &stderr } else { "" },
+                ));
+                docker_websocket_upgrade_headers(key)
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
                 let requested_id = path
@@ -19265,7 +19367,12 @@ fn handle_docker_compat_connection(
             ("GET", "/images/search") => {
                 let (term, limit) = parse_docker_image_search_query(&query)?;
                 let images = store.list_references().map_err(|err| err.to_string())?;
-                let entries = docker_image_search_results(&images, &term, limit);
+                let local_entries = docker_image_search_results(&images, &term, limit);
+                let entries = if local_entries.is_empty() {
+                    docker_hub_search(&term, limit)?
+                } else {
+                    local_entries
+                };
                 let json = serde_json::to_string(&entries)
                     .map_err(|error| format!("docker: image search response failed: {error}"))?;
                 http_response(200, json.as_bytes(), "application/json")
@@ -19646,7 +19753,8 @@ fn handle_docker_compat_connection(
                     .trim_end_matches('/');
                 let request = parse_docker_network_connect_request(&request.body)?;
                 let id = resolve_container_id(&runtime, &request.container)?;
-                let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                let mut config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                config.aliases = request.aliases;
                 let permit = surface_authorization
                     .authorize_named(
                         &origin,
@@ -19912,6 +20020,19 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some(output) = websocket_attach {
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message, WebSocket};
+        let mut websocket = WebSocket::from_raw_socket(stream, Role::Server, None);
+        if !output.is_empty() {
+            websocket
+                .send(Message::Binary(output.into()))
+                .map_err(|error| format!("docker: websocket attach send failed: {error}"))?;
+        }
+        websocket
+            .close(None)
+            .map_err(|error| format!("docker: websocket attach close failed: {error}"))?;
+        return Ok(());
+    }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
             Some(
@@ -20137,6 +20258,9 @@ fn docker_status_for_error(err: &str) -> u16 {
     // stable service-unavailable response so clients and readiness probes can
     // distinguish it from ordinary API validation failures.
     if lowered.contains("so_peerpidfd") {
+        return 503;
+    }
+    if lowered.contains("docker hub search unavailable") {
         return 503;
     }
     if lowered.contains("still running") {
@@ -20727,6 +20851,68 @@ fn docker_image_search_results(
 }
 
 #[cfg(target_os = "linux")]
+fn docker_hub_search(term: &str, limit: usize) -> Result<Vec<serde_json::Value>, String> {
+    let endpoint = std::env::var("FERROCRATE_DOCKER_HUB_SEARCH_URL")
+        .unwrap_or_else(|_| "https://hub.docker.com/v2/search/repositories/".to_string());
+    docker_hub_search_with_endpoint(&endpoint, term, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_with_endpoint(
+    endpoint: &str,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("ferrocrate/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    let response = client
+        .get(endpoint)
+        .query(&[("query", term), ("page_size", &limit.to_string())])
+        .send()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "docker: Docker Hub search unavailable: upstream returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let payload = response
+        .json::<serde_json::Value>()
+        .map_err(|error| format!("docker: Docker Hub search returned invalid JSON: {error}"))?;
+    docker_hub_search_results_from_value(payload, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_results_from_value(
+    payload: serde_json::Value,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let results = payload
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "docker: Docker Hub search response omitted results".to_string())?;
+    Ok(results
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("repo_name")?.as_str()?;
+            Some(serde_json::json!({
+                "Index": "docker.io",
+                "Name": name,
+                "Description": entry.get("short_description").and_then(serde_json::Value::as_str).unwrap_or(""),
+                "Official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "Automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "StarCount": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            }))
+        })
+        .take(limit)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
 const DOCKER_API_VERSION: &str = "1.45";
 
 #[cfg(target_os = "linux")]
@@ -21092,6 +21278,13 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
             other.to_string()
         }
     };
+    let network_aliases = request
+        .networking_config
+        .endpoints
+        .get(&network_mode)
+        .or_else(|| request.networking_config.endpoints.values().next())
+        .map(|endpoint| endpoint.aliases.clone())
+        .unwrap_or_default();
     let health = parse_docker_healthcheck(request.healthcheck)?;
     let memory_max = normalize_docker_limit(host_config.memory, "Memory")?;
     let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
@@ -21125,6 +21318,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        network_aliases,
         tty: request.tty,
         log_options,
         log_driver,
@@ -21603,6 +21797,10 @@ fn docker_network_settings(
     let ipv6 = record.ipv6_address.clone().unwrap_or_default();
     let mut networks = serde_json::Map::new();
     for endpoint in record.effective_network_endpoints() {
+        let mut dns_names = record.name.clone().into_iter().collect::<Vec<_>>();
+        dns_names.extend(endpoint.aliases.iter().cloned());
+        dns_names.sort();
+        dns_names.dedup();
         let ipv4_prefix = endpoint
             .ownership
             .as_ref()
@@ -21622,7 +21820,7 @@ fn docker_network_settings(
                 "GlobalIPv6Address": endpoint.ipv6_address.clone().unwrap_or_default(),
                 "GlobalIPv6PrefixLen": if endpoint.ipv6_address.is_some() { 64 } else { 0 },
                 "MacAddress": "",
-                "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+                "DNSNames": dns_names,
             }),
         );
     }
@@ -22210,6 +22408,15 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_websocket_upgrade_headers(key: &str) -> Vec<u8> {
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 #[cfg(target_os = "linux")]
@@ -26585,6 +26792,16 @@ volumes:
     }
 
     #[test]
+    fn container_create_preserves_network_aliases() {
+        let spec = super::parse_docker_create_spec(
+            br#"{"Image":"alpine:3.20","HostConfig":{"NetworkMode":"app"},"NetworkingConfig":{"EndpointsConfig":{"app":{"Aliases":["api","api.internal"]}}}}"#,
+            None,
+        )
+        .expect("network aliases");
+        assert_eq!(spec.network_aliases, vec!["api", "api.internal"]);
+    }
+
+    #[test]
     fn parses_docker_network_connect_and_disconnect_payloads() {
         let connect = super::parse_docker_network_connect_request(
             br#"{"Container":"api","EndpointConfig":{"Aliases":["api-alias"]}}"#,
@@ -28510,6 +28727,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -28738,6 +28956,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                network_aliases: Vec::new(),
                 tty: false,
                 log_options: HashMap::new(),
                 log_driver: "json-file".to_string(),
@@ -28816,6 +29035,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -28955,6 +29175,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -29250,6 +29471,35 @@ volumes:
     }
 
     #[test]
+    fn docker_hub_search_projects_engine_wire_fields_and_limit() {
+        let payload = serde_json::json!({
+            "results": [
+                {"repo_name":"library/alpine","short_description":"small","star_count":99,"is_official":true,"is_automated":false},
+                {"repo_name":"example/extra","short_description":null,"star_count":3,"is_official":false,"is_automated":true}
+            ]
+        });
+        let results = super::docker_hub_search_results_from_value(payload, 1)
+            .expect("Docker Hub response");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["Name"], "library/alpine");
+        assert_eq!(results[0]["Index"], "docker.io");
+        assert_eq!(results[0]["StarCount"], 99);
+        assert_eq!(results[0]["Official"], true);
+    }
+
+    #[test]
+    fn docker_hub_search_reports_clean_offline_error() {
+        let error = super::docker_hub_search_with_endpoint(
+            "http://127.0.0.1:1/v2/search/repositories/",
+            "busybox",
+            5,
+        )
+        .expect_err("closed endpoint");
+        assert!(error.starts_with("docker: Docker Hub search unavailable:"), "{error}");
+        assert_eq!(super::docker_status_for_error(&error), 503);
+    }
+
+    #[test]
     fn docker_volume_filters_match_name_and_driver() {
         let record = ferro_core::volume_store::VolumeRecord {
             name: "database".to_string(),
@@ -29525,6 +29775,16 @@ volumes:
         assert!(headers.contains("Connection: Upgrade\r\n"));
         assert!(headers.contains("Upgrade: tcp\r\n"));
         assert!(headers.contains("application/vnd.docker.raw-stream"));
+    }
+
+    #[test]
+    fn websocket_attach_handshake_uses_rfc6455_accept_key() {
+        let response = super::docker_websocket_upgrade_headers(
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        );
+        let text = String::from_utf8(response).expect("HTTP response");
+        assert!(text.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(text.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
     }
 
     #[test]
@@ -30527,6 +30787,18 @@ volumes:
         validate_network_backend("nftables").expect("ok");
         let err = validate_network_backend("bogus").expect_err("invalid backend");
         assert!(err.contains("network-backend"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packet_filter_detection_prefers_nft_and_reports_binary_path() {
+        let detected = super::packet_filter_backend_with(|name| match name {
+            "nft" => Some(PathBuf::from("/usr/sbin/nft")),
+            "iptables" => Some(PathBuf::from("/usr/sbin/iptables")),
+            _ => None,
+        });
+        assert_eq!(detected, Some(("nft", PathBuf::from("/usr/sbin/nft"))));
+        assert_eq!(super::packet_filter_backend_with(|_| None), None);
     }
 
     #[test]

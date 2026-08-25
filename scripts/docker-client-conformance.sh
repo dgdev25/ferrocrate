@@ -96,6 +96,14 @@ command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
 command -v ldd >/dev/null 2>&1 || harness_error "ldd is required to verify the offline image fixture"
+websocat_bin="${FERROCRATE_CONFORMANCE_WEBSOCAT:-}"
+if [[ -z "$websocat_bin" ]]; then
+  websocat_bin="$(command -v websocat 2>/dev/null || true)"
+fi
+if [[ -z "$websocat_bin" && -x /tmp/ferrocrate-websocat/bin/websocat ]]; then
+  websocat_bin=/tmp/ferrocrate-websocat/bin/websocat
+fi
+[[ -x "$websocat_bin" ]] || harness_error "websocat is required for WebSocket attach conformance"
 busybox_bin=""
 if [[ -n "${FERROCRATE_CONFORMANCE_BUSYBOX:-}" ]]; then
   busybox_candidates=("$FERROCRATE_CONFORMANCE_BUSYBOX")
@@ -213,9 +221,10 @@ runtime_dir="$work_root/runtime"
 state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
+compose_parity_dir="$work_root/compose-parity"
 outputs_dir="$work_root/outputs"
 cgroup_root="$work_root/cgroup"
-mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$compose_parity_dir/watch-source" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
 printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
   harness_error "cannot initialize isolated cgroup controller fixture"
@@ -260,7 +269,10 @@ volume="$run_prefix-volume"
 network="$run_prefix-network"
 write_only_log_container="$run_prefix-write-only-log"
 secondary_network="$run_prefix-secondary"
+alias_network="$run_prefix-alias-network"
+alias_target="$run_prefix-alias-target"
 compose_project="$run_prefix-compose"
+compose_parity_project="$run_prefix-parity-compose"
 compose_frontend_network="${compose_project}_frontend"
 compose_backend_network="${compose_project}_backend"
 host_port=18093
@@ -413,12 +425,18 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker rm --force "$container" "$attach_container" "$write_only_log_container" \
+        docker compose --project-name "$compose_parity_project" \
+          --file "$compose_parity_dir/compose.yml" --profile optional down --timeout 2 \
       >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker network rm "$network" "$secondary_network" >/dev/null 2>&1 || true
+        docker rm --force "$container" "$attach_container" "$write_only_log_container" "$alias_target" \
+      >/dev/null 2>&1 || true
+    cleanup_token="$(next_cleanup_token)"
+    run_bounded_owned 15 3 "$cleanup_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker network rm "$network" "$secondary_network" "$alias_network" >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
@@ -478,6 +496,25 @@ printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bi
   "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
+printf 'initial\n' >"$compose_parity_dir/watch-source/marker.txt" || harness_error "cannot write watch fixture"
+cat >"$compose_parity_dir/compose.yml" <<EOF || harness_error "cannot write Compose parity fixture"
+services:
+  optional:
+    image: $image
+    profiles: [optional]
+    command: ["/bin/busybox", "sleep", "120"]
+  worker:
+    image: $image
+    command: ["/bin/busybox", "sleep", "120"]
+  watcher:
+    image: $image
+    command: ["/bin/busybox", "sleep", "120"]
+    develop:
+      watch:
+        - action: sync
+          path: ./watch-source
+          target: /
+EOF
 
 # The harness already runs inside a disposable root-mapped user+network
 # namespace, so exercise the real bridge/connect path there. Callers can still
@@ -521,6 +558,7 @@ error_count=0
 record_stdin="/dev/null"
 expected_daemon_error_message=""
 record_docker_buildkit=0
+record_env=()
 
 shell_command() {
   local rendered="docker" argument
@@ -541,10 +579,13 @@ record_command() {
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
   command_text="$(shell_command "$@")"
+  if ((${#record_env[@]})); then
+    command_text="${record_env[*]} $command_text"
+  fi
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" "${record_env[@]}" \
         FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
@@ -571,6 +612,7 @@ record_command() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
   record_docker_buildkit=0
+  record_env=()
 }
 
 # A command whose success is a nonzero exit WITH a daemon-mediated error
@@ -611,6 +653,80 @@ record_expected_daemon_error() {
   record_stdin="/dev/null"
   expected_daemon_error_message=""
   record_docker_buildkit=0
+}
+
+record_compose_watch_sync() {
+  local id="compose-watch-sync" area="compose"
+  local command_text started ended duration watch_exit probe_exit status stdout_file stderr_file command_token modifier_pid
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="$(shell_command compose --ansi never --project-name "$compose_parity_project" --file "$compose_parity_dir/compose.yml" watch --no-up) [bounded change-and-sync proof]"
+  started="$(date +%s%N)"
+  (sleep 2; printf 'synced\n' >"$compose_parity_dir/watch-source/marker.txt") &
+  modifier_pid=$!
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned 8 3 "$command_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker compose --ansi never --project-name "$compose_parity_project" \
+          --file "$compose_parity_dir/compose.yml" watch --no-up \
+      >"$stdout_file" 2>"$stderr_file"; then
+    watch_exit=0
+  else
+    watch_exit=$?
+  fi
+  wait "$modifier_pid" 2>/dev/null || true
+  if run_bounded_owned 10 3 "$command_token-proof" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker cp "${compose_parity_project}-watcher-1:/marker.txt" \
+          "$work_root/watch-proof.txt" \
+      >>"$stdout_file" 2>>"$stderr_file" \
+      && grep -Fxq synced "$work_root/watch-proof.txt"; then
+    probe_exit=0
+  else
+    probe_exit=1
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$watch_exit" == 124 || "$watch_exit" == 143 ]] && [[ "$probe_exit" == 0 ]]; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+    watch_exit=0
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$watch_exit" "$status" "$duration" >>"$log_tmp"
+}
+
+record_websocket_attach() {
+  local id="container-attach-websocket" area="container"
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="websocat --binary --one-message --ws-c-uri ws://localhost/v1.45/containers/$attach_container/attach/ws?stdout=1\\&stderr=1 - ws-c:unix:<docker-socket>"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned "$command_timeout" 5 "$command_token" \
+      "$websocat_bin" --binary --one-message \
+        --ws-c-uri="ws://localhost/v1.45/containers/$attach_container/attach/ws?stdout=1&stderr=1" \
+        - "ws-c:unix:$socket" \
+      >"$stdout_file" 2>"$stderr_file" \
+      && grep -aFq ferrocrate-conformance-attach "$stdout_file"; then
+    exit_code=0
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    exit_code=$?
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
 }
 
 # Client identity and engine prerequisites.
@@ -692,12 +808,26 @@ record_command network-list network network ls
 record_command network-inspect network network inspect "$network"
 record_command network-remove network network rm "$network"
 
+# Per-network aliases must resolve through the bridge's embedded DNS from a
+# distinct peer. This uses BusyBox nslookup so the row cannot pass through
+# libc's /etc/hosts fallback.
+record_command network-alias-create network network create --driver bridge \
+  --subnet 172.30.245.0/24 "$alias_network"
+record_command network-alias-target network run --detach --name "$alias_target" \
+  --network "$alias_network" --network-alias conformance-alias \
+  "$image" /bin/busybox sleep 120
+record_command network-alias-nslookup network run --rm --network "$alias_network" \
+  "$image" /bin/busybox nslookup conformance-alias
+record_command network-alias-target-remove network rm --force "$alias_target"
+record_command network-alias-remove network network rm "$alias_network"
+
 # Attach uses a finite workload so a conforming client closes naturally.
 record_command attach-container-create container create --label "$owner_label" --name "$attach_container" \
   --network none "$image" /bin/busybox sh -c '/bin/busybox sleep 2; echo ferrocrate-conformance-attach'
 record_command attach-container-start container start "$attach_container"
 record_command container-attach container attach --no-stdin --sig-proxy=false "$attach_container"
 record_command attach-container-wait container wait "$attach_container"
+record_websocket_attach
 record_command attach-container-remove container rm --force "$attach_container"
 
 # Discovery/auth use isolated Docker credentials. Login intentionally targets
@@ -711,6 +841,29 @@ record_stdin="$work_root/login-password.txt"
 # nonzero with a daemon-mediated error message.
 record_expected_daemon_error registry-login registry login --username conformance --password-stdin 127.0.0.1:1
 record_command registry-logout registry logout 127.0.0.1:1
+
+# Compose profiles and scale are driven by the genuine Compose plugin. Exec
+# into the profile-gated service and worker index 2 proves the client created
+# the requested topology rather than merely accepting flags.
+record_command compose-profile-scale-up compose compose --ansi never \
+  --project-name "$compose_parity_project" --file "$compose_parity_dir/compose.yml" \
+  --profile optional up --detach --scale worker=2
+record_command compose-profile-inspect compose inspect \
+  "${compose_parity_project}-optional-1"
+record_command compose-scale-index-two compose inspect \
+  "${compose_parity_project}-worker-2"
+record_command compose-parity-down compose compose --ansi never \
+  --project-name "$compose_parity_project" --file "$compose_parity_dir/compose.yml" \
+  --profile optional down --timeout 2
+record_env=(COMPOSE_PROFILES=optional)
+record_command compose-profiles-env-up compose compose --ansi never \
+  --project-name "$compose_parity_project" --file "$compose_parity_dir/compose.yml" up --detach
+record_command compose-profiles-env-inspect compose inspect \
+  "${compose_parity_project}-optional-1"
+record_compose_watch_sync
+record_command compose-profiles-env-down compose compose --ansi never \
+  --project-name "$compose_parity_project" --file "$compose_parity_dir/compose.yml" \
+  --profile optional down --timeout 2
 
 # Genuine Compose plugin invocations against the repository's representative
 # four-service application fixture.

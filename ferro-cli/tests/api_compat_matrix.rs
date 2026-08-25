@@ -383,10 +383,10 @@ const API_MATRIX: &[ApiCase] = &[
     },
     ApiCase {
         method: "GET",
-        // Recognized Docker route without a local websocket implementation.
+        // WebSocket attach resolves the container before upgrading.
         path: "/containers/missing/attach/ws",
-        coverage: Coverage::Unsupported,
-        expected_status: 501,
+        coverage: Coverage::Implemented,
+        expected_status: 404,
         body: "",
     },
     ApiCase {

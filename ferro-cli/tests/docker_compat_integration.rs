@@ -3005,18 +3005,14 @@ fn docker_compat_put_archive_replaces_type_changing_entries() {
     assert_eq!(status, 204, "archive-replace cleanup response={body}");
 }
 
-/// Recognized Docker routes without a local implementation report an explicit
-/// 501 boundary instead of a generic unknown-route 404.
+/// Recognized Docker routes validate or resolve their inputs before execution.
 #[test]
 fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     let harness = DaemonHarness::spawn();
 
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/attach/ws");
-    assert_eq!(status, 501, "attach/ws response={body}");
-    assert!(
-        body.contains("websocket attach is unsupported") && body.contains("TCP hijack attach"),
-        "body={body}"
-    );
+    assert_eq!(status, 404, "attach/ws response={body}");
+    assert!(body.contains("container not found"), "body={body}");
 
     // The synthetic top listing cannot honor a client ps argument set.
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=-ef");
@@ -3028,6 +3024,43 @@ fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     // An empty ps_args stays a no-op and preserves the missing-container 404.
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=");
     assert_eq!(status, 404, "empty ps_args response={body}");
+}
+
+#[test]
+fn docker_compat_websocket_attach_upgrades_and_frames_logs() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "websocket-attach:latest");
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=websocket-attach",
+        "application/json",
+        br#"{"Image":"websocket-attach:latest","Cmd":["/bin/busybox","sh","-c","echo websocket-attached"],"HostConfig":{"NetworkMode":"none"}}"#,
+    );
+    assert_eq!(status, 201, "create response={body}");
+    let (status, body) = harness.request("POST", "/v1.45/containers/websocket-attach/start");
+    assert_eq!(status, 204, "start response={body}");
+    for _ in 0..50 {
+        let (status, body) = harness.request("GET", "/v1.45/containers/websocket-attach/json");
+        assert_eq!(status, 200, "inspect response={body}");
+        if body.contains("\"Status\":\"exited\"") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let stream = UnixStream::connect(&harness.socket_path).expect("connect websocket socket");
+    let (mut websocket, response) = tokio_tungstenite::tungstenite::client(
+        "ws://localhost/v1.45/containers/websocket-attach/attach/ws?stdout=1&stderr=1",
+        stream,
+    )
+    .expect("websocket upgrade");
+    assert_eq!(response.status(), 101);
+    let message = websocket.read().expect("websocket attach frame");
+    let bytes = message.into_data();
+    assert!(
+        bytes.windows(b"websocket-attached".len()).any(|window| window == b"websocket-attached"),
+        "frame={bytes:?}"
+    );
 }
 
 #[test]

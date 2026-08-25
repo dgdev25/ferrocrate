@@ -53,4 +53,9 @@ expect_usage_error --listen 127.0.0.1:4317 native
 expect_usage_error --web --web
 expect_usage_error --web --listen 127.0.0.1:4317 --listen 127.0.0.1:4318
 
+if ! grep -Fq 'export PATH="$root/target/debug:$root/target/release:$PATH"' "$launcher"; then
+  printf 'dev launcher must prefer the freshly built debug desktop proxy\n' >&2
+  exit 1
+fi
+
 printf 'dev-desktop argument tests passed\n'

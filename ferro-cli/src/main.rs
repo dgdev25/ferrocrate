@@ -22298,35 +22298,16 @@ async fn handle_buildkit_control_request(
         .await;
     }
     if method == BuildkitControlMethod::GatewayPing {
-        use buildkit_proto::moby::buildkit::v1::frontend::PongResponse;
-        use buildkit_proto::moby::buildkit::v1::apicaps::ApiCap;
         response_stream
             .send_data(
-                grpc_message(&PongResponse {
-                    frontend_api_caps: [
-                        "solve.base",
-                        "return",
-                        "returnmap",
-                        "proto.refarray",
-                        "gateway.solve.metadata",
-                    ]
-                    .into_iter()
-                    .map(|id| ApiCap {
-                        id: id.to_string(),
-                        enabled: true,
-                        ..Default::default()
-                    })
-                    .collect(),
-                    workers: buildkit_list_workers_response().record,
-                    ..Default::default()
-                }),
+                grpc_message(&buildkit_gateway_pong()),
                 false,
             )
             .map_err(|error| format!("buildkit control: gateway ping failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
     if method == BuildkitControlMethod::Solve {
-        use buildkit_proto::moby::buildkit::v1::{SolveRequest, SolveResponse};
+        use buildkit_proto::moby::buildkit::v1::SolveRequest;
         let solve = receive_buildkit_unary::<SolveRequest>(request.into_body()).await?;
         tracing::debug!(
             build_ref = %solve.r#ref,
@@ -22359,29 +22340,9 @@ async fn handle_buildkit_control_request(
             build.completed.notify_waiters();
         }
         wait_for_buildkit_completion(&build, lifetime).await?;
-        let returned = build
-            .returned
-            .lock()
-            .map_err(|error| format!("buildkit gateway return poisoned: {error}"))?;
-        if let Some(error) = returned.as_ref().and_then(|returned| returned.error.as_ref()) {
-            if error.code != 0 {
-                return Err(format!("buildkit solve: {}", error.message));
-            }
-        }
-        drop(returned);
-        let result = build
-            .result
-            .lock()
-            .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
-            .clone()
-            .ok_or_else(|| "buildkit solve: frontend returned no image".to_string())?;
-        let exporter_response = HashMap::from([
-            ("containerimage.digest".to_string(), result.image_digest),
-            ("image.name".to_string(), result.image_name),
-        ]);
         response_stream
             .send_data(
-                grpc_message(&SolveResponse { exporter_response }),
+                grpc_message(&buildkit_outer_solve_response(&build)?),
                 false,
             )
             .map_err(|error| format!("buildkit solve: response failed: {error}"))?;
@@ -22541,6 +22502,103 @@ async fn handle_buildkit_control_request(
         12,
         Some("method%20not%20implemented"),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::PongResponse {
+    use buildkit_proto::moby::buildkit::v1::apicaps::ApiCap;
+    use buildkit_proto::moby::buildkit::v1::frontend::PongResponse;
+
+    let enabled = |id: &str| ApiCap {
+        id: id.to_string(),
+        enabled: true,
+        ..Default::default()
+    };
+    PongResponse {
+        frontend_api_caps: [
+            "solve.base",
+            "solve.inlinereturn",
+            "resolveimage",
+            "resolveimage.resolvemode",
+            "readfile",
+            "return",
+            "returnmap",
+            "readdir",
+            "statfile",
+            "importcaches",
+            "proto.refarray",
+            "reference.output",
+            "frontend.inputs",
+            "gateway.solve.metadata",
+            "frontend.caps",
+            "gateway.solve.evaluate",
+            "gateway.evaluate",
+            "gateway.warnings",
+            "reference.attestations",
+        ]
+        .into_iter()
+        .map(enabled)
+        .collect(),
+        llb_caps: [
+            "source.image",
+            "source.image.resolvemode",
+            "source.local",
+            "source.local.unique",
+            "source.local.sessionid",
+            "source.local.sharedkeyhint",
+            "exec.meta.base",
+            "exec.meta.network",
+            "exec.meta.proxyenv",
+            "exec.mount.bind",
+            "file.base",
+            "constraints",
+            "platform",
+        ]
+        .into_iter()
+        .map(enabled)
+        .collect(),
+        workers: buildkit_list_workers_response().record,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_outer_solve_response(
+    build: &BuildkitBuild,
+) -> Result<buildkit_proto::moby::buildkit::v1::SolveResponse, String> {
+    use buildkit_proto::moby::buildkit::v1::SolveResponse;
+
+    let returned = build
+        .returned
+        .lock()
+        .map_err(|error| format!("buildkit gateway return poisoned: {error}"))?;
+    if let Some(error) = returned.as_ref().and_then(|returned| returned.error.as_ref()) {
+        if error.code != 0 {
+            return Err(format!("buildkit solve: {}", error.message));
+        }
+    }
+    drop(returned);
+    let result = build
+        .result
+        .lock()
+        .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+        .clone();
+    if let Some(result) = result {
+        return Ok(SolveResponse {
+            exporter_response: HashMap::from([
+                ("containerimage.digest".to_string(), result.image_digest),
+                ("image.name".to_string(), result.image_name),
+            ]),
+        });
+    }
+    if build.request.internal
+        && build.request.frontend.is_empty()
+        && build.request.definition.is_none()
+        && build.request.exporters.is_empty()
+        && build.request.exporter_deprecated.is_empty()
+    {
+        return Ok(SolveResponse::default());
+    }
+    Err("buildkit solve: frontend returned no image".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -30656,6 +30714,69 @@ volumes:
             "dockerfile.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_probe_return_produces_an_empty_outer_solve_response() {
+        use super::buildkit_proto::moby::buildkit::v1::frontend;
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "probe-ref".to_string(),
+                session: "probe-session".to_string(),
+                internal: true,
+                ..Default::default()
+            })
+            .expect("register probe solve");
+        state
+            .record_buildkit_gateway_return("probe-ref", frontend::ReturnRequest::default())
+            .expect("record empty probe return");
+
+        let response = super::buildkit_outer_solve_response(&build).expect("probe response");
+        assert!(response.exporter_response.is_empty());
+    }
+
+    #[test]
+    fn buildkit_gateway_ping_advertises_required_frontend_and_llb_caps() {
+        use std::collections::HashSet;
+
+        let pong = super::buildkit_gateway_pong();
+        let frontend_caps = pong
+            .frontend_api_caps
+            .iter()
+            .filter(|cap| cap.enabled)
+            .map(|cap| cap.id.as_str())
+            .collect::<HashSet<_>>();
+        for required in [
+            "solve.base",
+            "solve.inlinereturn",
+            "resolveimage",
+            "resolveimage.resolvemode",
+            "readfile",
+            "return",
+            "returnmap",
+            "readdir",
+            "statfile",
+            "importcaches",
+            "proto.refarray",
+            "reference.output",
+            "frontend.inputs",
+            "gateway.solve.metadata",
+            "frontend.caps",
+            "gateway.solve.evaluate",
+            "gateway.evaluate",
+            "gateway.warnings",
+            "reference.attestations",
+        ] {
+            assert!(frontend_caps.contains(required), "missing frontend cap {required}");
+        }
+        assert!(pong
+            .llb_caps
+            .iter()
+            .any(|cap| cap.enabled && cap.id == "source.local.sessionid"));
     }
 
     #[test]

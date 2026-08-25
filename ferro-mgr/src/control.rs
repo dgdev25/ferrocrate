@@ -110,5 +110,6 @@ fn _typed_state(state: DesiredState) -> ManagerMessage {
         desired_state: Some(state),
         error: String::new(),
         desired_authorization_bundle: Vec::new(),
+        command_json: Vec::new(),
     }
 }

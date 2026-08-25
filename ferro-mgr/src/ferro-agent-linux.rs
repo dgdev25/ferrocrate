@@ -19,6 +19,7 @@ use ferro_mgr::{
         netd_sequence::{NetdSequence, SequenceValue},
         Agent, AgentError, StateStore,
     },
+    fleet::{collect_agent_observation, execute_agent_command, FleetCommand},
     proto::{control_service_client::ControlServiceClient, AgentMessage},
 };
 use ipnet::Ipv4Net;
@@ -104,8 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::env::var("FERROCRATE_AGENT_OVERLAYS_JSON").unwrap_or_else(|_| "{}".into()),
     )?;
     let ipam = Ipam::with_state(pool, gateway, reserved, ipam_state)?;
+    let runtime_executable = PathBuf::from(required("FERROCRATE_RUNTIME_EXE")?);
     let local_api = LocalApi::new(runtime_uid, lease_expiry, ipam)
-        .with_runtime_executable(required("FERROCRATE_RUNTIME_EXE")?)
+        .with_runtime_executable(runtime_executable.clone())
         .with_authorization_identity(service_mode, instance_boot.clone());
     let envelope_key_bytes = read_private_key(&required(
         "FERROCRATE_AGENT_NETD_ENVELOPE_SIGNING_KEY_FILE",
@@ -166,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_mode,
         instance_boot,
         netd_envelope_signer,
+        runtime_executable,
     )
     .await
 }
@@ -231,6 +234,7 @@ async fn run_control_stream(
     service_mode: AuthorizationServiceMode,
     instance_boot: String,
     netd_envelope_signer: Option<SigningKey>,
+    runtime_executable: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = required("FERROCRATE_CONTROL_ENDPOINT")?;
     let ca = std::fs::read(required("FERROCRATE_NODE_CA_CERT")?)?;
@@ -283,26 +287,29 @@ async fn run_control_stream(
         .with_netd_sequence(netd_sequence.clone())
     });
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let initial_observation = collect_agent_observation(&runtime_executable, now_unix()).await;
     sender
         .send(AgentMessage {
             node_id: node_id.clone(),
             acknowledged_revision: agent.state().applied_revision,
-            payload: Vec::new(),
+            payload: serde_json::to_vec(&initial_observation)?,
         })
         .await?;
     let keepalive_sender = sender.clone();
     let keepalive_agent = agent.clone();
     let keepalive_node_id = node_id.clone();
+    let keepalive_runtime = runtime_executable.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.tick().await;
         loop {
             interval.tick().await;
+            let observation = collect_agent_observation(&keepalive_runtime, now_unix()).await;
             if keepalive_sender
                 .send(AgentMessage {
                     node_id: keepalive_node_id.clone(),
                     acknowledged_revision: keepalive_agent.state().applied_revision,
-                    payload: Vec::new(),
+                    payload: serde_json::to_vec(&observation).unwrap_or_default(),
                 })
                 .await
                 .is_err()
@@ -318,6 +325,23 @@ async fn run_control_stream(
     while let Some(message) = control.message().await? {
         if !message.error.is_empty() {
             return Err(format!("manager control error: {}", message.error).into());
+        }
+        if !message.command_json.is_empty() {
+            let command: FleetCommand = serde_json::from_slice(&message.command_json)?;
+            let result = execute_agent_command(&runtime_executable, command).await;
+            sender
+                .send(AgentMessage {
+                    node_id: node_id.clone(),
+                    acknowledged_revision: agent.state().applied_revision,
+                    payload: serde_json::to_vec(&serde_json::json!({
+                        "kind": "command_result",
+                        "request_id": result.request_id,
+                        "exit_code": result.exit_code,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    }))?,
+                })
+                .await?;
         }
         if let Some(desired) = message.desired_state {
             let reconciliation = if service_mode.mode() == AuthorizationMode::Disabled {

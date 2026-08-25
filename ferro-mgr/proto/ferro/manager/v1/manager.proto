@@ -14,7 +14,7 @@ message OverlayState { string overlay_id = 1; repeated string routes = 2; repeat
 message Peer { string node_id = 1; bytes public_key = 2; string endpoint = 3; repeated string allowed_ips = 4; }
 message DesiredState { string cluster_id = 1; uint64 cluster_epoch = 2; uint64 revision = 3; repeated OverlayState overlays = 4; bytes signature = 5; int64 lease_expires_unix = 6; }
 message AgentMessage { string node_id = 1; uint64 acknowledged_revision = 2; bytes payload = 3; }
-message ManagerMessage { DesiredState desired_state = 1; string error = 2; bytes desired_authorization_bundle = 3; }
+message ManagerMessage { DesiredState desired_state = 1; string error = 2; bytes desired_authorization_bundle = 3; bytes command_json = 4; }
 message AdminRequest { string cluster_id = 1; }
 message AdminResponse { uint32 node_count = 1; uint64 cluster_epoch = 2; }
 message PublishDesiredRequest { string cluster_id = 1; string node_id = 2; repeated OverlayState overlays = 3; }

@@ -12,6 +12,7 @@ use crate::{
     controller_authorization::{ControllerAuthorizationError, ControllerGrantIssuer},
     desired_state::DesiredStateBuilder,
     enrollment::EnrollmentService,
+    fleet::{ControlHub, FleetCommandResult},
     pki::CertificateAuthority,
     proto::{
         admin_service_server::AdminService, control_service_server::ControlService,
@@ -19,7 +20,7 @@ use crate::{
         AgentMessage, DesiredState, EnrollRequest, EnrollResponse, ManagerMessage,
         PublishDesiredRequest, PublishDesiredResponse,
     },
-    store::{Enrollment, ManagerStore},
+    store::{Enrollment, HostObservation, ManagerStore},
 };
 
 pub struct EnrollmentServiceImpl {
@@ -78,6 +79,7 @@ pub struct ControlServiceImpl {
     store: Arc<ManagerStore>,
     active_nodes: Arc<Mutex<HashSet<String>>>,
     controller: Option<Arc<ControllerGrantIssuer>>,
+    fleet_hub: Arc<ControlHub>,
 }
 impl ControlServiceImpl {
     pub fn new(
@@ -86,12 +88,14 @@ impl ControlServiceImpl {
         signing_key: Vec<u8>,
         store: Arc<ManagerStore>,
     ) -> Self {
+        let fleet_hub = Arc::new(ControlHub::new(store.clone()));
         Self {
             builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)),
             revision: 1,
             store,
             active_nodes: Arc::new(Mutex::new(HashSet::new())),
             controller: None,
+            fleet_hub,
         }
     }
     pub fn new_authorized(
@@ -168,6 +172,10 @@ impl ControlServiceImpl {
             .map_err(|e| e.to_string())?;
         Ok(revision)
     }
+
+    pub fn fleet_hub(&self) -> Arc<ControlHub> {
+        self.fleet_hub.clone()
+    }
 }
 
 #[tonic::async_trait]
@@ -183,8 +191,10 @@ impl ControlService for ControlServiceImpl {
         let revision = self.revision;
         let store = self.store.clone();
         let active_nodes = self.active_nodes.clone();
+        let fleet_hub = self.fleet_hub.clone();
         tokio::spawn(async move {
             let mut bound_node = None;
+            let mut command_forward = None;
             while let Ok(Some(message)) = inbound.message().await {
                 if message.node_id.is_empty() {
                     let _ = sender
@@ -192,6 +202,7 @@ impl ControlService for ControlServiceImpl {
                             desired_state: None,
                             error: "node_id is required".into(),
                             desired_authorization_bundle: Vec::new(),
+                            command_json: Vec::new(),
                         }))
                         .await;
                     continue;
@@ -203,6 +214,7 @@ impl ControlService for ControlServiceImpl {
                                 desired_state: None,
                                 error: "node identity changed within stream".into(),
                                 desired_authorization_bundle: Vec::new(),
+                                command_json: Vec::new(),
                             }))
                             .await;
                         break;
@@ -217,6 +229,7 @@ impl ControlService for ControlServiceImpl {
                                 desired_state: None,
                                 error: "node already has an active control stream".into(),
                                 desired_authorization_bundle: Vec::new(),
+                                command_json: Vec::new(),
                             }))
                             .await;
                         break;
@@ -231,17 +244,53 @@ impl ControlService for ControlServiceImpl {
                                 desired_state: None,
                                 error: "node is not enrolled or has been revoked".into(),
                                 desired_authorization_bundle: Vec::new(),
+                                command_json: Vec::new(),
                             }))
                             .await;
                         continue;
                     }
                 }
+                if command_forward.is_none() {
+                    let Ok(mut connection) = fleet_hub.connect(&message.node_id) else {
+                        let _ = sender
+                            .send(Ok(ManagerMessage {
+                                desired_state: None,
+                                error: "node already has an active fleet command stream".into(),
+                                desired_authorization_bundle: Vec::new(),
+                                command_json: Vec::new(),
+                            }))
+                            .await;
+                        break;
+                    };
+                    let command_sender = sender.clone();
+                    command_forward = Some(tokio::spawn(async move {
+                        while let Some(command) = connection.receiver.recv().await {
+                            let Ok(command_json) = serde_json::to_vec(&command) else {
+                                continue;
+                            };
+                            if command_sender
+                                .send(Ok(ManagerMessage {
+                                    desired_state: None,
+                                    error: String::new(),
+                                    desired_authorization_bundle: Vec::new(),
+                                    command_json,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }));
+                }
+                handle_fleet_payload(&fleet_hub, &message);
                 if message.acknowledged_revision > revision {
                     let _ = sender
                         .send(Ok(ManagerMessage {
                             desired_state: None,
                             error: "acknowledged revision is ahead of manager".into(),
                             desired_authorization_bundle: Vec::new(),
+                            command_json: Vec::new(),
                         }))
                         .await;
                     continue;
@@ -257,6 +306,7 @@ impl ControlService for ControlServiceImpl {
                                             desired_state: None,
                                             error: "persisted desired state is invalid".into(),
                                             desired_authorization_bundle: Vec::new(),
+                                            command_json: Vec::new(),
                                         }))
                                         .await;
                                     continue;
@@ -281,6 +331,7 @@ impl ControlService for ControlServiceImpl {
                                     desired_state: None,
                                     error: "manager state unavailable".into(),
                                     desired_authorization_bundle: Vec::new(),
+                                    command_json: Vec::new(),
                                 }))
                                 .await;
                             continue;
@@ -291,8 +342,12 @@ impl ControlService for ControlServiceImpl {
                         desired_state: Some(desired_state),
                         error: String::new(),
                         desired_authorization_bundle,
+                        command_json: Vec::new(),
                     }))
                     .await;
+            }
+            if let Some(task) = command_forward {
+                task.abort();
             }
             if let Some(node_id) = bound_node {
                 if let Ok(mut active) = active_nodes.lock() {
@@ -301,6 +356,67 @@ impl ControlService for ControlServiceImpl {
             }
         });
         Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AgentFleetPayload {
+    Observation {
+        version: String,
+        health: String,
+        doctor_summary: String,
+        containers: serde_json::Value,
+        observed_at: i64,
+    },
+    CommandResult {
+        request_id: u64,
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+fn handle_fleet_payload(hub: &ControlHub, message: &AgentMessage) {
+    if message.payload.is_empty() {
+        return;
+    }
+    let Ok(payload) = serde_json::from_slice::<AgentFleetPayload>(&message.payload) else {
+        return;
+    };
+    match payload {
+        AgentFleetPayload::Observation {
+            version,
+            health,
+            doctor_summary,
+            containers,
+            observed_at,
+        } => {
+            let _ = hub.record_observation(HostObservation {
+                node_id: message.node_id.clone(),
+                last_seen_unix: observed_at,
+                version,
+                health,
+                doctor_summary,
+                containers_json: serde_json::to_string(&containers)
+                    .unwrap_or_else(|_| "[]".into()),
+                acknowledged_revision: message.acknowledged_revision,
+            });
+        }
+        AgentFleetPayload::CommandResult {
+            request_id,
+            exit_code,
+            stdout,
+            stderr,
+        } => hub.complete(
+            &message.node_id,
+            FleetCommandResult {
+                request_id,
+                exit_code,
+                stdout,
+                stderr,
+            },
+        ),
     }
 }
 

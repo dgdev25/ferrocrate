@@ -1,0 +1,59 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build-unit-warnings:
+    name: ${{ matrix.os }} build, unit, warnings
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/ferro-desktop-ui/package-lock.json
+      - name: Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Frontend dependencies
+        working-directory: apps/ferro-desktop-ui
+        run: npm ci
+      - name: Stage sidecars for Tauri validation
+        shell: bash
+        run: |
+          cargo build --release -p ferro-cli -p ferro-desktop
+          bash scripts/bundle-sidecars.sh
+      - name: Unit gates
+        shell: bash
+        env:
+          FERROCRATE_ENTITLEMENT_PUBLIC_KEY_B64: ""
+          FERROCRATE_ENTITLEMENT_SIGNING_KEY_B64: ""
+        run: |
+          unset FERROCRATE_ENTITLEMENT_PUBLIC_KEY_B64 FERROCRATE_ENTITLEMENT_SIGNING_KEY_B64
+          cargo test -p ferro-desktop
+          cargo test --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml
+          npm run --prefix apps/ferro-desktop-ui build
+          npm run --prefix apps/ferro-desktop-ui test
+      - name: Warning gate
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/check-warnings.sh
+      - name: Warning gate (Windows-compatible subset)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml --all-targets -- -D warnings
+          npm run --prefix apps/ferro-desktop-ui lint

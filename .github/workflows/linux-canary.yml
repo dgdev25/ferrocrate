@@ -1,0 +1,26 @@
+name: Linux packaging canary
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions: { contents: read }
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+        working-directory: apps/ferro-desktop-ui
+      - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+      - run: npm run tauri:build -- --bundles deb,appimage
+        working-directory: apps/ferro-desktop-ui
+        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
+      - run: bash scripts/fix-appimage.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/appimage/*.AppImage
+      - name: Secret-leak canary
+        env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }
+        run: '! grep -R -a -F "$FERROCRATE_SECRET_CANARY" apps/ferro-desktop-ui/src-tauri/target/release/bundle'

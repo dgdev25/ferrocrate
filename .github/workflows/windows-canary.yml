@@ -1,0 +1,26 @@
+name: Windows packaging canary
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions: { contents: read }
+jobs:
+  package:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+        working-directory: apps/ferro-desktop-ui
+      - shell: bash
+        run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+      - run: npm run tauri:build -- --bundles nsis,msi
+        working-directory: apps/ferro-desktop-ui
+        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
+      - name: Secret-leak canary
+        shell: bash
+        env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }
+        run: '! grep -R -a -F "$FERROCRATE_SECRET_CANARY" apps/ferro-desktop-ui/src-tauri/target/release/bundle'

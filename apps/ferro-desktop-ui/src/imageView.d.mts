@@ -13,6 +13,11 @@ export function formatImageCreated(value: number | string | null | undefined): s
 export function displayImageReference(reference: string): string;
 export function imageIsUsed(image: Pick<ImageRow, "reference" | "fullReference">, containerImages: string[]): boolean;
 export function pullFailurePresentation(error: unknown): { kind: "daemon" | "license" | "binary" | "generic"; message: string; detail: string };
+export function pullCompletionState(result: { ok: boolean; stderr?: string; message?: string }): {
+  open: boolean;
+  progress: string;
+  failure: ReturnType<typeof pullFailurePresentation> | null;
+};
 export function ImagePagePullAction(props: { hasImages: boolean; disabled?: boolean; onOpen?: () => void }): ReactElement | null;
 export function ImageEmptyState(props: { hasImages: boolean; disabled?: boolean; onOpen?: () => void }): ReactElement | null;
 export function PullImageDialog(props: {

@@ -2046,7 +2046,7 @@ fn doctor_state_store_check() -> Option<DoctorCheck> {
     }
 
     let container_records = ferro_core::sqlite_container_store::SqliteContainerStore::open(
-        runtime.join("containers"),
+        runtime.join("containers.db"),
     )
     .and_then(|store| store.list());
     match container_records {
@@ -23251,6 +23251,22 @@ mod tests {
     use std::time::{Duration, Instant};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn doctor_keeps_the_container_database_separate_from_runtime_directories() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let previous = std::env::var_os("FERROCRATE_HOME");
+        let temp = tempfile::tempdir().expect("doctor state fixture");
+        unsafe { std::env::set_var("FERROCRATE_HOME", temp.path()) };
+        let check = super::doctor_state_store_check().expect("state check");
+        assert!(check.ok, "{}", check.message);
+        assert!(temp.path().join("containers.db").is_file());
+        assert!(!temp.path().join("containers").is_file());
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

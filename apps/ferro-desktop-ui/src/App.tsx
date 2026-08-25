@@ -24,6 +24,7 @@ import type {
 import { ComposeFileDialog, composeChooserMode, composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
+import { productSurfaceLabel } from "./surfaceLabel.mjs";
 import type { AppSection } from "./desktopChrome.mjs";
 import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
 import type { RunContainerDraft, RunContainerInvokeArgs } from "./dialogForms.mjs";
@@ -1282,7 +1283,7 @@ function App(): JSX.Element {
     <div className="forge-shell">
       <header className="titlebar">
         <div className="traffic" aria-hidden="true"><span /><span /><span /></div>
-        <div className="logo">Ferrocrate <em>Desktop</em></div>
+        <div className="logo">Ferrocrate <em>{productSurfaceLabel()}</em></div>
         <label className="global-search">
           <Icon name="search" size={16} />
           <input

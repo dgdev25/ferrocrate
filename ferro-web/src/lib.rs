@@ -19,6 +19,8 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
 
+use axum_server::tls_rustls::RustlsConfig;
+
 #[derive(Clone, Debug)]
 pub struct EventRecord {
     id: u64,
@@ -218,7 +220,7 @@ impl Server {
     }
 
     pub async fn wait(mut self) -> Result<(), String> {
-        self.shutdown.take();
+        let _shutdown = self.shutdown.take();
         self.task
             .await
             .map_err(|error| format!("web server task failed: {error}"))?
@@ -230,6 +232,33 @@ pub fn generate_session_token() -> Result<String, String> {
     getrandom::fill(&mut bytes)
         .map_err(|error| format!("failed to generate web session token: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub async fn serve_tls(
+    addr: SocketAddr,
+    token: String,
+    cert: &std::path::Path,
+    key: &std::path::Path,
+    assets: Arc<dyn StaticAssets>,
+    dispatcher: Arc<dyn CommandDispatcher>,
+) -> Result<(), String> {
+    let config = RustlsConfig::from_pem_file(cert, key)
+        .await
+        .map_err(|error| format!("failed to load dashboard TLS identity: {error}"))?;
+    let listener = std::net::TcpListener::bind(addr)
+        .map_err(|error| format!("failed to bind TLS web server at {addr}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TLS web listener: {error}"))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to inspect TLS web listener: {error}"))?;
+    let app = router(addr, token, assets, dispatcher, EventHub::new());
+    axum_server::from_tcp_rustls(listener, config)
+        .map_err(|error| format!("failed to configure TLS web server: {error}"))?
+        .serve(app.into_make_service())
+        .await
+        .map_err(|error| format!("TLS web server failed: {error}"))
 }
 
 fn router(
@@ -742,6 +771,30 @@ mod tests {
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.events[0].name(), "container-log-batch");
         assert!(!replay.gap);
+    }
+
+    #[tokio::test]
+    async fn wait_keeps_the_listener_alive_until_the_waiter_is_cancelled() {
+        let server = Server::spawn_loopback(
+            "127.0.0.1:0".parse().unwrap(),
+            "test-token".to_string(),
+            Arc::new(TestAssets),
+            Arc::new(TestDispatcher),
+        )
+        .await
+        .expect("start server");
+        let addr = server.addr();
+        let waiter = tokio::spawn(server.wait());
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            !waiter.is_finished(),
+            "wait must retain the shutdown sender"
+        );
+        let response = reqwest::get(format!("http://{addr}/"))
+            .await
+            .expect("listener remains reachable");
+        assert_eq!(response.status(), 200);
+        waiter.abort();
     }
 
     #[test]

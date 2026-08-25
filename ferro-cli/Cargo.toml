@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["dashboard"]
+dashboard = ["dep:ferro-web", "dep:rust-embed", "dep:mime_guess", "dep:tokio"]
 test-console = []
 journald = ["ferro-core/journald"]
 syslog = ["ferro-core/syslog"]
@@ -28,12 +30,17 @@ mdns-sd = "0.13"
 uuid = { version = "1.0", features = ["v4"] }
 tokio-tungstenite = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+ferro-web = { path = "../ferro-web", optional = true }
+rust-embed = { version = "8.7", optional = true }
+mime_guess = { version = "2", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ferro-core = { path = "../ferro-core" }
 ferro-compose = { path = "../ferro-compose" }
 ferro-net = { path = "../ferro-net" }
 ferro-mind = { path = "../ferro-mind", features = ["rvf-persistence"] }
+ferro-desktop = { path = "../ferro-desktop" }
 caps = { workspace = true }
 nix = { workspace = true }
 

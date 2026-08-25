@@ -33,6 +33,9 @@ fn main() {
 #[path = "network_lifecycle.rs"]
 mod network_lifecycle;
 
+#[cfg(all(target_os = "linux", feature = "dashboard"))]
+mod dashboard;
+
 #[cfg(target_os = "linux")]
 #[rustfmt::skip]
 mod linux_cli {
@@ -165,6 +168,24 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Serve the embedded Forge dashboard for this launch only.
+    Dashboard {
+        /// Address to listen on. Loopback is the secure default.
+        #[arg(long, default_value = "127.0.0.1:4190")]
+        listen: std::net::SocketAddr,
+        /// Write the per-launch bearer token to a mode-0600 file.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// PEM certificate required for a non-loopback listener.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key required for a non-loopback listener.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+        /// Confirm that an operator-controlled network gate protects the listener.
+        #[arg(long, default_value_t = false)]
+        operator_gate: bool,
+    },
     #[cfg(target_os = "linux")]
     /// Inspect or verify the authorization policy surface.
     Policy {
@@ -4635,6 +4656,7 @@ impl CommandOwnership {
             | Commands::Config { .. }
             | Commands::Context { .. }
             | Commands::Doctor { .. }
+            | Commands::Dashboard { .. }
             | Commands::Entitlement { .. }
             | Commands::AiAudit { .. }
             | Commands::Migrate { .. }
@@ -4738,6 +4760,23 @@ fn dispatch(command: Commands) -> Result<(), String> {
         } = &command
         {
             return handle_doctor(*fix, *bootstrap, *dry_run, *confirm, *json);
+        }
+        #[cfg(feature = "dashboard")]
+        if let Commands::Dashboard {
+            listen,
+            token_file,
+            tls_cert,
+            tls_key,
+            operator_gate,
+        } = &command
+        {
+            return super::dashboard::run(super::dashboard::Options {
+                listen: *listen,
+                token_file: token_file.clone(),
+                tls_cert: tls_cert.clone(),
+                tls_key: tls_key.clone(),
+                operator_gate: *operator_gate,
+            });
         }
 
         match &command {
@@ -5382,6 +5421,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 confirm,
                 json,
             } => handle_doctor(fix, bootstrap, dry_run, confirm, json),
+            Commands::Dashboard { .. } => {
+                Err("dashboard support is disabled in this build".to_string())
+            }
             Commands::Config { command } => handle_config(command),
             Commands::Context { command } => handle_context(command),
             Commands::AiAudit {
@@ -9055,6 +9097,7 @@ fn dispatch_remote_socket(
         | Commands::Config { .. }
         | Commands::Context { .. }
         | Commands::Doctor { .. }
+        | Commands::Dashboard { .. }
         | Commands::Entitlement { .. }
         | Commands::AiAudit { .. }
         | Commands::Migrate { .. }

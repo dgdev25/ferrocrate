@@ -38,6 +38,19 @@ printf 'row_id=%s\ndistribution=%s\nkernel=%s\narchitecture=%s\nmanifest_status=
   "$row_id" "$distribution" "$kernel" "$architecture" "$status" \
   >"$evidence_dir/row.txt"
 
+# A matrix row is evidence for the current checkout, so never allow the
+# conformance harness to fall back to a pre-existing target/debug binary.
+cargo build --release -p ferro-cli
+ferrocrate_bin="$repo_root/target/release/ferro-cli"
+[[ -x "$ferrocrate_bin" ]] || {
+  echo "host matrix row $row_id failed to build $ferrocrate_bin" >&2
+  exit 2
+}
+ferrocrate_commit="$(git -C "$repo_root" rev-parse HEAD)"
+printf 'binary=%s\ncommit=%s\n' "$ferrocrate_bin" "$ferrocrate_commit" \
+  >>"$evidence_dir/row.txt"
+printf 'host matrix binary: %s (commit %s)\n' "$ferrocrate_bin" "$ferrocrate_commit"
+
 bash "$repo_root/scripts/host-matrix-preflight.sh" "$evidence_dir/preflight.txt"
 bash "$repo_root/scripts/host-matrix-supporting-checks.sh" "$evidence_dir/supporting-checks.txt"
 
@@ -156,7 +169,8 @@ fi
 set +e
 timeout --signal=TERM --kill-after=5s "${conformance_timeout}s" \
   env FERROCRATE_CONFORMANCE_WRAPPER_TOKEN="$conformance_process_token" \
-  DOCKER_BUILDKIT=0 bash "$repo_root/scripts/docker-client-conformance.sh" \
+  DOCKER_BUILDKIT=0 FERROCRATE_BIN="$ferrocrate_bin" \
+  bash "$repo_root/scripts/docker-client-conformance.sh" \
   --output "$parity_scoreboard_tmp" \
   --log "$conformance_log_tmp" &
 conformance_supervisor_pid=$!

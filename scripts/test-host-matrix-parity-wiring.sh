@@ -39,6 +39,22 @@ exec /usr/bin/id "$@"
 STUB_ID
 chmod +x "$fixture_bin/id"
 
+cat >"$fixture_bin/cargo" <<'STUB_CARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "build --release -p ferro-cli" ]]
+mkdir -p "$FERROCRATE_REPO_ROOT/target/release"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FERROCRATE_REPO_ROOT/target/release/ferro-cli"
+chmod +x "$FERROCRATE_REPO_ROOT/target/release/ferro-cli"
+STUB_CARGO
+chmod +x "$fixture_bin/cargo"
+
+cat >"$fixture_bin/git" <<'STUB_GIT'
+#!/usr/bin/env bash
+printf '0123456789abcdef0123456789abcdef01234567\n'
+STUB_GIT
+chmod +x "$fixture_bin/git"
+
 cat >"$fixture_root/docs/evidence/host-matrix/rows.tsv" <<EOF
 contract-row|contract-distribution|$(uname -r)|$(uname -m)|qualified
 EOF
@@ -78,6 +94,7 @@ execution_log="$4"
 printf 'DOCKER_BUILDKIT=%s\noutput=%s\nlog=%s\n' \
   "${DOCKER_BUILDKIT:-unset}" "$output" "$execution_log" \
   >"$STUB_STATE/conformance.invocation"
+printf 'FERROCRATE_BIN=%s\n' "${FERROCRATE_BIN:-unset}" >>"$STUB_STATE/conformance.invocation"
 
 if [[ "${CONFORMANCE_STUB_SLEEP_SECONDS:-0}" != 0 ]]; then
   printf '%s\n' "$$" >"$STUB_STATE/harness.pid"

@@ -2074,6 +2074,36 @@ fn doctor_platform_scope_message() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn orphan_bridge_names(link_names: impl IntoIterator<Item = String>, records: &[NetworkRecord]) -> Vec<String> {
+    let owned: std::collections::HashSet<&str> = records.iter().map(|record| record.bridge_name.as_str()).collect();
+    let mut orphans: Vec<_> = link_names
+        .into_iter()
+        .filter(|name| name.starts_with("fc-") && !owned.contains(name.as_str()))
+        .collect();
+    orphans.sort();
+    orphans
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_orphan_bridges_at_daemon_start(runtime_dir: &Path) {
+    let records = load_networks(runtime_dir).unwrap_or_default();
+    let links = std::fs::read_dir("/sys/class/net")
+        .into_iter().flatten().filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok());
+    let kernel = self::network_lifecycle::SystemBridgeKernel;
+    for name in orphan_bridge_names(links, &records) {
+        match self::network_lifecycle::NetworkKernel::observe_bridge(&kernel, &name) {
+            Ok(Some(identity)) => match self::network_lifecycle::NetworkKernel::destroy_bridge(&kernel, &identity) {
+                Ok(()) => tracing::warn!(bridge = %name, "deleted orphan bridge during daemon startup"),
+                Err(error) => tracing::warn!(bridge = %name, %error, "could not delete orphan bridge during daemon startup"),
+            },
+            Ok(None) => {}
+            Err(error) => tracing::warn!(bridge = %name, %error, "could not inspect orphan bridge during daemon startup"),
+        }
+    }
+}
+
 fn handle_doctor(
     fix: bool,
     bootstrap: bool,
@@ -2311,6 +2341,27 @@ fn handle_doctor(
 
         #[cfg(target_os = "linux")]
         {
+            let records = load_networks(&runtime_dir()).unwrap_or_default();
+            let links = std::fs::read_dir("/sys/class/net")
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok());
+            let orphan_bridges = orphan_bridge_names(links, &records);
+            checks.push(DoctorCheck {
+                id: "orphan_bridges".to_string(),
+                ok: orphan_bridges.is_empty(),
+                message: if orphan_bridges.is_empty() {
+                    "no orphan deterministic network bridges".to_string()
+                } else {
+                    format!("orphan bridges: {}", orphan_bridges.join(", "))
+                },
+                hint: (!orphan_bridges.is_empty()).then_some(
+                    "the daemon reconciles an orphan when its logical network is created again".to_string(),
+                ),
+                remediated: false,
+                action: None,
+            });
             let apparmor_restriction = std::fs::read_to_string(
                 "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
             )
@@ -4566,7 +4617,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             if let Some(result) = dispatch_remote_context(&command) {
                 return result;
             }
-            match EngineAccess::select(&runtime_dir)? {
+            match EngineAccess::select(&engine_runtime_dir())? {
                 EngineAccess::Direct(owner) => Some(owner),
                 EngineAccess::Delegate(endpoint) => {
                     return dispatch_remote_endpoint(&command, &endpoint).unwrap_or_else(|| {
@@ -16865,9 +16916,11 @@ fn run_daemon(
         return Err("daemon: --docker-compat is required".to_string());
     }
     let runtime_dir = runtime_dir();
-    let mut engine_owner = EngineLockGuard::try_acquire(&runtime_dir)?
+    let engine_runtime_dir = engine_runtime_dir();
+    let mut engine_owner = EngineLockGuard::try_acquire(&engine_runtime_dir)?
         .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
     authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
+    reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     // A daemon owns the request thread independently of each workload. Keep
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
@@ -30136,6 +30189,37 @@ volumes:
             }
         }
     }
+
+    #[test]
+    fn persistent_root_uses_only_explicit_home_or_home_dot_ferrocrate() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            super::persistent_root(Some(OsStr::new("/state")), Some(OsStr::new("/home/user"))),
+            PathBuf::from("/state")
+        );
+        assert_eq!(
+            super::persistent_root(None, Some(OsStr::new("/home/user"))),
+            PathBuf::from("/home/user/.ferrocrate")
+        );
+        assert_eq!(super::persistent_root(None, None), PathBuf::from(".ferrocrate"));
+    }
+
+    #[test]
+    fn doctor_orphan_bridge_row_excludes_owned_and_non_ferro_links() {
+        let owned = super::network_lifecycle::NetworkRecord {
+            name: "blue".into(), driver: "bridge".into(), subnet: "10.0.0.0/24".into(),
+            gateway: "10.0.0.1".into(), bridge_name: "fc-owned000001".into(),
+            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, created_at_unix: 0, generation: 1,
+        };
+        assert_eq!(
+            super::orphan_bridge_names(
+                ["lo", "fc-orphan00001", "fc-owned000001"].into_iter().map(str::to_string),
+                &[owned],
+            ),
+            vec!["fc-orphan00001"]
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
@@ -30193,14 +30277,31 @@ mod tests_non_linux {
     }
 }
 
-fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("FERROCRATE_HOME") {
+fn persistent_root(ferrocrate_home: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    // This is the persistent state root, despite the legacy function name.
+    // Runtime/socket variables must never redirect durable state.
+    if let Some(dir) = ferrocrate_home {
         return PathBuf::from(dir);
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = home {
         return PathBuf::from(home).join(".ferrocrate");
     }
     PathBuf::from(".ferrocrate")
+}
+
+fn runtime_dir() -> PathBuf {
+    persistent_root(
+        std::env::var_os("FERROCRATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+fn engine_runtime_dir() -> PathBuf {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("FERROCRATE_HOME"))
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(runtime_dir)
 }
 
 }

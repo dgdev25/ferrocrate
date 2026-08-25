@@ -148,14 +148,10 @@ ip netns add "$ns_name"
 ip netns exec "$ns_name" ip link set lo up
 
 
-# The runtime writes network-operations.journal under the persistent root
-# (HOME/.ferrocrate) or, on hosts that resolve the root to the runtime dir,
-# directly under FERROCRATE_RUNTIME_DIR. Accept either location.
+# Persistent state is deterministic: FERROCRATE_HOME when set, otherwise
+# HOME/.ferrocrate. FERROCRATE_RUNTIME_DIR is only for ephemeral runtime data.
 journal_path() {
-  local root="$1" candidate
-  for candidate in "$root/.ferrocrate/network-operations.journal" "$root/network-operations.journal"; do
-    if [[ -f "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
-  done
+  local root="$1"
   printf '%s\n' "$root/.ferrocrate/network-operations.journal"
 }
 

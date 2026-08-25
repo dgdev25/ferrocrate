@@ -106,7 +106,9 @@ impl RegistryClient {
 
     /// Create a registry client with custom configuration for rate limiting and retries
     pub fn with_config(config: RegistryClientConfig) -> Result<Self, RegistryError> {
-        let mut builder = Client::builder().timeout(Duration::from_secs(config.timeout_secs));
+        let mut builder = Client::builder()
+            .connect_timeout(Duration::from_secs(config.timeout_secs.min(3)))
+            .timeout(Duration::from_secs(config.timeout_secs));
         if let Some(certificate) = registry_ca_certificate()? {
             builder = builder.add_root_certificate(certificate);
         }
@@ -475,7 +477,7 @@ impl RegistryClient {
                 if cached_token.is_some() { None } else { auth },
             ) {
                 Ok(response) => response,
-                Err(error) if error.is_timeout() || error.is_connect() => {
+                Err(error) if error.is_timeout() => {
                     last_error = Some(RegistryError::Request(error));
                     continue;
                 }
@@ -493,7 +495,7 @@ impl RegistryClient {
                     let token = self.fetch_bearer_token(&challenge, auth, &origin)?;
                     response = match send(Some(&token), None) {
                         Ok(response) => response,
-                        Err(error) if error.is_timeout() || error.is_connect() => {
+                        Err(error) if error.is_timeout() => {
                             last_error = Some(RegistryError::Request(error));
                             continue;
                         }
@@ -917,13 +919,14 @@ mod tests {
     use super::{
         append_digest_query, normalize_location, parse_image_reference,
         registry_scheme_with_override, request_origin, ReferenceSeparator, RegistryAuth,
-        RegistryClient, RegistryClientConfig,
+        RegistryClient, RegistryClientConfig, RegistryError,
     };
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use httptest::matchers::{all_of, contains, request};
     use httptest::responders::{cycle, status_code};
     use httptest::{Expectation, Server};
+    use std::time::Duration;
 
     #[test]
     fn bearer_cache_origin_excludes_registry_path() {
@@ -1123,6 +1126,30 @@ mod tests {
             .pull_manifest(&image, None)
             .expect("rate-limited response should be retried");
         assert_eq!(parsed.schema_version, 2);
+    }
+
+    #[test]
+    fn connection_refused_fails_without_retry_backoff() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+        let client = RegistryClient::with_config(RegistryClientConfig {
+            timeout_secs: 30,
+            max_retries: 3,
+            initial_backoff_ms: 2_000,
+            max_backoff_ms: 2_000,
+        })
+        .expect("client");
+        let started = std::time::Instant::now();
+        let error = client
+            .pull_manifest(&format!("{address}/test/image:latest"), None)
+            .expect_err("closed listener must refuse connection");
+        assert!(matches!(error, RegistryError::Request(_)), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "connection refusal entered retry backoff: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

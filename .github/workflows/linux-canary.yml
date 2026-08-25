@@ -24,7 +24,9 @@ jobs:
       - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles deb,appimage
         working-directory: apps/ferro-desktop-ui
-        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
+        env:
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - run: bash scripts/inject-deb-maintainer-scripts.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/deb/*.deb
       - run: bash scripts/fix-appimage.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/appimage/*.AppImage
       - name: Secret-leak canary

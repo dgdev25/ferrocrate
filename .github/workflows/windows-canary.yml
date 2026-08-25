@@ -22,7 +22,9 @@ jobs:
         run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles nsis,msi
         working-directory: apps/ferro-desktop-ui
-        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
+        env:
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - name: Secret-leak canary
         shell: bash
         env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }

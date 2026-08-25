@@ -11,12 +11,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, target_os: linux, arch: x86_64 }
-          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, target_os: linux, arch: aarch64 }
-          - { os: macos-15, target: x86_64-apple-darwin, target_os: macos, arch: x86_64 }
-          - { os: macos-15, target: aarch64-apple-darwin, target_os: macos, arch: aarch64 }
-          - { os: windows-2025, target: x86_64-pc-windows-msvc, target_os: windows, arch: x86_64 }
-    runs-on: ${{ matrix.os }}
+          - { runner: [self-hosted, linux, ferro-lab], target: x86_64-unknown-linux-gnu, target_os: linux, arch: x86_64 }
+          - { runner: [self-hosted, linux, ferro-lab], target: aarch64-unknown-linux-gnu, target_os: linux, arch: aarch64 }
+          - { runner: [self-hosted, macos, ferro-lab], target: x86_64-apple-darwin, target_os: macos, arch: x86_64 }
+          - { runner: [self-hosted, macos, ferro-lab], target: aarch64-apple-darwin, target_os: macos, arch: aarch64 }
+          - { runner: [self-hosted, windows, ferro-lab], target: x86_64-pc-windows-msvc, target_os: windows, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,8 @@ jobs:
           if-no-files-found: error
 
   linux-desktop:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, ferro-lab]
+    environment: release
     timeout-minutes: 75
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -78,7 +79,8 @@ jobs:
           if-no-files-found: error
 
   macos-desktop:
-    runs-on: macos-15
+    runs-on: [self-hosted, macos, ferro-lab]
+    environment: release
     timeout-minutes: 75
     permissions:
       contents: read
@@ -140,7 +142,8 @@ jobs:
           if-no-files-found: error
 
   windows-desktop:
-    runs-on: windows-2025
+    runs-on: [self-hosted, windows, ferro-lab]
+    environment: release
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -183,7 +186,7 @@ jobs:
 
   publish:
     needs: [cli, linux-desktop, macos-desktop, windows-desktop]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, ferro-lab]
     permissions:
       contents: write
       id-token: write

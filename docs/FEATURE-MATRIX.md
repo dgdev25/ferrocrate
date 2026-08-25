@@ -22,7 +22,8 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 | Tier | Status | Evidence |
 |---|---|---|
 | Rootful Ubuntu 26.04 x86_64 (qualified baseline) | Supported | [`host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md`](evidence/host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md) |
-| Debian 12 / Fedora 42 / Rocky 9 rootful network rows | Supported | same four-distro rerun witness above |
+| Debian 12 / Debian 13 / Fedora 42 rootful rows | Supported | four-distro rerun witness above; 2026-08-25 re-run [`host-matrix/rows.tsv`](evidence/host-matrix/rows.tsv) |
+| Rocky 9, Linux 5.14 (RHEL kernel) | Native lifecycle gates supported; Docker socket host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/rocky-9-kernel-5.14/BLOCKED.md`](evidence/host-matrix/rocky-9-kernel-5.14/BLOCKED.md) |
 | Alpine 3.22, Linux 6.12, x86_64 (musl) | Supported | [`host-matrix/alpine-3.22-kernel-6.12/README.md`](evidence/host-matrix/alpine-3.22-kernel-6.12/README.md) |
 | Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
 | Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md) |
@@ -42,8 +43,8 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 | Dockerfile secrets/SSH mounts | Supported (root-qualified on this host) | [`build/2026-08-21-build-secrets-ssh-mounts.md`](evidence/build/2026-08-21-build-secrets-ssh-mounts.md) |
 | Container lifecycle (create/start/stop/kill/wait/restart) | Supported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) |
 | Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
-| Container log drivers | `json-file` supported; `journald` and `syslog` experimental behind crate features; signed manifest plugins experimental. Readback is supported only for `json-file`. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
-| Docker-client classic-builder conformance | Supported: 47/47 pass | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), merge `363a7b24` |
+| Container log drivers | `json-file` supported; `journald` and `syslog` supported behind crate features with live proofs; signed manifest plugins supported (fixture scope). Readback is supported only for `json-file`, matching Docker. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
+| Docker-client classic-builder conformance | Supported: 60/60 pass, rootless and rootful, on every qualified row of the 2026-08-25 matrix re-run | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), merge `363a7b24` |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
 | Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |

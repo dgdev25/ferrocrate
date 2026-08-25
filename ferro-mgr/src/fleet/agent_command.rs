@@ -216,6 +216,7 @@ fn reported_client_version(output: &str) -> String {
     output
         .lines()
         .find_map(|line| line.trim().strip_prefix("Version:").map(str::trim))
+        .map(|version| version.trim_matches('"'))
         .filter(|version| !version.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| "unknown".into())
@@ -229,6 +230,10 @@ mod tests {
     fn observation_extracts_the_client_version_from_docker_style_output() {
         assert_eq!(
             reported_client_version("Client:\n Version: 0.1.0\n API version: 1.43\n"),
+            "0.1.0"
+        );
+        assert_eq!(
+            reported_client_version("Client:\n Version: \"0.1.0\"\n API version: \"1.45\"\n"),
             "0.1.0"
         );
     }

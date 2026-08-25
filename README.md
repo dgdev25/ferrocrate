@@ -22,7 +22,8 @@ builds runs under Docker, podman, or Kubernetes, and the other way round.
   PID start-time before signaling, so a recycled PID is never killed by
   mistake; state survives daemon restarts and is reconciled on startup.
 - **Qualified, not assumed** — every support claim links dated evidence from
-  real hosts; the current Windows/macOS desktop-backend boundaries are recorded
+  real hosts; desktop acceptance is currently host-blocked by Windows WSL's
+  missing `socat` relay and Tahoe's unavailable nested VM/toolchain, recorded
   in [`VM-ACCEPTANCE-2026-08-25.md`](docs/desktop/VM-ACCEPTANCE-2026-08-25.md).
 
 ## 🚀 Quickstart

@@ -16427,6 +16427,14 @@ impl DockerAttachReadiness {
 }
 
 #[cfg(target_os = "linux")]
+fn prune_live_attach_registrations(
+    registrations: &mut Vec<Weak<DockerAttachReadiness>>,
+) -> Vec<Arc<DockerAttachReadiness>> {
+    registrations.retain(|entry| entry.strong_count() > 0);
+    registrations.iter().filter_map(Weak::upgrade).collect()
+}
+
+#[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
@@ -16563,10 +16571,7 @@ impl DockerCompatState {
                 .map_err(|error| format!("docker: attach readiness lock poisoned: {error}"))?;
             let registrations = all
                 .get_mut(id)
-                .map(|entries| {
-                    entries.retain(|entry| entry.strong_count() > 0);
-                    entries.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
-                })
+                .map(prune_live_attach_registrations)
                 .unwrap_or_default();
             if all.get(id).is_some_and(Vec::is_empty) {
                 all.remove(id);
@@ -16583,6 +16588,31 @@ impl DockerCompatState {
             }
         }
         Ok(())
+    }
+
+    fn wait_for_pre_start_attaches_to_finish(&self, id: &str) -> Result<(), String> {
+        loop {
+            let finished = {
+                let mut all = self
+                    .attach_readiness
+                    .lock()
+                    .map_err(|error| format!("docker: attach readiness lock poisoned: {error}"))?;
+                let registrations = all
+                    .get_mut(id)
+                    .map(prune_live_attach_registrations)
+                    .unwrap_or_default();
+                let finished = registrations.is_empty();
+                drop(registrations);
+                if finished {
+                    all.remove(id);
+                }
+                finished
+            };
+            if finished {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -19292,9 +19322,16 @@ fn handle_docker_compat_connection(
                                 .ok()
                                 .and_then(|record| record.last_exit_code)
                                 .unwrap_or(0);
-                            // Give an attach registered before start one poll
-                            // turn to drain the terminal log before deletion.
-                            std::thread::sleep(Duration::from_millis(50));
+                            // Auto-remove owns the log files, so it must wait
+                            // for every attach registered before start to read
+                            // and flush the terminal bytes. A fixed grace
+                            // period loses output on slow hosts.
+                            if remove_state
+                                .wait_for_pre_start_attaches_to_finish(&remove_id)
+                                .is_err()
+                            {
+                                return;
+                            }
                             if remove_runtime.remove(&remove_id).is_ok() {
                                 // Publish only after removal so `docker run
                                 // --rm` cannot return while network/volume
@@ -23436,6 +23473,18 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("readiness result"));
         thread.join().expect("readiness waiter");
+    }
+
+    #[test]
+    fn auto_remove_observes_pre_start_attach_until_stream_completion() {
+        let readiness = std::sync::Arc::new(super::DockerAttachReadiness::default());
+        let mut registrations = vec![std::sync::Arc::downgrade(&readiness)];
+        assert_eq!(
+            super::prune_live_attach_registrations(&mut registrations).len(),
+            1
+        );
+        drop(readiness);
+        assert!(super::prune_live_attach_registrations(&mut registrations).is_empty());
     }
 
     #[test]

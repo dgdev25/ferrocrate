@@ -40,7 +40,6 @@ import {
   containerContentState,
   filterNamedResources,
   FirstRunState,
-  HostPathField,
   hostPathError,
   LicensingDialog,
   ResourceCreateDialog,
@@ -63,7 +62,6 @@ import { mountTerminalHost, writeTerminalOutput } from "./terminalLifecycle.mjs"
 import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   beginContainerStatsPoll,
-  daemonIsAvailable,
   daemonStatusPresentation,
   containerRemoveAvailability,
   containerStatsUnavailableMessage,
@@ -1244,7 +1242,6 @@ function App(): JSX.Element {
   const selectedRow = containerRows.find((row) => row.id === containerTarget || row.name === containerTarget) ?? null;
   const liveStatsUnavailable = containerRows.some((row) => row.state === "running" && row.statsAvailable === false);
   const imageCount = imageRows.length;
-  const daemonRunning = daemonIsAvailable(snapshot);
   const daemonPresentation = daemonStatusPresentation(snapshot?.daemon);
   const containerViewState = containerContentState(
     containerRows.length,

@@ -820,7 +820,7 @@ else
   record_command image-build image build --tag "$image" "$context_dir"
 fi
 record_command image-inspect image image inspect "$image"
-record_command foreground-image-tag image tag "$image" alpine:3.20
+record_command foreground-image-pull image pull alpine:3.20
 record_foreground_output
 record_foreground_stderr
 record_command container-create container create --label "$owner_label" --name "$container" \

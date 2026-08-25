@@ -19143,13 +19143,17 @@ fn handle_docker_compat_connection(
                                 .ok()
                                 .and_then(|record| record.last_exit_code)
                                 .unwrap_or(0);
-                            if let Ok(mut results) = remove_state.auto_remove_results.lock() {
-                                results.insert(remove_id.clone(), Some(exit_code));
-                            }
                             // Give an attach registered before start one poll
                             // turn to drain the terminal log before deletion.
                             std::thread::sleep(Duration::from_millis(50));
-                            let _ = remove_runtime.remove(&remove_id);
+                            if remove_runtime.remove(&remove_id).is_ok() {
+                                // Publish only after removal so `docker run
+                                // --rm` cannot return while network/volume
+                                // associations are still being torn down.
+                                if let Ok(mut results) = remove_state.auto_remove_results.lock() {
+                                    results.insert(remove_id, Some(exit_code));
+                                }
+                            }
                         }
                     });
                 }

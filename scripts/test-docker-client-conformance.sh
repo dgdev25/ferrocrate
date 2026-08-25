@@ -525,8 +525,8 @@ awk -F '\t' '$1 != "image-build" && $1 != "unrecorded" && $4 != "0" { exit 1 }' 
   "$fake_state/docker.calls"
 awk -F '\t' '$2 == "image-build" { found = ($5 == 1 && $6 == "PASS") } END { exit !found }' \
   "$buildkit_log"
-grep -Fq '| PASS | 55 |' "$buildkit_scoreboard"
-grep -Fq '| FAIL | 4 |' "$buildkit_scoreboard"
+grep -Fq '| PASS | 70 |' "$buildkit_scoreboard"
+grep -Fq '| FAIL | 13 |' "$buildkit_scoreboard"
 grep -Fq '| ERROR | 1 |' "$buildkit_scoreboard"
 grep -Fq 'BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)' "$buildkit_scoreboard"
 

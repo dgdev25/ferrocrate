@@ -14596,7 +14596,7 @@ mod tests {
     use std::sync::{mpsc, Arc, Barrier, Mutex};
 
     #[test]
-    fn runtime_file_publication_is_safe_for_eight_concurrent_writers() {
+    fn eight_concurrent_runtime_file_creates_are_idempotent() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("shared.hosts");
         let barrier = Arc::new(Barrier::new(8));

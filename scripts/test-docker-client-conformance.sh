@@ -253,6 +253,16 @@ compose-version
 engine-info
 image-build
 image-inspect
+foreground-image-pull
+detached-run-no-stderr
+running-container-wait
+exited-container-wait
+detached-wait-remove
+created-container-create
+created-container-wait
+created-wait-remove
+run-foreground-output
+run-foreground-stderr
 container-create
 container-create-duplicate-name
 container-start
@@ -285,20 +295,34 @@ image-tag
 image-tag-inspect
 volume-create
 volume-list
-volume-inspect
+volume-label-inspect
 volume-remove
 network-create
 network-list
-network-inspect
+network-label-inspect
 network-remove
+network-alias-create
+network-alias-target
+network-alias-nslookup
+network-alias-target-remove
+network-alias-remove
 attach-container-create
 attach-container-start
 container-attach
 attach-container-wait
+container-attach-websocket
 attach-container-remove
 registry-search
 registry-login
 registry-logout
+compose-profile-scale-up
+compose-profile-inspect
+compose-scale-index-two
+compose-parity-down
+compose-profiles-env-up
+compose-profiles-env-inspect
+compose-watch-sync
+compose-profiles-env-down
 compose-network-create-frontend
 compose-network-create-backend
 compose-up
@@ -358,7 +382,10 @@ call_ids="$work_root/call.ids"
 awk -F '\t' 'NR > 1 { print $2 }' "$execution_log" >"$log_ids"
 awk -F '\t' '$1 != "unrecorded" { print $1 }' "$fake_state/docker.calls" >"$call_ids"
 diff -u "$expected_ids" "$log_ids"
-diff -u "$expected_ids" "$call_ids"
+expected_call_ids="$work_root/expected-call.ids"
+grep -Ev '^(run-foreground-output|run-foreground-stderr|container-attach-websocket|compose-watch-sync)$' \
+  "$expected_ids" >"$expected_call_ids"
+diff -u "$expected_call_ids" "$call_ids"
 
 assert_recorded_command_starts_with() {
   local id="$1" expected="$2" actual
@@ -424,8 +451,8 @@ awk -F '\t' '$2 == "compose-down" { found = ($5 == 0 && $6 == "PASS") } END { ex
   "$execution_log"
 grep -Eq '^\| [0-9]+ \| registry-search \|.*\| 37 \| FAIL \|$' "$scoreboard"
 grep -Eq '^\| [0-9]+ \| container-attach \|.*\| 124 \| ERROR \|$' "$scoreboard"
-grep -Fq '| PASS | 55 |' "$scoreboard"
-grep -Fq '| FAIL | 4 |' "$scoreboard"
+grep -Fq '| PASS | 70 |' "$scoreboard"
+grep -Fq '| FAIL | 13 |' "$scoreboard"
 grep -Fq '| ERROR | 1 |' "$scoreboard"
 grep -Fq 'DOCKER_BUILDKIT=0' "$scoreboard"
 grep -Fq 'tests/fixtures/real-app/compose.yml' "$scoreboard"

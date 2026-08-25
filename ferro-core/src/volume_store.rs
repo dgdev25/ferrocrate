@@ -20,6 +20,8 @@ pub struct VolumeRecord {
     pub driver: String,
     #[serde(default)]
     pub driver_opts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     pub created_at_unix: u64,
 }
 
@@ -150,11 +152,16 @@ fn volume_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VolumeRec
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let created_at_unix: i64 = row.get(4)?;
+    let labels_json: String = row.get(5)?;
+    let labels = serde_json::from_str(&labels_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(VolumeRecord {
         name: row.get(0)?,
         path: row.get(1)?,
         driver: row.get(2)?,
         driver_opts,
+        labels,
         created_at_unix: created_at_unix.max(0) as u64,
     })
 }
@@ -177,6 +184,18 @@ impl LocalVolumeStore {
                 created_at_unix INTEGER NOT NULL
             )",
         )?;
+        let has_labels = connection
+            .prepare("PRAGMA table_info(volumes)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|column| column == "labels");
+        if !has_labels {
+            connection.execute(
+                "ALTER TABLE volumes ADD COLUMN labels TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
         Ok(Self {
             db: Mutex::new(connection),
             root,
@@ -255,6 +274,7 @@ impl LocalVolumeStore {
             path,
             driver: driver.to_string(),
             driver_opts,
+            labels: BTreeMap::new(),
             created_at_unix: now_unix(),
         };
         let driver_opts = serde_json::to_string(&record.driver_opts)?;
@@ -315,7 +335,7 @@ impl LocalVolumeStore {
             .lock()
             .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
         let mut statement = db.prepare(
-            "SELECT name, path, driver, driver_opts, created_at_unix
+            "SELECT name, path, driver, driver_opts, created_at_unix, labels
              FROM volumes ORDER BY name",
         )?;
         let mut out = Vec::new();
@@ -332,7 +352,7 @@ impl LocalVolumeStore {
             .lock()
             .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
         match db.query_row(
-            "SELECT name, path, driver, driver_opts, created_at_unix
+            "SELECT name, path, driver, driver_opts, created_at_unix, labels
              FROM volumes WHERE name = ?1",
             params![name],
             volume_record_from_row,
@@ -341,6 +361,26 @@ impl LocalVolumeStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    pub fn set_labels(
+        &self,
+        name: &str,
+        labels: BTreeMap<String, String>,
+    ) -> Result<(), VolumeStoreError> {
+        let labels = serde_json::to_string(&labels)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| VolumeStoreError::Lock(error.to_string()))?;
+        let updated = db.execute(
+            "UPDATE volumes SET labels = ?2 WHERE name = ?1",
+            params![name, labels],
+        )?;
+        if updated == 0 {
+            return Err(VolumeStoreError::NotFound(name.to_string()));
+        }
+        Ok(())
     }
 
     fn remove(&self, name: &str) -> Result<bool, VolumeStoreError> {

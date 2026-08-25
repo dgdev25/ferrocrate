@@ -3595,6 +3595,38 @@ fn docker_compat_network_create_list_delete_routes_work() {
 }
 
 #[test]
+fn docker_compat_network_labels_persist_and_filter() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{
+        "Name":"compose-labeled-net",
+        "Driver":"bridge",
+        "Labels":{
+            "com.docker.compose.network":"default",
+            "com.docker.compose.project":"labels-test"
+        }
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(), create_body
+    );
+    let (status, body) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "create body={body}");
+
+    let (status, body) = harness.request("GET", "/v1.45/networks/compose-labeled-net");
+    assert_eq!(status, 200, "inspect body={body}");
+    let inspect: serde_json::Value = serde_json::from_str(&body).expect("inspect JSON");
+    assert_eq!(inspect["Labels"]["com.docker.compose.network"], "default");
+    assert_eq!(inspect["Labels"]["com.docker.compose.project"], "labels-test");
+
+    let filters = "%7B%22label%22%3A%5B%22com.docker.compose.network%3Ddefault%22%2C%22com.docker.compose.project%22%5D%7D";
+    let (status, body) = harness.request("GET", &format!("/v1.45/networks?filters={filters}"));
+    assert_eq!(status, 200, "list body={body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("list JSON");
+    assert_eq!(listed.as_array().expect("network list").len(), 1, "{listed}");
+    assert_eq!(listed[0]["Labels"]["com.docker.compose.network"], "default");
+}
+
+#[test]
 fn docker_compat_dual_stack_network_preserves_ipv6_ipam_on_list_and_inspect() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{
@@ -3761,6 +3793,37 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
     let (status, response) = harness.request("DELETE", "/v1.45/volumes/compat-volume");
     assert_eq!(status, 204, "delete body={response}");
+}
+
+#[test]
+fn docker_compat_volume_labels_persist_and_filter() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{
+        "Name":"compose-labeled-volume",
+        "Driver":"local",
+        "Labels":{
+            "com.docker.compose.volume":"data",
+            "com.docker.compose.project":"labels-test"
+        }
+    }"#;
+    let request = format!(
+        "POST /v1.45/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 201, "create body={response}");
+
+    let (status, response) = harness.request("GET", "/v1.45/volumes/compose-labeled-volume");
+    assert_eq!(status, 200, "inspect body={response}");
+    let inspect: serde_json::Value = serde_json::from_str(&response).expect("inspect JSON");
+    assert_eq!(inspect["Labels"]["com.docker.compose.volume"], "data");
+
+    let filters = "%7B%22label%22%3A%5B%22com.docker.compose.volume%3Ddata%22%2C%22com.docker.compose.project%22%5D%7D";
+    let (status, response) = harness.request("GET", &format!("/v1.45/volumes?filters={filters}"));
+    assert_eq!(status, 200, "list body={response}");
+    let listed: serde_json::Value = serde_json::from_str(&response).expect("list JSON");
+    assert_eq!(listed["Volumes"].as_array().expect("volumes").len(), 1, "{listed}");
+    assert_eq!(listed["Volumes"][0]["Labels"]["com.docker.compose.volume"], "data");
 }
 
 #[test]

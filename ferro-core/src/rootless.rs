@@ -121,15 +121,15 @@ pub fn bubblewrap_available() -> bool {
     bubblewrap_path().is_some()
 }
 
+pub(crate) const BUBBLEWRAP_UNAVAILABLE_MESSAGE: &str =
+    "bubblewrap (bwrap) executable is unavailable; rootless rootfs and mounted workloads require it";
+
 /// Report a bounded operator-facing bubblewrap prerequisite diagnostic without
 /// executing anything discovered through `PATH`.
 pub fn bubblewrap_diagnostic() -> Result<(), String> {
     bubblewrap_path()
         .map(|_| ())
-        .ok_or_else(|| {
-            "bubblewrap (bwrap) executable is unavailable; rootless rootfs and mounted workloads require it"
-                .to_string()
-        })
+        .ok_or_else(|| BUBBLEWRAP_UNAVAILABLE_MESSAGE.to_string())
 }
 
 /// Probe the bubblewrap execution path used for every rootless rootfs.
@@ -729,6 +729,14 @@ mod tests {
     #[test]
     fn bwrap_probe_identity_missing_binary_is_empty() {
         assert!(super::bwrap_probe_identity(Path::new("/nonexistent/bwrap")).is_empty());
+    }
+
+    #[test]
+    fn missing_bubblewrap_diagnostic_text_is_stable() {
+        assert_eq!(
+            super::BUBBLEWRAP_UNAVAILABLE_MESSAGE,
+            "bubblewrap (bwrap) executable is unavailable; rootless rootfs and mounted workloads require it"
+        );
     }
 
     #[test]

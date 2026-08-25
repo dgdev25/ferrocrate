@@ -36,6 +36,7 @@ Required environment:
 
 Optional environment:
   FERROCRATE_BIN                                  ferro-cli executable
+  FERROCRATE_COMPOSE_BIN                          alternate standalone Compose executable
   FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS          per-client timeout (default: 240)
   FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS   daemon readiness timeout (default: 20)
   FERROCRATE_PEER_AUTH                            pidfd (default) or legacy-peercred
@@ -87,6 +88,13 @@ peer_auth_mode="${FERROCRATE_PEER_AUTH:-pidfd}"
 [[ "$(uname -s)" == Linux ]] || harness_error "the Docker-compatible daemon is Linux-only"
 [[ -x "$ferro_bin" ]] || harness_error "missing executable ferro-cli: $ferro_bin"
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
+compose_bin="${FERROCRATE_COMPOSE_BIN:-}"
+if [[ -n "$compose_bin" ]]; then
+  [[ -x "$compose_bin" ]] || harness_error "FERROCRATE_COMPOSE_BIN is not executable: $compose_bin"
+  compose_client=("$compose_bin")
+else
+  compose_client=(docker compose)
+fi
 command -v timeout >/dev/null 2>&1 || harness_error "timeout is required"
 command -v setsid >/dev/null 2>&1 || harness_error "setsid is required for bounded daemon cleanup"
 command -v unshare >/dev/null 2>&1 || harness_error "unshare is required for isolated rootful network conformance"
@@ -271,6 +279,8 @@ write_only_log_container="$run_prefix-write-only-log"
 secondary_network="$run_prefix-secondary"
 alias_network="$run_prefix-alias-network"
 alias_target="$run_prefix-alias-target"
+detached_wait_container="$run_prefix-detached-wait"
+created_wait_container="$run_prefix-created-wait"
 compose_project="$run_prefix-compose"
 compose_parity_project="$run_prefix-parity-compose"
 compose_frontend_network="${compose_project}_frontend"
@@ -420,12 +430,12 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker compose --project-name "$compose_project" --file "$fixture" down --timeout 2 \
+        "${compose_client[@]}" --project-name "$compose_project" --file "$fixture" down --timeout 2 \
       >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker compose --project-name "$compose_parity_project" \
+        "${compose_client[@]}" --project-name "$compose_parity_project" \
           --file "$compose_parity_dir/compose.yml" --profile optional down --timeout 2 \
       >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
@@ -578,6 +588,10 @@ record_command() {
   sequence=$((sequence + 1))
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  local -a client_command=(docker "$@")
+  if [[ "$1" == compose && -n "$compose_bin" ]]; then
+    client_command=("$compose_bin" "${@:2}")
+  fi
   command_text="$(shell_command "$@")"
   if ((${#record_env[@]})); then
     command_text="${record_env[*]} $command_text"
@@ -586,7 +600,7 @@ record_command() {
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT="$record_docker_buildkit" "${record_env[@]}" \
-        FERROCRATE_CONFORMANCE_RECORD_ID="$id" docker "$@" \
+        FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
       <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
@@ -613,6 +627,59 @@ record_command() {
   record_stdin="/dev/null"
   record_docker_buildkit=0
   record_env=()
+}
+
+record_command_expect() {
+  local id="$1" area="$2" expected_stdout="$3" require_empty_stderr="$4"
+  shift 4
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
+  local -a client_command=(docker "$@")
+  if [[ "$1" == compose && -n "$compose_bin" ]]; then
+    client_command=("$compose_bin" "${@:2}")
+  fi
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="$(shell_command "$@") [expected stdout: $expected_stdout]"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned "$command_timeout" 5 "$command_token" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
+      >"$stdout_file" 2>"$stderr_file"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$exit_code" == 0 ]] \
+      && { [[ "$expected_stdout" == __NONEMPTY__ && -s "$stdout_file" ]] \
+        || grep -Fxq -- "$expected_stdout" "$stdout_file"; } \
+      && { [[ "$require_empty_stderr" != 1 ]] || [[ ! -s "$stderr_file" ]]; }; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+}
+
+record_created_container_wait() {
+  local starter_pid
+  record_command created-container-create container create --name "$created_wait_container" \
+    "$image" /bin/busybox true
+  (
+    sleep 1
+    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      docker start "$created_wait_container" >/dev/null 2>&1
+  ) &
+  starter_pid=$!
+  record_command_expect created-container-wait container 0 0 wait "$created_wait_container"
+  wait "$starter_pid" || true
+  record_command created-wait-remove container rm "$created_wait_container"
 }
 
 # A command whose success is a nonzero exit WITH a daemon-mediated error
@@ -668,7 +735,7 @@ record_compose_watch_sync() {
   command_token="$process_token_base-client-$sequence"
   if run_bounded_owned 8 3 "$command_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker compose --ansi never --project-name "$compose_parity_project" \
+        "${compose_client[@]}" --ansi never --project-name "$compose_parity_project" \
           --file "$compose_parity_dir/compose.yml" watch --no-up \
       >"$stdout_file" 2>"$stderr_file"; then
     watch_exit=0
@@ -821,6 +888,12 @@ else
 fi
 record_command image-inspect image image inspect "$image"
 record_command foreground-image-pull image pull alpine:3.20
+record_command_expect detached-run-no-stderr container __NONEMPTY__ 1 run --detach \
+  --name "$detached_wait_container" "$image" /bin/busybox sh -c 'sleep 1; exit 7'
+record_command_expect running-container-wait container 7 0 wait "$detached_wait_container"
+record_command_expect exited-container-wait container 7 0 wait "$detached_wait_container"
+record_command detached-wait-remove container rm "$detached_wait_container"
+record_created_container_wait
 record_foreground_output
 record_foreground_stderr
 record_command container-create container create --label "$owner_label" --name "$container" \
@@ -869,13 +942,19 @@ record_command image-tag image tag "$image" "$tagged_image"
 record_command image-tag-inspect image image inspect "$tagged_image"
 
 # Durable named resources exercise their full Docker-client CRUD projections.
-record_command volume-create volume volume create "$volume"
+record_command volume-create volume volume create --label "$owner_label" \
+  --label com.docker.compose.volume=conformance "$volume"
 record_command volume-list volume volume ls
-record_command volume-inspect volume volume inspect "$volume"
+record_command_expect volume-label-inspect volume \
+  "conformance|$owner_label" 0 volume inspect --format \
+  '{{ printf "%s|%s=%s" (index .Labels "com.docker.compose.volume") "io.ferrocrate.conformance-run" (index .Labels "io.ferrocrate.conformance-run") }}' "$volume"
 record_command volume-remove volume volume rm "$volume"
-record_command network-create network network create "$network"
+record_command network-create network network create --label "$owner_label" \
+  --label com.docker.compose.network=default "$network"
 record_command network-list network network ls
-record_command network-inspect network network inspect "$network"
+record_command_expect network-label-inspect network \
+  "default|$owner_label" 0 network inspect --format \
+  '{{ printf "%s|%s=%s" (index .Labels "com.docker.compose.network") "io.ferrocrate.conformance-run" (index .Labels "io.ferrocrate.conformance-run") }}' "$network"
 record_command network-remove network network rm "$network"
 
 # Per-network aliases must resolve through the bridge's embedded DNS from a

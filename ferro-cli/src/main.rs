@@ -1131,6 +1131,8 @@ pub enum NetworkCommands {
         ipv6_subnet: Option<String>,
         #[arg(long = "ipv6-gateway")]
         ipv6_gateway: Option<String>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
     /// List networks.
     Ls {
@@ -4996,7 +4998,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
                 for image in docker_image_search_results(&images, &term, 25) {
-                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["StarCount"], image["Official"], image["Automated"]);
+                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["star_count"], image["is_official"], image["is_automated"]);
                 }
                 Ok(())
             }
@@ -8804,6 +8806,7 @@ fn dispatch_remote_socket(
                     gateway,
                     ipv6_subnet,
                     ipv6_gateway,
+                    labels,
                 },
         } => {
             let mut configs = Vec::new();
@@ -8824,6 +8827,10 @@ fn dispatch_remote_socket(
                 "Driver": "bridge",
                 "EnableIPv6": ipv6_subnet.is_some(),
                 "IPAM": {"Config": configs},
+                "Labels": match parse_key_values("network: label", labels) {
+                    Ok(labels) => labels,
+                    Err(error) => return Some(Err(error)),
+                },
             });
             let body = match serde_json::to_vec(&body) {
                 Ok(body) => body,
@@ -9253,9 +9260,9 @@ fn format_remote_search_text(body: &[u8]) -> Result<String, String> {
             "{}\t{}\t{}\t{}\t{}\n",
             entry["Name"].as_str().unwrap_or_default(),
             entry["Description"].as_str().unwrap_or_default(),
-            entry["StarCount"],
-            entry["Official"],
-            entry["Automated"],
+            entry["star_count"],
+            entry["is_official"],
+            entry["is_automated"],
         ));
     }
     Ok(output)
@@ -12847,6 +12854,7 @@ fn create_network_record(
         bridge_name: bridge_name_for_network(name),
         bridge_cidr: format!("{gateway_ip}/{prefix}"),
         ipv6_cidr,
+        labels: BTreeMap::new(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -12996,6 +13004,7 @@ fn handle_network_authorized(
             gateway,
             ipv6_subnet,
             ipv6_gateway,
+            labels,
         } => {
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
@@ -13004,13 +13013,16 @@ fn handle_network_authorized(
             if records.iter().any(|record| record.name == name) {
                 return Err(format!("network: already exists {name}"));
             }
-            let record = create_network_record(
+            let mut record = create_network_record(
                 &name,
                 subnet.as_deref(),
                 gateway.as_deref(),
                 ipv6_subnet.as_deref(),
                 ipv6_gateway.as_deref(),
             )?;
+            record.labels = parse_key_values("network: label", &labels)?
+                .into_iter()
+                .collect();
             if records.iter().any(|existing| {
                 existing.bridge_name == record.bridge_name && existing.name != record.name
             }) {
@@ -13044,6 +13056,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -13053,6 +13066,7 @@ fn handle_network_authorized(
                 &DockerNetworkView {
                     name: "bridge",
                     driver: "bridge",
+                    labels: &BTreeMap::new(),
                 },
                 &filters,
             );
@@ -13177,6 +13191,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -16247,6 +16262,8 @@ struct DockerNetworkCreateSpec {
     enable_ipv6: bool,
     #[serde(rename = "IPAM")]
     ipam: Option<DockerIpamSpec>,
+    #[serde(rename = "Labels", default)]
+    labels: BTreeMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16385,6 +16402,7 @@ fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    starting: Mutex<std::collections::HashSet<String>>,
     pending_path: PathBuf,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
@@ -16435,6 +16453,7 @@ impl DockerCompatState {
         Ok(Self {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(pending),
+            starting: Mutex::new(std::collections::HashSet::new()),
             pending_path,
             name_store,
             execs: Mutex::new(HashMap::new()),
@@ -19046,7 +19065,7 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/start");
                 let (id, spec) = {
-                    let mut pending = state
+                    let pending = state
                         .pending
                         .lock()
                         .map_err(|e| format!("lock poisoned: {e}"))?;
@@ -19058,14 +19077,22 @@ fn handle_docker_compat_connection(
                             .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
                             .map(|(pending_id, _)| pending_id.clone())
                     };
-                    let spec = pending_id.as_deref().and_then(|id| pending.remove(id));
+                    let spec = pending_id.as_deref().and_then(|id| pending.get(id).cloned());
                     (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
                     runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };
-                state.persist_pending()?;
+                {
+                    let mut starting = state
+                        .starting
+                        .lock()
+                        .map_err(|error| format!("docker: starting lock poisoned: {error}"))?;
+                    if !starting.insert(id.clone()) {
+                        return Err(format!("docker: container start already in progress: {id}"));
+                    }
+                }
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
                     ferro_core::container_store::HealthConfig {
@@ -19135,17 +19162,29 @@ fn handle_docker_compat_connection(
                     Some(&id),
                 );
                 if let Err(error) = start_result {
+                    if let Ok(mut starting) = state.starting.lock() {
+                        starting.remove(&id);
+                    }
                     if spec.auto_remove {
                         if let Ok(mut results) = state.auto_remove_results.lock() {
                             results.remove(&id);
                         }
                     }
-                    if let Ok(mut pending) = state.pending.lock() {
-                        pending.insert(id, spec);
-                    }
-                    let _ = state.persist_pending();
                     return Err(error);
                 }
+                {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    pending.remove(&id);
+                }
+                state
+                    .starting
+                    .lock()
+                    .map_err(|error| format!("docker: starting lock poisoned: {error}"))?
+                    .remove(&id);
+                state.persist_pending()?;
                 if spec.auto_remove {
                     let remove_runtime = runtime.request_scoped(origin.clone());
                     let remove_state = Arc::clone(&state);
@@ -19297,6 +19336,13 @@ fn handle_docker_compat_connection(
                                 // of polling for the default 30-second
                                 // pre-start window.
                                 return Err(error.to_string());
+                            }
+                            if condition != "removed" && pending {
+                                // The durable pending record is Docker's
+                                // created lifecycle state. Send wait headers
+                                // now so the client can issue `/start`; the
+                                // streaming epilogue observes publication.
+                                break;
                             }
                             if condition == "removed" && !observed && pending {
                                 // Docker CLI sends wait before start. Return
@@ -19536,6 +19582,7 @@ fn handle_docker_compat_connection(
                     &DockerNetworkView {
                         name: "bridge",
                         driver: "bridge",
+                        labels: &BTreeMap::new(),
                     },
                     &filters,
                 ) {
@@ -19551,6 +19598,7 @@ fn handle_docker_compat_connection(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -19568,6 +19616,7 @@ fn handle_docker_compat_connection(
                             "Id": record.name,
                             "Driver": record.driver,
                             "Scope": "local",
+                            "Labels": record.labels,
                             "IPAM": {
                                 "Config": ipam_config
                             }
@@ -19607,7 +19656,8 @@ fn handle_docker_compat_connection(
                         "Scope": "local",
                         "EnableIPv6": record.ipv6_cidr.is_some(),
                         "IPAM": {"Config": ipam_config},
-                        "Containers": containers
+                        "Containers": containers,
+                        "Labels": record.labels
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
@@ -19651,6 +19701,7 @@ fn handle_docker_compat_connection(
                         gateway,
                         ipv6_subnet,
                         ipv6_gateway,
+                        labels: spec.labels.iter().map(|(key, value)| format!("{key}={value}")).collect(),
                     },
                     &origin,
                     &surface_authorization,
@@ -19669,6 +19720,7 @@ fn handle_docker_compat_connection(
                             &DockerNetworkView {
                                 name: &record.name,
                                 driver: &record.driver,
+                                labels: &record.labels,
                             },
                             &filters,
                         )
@@ -19977,11 +20029,32 @@ fn handle_docker_compat_connection(
                     .authorize_volume_create_plan(&origin, &plan)
                     .map_err(|error| error.to_string())?;
                 execute_volume_create(&volume_store, plan, proof)?;
+                let labels = body
+                    .get("Labels")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .map(|(key, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (key.clone(), value.to_string()))
+                                    .ok_or_else(|| {
+                                        "docker: volume Labels values must be strings".to_string()
+                                    })
+                            })
+                            .collect::<Result<BTreeMap<_, _>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                volume_store
+                    .set_labels(name, labels)
+                    .map_err(|error| error.to_string())?;
                 let record = volume_store
                     .get(name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
-                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
+                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path, "Labels": record.labels});
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/volumes/prune") => {
@@ -20045,6 +20118,7 @@ fn handle_docker_compat_connection(
                             "Driver": record.driver,
                             "Mountpoint": record.path,
                             "CreatedAt": record.created_at_unix.to_string(),
+                            "Labels": record.labels,
                             "Status": serde_json::Value::Null,
                             "UsageData": {"RefCount": mounts.len(), "Size": 0},
                             "FerrocrateMounts": mounts,
@@ -20065,6 +20139,7 @@ fn handle_docker_compat_connection(
                     "Driver": record.driver,
                     "Mountpoint": record.path,
                     "CreatedAt": record.created_at_unix.to_string(),
+                    "Labels": record.labels,
                     "Status": serde_json::Value::Null,
                     "UsageData": serde_json::Value::Null,
                 });
@@ -20215,17 +20290,18 @@ fn handle_docker_compat_connection(
                 .map_err(|error| format!("docker: wait stream write failed: {error}"))?;
             return Ok(());
         }
-        if condition == "next-exit" {
-            // A created container has not produced its next exit yet: block
-            // through the pre-start window before waiting for the exit.
+        if matches!(condition.as_str(), "next-exit" | "not-running") {
+            // A created container has not produced its next exit yet. Wait
+            // for `/start` to publish the runtime record after headers have
+            // already been sent to the client.
             let start_deadline = timeout
                 .map(|value| Instant::now() + value)
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-            while follow_runtime
-                .inspect(&id)
-                .map(|record| record.status == "created")
-                .unwrap_or(false)
-            {
+            loop {
+                match follow_runtime.inspect(&id) {
+                    Ok(record) if record.status != "created" => break,
+                    Ok(_) | Err(_) => {}
+                }
                 if Instant::now() >= start_deadline {
                     break;
                 }
@@ -20937,9 +21013,9 @@ fn docker_image_search_results(
                 "Index": "local",
                 "Name": record.reference,
                 "Description": "Locally available Ferrocrate image",
-                "Official": false,
-                "Automated": false,
-                "StarCount": 0,
+                "is_official": false,
+                "is_automated": false,
+                "star_count": 0,
             })
         })
         .collect::<Vec<_>>();
@@ -21001,9 +21077,9 @@ fn docker_hub_search_results_from_value(
                 "Index": "docker.io",
                 "Name": name,
                 "Description": entry.get("short_description").and_then(serde_json::Value::as_str).unwrap_or(""),
-                "Official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                "Automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                "StarCount": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                "is_official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "is_automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "star_count": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
             }))
         })
         .take(limit)
@@ -21133,11 +21209,11 @@ fn docker_volume_matches_filters(
             return false;
         }
     }
-    // Volume records do not persist labels; a label selector matches only
-    // when it selects nothing (compose probes for its project volumes this
-    // way and creates them on an empty result).
     if let Some(labels) = filters.get("label") {
-        if !labels.is_empty() {
+        if !labels.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        }) {
             return false;
         }
     }
@@ -21158,6 +21234,7 @@ fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Res
 struct DockerNetworkView<'a> {
     name: &'a str,
     driver: &'a str,
+    labels: &'a BTreeMap<String, String>,
 }
 
 fn docker_network_matches_filters(
@@ -21180,12 +21257,12 @@ fn docker_network_matches_filters(
                     || (value == "custom" && record.name != "bridge")
             })
     });
-    // Network records do not persist labels; a label selector can therefore
-    // only match when it selects nothing. Compose uses this filter to find
-    // its own project networks and treats an empty result as "create it".
-    let label_matches = filters
-        .get("label")
-        .is_none_or(|values| values.is_empty());
+    let label_matches = filters.get("label").is_none_or(|values| {
+        values.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        })
+    });
     name_matches && driver_matches && scope_matches && type_matches && label_matches
 }
 
@@ -23739,7 +23816,7 @@ mod tests {
             "A /tmp/new\n"
         );
         assert!(super::format_remote_search_text(
-            br#"[{"Name":"demo","Description":"fixture","StarCount":2,"Official":false,"Automated":true}]"#
+            br#"[{"Name":"demo","Description":"fixture","star_count":2,"is_official":false,"is_automated":true}]"#
         )
         .expect("search text")
         .starts_with("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED\n"));
@@ -27054,6 +27131,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27318,6 +27396,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27379,6 +27458,7 @@ volumes:
                 gateway: Some("172.31.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         );
@@ -27434,6 +27514,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27486,6 +27567,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27529,6 +27611,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27591,6 +27674,7 @@ volumes:
             bridge_name: first.clone(),
             bridge_cidr: "172.32.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -27611,6 +27695,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27638,6 +27723,7 @@ volumes:
                 gateway: Some("172.33.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27713,6 +27799,7 @@ volumes:
             bridge_name: super::canonical_bridge_name("orphan-net"),
             bridge_cidr: "172.35.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -29581,8 +29668,8 @@ volumes:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["Name"], "library/alpine");
         assert_eq!(results[0]["Index"], "docker.io");
-        assert_eq!(results[0]["StarCount"], 99);
-        assert_eq!(results[0]["Official"], true);
+        assert_eq!(results[0]["star_count"], 99);
+        assert_eq!(results[0]["is_official"], true);
     }
 
     #[test]
@@ -29604,6 +29691,7 @@ volumes:
             path: "/var/lib/ferrocrate/volumes/database".to_string(),
             driver: "local".to_string(),
             driver_opts: Default::default(),
+            labels: BTreeMap::from([("tier".to_string(), "frontend".to_string())]),
             created_at_unix: 1,
         };
         let filters = serde_json::from_value(serde_json::json!({
@@ -29632,9 +29720,11 @@ volumes:
 
     #[test]
     fn docker_network_filters_match_name_driver_and_type() {
+        let labels = BTreeMap::from([("x".to_string(), "y".to_string())]);
         let custom = super::DockerNetworkView {
             name: "app-net",
             driver: "bridge",
+            labels: &labels,
         };
         let filters = serde_json::from_value(serde_json::json!({
             "name": ["app-net"],
@@ -29652,14 +29742,13 @@ volumes:
         let builtin = super::DockerNetworkView {
             name: "bridge",
             driver: "bridge",
+            labels: &BTreeMap::new(),
         };
         assert!(!docker_network_matches_filters(&builtin, &filters));
-        // Labels are accepted (compose probes with them) but never stored,
-        // so a valued selector matches no network.
         let labeled =
             serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
         assert!(validate_docker_network_filters(&labeled).is_ok());
-        assert!(!docker_network_matches_filters(&custom, &labeled));
+        assert!(docker_network_matches_filters(&custom, &labeled));
         let unsupported =
             serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
         assert!(validate_docker_network_filters(&unsupported).is_err());
@@ -31045,7 +31134,7 @@ volumes:
         let owned = super::network_lifecycle::NetworkRecord {
             name: "blue".into(), driver: "bridge".into(), subnet: "10.0.0.0/24".into(),
             gateway: "10.0.0.1".into(), bridge_name: "fc-owned000001".into(),
-            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, created_at_unix: 0, generation: 1,
+            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, labels: BTreeMap::new(), created_at_unix: 0, generation: 1,
         };
         assert_eq!(
             super::orphan_bridge_names(

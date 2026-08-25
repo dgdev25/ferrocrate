@@ -4356,6 +4356,9 @@ impl EngineAccess {
                 Ok(endpoint) => return Ok(Self::Delegate(endpoint)),
                 Err(error) => error,
             };
+            if runtime_dir.join(ENGINE_OWNER_FILE).exists() {
+                return Err(last_error);
+            }
             if Instant::now() >= deadline {
                 return Err(format!(
                     "engine: timed out waiting for active owner publication or direct ownership: {last_error}"
@@ -22695,6 +22698,39 @@ mod tests {
         assert!(matches!(access, EngineAccess::Direct(_)));
         assert!(started.elapsed() >= Duration::from_millis(50));
         release.join().expect("release owner");
+    }
+
+    #[test]
+    fn held_lock_with_missing_published_socket_fails_without_owner_timeout() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
+        let _owner = EngineLockGuard::try_acquire(runtime.path())
+            .expect("acquire owner lock")
+            .expect("unowned runtime");
+        std::fs::write(
+            runtime.path().join("engine-owner.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "pid": std::process::id(),
+                "uid": nix::unistd::geteuid().as_raw(),
+                "runtime_root": canonical_runtime,
+                "socket": runtime.path().join("missing.sock"),
+            }))
+            .expect("owner record JSON"),
+        )
+        .expect("write stale owner record");
+
+        let started = Instant::now();
+        let error = EngineAccess::select(runtime.path()).expect_err("missing endpoint must fail");
+        assert!(
+            error.contains("active owner socket") && error.contains("unavailable"),
+            "unexpected stale-owner diagnostic: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "stale published owner consumed the owner timeout: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

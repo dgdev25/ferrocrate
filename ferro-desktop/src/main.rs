@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use ferro_core::entitlements::{self, Feature};
 use ferro_desktop::backend::{
     select_backend, Backend, ExecRequest as BackendExecRequest, LinuxNativeBackend,
@@ -158,7 +158,7 @@ enum Commands {
         #[arg(long)]
         state_file: Option<String>,
         #[command(subcommand)]
-        command: VmCommands,
+        command: Box<VmCommands>,
     },
     Autostart {
         #[command(subcommand)]
@@ -254,44 +254,47 @@ fn default_fs_backend() -> String {
     }
 }
 
+#[derive(Debug, Args)]
+struct VmInitArgs {
+    #[arg(long, default_value_t = default_vm_backend())]
+    backend: String,
+    #[arg(long, default_value = "FerroCrateDesktopVM")]
+    vm_name: String,
+    #[arg(long, default_value_t = 2)]
+    cpus: u8,
+    #[arg(long, default_value_t = 4096)]
+    memory_mb: u32,
+    #[arg(long)]
+    disk_path: Option<String>,
+    #[arg(long)]
+    host_share_path: Option<String>,
+    #[arg(long, default_value_t = default_fs_backend())]
+    fs_backend: String,
+    #[arg(long)]
+    virtiofs_socket_path: Option<String>,
+    #[arg(long)]
+    hyperv_switch: Option<String>,
+    #[arg(long, default_value_t = 2222)]
+    ssh_port: u16,
+    #[arg(long, default_value_t = 4288)]
+    api_port: u16,
+    #[arg(long)]
+    guest_user: Option<String>,
+    #[arg(long)]
+    ssh_private_key_path: Option<String>,
+    #[arg(long)]
+    cloud_init_image_path: Option<String>,
+    #[arg(long)]
+    vfkit_kernel_path: Option<String>,
+    #[arg(long)]
+    vfkit_initrd_path: Option<String>,
+    #[arg(long, default_value = "5a:94:ef:e4:0c:ee")]
+    vfkit_mac: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum VmCommands {
-    Init {
-        #[arg(long, default_value_t = default_vm_backend())]
-        backend: String,
-        #[arg(long, default_value = "FerroCrateDesktopVM")]
-        vm_name: String,
-        #[arg(long, default_value_t = 2)]
-        cpus: u8,
-        #[arg(long, default_value_t = 4096)]
-        memory_mb: u32,
-        #[arg(long)]
-        disk_path: Option<String>,
-        #[arg(long)]
-        host_share_path: Option<String>,
-        #[arg(long, default_value_t = default_fs_backend())]
-        fs_backend: String,
-        #[arg(long)]
-        virtiofs_socket_path: Option<String>,
-        #[arg(long)]
-        hyperv_switch: Option<String>,
-        #[arg(long, default_value_t = 2222)]
-        ssh_port: u16,
-        #[arg(long, default_value_t = 4288)]
-        api_port: u16,
-        #[arg(long)]
-        guest_user: Option<String>,
-        #[arg(long)]
-        ssh_private_key_path: Option<String>,
-        #[arg(long)]
-        cloud_init_image_path: Option<String>,
-        #[arg(long)]
-        vfkit_kernel_path: Option<String>,
-        #[arg(long)]
-        vfkit_initrd_path: Option<String>,
-        #[arg(long, default_value = "5a:94:ef:e4:0c:ee")]
-        vfkit_mac: String,
-    },
+    Init(Box<VmInitArgs>),
     Start {
         #[arg(long, default_value_t = false)]
         foreground: bool,
@@ -1264,7 +1267,7 @@ fn main() {
         Commands::Vm {
             state_file,
             command,
-        } => run_vm_command(state_file.as_deref(), command),
+        } => run_vm_command(state_file.as_deref(), *command),
         Commands::Autostart { command } => run_autostart_command(command),
     };
     if let Err(err) = result {
@@ -2083,25 +2086,26 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
         .map(PathBuf::from)
         .unwrap_or_else(default_vm_state_path);
     match command {
-        VmCommands::Init {
-            backend,
-            vm_name,
-            cpus,
-            memory_mb,
-            disk_path,
-            host_share_path,
-            fs_backend,
-            virtiofs_socket_path,
-            hyperv_switch,
-            ssh_port,
-            api_port,
-            guest_user,
-            ssh_private_key_path,
-            cloud_init_image_path,
-            vfkit_kernel_path,
-            vfkit_initrd_path,
-            vfkit_mac,
-        } => {
+        VmCommands::Init(args) => {
+            let VmInitArgs {
+                backend,
+                vm_name,
+                cpus,
+                memory_mb,
+                disk_path,
+                host_share_path,
+                fs_backend,
+                virtiofs_socket_path,
+                hyperv_switch,
+                ssh_port,
+                api_port,
+                guest_user,
+                ssh_private_key_path,
+                cloud_init_image_path,
+                vfkit_kernel_path,
+                vfkit_initrd_path,
+                vfkit_mac,
+            } = *args;
             let disk_path = disk_path.unwrap_or_else(|| {
                 state_path
                     .parent()
@@ -4122,7 +4126,7 @@ mod tests {
         }));
         assert!(command_requires_desktop_entitlement(&Commands::Vm {
             state_file: None,
-            command: VmCommands::Status { json: true },
+            command: Box::new(VmCommands::Status { json: true }),
         }));
         assert!(command_requires_desktop_entitlement(&Commands::BackendSmoke {
             start: true,

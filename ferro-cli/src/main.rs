@@ -19728,7 +19728,7 @@ fn handle_docker_compat_connection(
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
     if buildkit_control_hijack {
-        return run_buildkit_control_transport(stream, Duration::from_secs(30 * 60));
+        return run_buildkit_control_transport(stream, state, Duration::from_secs(30 * 60));
     }
     if let Some(registration) = buildkit_session_hijack {
         return run_buildkit_session_transport(
@@ -22059,7 +22059,11 @@ fn docker_buildkit_control_hijack_headers() -> Vec<u8> {
 }
 
 #[cfg(target_os = "linux")]
-fn run_buildkit_control_transport(stream: UnixStream, lifetime: Duration) -> Result<(), String> {
+fn run_buildkit_control_transport(
+    stream: UnixStream,
+    state: Arc<DockerCompatState>,
+    lifetime: Duration,
+) -> Result<(), String> {
     stream
         .set_nonblocking(true)
         .map_err(|error| format!("buildkit control: set nonblocking failed: {error}"))?;
@@ -22079,44 +22083,91 @@ fn run_buildkit_control_transport(stream: UnixStream, lifetime: Duration) -> Res
             .map_err(|error| format!("buildkit control: h2 handshake failed: {error}"))?;
         tokio::time::timeout(lifetime, async move {
             while let Some(result) = connection.accept().await {
-                let (request, mut respond) = result
+                let (request, respond) = result
                     .map_err(|error| format!("buildkit control: accept failed: {error}"))?;
-                let path = request.uri().path().to_string();
-                let response = http::Response::builder()
-                    .status(200)
-                    .header("content-type", "application/grpc")
-                    .body(())
-                    .map_err(|error| format!("buildkit control: response failed: {error}"))?;
-                let mut response_stream = respond
-                    .send_response(response, false)
-                    .map_err(|error| format!("buildkit control: response send failed: {error}"))?;
-                if path == "/moby.buildkit.v1.Control/ListWorkers" {
-                    let payload = buildkit_list_workers_response();
-                    response_stream
-                        .send_data(grpc_message(&payload), false)
-                        .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
-                    let mut trailers = http::HeaderMap::new();
-                    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
-                    response_stream
-                        .send_trailers(trailers)
-                        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))?;
-                } else {
-                    let mut trailers = http::HeaderMap::new();
-                    trailers.insert("grpc-status", http::HeaderValue::from_static("12"));
-                    trailers.insert(
-                        "grpc-message",
-                        http::HeaderValue::from_static("method%20not%20implemented"),
-                    );
-                    response_stream
-                        .send_trailers(trailers)
-                        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))?;
-                }
+                let request_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_buildkit_control_request(
+                        request,
+                        respond,
+                        request_state,
+                        lifetime,
+                    )
+                    .await
+                    {
+                        tracing::error!("buildkit control request failed: {error}");
+                    }
+                });
             }
             Ok::<(), String>(())
         })
         .await
         .unwrap_or(Ok(()))
     })
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_buildkit_control_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    state: Arc<DockerCompatState>,
+    lifetime: Duration,
+) -> Result<(), String> {
+    let path = request.uri().path().to_string();
+    let response = http::Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc")
+        .body(())
+        .map_err(|error| format!("buildkit control: response failed: {error}"))?;
+    let mut response_stream = respond
+        .send_response(response, false)
+        .map_err(|error| format!("buildkit control: response send failed: {error}"))?;
+    if path == "/moby.buildkit.v1.Control/ListWorkers" {
+        response_stream
+            .send_data(grpc_message(&buildkit_list_workers_response()), false)
+            .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if path == "/moby.buildkit.v1.Control/Session" {
+        let registration = parse_buildkit_control_session_registration(request.headers())?;
+        return run_buildkit_control_session(
+            request.into_body(),
+            response_stream,
+            state,
+            registration,
+            lifetime,
+        )
+        .await;
+    }
+    send_buildkit_grpc_status(
+        &mut response_stream,
+        12,
+        Some("method%20not%20implemented"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn send_buildkit_grpc_status(
+    response: &mut h2::SendStream<Bytes>,
+    status: u16,
+    message: Option<&str>,
+) -> Result<(), String> {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        "grpc-status",
+        http::HeaderValue::from_str(&status.to_string())
+            .map_err(|error| format!("buildkit control: invalid gRPC status: {error}"))?,
+    );
+    if let Some(message) = message {
+        trailers.insert(
+            "grpc-message",
+            http::HeaderValue::from_str(message)
+                .map_err(|error| format!("buildkit control: invalid gRPC message: {error}"))?,
+        );
+    }
+    response
+        .send_trailers(trailers)
+        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -22187,10 +22238,36 @@ fn parse_buildkit_session_registration(
         .filter(|value| value.starts_with('/') && value.len() <= 256)
         .map(str::to_owned)
         .collect::<HashSet<_>>();
-    if !methods.contains("/moby.filesync.v1.FileSync/DiffCopy") {
-        return Err("buildkit session: client does not expose FileSync.DiffCopy".to_string());
-    }
     Ok(BuildkitSessionRegistration { uuid, methods })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_buildkit_control_session_registration(
+    headers: &http::HeaderMap,
+) -> Result<BuildkitSessionRegistration, String> {
+    let mut values = HashMap::new();
+    if let Some(value) = headers
+        .get("x-docker-expose-session-uuid")
+        .and_then(|value| value.to_str().ok())
+    {
+        values.insert(
+            "x-docker-expose-session-uuid".to_string(),
+            value.to_string(),
+        );
+    }
+    let methods = headers
+        .get_all("x-docker-expose-session-grpc-method")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !methods.is_empty() {
+        values.insert(
+            "x-docker-expose-session-grpc-method".to_string(),
+            methods,
+        );
+    }
+    parse_buildkit_session_registration(&values)
 }
 
 #[cfg(target_os = "linux")]
@@ -22268,6 +22345,30 @@ fn drain_grpc_packets(buffer: &mut Vec<u8>) -> Result<Vec<FsutilPacket>, String>
     Ok(packets)
 }
 
+#[cfg(target_os = "linux")]
+fn drain_buildkit_session_bytes(buffer: &mut Vec<u8>) -> Result<Vec<Vec<u8>>, String> {
+    use buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+    let mut messages = Vec::new();
+    while buffer.len() >= 5 {
+        if buffer[0] != 0 {
+            return Err("buildkit session: compressed gRPC messages are unsupported".to_string());
+        }
+        let size = u32::from_be_bytes(buffer[1..5].try_into().expect("fixed frame prefix")) as usize;
+        if size > 16 * 1024 * 1024 {
+            return Err("buildkit session: message exceeds transfer limit".to_string());
+        }
+        if buffer.len() < size + 5 {
+            break;
+        }
+        let message = BytesMessage::decode(&buffer[5..5 + size])
+            .map_err(|error| format!("buildkit session: invalid tunnel message: {error}"))?;
+        buffer.drain(..5 + size);
+        messages.push(message.data);
+    }
+    Ok(messages)
+}
+
 /// Switch an authenticated, hijacked Docker session socket into the daemon's
 /// HTTP/2 client role. BuildKit deliberately reverses the usual RPC direction:
 /// the Docker CLI hosts the gRPC services and FerroCrate calls them.
@@ -22294,6 +22395,101 @@ fn run_buildkit_session_transport(
             .await
             .map_err(|_| "buildkit session: h2 handshake timed out".to_string())?
             .map_err(|error| format!("buildkit session: h2 handshake failed: {error}"))?;
+        run_buildkit_session_worker(requests, connection, state, registration, lifetime).await
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn run_buildkit_control_session(
+    mut incoming: h2::RecvStream,
+    mut outgoing: h2::SendStream<Bytes>,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (daemon_io, tunnel_io) = tokio::io::duplex(64 * 1024);
+    let (mut tunnel_read, mut tunnel_write) = tokio::io::split(tunnel_io);
+    let input = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        while let Some(chunk) = incoming.data().await {
+            let chunk = chunk.map_err(|error| format!("buildkit session: tunnel receive failed: {error}"))?;
+            incoming
+                .flow_control()
+                .release_capacity(chunk.len())
+                .map_err(|error| format!("buildkit session: tunnel flow control failed: {error}"))?;
+            buffer.extend_from_slice(&chunk);
+            for message in drain_buildkit_session_bytes(&mut buffer)? {
+                tunnel_write
+                    .write_all(&message)
+                    .await
+                    .map_err(|error| format!("buildkit session: tunnel write failed: {error}"))?;
+            }
+        }
+        if !buffer.is_empty() {
+            return Err("buildkit session: truncated tunnel message".to_string());
+        }
+        tunnel_write
+            .shutdown()
+            .await
+            .map_err(|error| format!("buildkit session: tunnel shutdown failed: {error}"))
+    });
+    let output = tokio::spawn(async move {
+        use buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+        let mut buffer = vec![0_u8; 32 * 1024];
+        loop {
+            let read = tunnel_read
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("buildkit session: tunnel read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            outgoing
+                .send_data(
+                    grpc_message(&BytesMessage {
+                        data: buffer[..read].to_vec(),
+                    }),
+                    false,
+                )
+                .map_err(|error| format!("buildkit session: tunnel response failed: {error}"))?;
+        }
+        send_buildkit_grpc_status(&mut outgoing, 0, None)
+    });
+    let handshake = h2::client::Builder::new()
+        .max_frame_size(16 * 1024)
+        .handshake(daemon_io);
+    let (requests, connection) = tokio::time::timeout(lifetime, handshake)
+        .await
+        .map_err(|_| "buildkit session: tunneled h2 handshake timed out".to_string())?
+        .map_err(|error| format!("buildkit session: tunneled h2 handshake failed: {error}"))?;
+    let worker = run_buildkit_session_worker(requests, connection, state, registration, lifetime).await;
+    input.abort();
+    let input_result = input.await;
+    let output_result = output.await;
+    if let Err(error) = worker {
+        return Err(error);
+    }
+    if let Ok(Err(error)) = input_result {
+        return Err(error);
+    }
+    output_result
+        .map_err(|error| format!("buildkit session: tunnel output task failed: {error}"))?
+}
+
+#[cfg(target_os = "linux")]
+async fn run_buildkit_session_worker<T>(
+    requests: h2::client::SendRequest<Bytes>,
+    connection: h2::client::Connection<T, Bytes>,
+    state: Arc<DockerCompatState>,
+    registration: BuildkitSessionRegistration,
+    lifetime: Duration,
+) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(8);
         let handle = BuildkitSessionHandle {
             commands: command_tx,
@@ -22341,7 +22537,6 @@ fn run_buildkit_session_transport(
             Ok(result) => result,
             Err(_) => Ok(()),
         }
-    })
 }
 
 #[cfg(target_os = "linux")]
@@ -29773,6 +29968,68 @@ volumes:
         assert!(headers.contains("Connection: Upgrade\r\n"));
         assert!(headers.contains("Upgrade: h2c\r\n"));
         assert!(!headers.contains("Content-Length"));
+    }
+
+    #[test]
+    fn buildkit_control_session_decodes_fragmented_bytes_messages() {
+        use super::buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+        let first = super::grpc_message(&BytesMessage {
+            data: b"client settings".to_vec(),
+        });
+        let second = super::grpc_message(&BytesMessage {
+            data: b"session payload".to_vec(),
+        });
+        let mut wire = [first.as_ref(), second.as_ref()].concat();
+        let tail = wire.split_off(first.len() + 2);
+        assert_eq!(
+            super::drain_buildkit_session_bytes(&mut wire).expect("first fragment"),
+            vec![b"client settings".to_vec()]
+        );
+        wire.extend_from_slice(&tail);
+        assert_eq!(
+            super::drain_buildkit_session_bytes(&mut wire).expect("second fragment"),
+            vec![b"session payload".to_vec()]
+        );
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn buildkit_control_session_preserves_repeated_exposed_methods() {
+        let request = http::Request::builder()
+            .header("x-docker-expose-session-uuid", "control-session")
+            .header(
+                "x-docker-expose-session-grpc-method",
+                "/moby.filesync.v1.FileSync/DiffCopy",
+            )
+            .header(
+                "x-docker-expose-session-grpc-method",
+                "/moby.session.auth.v1.Auth/Credentials",
+            )
+            .body(())
+            .expect("session request");
+        let registration = super::parse_buildkit_control_session_registration(request.headers())
+            .expect("control session metadata");
+        assert_eq!(registration.uuid, "control-session");
+        assert_eq!(registration.methods.len(), 2);
+    }
+
+    #[test]
+    fn buildkit_session_registration_allows_health_only_discovery_session() {
+        let headers = HashMap::from([
+            (
+                "x-docker-expose-session-uuid".to_string(),
+                "health-session".to_string(),
+            ),
+            (
+                "x-docker-expose-session-grpc-method".to_string(),
+                "/grpc.health.v1.Health/Check".to_string(),
+            ),
+        ]);
+        let registration = super::parse_buildkit_session_registration(&headers)
+            .expect("health-only sessions are valid until filesync is requested");
+        assert_eq!(registration.uuid, "health-session");
+        assert_eq!(registration.methods.len(), 1);
     }
 
     #[test]

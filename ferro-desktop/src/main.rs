@@ -132,6 +132,14 @@ enum Commands {
         #[arg(long)]
         wsl_distro: Option<String>,
     },
+    /// Exercise the selected desktop backend's lifecycle and API transport.
+    BackendSmoke {
+        /// Start the selected backend before checking its status and transport.
+        #[arg(long, default_value_t = false)]
+        start: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Phase0Check {
         #[arg(long)]
         wsl_distro: Option<String>,
@@ -1246,6 +1254,7 @@ fn main() {
             run_registry_proxy(socket.as_deref(), command)
         }
         Commands::Doctor { wsl_distro } => run_doctor(wsl_distro),
+        Commands::BackendSmoke { start, json } => run_backend_smoke(start, json),
         Commands::Phase0Check { wsl_distro, json } => run_phase0_check(wsl_distro, json),
         Commands::Forward {
             state_file,
@@ -1273,6 +1282,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
             | Commands::TerminalResize { .. }
             | Commands::VolumeProxy { .. }
             | Commands::NetworkProxy { .. }
+            | Commands::BackendSmoke { .. }
             | Commands::ContainerProxy { .. }
             | Commands::RegistryProxy { .. }
             | Commands::Forward { .. }
@@ -1793,6 +1803,63 @@ fn run_doctor(wsl_distro: Option<String>) -> Result<(), DesktopError> {
     }
     if let Some(available) = check.requested_available {
         println!("wsl_distro_available={available}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct BackendSmokeReport {
+    backend: ferro_desktop::backend::BackendStatus,
+    request_status: u16,
+    request_path: &'static str,
+}
+
+fn run_backend_smoke(start: bool, json: bool) -> Result<(), DesktopError> {
+    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    if start {
+        backend
+            .start()
+            .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    }
+    let status = backend.status();
+    if !status.healthy {
+        return Err(DesktopError::Invalid(format!(
+            "selected backend {} is not healthy (state={}, reason={})",
+            status.backend,
+            serde_json::to_value(status.state)
+                .ok()
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "unknown".to_string()),
+            status.reason.as_deref().unwrap_or("not reported"),
+        )));
+    }
+
+    const REQUEST_PATH: &str = "/containers/json?all=1";
+    let response = backend
+        .request(TransportRequest::new("GET", REQUEST_PATH))
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    if !(200..300).contains(&response.status) {
+        return Err(DesktopError::Invalid(format!(
+            "selected backend {} proxy request {REQUEST_PATH} returned HTTP {}",
+            status.backend, response.status
+        )));
+    }
+    let report = BackendSmokeReport {
+        backend: status,
+        request_status: response.status,
+        request_path: REQUEST_PATH,
+    };
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!(
+            "backend={} state={:?} healthy={} request={} status={}",
+            report.backend.backend,
+            report.backend.state,
+            report.backend.healthy,
+            report.request_path,
+            report.request_status,
+        );
     }
     Ok(())
 }
@@ -4056,6 +4123,10 @@ mod tests {
         assert!(command_requires_desktop_entitlement(&Commands::Vm {
             state_file: None,
             command: VmCommands::Status { json: true },
+        }));
+        assert!(command_requires_desktop_entitlement(&Commands::BackendSmoke {
+            start: true,
+            json: true,
         }));
         assert!(!command_requires_desktop_entitlement(&Commands::Doctor {
             wsl_distro: None,

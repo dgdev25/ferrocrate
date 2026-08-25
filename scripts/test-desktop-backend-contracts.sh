@@ -54,5 +54,8 @@ require_text "$real_daemon" 'host_os=.*uname' 'host/backend selection'
 require_text "$real_daemon" 'SKIP.*requires.*host' 'unavailable backend skip row'
 require_text "$real_daemon" 'selected backend .* does not match host backend' 'mismatched backend guard'
 require_text "$real_daemon" 'desktop-real-daemon-test' 'scoped desktop test entitlement'
+require_text "$real_daemon" 'run_wsl2_backend_smoke' 'WSL2 selected-backend smoke path'
+require_text "$real_daemon" 'run_macos_backend_smoke' 'macOS selected-backend smoke path'
+require_text "$real_daemon" 'backend-smoke --start --json' 'selected-backend start/status/request command'
 
 printf 'desktop backend provisioning contracts passed\n'

@@ -5,21 +5,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 test_root="$(mktemp -d)"
 runtime="$test_root/runtime"
 socket="$runtime/ferrocrate.sock"
-mkdir -p "$runtime"
-export FERROCRATE_RUNTIME_DIR="$runtime"
-export XDG_RUNTIME_DIR="$runtime"
-export FERROCRATE_ROOTLESS_SOCKET="$socket"
-export HOME="$test_root/home"
-export FERROCRATE_HOME="$HOME/.ferrocrate"
-export FERROCRATE_IMAGE_STORE="$test_root/image-store"
-mkdir -p "$HOME" "$FERROCRATE_IMAGE_STORE"
-# Keep this real daemon/socket integration runnable without CAP_NET_ADMIN. This
-# selects Ferrocrate's process-persistent test kernel adapter; HTTP routing,
-# durable network lifecycle state, and every desktop proxy remain production
-# code paths (there is no mocked server or mocked Tauri invocation).
-export FERROCRATE_NETWORK_KERNEL_STATE="$test_root/network-kernel-state.json"
+host_home="${HOME:?HOME is required for backend configuration}"
 export FERROCRATE_BIN="${FERROCRATE_BIN:-$root/target/release/ferro-cli}"
-desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop}"
 # Desktop proxy commands are entitlement-gated. Keep this integration test
 # self-contained and scoped to its disposable root rather than borrowing a
 # developer's paid entitlement.
@@ -61,9 +48,18 @@ case "$backend" in
 esac
 host_os="$(uname -s)"
 case "$host_os" in
-  Linux) host_backend="linux-native" ;;
-  Darwin) host_backend="macos-vm" ;;
-  MINGW*|MSYS*|CYGWIN*) host_backend="wsl2" ;;
+  Linux)
+    host_backend="linux-native"
+    desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop}"
+    ;;
+  Darwin)
+    host_backend="macos-vm"
+    desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop}"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    host_backend="wsl2"
+    desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop.exe}"
+    ;;
   *) host_backend="unavailable" ;;
 esac
 case "$backend" in
@@ -102,35 +98,109 @@ print_backend_rows() {
   done
 }
 
+skip_selected_backend() {
+  local reason="$1"
+  print_backend_rows "SKIP" "$reason"
+  printf 'selected backend %s skipped: %s\n' "$backend" "$reason"
+  exit 0
+}
+
+run_selected_backend_smoke() {
+  local output
+  if ! output="$("$desktop_bin" backend-smoke --start --json 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  printf '%s\n' "$output" | grep -Fq "\"backend\":\"$backend\""
+  printf '%s\n' "$output" | grep -Eq '"request_status":2[0-9]{2}'
+  print_backend_rows "PASS" "selected $backend transport"
+}
+
+run_wsl2_backend_smoke() {
+  if ! command -v wsl.exe >/dev/null 2>&1; then
+    skip_selected_backend "wsl.exe is unavailable"
+  fi
+  local distro="${FERROCRATE_WSL_DISTRO:-Ubuntu}" phase0
+  if ! phase0="$("$desktop_bin" phase0-check --wsl-distro "$distro" --json 2>&1)"; then
+    skip_selected_backend "WSL2 phase-0 probe failed for distro $distro"
+  fi
+  if ! printf '%s\n' "$phase0" | grep -Eq '"requested_available"[[:space:]]*:[[:space:]]*true'; then
+    skip_selected_backend "WSL2 distro $distro is unavailable"
+  fi
+  if ! printf '%s\n' "$phase0" | grep -Eq '"ferrocrate_present_in_guest"[[:space:]]*:[[:space:]]*true'; then
+    skip_selected_backend "ferrocrate is absent from WSL2 distro $distro"
+  fi
+  run_selected_backend_smoke
+}
+
+run_macos_backend_smoke() {
+  local config_root="${FERROCRATE_CONFIG_DIR:-$host_home/.ferrocrate}"
+  local state_file="${FERROCRATE_DESKTOP_VM_STATE:-$config_root/desktop-vm.json}"
+  local ssh_key="${FERROCRATE_VM_SSH_KEY:-$config_root/vm/desktop_vm_ed25519}"
+  if ! command -v ssh >/dev/null 2>&1; then
+    skip_selected_backend "ssh is unavailable"
+  fi
+  if [[ ! -f "$state_file" ]]; then
+    skip_selected_backend "VM state is absent: $state_file"
+  fi
+  if [[ ! -f "$ssh_key" ]]; then
+    skip_selected_backend "VM SSH key is absent: $ssh_key"
+  fi
+  run_selected_backend_smoke
+}
+
+run_linux_fixture() {
+  mkdir -p "$runtime"
+  export FERROCRATE_RUNTIME_DIR="$runtime"
+  export XDG_RUNTIME_DIR="$runtime"
+  export FERROCRATE_ROOTLESS_SOCKET="$socket"
+  export HOME="$test_root/home"
+  export FERROCRATE_HOME="$HOME/.ferrocrate"
+  export FERROCRATE_IMAGE_STORE="$test_root/image-store"
+  mkdir -p "$HOME" "$FERROCRATE_IMAGE_STORE"
+  # Keep this real daemon/socket integration runnable without CAP_NET_ADMIN. This
+  # selects Ferrocrate's process-persistent test kernel adapter; HTTP routing,
+  # durable network lifecycle state, and every desktop proxy remain production
+  # code paths (there is no mocked server or mocked Tauri invocation).
+  export FERROCRATE_NETWORK_KERNEL_STATE="$test_root/network-kernel-state.json"
+
+  "$FERROCRATE_BIN" daemon --socket "$socket" --docker-compat >"$test_root/daemon.log" 2>&1 &
+  daemon_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -S "$socket" ]] && curl -fsS --unix-socket "$socket" http://localhost/_ping >/dev/null && break
+    sleep 0.1
+  done
+  curl -fsS --unix-socket "$socket" http://localhost/_ping | grep -qx OK
+
+  # Lists and typed mutations use the same explicit Ferrocrate socket.
+  curl -fsS --unix-socket "$socket" 'http://localhost/containers/json?all=1' >/dev/null
+  curl -fsS --unix-socket "$socket" http://localhost/images/json >/dev/null
+  "$desktop_bin" volume-proxy --socket "$socket" create desktop-real-volume >/dev/null
+  "$desktop_bin" volume-proxy --socket "$socket" list | grep -q desktop-real-volume
+  "$desktop_bin" network-proxy --socket "$socket" create desktop-real-network --subnet 172.31.240.0/24 >/dev/null
+  "$desktop_bin" network-proxy --socket "$socket" list | grep -q desktop-real-network
+  "$desktop_bin" network-proxy --socket "$socket" inspect desktop-real-network | grep -q desktop-real-network
+
+  # Pull, create, inspect and stats are real daemon operations.
+  curl -fsS --unix-socket "$socket" -X POST 'http://localhost/images/create?fromImage=alpine&tag=latest' >/dev/null
+  create_json="$(curl -fsS --unix-socket "$socket" -H 'Content-Type: application/json' -d '{"Image":"alpine:latest","Cmd":["sh","-c","sleep 30"]}' http://localhost/containers/create?name=desktop-real-container)"
+  container_id="$(printf '%s' "$create_json" | jq -er '.Id')"
+  curl -fsS --unix-socket "$socket" -X POST "http://localhost/containers/$container_id/start" >/dev/null
+  "$desktop_bin" container-proxy --socket "$socket" inspect "$container_id" | grep -q "$container_id"
+  curl -fsS --unix-socket "$socket" "http://localhost/containers/$container_id/stats?stream=false" | jq -e 'type == "object"' >/dev/null
+  print_backend_rows "PASS" "$socket"
+  printf 'desktop real-daemon paths passed via %s backend=%s\n' "$socket" "$backend"
+}
+
 if [[ "$backend" != "$host_backend" ]]; then
   print_backend_rows "SKIP" "requires $required_host host"
   printf 'selected backend %s does not match host backend %s; skipped without relabelling this host execution\n' "$backend" "$host_backend"
   exit 0
 fi
 
-"$FERROCRATE_BIN" daemon --socket "$socket" --docker-compat >"$test_root/daemon.log" 2>&1 &
-daemon_pid=$!
-for _ in $(seq 1 100); do
-  [[ -S "$socket" ]] && curl -fsS --unix-socket "$socket" http://localhost/_ping >/dev/null && break
-  sleep 0.1
-done
-curl -fsS --unix-socket "$socket" http://localhost/_ping | grep -qx OK
-
-# Lists and typed mutations use the same explicit Ferrocrate socket.
-curl -fsS --unix-socket "$socket" 'http://localhost/containers/json?all=1' >/dev/null
-curl -fsS --unix-socket "$socket" http://localhost/images/json >/dev/null
-"$desktop_bin" volume-proxy --socket "$socket" create desktop-real-volume >/dev/null
-"$desktop_bin" volume-proxy --socket "$socket" list | grep -q desktop-real-volume
-"$desktop_bin" network-proxy --socket "$socket" create desktop-real-network --subnet 172.31.240.0/24 >/dev/null
-"$desktop_bin" network-proxy --socket "$socket" list | grep -q desktop-real-network
-"$desktop_bin" network-proxy --socket "$socket" inspect desktop-real-network | grep -q desktop-real-network
-
-# Pull, create, inspect and stats are real daemon operations.
-curl -fsS --unix-socket "$socket" -X POST 'http://localhost/images/create?fromImage=alpine&tag=latest' >/dev/null
-create_json="$(curl -fsS --unix-socket "$socket" -H 'Content-Type: application/json' -d '{"Image":"alpine:latest","Cmd":["sh","-c","sleep 30"]}' http://localhost/containers/create?name=desktop-real-container)"
-container_id="$(printf '%s' "$create_json" | jq -er '.Id')"
-curl -fsS --unix-socket "$socket" -X POST "http://localhost/containers/$container_id/start" >/dev/null
-"$desktop_bin" container-proxy --socket "$socket" inspect "$container_id" | grep -q "$container_id"
-curl -fsS --unix-socket "$socket" "http://localhost/containers/$container_id/stats?stream=false" | jq -e 'type == "object"' >/dev/null
-print_backend_rows "PASS" "$socket"
-printf 'desktop real-daemon paths passed via %s backend=%s\n' "$socket" "$backend"
+case "$backend" in
+  linux-native) run_linux_fixture ;;
+  wsl2) run_wsl2_backend_smoke ;;
+  macos-vm) run_macos_backend_smoke ;;
+esac

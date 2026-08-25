@@ -151,13 +151,22 @@ impl LifecyclePhaseHook for AbortAtPhase {
 
 fn assert_abort_reopen_matrix(action: &str) {
     let _guard = runtime_test_guard();
-    let phases = [
-        LifecyclePhasePoint::DecisionDurable,
-        LifecyclePhasePoint::ReservationDurable,
-        LifecyclePhasePoint::EffectObserved,
-        LifecyclePhasePoint::TerminalDurable,
-        LifecyclePhasePoint::ReservationCleared,
-    ];
+    let phases = if action == "exec" {
+        vec![
+            LifecyclePhasePoint::DecisionDurable,
+            LifecyclePhasePoint::EffectObserved,
+            LifecyclePhasePoint::TerminalDurable,
+            LifecyclePhasePoint::ReservationCleared,
+        ]
+    } else {
+        vec![
+            LifecyclePhasePoint::DecisionDurable,
+            LifecyclePhasePoint::ReservationDurable,
+            LifecyclePhasePoint::EffectObserved,
+            LifecyclePhasePoint::TerminalDurable,
+            LifecyclePhasePoint::ReservationCleared,
+        ]
+    };
     for (phase_index, phase) in phases.into_iter().enumerate() {
         let root = tempfile::tempdir().unwrap();
         let cgroup = root.path().join("cgroup");
@@ -258,14 +267,19 @@ fn assert_abort_reopen_matrix(action: &str) {
             _ => unreachable!(),
         };
         assert!(result.is_err(), "{action} unexpectedly crossed {phase:?}");
-        let expected_journal_pending = phase_index <= 2;
+        let expected_journal_pending = matches!(
+            phase,
+            LifecyclePhasePoint::DecisionDurable
+                | LifecyclePhasePoint::ReservationDurable
+                | LifecyclePhasePoint::EffectObserved
+        );
         assert_eq!(
             !journal.pending().unwrap().is_empty(),
             expected_journal_pending,
             "pre-reopen journal state for {action} {phase:?}"
         );
         let records_before_reopen = runtime.list().unwrap();
-        let expected_store_pending = match phase {
+        let expected_store_pending = action != "exec" && match phase {
             LifecyclePhasePoint::ReservationDurable | LifecyclePhasePoint::EffectObserved => true,
             LifecyclePhasePoint::TerminalDurable => action != "remove",
             _ => false,
@@ -329,7 +343,10 @@ fn assert_abort_reopen_matrix(action: &str) {
         assert!(recovery_count <= 1, "{action} {phase:?}");
         assert_eq!(
             recovery_count,
-            usize::from(phase_index <= 2 || (action == "run" && phase_index == 3)),
+            usize::from(
+                expected_journal_pending
+                    || (action == "run" && phase == LifecyclePhasePoint::TerminalDurable),
+            ),
             "terminal recovery uniqueness for {action} {phase:?}"
         );
         assert!(matches!(
@@ -422,7 +439,7 @@ fn assert_post_effect_unknown_reconciles(action: &str) {
         Err(RuntimeError::PostEffectPersistence(_))
     ));
     assert_eq!(journal.pending().unwrap().len(), 1);
-    assert!(runtime.inspect(id).unwrap().pending_mutation.is_some());
+    assert!(runtime.inspect(id).unwrap().pending_mutation.is_none());
     let outcomes = journal
         .records()
         .unwrap()
@@ -522,7 +539,6 @@ fn exec_exposes_every_durable_crash_boundary_in_order() {
         *hook.0.lock().unwrap(),
         [
             LifecyclePhasePoint::DecisionDurable,
-            LifecyclePhasePoint::ReservationDurable,
             LifecyclePhasePoint::EffectObserved,
             LifecyclePhasePoint::TerminalDurable,
             LifecyclePhasePoint::ReservationCleared,

@@ -125,14 +125,7 @@ pub async fn collect_agent_observation(
 ) -> AgentObservation {
     let version = run_bounded(runtime_executable, &["version".into()])
         .await
-        .map(|(_, stdout, _)| {
-            stdout
-                .lines()
-                .next()
-                .unwrap_or("unknown")
-                .trim()
-                .to_string()
-        })
+        .map(|(_, stdout, _)| reported_client_version(&stdout))
         .unwrap_or_else(|_| "unknown".into());
     let containers = run_bounded(
         runtime_executable,
@@ -217,4 +210,26 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(reader: R) -> Result<Stri
         bytes.extend_from_slice(b"\n[output truncated]\n");
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn reported_client_version(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Version:").map(str::trim))
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reported_client_version;
+
+    #[test]
+    fn observation_extracts_the_client_version_from_docker_style_output() {
+        assert_eq!(
+            reported_client_version("Client:\n Version: 0.1.0\n API version: 1.43\n"),
+            "0.1.0"
+        );
+    }
 }

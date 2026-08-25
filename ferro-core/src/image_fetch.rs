@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -235,7 +236,12 @@ fn pull_planned_image_with_store_mode(
 ) -> Result<ImageFetchResult, ImageFetchError> {
     let client = RegistryClient::new()?;
     let auth = resolve_registry_auth(plan.canonical_reference())?;
-    let fetched_json = client.pull_manifest_raw(plan.immutable_reference(), auth.as_ref())?;
+    let fetched_json = pull_manifest_with_peer_fallback(
+        &client,
+        plan.immutable_reference(),
+        auth.as_ref(),
+        Some(plan.manifest_digest()),
+    )?;
     let fetched =
         ImageFetchPlan::from_resolved_manifest(plan.canonical_reference(), &fetched_json)?;
     if fetched.manifest_digest != plan.manifest_digest
@@ -256,7 +262,8 @@ fn pull_planned_image_with_store_mode(
     fs::create_dir_all(&config_root)?;
     let config_path = config_root.join(plan.config_digest().replace(':', "_"));
     if !config_path.exists() {
-        client.pull_blob_to_file(
+        pull_blob_with_peer_fallback(
+            &client,
             plan.immutable_reference(),
             plan.config_digest(),
             auth.as_ref(),
@@ -321,7 +328,7 @@ fn pull_layers_concurrently(
             let blob_path = blob_root.join(digest.replace(':', "_"));
             scope.spawn(move || -> Result<(usize, PathBuf), ImageFetchError> {
                 if !blob_path.exists() {
-                    client.pull_blob_to_file(reference, &digest, auth, &blob_path)?;
+                    pull_blob_with_peer_fallback(client, reference, &digest, auth, &blob_path)?;
                 }
                 verify_digest(&blob_path, &digest)?;
                 verify_size(&blob_path, expected_size)?;
@@ -478,7 +485,7 @@ fn resolve_manifest_json(
     image: &str,
     auth: Option<&crate::registry::RegistryAuth>,
 ) -> Result<String, ImageFetchError> {
-    let manifest_json = client.pull_manifest_raw(image, auth)?;
+    let manifest_json = pull_manifest_with_peer_fallback(client, image, auth, None)?;
     let manifest_error = match parse_image_manifest(&manifest_json) {
         Ok(_) => return Ok(manifest_json),
         Err(error) => error,
@@ -491,10 +498,86 @@ fn resolve_manifest_json(
     if let Some(digest) = select_platform_manifest(&index.manifests) {
         let parsed = parse_image_reference(image)?;
         let reference = format!("{}/{}@{}", parsed.registry, parsed.repository, digest);
-        return Ok(client.pull_manifest_raw(&reference, auth)?);
+        return pull_manifest_with_peer_fallback(client, &reference, auth, Some(&digest));
     }
 
     Err(manifest_error.into())
+}
+
+fn lan_mirror_enabled() -> bool {
+    std::env::var("FERROCRATE_LAN_MIRROR").is_ok_and(|value| {
+        matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    })
+}
+
+fn peer_get(image: &str, kind: &str, value: &str, wanted: Option<&str>) -> Option<(Vec<u8>, String)> {
+    if !lan_mirror_enabled() {
+        return None;
+    }
+    let reference = parse_image_reference(image).ok()?;
+    let timeout_ms = std::env::var("FERROCRATE_LAN_MIRROR_TIMEOUT_MS")
+        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1200).clamp(100, 5000);
+    let peers = crate::lan_mirror::discover(Duration::from_millis(timeout_ms), wanted).ok()?;
+    let http = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(5))
+        .build().ok()?;
+    for peer in peers {
+        let url = format!("{}/v2/{}/{kind}/{value}", peer.base_url(), reference.repository);
+        let mut request = http.get(url);
+        if let Ok(secret) = std::env::var("FERROCRATE_LAN_MIRROR_SECRET") {
+            request = request.header("X-Ferrocrate-Mirror-Secret", secret);
+        }
+        let Ok(response) = request.send() else { continue };
+        if !response.status().is_success() { continue; }
+        let Ok(bytes) = response.bytes() else { continue };
+        return Some((bytes.to_vec(), peer.instance_id));
+    }
+    None
+}
+
+fn pull_manifest_with_peer_fallback(
+    client: &RegistryClient,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+    wanted_digest: Option<&str>,
+) -> Result<String, ImageFetchError> {
+    let reference = parse_image_reference(image)?;
+    if let Some((bytes, peer)) = peer_get(image, "manifests", &reference.reference, wanted_digest) {
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        if wanted_digest.is_none_or(|wanted| wanted == digest) {
+            if let Ok(manifest) = String::from_utf8(bytes) {
+                eprintln!("manifest {digest}: peer {peer}");
+                return Ok(manifest);
+            }
+        }
+        eprintln!("manifest {digest}: peer mismatch, falling back to registry");
+    }
+    Ok(client.pull_manifest_raw(image, auth)?)
+}
+
+fn pull_blob_with_peer_fallback(
+    client: &RegistryClient,
+    image: &str,
+    digest: &str,
+    auth: Option<&RegistryAuth>,
+    dest: &Path,
+) -> Result<(), ImageFetchError> {
+    if let Some((bytes, peer)) = peer_get(image, "blobs", digest, Some(digest)) {
+        if crate::lan_mirror::verify_bytes(&bytes, digest) {
+            if let Some(parent) = dest.parent() { fs::create_dir_all(parent)?; }
+            let temporary = dest.with_extension(format!("lan-tmp-{}", uuid::Uuid::new_v4()));
+            fs::write(&temporary, bytes)?;
+            fs::File::open(&temporary)?.sync_all()?;
+            fs::rename(&temporary, dest)?;
+            eprintln!("layer {digest}: peer {peer} (verified)");
+            return Ok(());
+        }
+        eprintln!("layer {digest}: peer mismatch, falling back to registry");
+    }
+    client.pull_blob_to_file(image, digest, auth, dest)?;
+    eprintln!("layer {digest}: registry (verified)");
+    Ok(())
 }
 
 fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> Option<String> {

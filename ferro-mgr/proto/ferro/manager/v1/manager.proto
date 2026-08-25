@@ -9,6 +9,8 @@ service AdminService {
   rpc FleetSnapshot(FleetSnapshotRequest) returns (FleetSnapshotResponse);
   rpc FleetCommand(FleetCommandRequest) returns (FleetCommandResponse);
   rpc RevokeHost(FleetRevokeRequest) returns (FleetRevokeResponse);
+  rpc FleetDeploy(FleetDeployRequest) returns (FleetDeployResponse);
+  rpc FleetRollback(FleetRollbackRequest) returns (FleetDeployResponse);
 }
 
 message EnrollRequest { string node_id = 1; bytes public_key = 2; string enrollment_token = 3; bytes csr = 4; string endpoint = 5; }
@@ -28,3 +30,6 @@ message FleetCommandRequest { string cluster_id = 1; string node_id = 2; string 
 message FleetCommandResponse { int32 exit_code = 1; string stdout = 2; string stderr = 3; }
 message FleetRevokeRequest { string cluster_id = 1; string node_id = 2; string reason = 3; }
 message FleetRevokeResponse { bool revoked = 1; }
+message FleetDeployRequest { string cluster_id = 1; string name = 2; string image = 3; repeated string command = 4; repeated string node_ids = 5; }
+message FleetRollbackRequest { string cluster_id = 1; string deployment_id = 2; }
+message FleetDeployResponse { string deployment_json = 1; }

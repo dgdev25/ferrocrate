@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::proto::{
-    admin_service_client::AdminServiceClient, FleetCommandRequest, FleetRevokeRequest,
-    FleetSnapshotRequest,
+    admin_service_client::AdminServiceClient, FleetCommandRequest, FleetDeployRequest,
+    FleetRevokeRequest, FleetRollbackRequest, FleetSnapshotRequest,
 };
 
 use super::FleetUiBackend;
@@ -147,8 +147,57 @@ impl FleetUiBackend for TonicFleetBackend {
                         .into_inner();
                     Ok(json!({"revoked":response.revoked}))
                 }
-                "fleet_deploy" | "fleet_rollback" => {
-                    Err("fleet deploy persistence is not configured".into())
+                "fleet_deploy" => {
+                    let command_values = arguments
+                        .get("command")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| "fleet deploy requires command".to_string())?;
+                    let command = command_values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| "fleet deploy command must contain strings".into())
+                        })
+                        .collect::<Result<Vec<String>, String>>()?;
+                    let node_ids = arguments
+                        .get("node_ids")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| "fleet deploy requires node_ids".to_string())?
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| "fleet deploy node_ids must contain strings".into())
+                        })
+                        .collect::<Result<Vec<String>, String>>()?;
+                    let response = client
+                        .fleet_deploy(FleetDeployRequest {
+                            cluster_id,
+                            name: string_field(&arguments, "name")?,
+                            image: string_field(&arguments, "image")?,
+                            command,
+                            node_ids,
+                        })
+                        .await
+                        .map_err(|error| format!("admin fleet deploy failed: {error}"))?
+                        .into_inner();
+                    serde_json::from_str(&response.deployment_json)
+                        .map_err(|error| format!("admin deployment response was invalid: {error}"))
+                }
+                "fleet_rollback" => {
+                    let response = client
+                        .fleet_rollback(FleetRollbackRequest {
+                            cluster_id,
+                            deployment_id: string_field(&arguments, "deployment_id")?,
+                        })
+                        .await
+                        .map_err(|error| format!("admin fleet rollback failed: {error}"))?
+                        .into_inner();
+                    serde_json::from_str(&response.deployment_json)
+                        .map_err(|error| format!("admin rollback response was invalid: {error}"))
                 }
                 _ => Err("unknown fleet operation".into()),
             }

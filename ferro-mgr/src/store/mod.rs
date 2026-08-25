@@ -1,7 +1,9 @@
 mod migrations;
 mod models;
 
-pub use models::{Enrollment, HostObservation, HostRecord, Overlay, ScopedToken, Token};
+pub use models::{
+    Enrollment, FleetDeployment, HostObservation, HostRecord, Overlay, ScopedToken, Token,
+};
 
 use std::{net::Ipv4Addr, path::Path, sync::Mutex};
 
@@ -390,6 +392,159 @@ impl ManagerStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fleet_deployment(
+        &self,
+        name: &str,
+        image: &str,
+        command_json: &str,
+        node_ids_json: &str,
+        previous_deployment_id: Option<&str>,
+        created_at: i64,
+    ) -> Result<FleetDeployment, StoreError> {
+        let command_valid = serde_json::from_str::<serde_json::Value>(command_json)
+            .is_ok_and(|value| value.is_array());
+        let nodes_valid = serde_json::from_str::<Vec<String>>(node_ids_json).is_ok_and(|nodes| {
+            !nodes.is_empty()
+                && nodes.len() <= 256
+                && nodes
+                    .iter()
+                    .all(|node| !node.trim().is_empty() && node.len() <= 256)
+        });
+        if name.trim().is_empty()
+            || image.trim().is_empty()
+            || name.len() > 128
+            || image.len() > 512
+            || !command_valid
+            || !nodes_valid
+        {
+            return Err(StoreError::InvalidNetwork(
+                "fleet deployment is invalid".into(),
+            ));
+        }
+        self.transact(|tx| {
+            let revision: u64 = tx.query_row(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM fleet_deployments",
+                [],
+                |row| row.get(0),
+            )?;
+            let deployment_id = format!("deploy-{revision:08}");
+            tx.execute(
+                "INSERT INTO fleet_deployments
+                 (deployment_id, revision, name, image, command_json, node_ids_json,
+                  previous_deployment_id, status, progress_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', '{}', ?8)",
+                params![
+                    deployment_id,
+                    revision,
+                    name,
+                    image,
+                    command_json,
+                    node_ids_json,
+                    previous_deployment_id,
+                    created_at,
+                ],
+            )?;
+            Ok(FleetDeployment {
+                deployment_id,
+                revision,
+                name: name.into(),
+                image: image.into(),
+                command_json: command_json.into(),
+                node_ids_json: node_ids_json.into(),
+                previous_deployment_id: previous_deployment_id.map(str::to_string),
+                status: "running".into(),
+                progress_json: "{}".into(),
+                created_at,
+                rolled_back_at: None,
+            })
+        })
+    }
+
+    pub fn update_fleet_deployment(
+        &self,
+        deployment_id: &str,
+        status: &str,
+        progress_json: &str,
+        rolled_back_at: Option<i64>,
+    ) -> Result<(), StoreError> {
+        if !matches!(status, "running" | "succeeded" | "failed" | "rolled_back")
+            || progress_json.len() > 256 * 1024
+            || !serde_json::from_str::<serde_json::Value>(progress_json)
+                .is_ok_and(|value| value.is_object())
+        {
+            return Err(StoreError::InvalidNetwork(
+                "fleet deployment update is invalid".into(),
+            ));
+        }
+        self.transact(|tx| {
+            let changed = tx.execute(
+                "UPDATE fleet_deployments SET status = ?2, progress_json = ?3,
+                 rolled_back_at = ?4 WHERE deployment_id = ?1",
+                params![deployment_id, status, progress_json, rolled_back_at],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidNetwork(
+                    "fleet deployment does not exist".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    pub fn fleet_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<Option<FleetDeployment>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let result = connection.query_row(
+            "SELECT deployment_id, revision, name, image, command_json, node_ids_json,
+                    previous_deployment_id, status, progress_json, created_at, rolled_back_at
+             FROM fleet_deployments WHERE deployment_id = ?1",
+            [deployment_id],
+            deployment_from_row,
+        );
+        match result {
+            Ok(deployment) => Ok(Some(deployment)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(StoreError::Sql(error)),
+        }
+    }
+
+    pub fn latest_succeeded_fleet_deployment(
+        &self,
+        name: &str,
+    ) -> Result<Option<FleetDeployment>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let result = connection.query_row(
+            "SELECT deployment_id, revision, name, image, command_json, node_ids_json,
+                    previous_deployment_id, status, progress_json, created_at, rolled_back_at
+             FROM fleet_deployments WHERE name = ?1 AND status = 'succeeded'
+             ORDER BY revision DESC LIMIT 1",
+            [name],
+            deployment_from_row,
+        );
+        match result {
+            Ok(deployment) => Ok(Some(deployment)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(StoreError::Sql(error)),
+        }
+    }
+
+    pub fn list_fleet_deployments(&self) -> Result<Vec<FleetDeployment>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT deployment_id, revision, name, image, command_json, node_ids_json,
+                    previous_deployment_id, status, progress_json, created_at, rolled_back_at
+             FROM fleet_deployments ORDER BY revision DESC",
+        )?;
+        let deployments = statement
+            .query_map([], deployment_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sql)?;
+        Ok(deployments)
+    }
+
     pub fn node_count(&self) -> Result<u32, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Ok(connection.query_row(
@@ -470,4 +625,20 @@ fn parse_v4(cidr: &str) -> Result<Ipv4Net, StoreError> {
 
 fn networks_overlap(left: Ipv4Net, right: Ipv4Net) -> bool {
     left.contains(&right.network()) || right.contains(&left.network())
+}
+
+fn deployment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FleetDeployment> {
+    Ok(FleetDeployment {
+        deployment_id: row.get(0)?,
+        revision: row.get(1)?,
+        name: row.get(2)?,
+        image: row.get(3)?,
+        command_json: row.get(4)?,
+        node_ids_json: row.get(5)?,
+        previous_deployment_id: row.get(6)?,
+        status: row.get(7)?,
+        progress_json: row.get(8)?,
+        created_at: row.get(9)?,
+        rolled_back_at: row.get(10)?,
+    })
 }

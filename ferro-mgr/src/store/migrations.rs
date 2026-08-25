@@ -63,6 +63,19 @@ pub(super) fn apply(connection: &Connection) -> Result<()> {
              doctor_summary TEXT NOT NULL,
              containers_json TEXT NOT NULL,
              acknowledged_revision INTEGER NOT NULL
+         ) STRICT;
+         CREATE TABLE IF NOT EXISTS fleet_deployments (
+             deployment_id TEXT PRIMARY KEY NOT NULL,
+             revision INTEGER UNIQUE NOT NULL,
+             name TEXT NOT NULL,
+             image TEXT NOT NULL,
+             command_json TEXT NOT NULL,
+             node_ids_json TEXT NOT NULL,
+             previous_deployment_id TEXT REFERENCES fleet_deployments(deployment_id),
+             status TEXT NOT NULL,
+             progress_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             rolled_back_at INTEGER
          ) STRICT;",
     )
 }

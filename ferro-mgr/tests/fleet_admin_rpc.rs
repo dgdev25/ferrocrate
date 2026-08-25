@@ -7,7 +7,7 @@ use ferro_mgr::{
     pki::{CertificateIdentity, CertificateRole},
     proto::{
         admin_service_server::AdminService, FleetCommandRequest, FleetRevokeRequest,
-        FleetSnapshotRequest,
+        FleetDeployRequest, FleetRollbackRequest, FleetSnapshotRequest,
     },
     rpc::{AdminServiceImpl, ControlServiceImpl},
     store::{Enrollment, HostObservation, ManagerStore},
@@ -139,4 +139,92 @@ async fn admin_revocation_is_idempotent_and_visible_in_snapshot() {
         .unwrap()
         .into_inner()
         .revoked);
+}
+
+#[tokio::test]
+async fn desired_deploy_rolls_forward_and_back_over_the_control_stream() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(ManagerStore::open(directory.path().join("manager.sqlite")).unwrap());
+    store
+        .register_node(Enrollment {
+            node_id: "node-a".into(),
+            public_key: vec![1; 32],
+            endpoint: "127.0.0.1:50053".into(),
+        })
+        .unwrap();
+    let control = Arc::new(ControlServiceImpl::new(
+        "cluster-a",
+        1,
+        vec![9; 32],
+        store.clone(),
+    ));
+    let admin = AdminServiceImpl::new_authorized(
+        store.clone(),
+        1,
+        "cluster-a",
+        control.clone(),
+    );
+    let hub = control.fleet_hub();
+    let mut connection = hub.connect("node-a").unwrap();
+    let responder_hub = hub.clone();
+    let responder = tokio::spawn(async move {
+        for _ in 0..5 {
+            let command = connection.receiver.recv().await.unwrap();
+            responder_hub.complete(
+                "node-a",
+                FleetCommandResult {
+                    request_id: command.request_id,
+                    exit_code: 0,
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                },
+            );
+        }
+    });
+    let first: Value = serde_json::from_str(
+        &admin
+            .fleet_deploy(authenticated(FleetDeployRequest {
+                cluster_id: "cluster-a".into(),
+                name: "fleet-web".into(),
+                image: "alpine:3.21".into(),
+                command: vec!["sh".into(), "-c".into(), "echo v1".into()],
+                node_ids: vec!["node-a".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .deployment_json,
+    )
+    .unwrap();
+    assert_eq!(first["status"], "succeeded");
+    let second: Value = serde_json::from_str(
+        &admin
+            .fleet_deploy(authenticated(FleetDeployRequest {
+                cluster_id: "cluster-a".into(),
+                name: "fleet-web".into(),
+                image: "alpine:3.22".into(),
+                command: vec!["sh".into(), "-c".into(), "echo v2".into()],
+                node_ids: vec!["node-a".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .deployment_json,
+    )
+    .unwrap();
+    assert_eq!(second["previous_deployment_id"], first["deployment_id"]);
+    let rolled_back: Value = serde_json::from_str(
+        &admin
+            .fleet_rollback(authenticated(FleetRollbackRequest {
+                cluster_id: "cluster-a".into(),
+                deployment_id: second["deployment_id"].as_str().unwrap().into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .deployment_json,
+    )
+    .unwrap();
+    assert_eq!(rolled_back["status"], "rolled_back");
+    responder.await.unwrap();
 }

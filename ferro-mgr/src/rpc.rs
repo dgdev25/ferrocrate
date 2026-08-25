@@ -18,10 +18,11 @@ use crate::{
         admin_service_server::AdminService, control_service_server::ControlService,
         enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse,
         AgentMessage, DesiredState, EnrollRequest, EnrollResponse, FleetCommandRequest,
-        FleetCommandResponse, FleetRevokeRequest, FleetRevokeResponse, FleetSnapshotRequest,
-        FleetSnapshotResponse, ManagerMessage, PublishDesiredRequest, PublishDesiredResponse,
+        FleetCommandResponse, FleetDeployRequest, FleetDeployResponse, FleetRevokeRequest,
+        FleetRevokeResponse, FleetRollbackRequest, FleetSnapshotRequest, FleetSnapshotResponse,
+        ManagerMessage, PublishDesiredRequest, PublishDesiredResponse,
     },
-    store::{Enrollment, HostObservation, ManagerStore},
+    store::{Enrollment, FleetDeployment, HostObservation, ManagerStore},
 };
 
 pub struct EnrollmentServiceImpl {
@@ -432,6 +433,7 @@ pub struct AdminServiceImpl {
     cluster_epoch: u64,
     authorizer: Option<AdminAuthorizer>,
     control: Option<Arc<ControlServiceImpl>>,
+    deployment_lock: Arc<tokio::sync::Mutex<()>>,
 }
 impl AdminServiceImpl {
     pub fn new(store: Arc<ManagerStore>, cluster_epoch: u64) -> Self {
@@ -440,6 +442,7 @@ impl AdminServiceImpl {
             cluster_epoch,
             authorizer: None,
             control: None,
+            deployment_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     pub fn new_authorized(
@@ -453,6 +456,7 @@ impl AdminServiceImpl {
             cluster_epoch,
             authorizer: Some(AdminAuthorizer::new(cluster_id)),
             control: Some(control),
+            deployment_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -573,10 +577,17 @@ impl AdminService for AdminServiceImpl {
                 })
             })
             .collect::<Vec<_>>();
+        let deploys = self
+            .store
+            .list_fleet_deployments()
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?
+            .iter()
+            .map(deployment_value)
+            .collect::<Vec<_>>();
         let snapshot_json = serde_json::to_string(&serde_json::json!({
             "cluster_epoch": self.cluster_epoch,
             "hosts": hosts,
-            "deploys": [],
+            "deploys": deploys,
         }))
         .map_err(|_| Status::internal("failed to encode fleet snapshot"))?;
         Ok(Response::new(FleetSnapshotResponse { snapshot_json }))
@@ -639,6 +650,230 @@ impl AdminService for AdminServiceImpl {
         }
         Ok(Response::new(FleetRevokeResponse { revoked }))
     }
+
+    async fn fleet_deploy(
+        &self,
+        request: Request<FleetDeployRequest>,
+    ) -> Result<Response<FleetDeployResponse>, Status> {
+        self.authorize(&request, "FleetDeploy")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        let _deployment_guard = self.deployment_lock.lock().await;
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("fleet control hub is required"))?;
+        let hub = control.fleet_hub();
+        for node_id in &request.node_ids {
+            if !self
+                .store
+                .node_is_active(node_id)
+                .map_err(|_| Status::internal("manager state unavailable"))?
+                || !hub.is_connected(node_id)
+            {
+                return Err(Status::failed_precondition(format!(
+                    "fleet host {node_id} is not active and connected"
+                )));
+            }
+        }
+        let previous = self
+            .store
+            .latest_succeeded_fleet_deployment(&request.name)
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?;
+        let deployment = self
+            .store
+            .begin_fleet_deployment(
+                &request.name,
+                &request.image,
+                &serde_json::to_string(&request.command)
+                    .map_err(|_| Status::invalid_argument("deployment command is invalid"))?,
+                &serde_json::to_string(&request.node_ids)
+                    .map_err(|_| Status::invalid_argument("deployment hosts are invalid"))?,
+                previous.as_ref().map(|value| value.deployment_id.as_str()),
+                chrono_like_now(),
+            )
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let mut progress = serde_json::Map::new();
+        for node_id in &request.node_ids {
+            progress.insert(node_id.clone(), serde_json::json!("updating"));
+            persist_deployment_progress(&self.store, &deployment, "running", &progress, None)?;
+            let update = async {
+                if previous.is_some() {
+                    execute_checked(
+                        &hub,
+                        node_id,
+                        "remove_container",
+                        serde_json::json!({"container":request.name}),
+                    )
+                    .await?;
+                }
+                execute_checked(
+                    &hub,
+                    node_id,
+                    "run_container",
+                    serde_json::json!({
+                        "name":request.name,
+                        "image":request.image,
+                        "command":request.command,
+                    }),
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = update {
+                progress.insert(node_id.clone(), serde_json::json!({"failed":error}));
+                persist_deployment_progress(&self.store, &deployment, "failed", &progress, None)?;
+                return Err(Status::failed_precondition("fleet rollout failed"));
+            }
+            progress.insert(node_id.clone(), serde_json::json!("ready"));
+        }
+        persist_deployment_progress(&self.store, &deployment, "succeeded", &progress, None)?;
+        let completed = self
+            .store
+            .fleet_deployment(&deployment.deployment_id)
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?
+            .ok_or_else(|| Status::internal("deployment disappeared"))?;
+        Ok(Response::new(FleetDeployResponse {
+            deployment_json: deployment_value(&completed).to_string(),
+        }))
+    }
+
+    async fn fleet_rollback(
+        &self,
+        request: Request<FleetRollbackRequest>,
+    ) -> Result<Response<FleetDeployResponse>, Status> {
+        self.authorize(&request, "FleetRollback")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        let _deployment_guard = self.deployment_lock.lock().await;
+        let deployment = self
+            .store
+            .fleet_deployment(&request.deployment_id)
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?
+            .ok_or_else(|| Status::not_found("fleet deployment does not exist"))?;
+        if deployment.status != "succeeded" {
+            return Err(Status::failed_precondition(
+                "only a succeeded deployment can be rolled back",
+            ));
+        }
+        let previous_id = deployment
+            .previous_deployment_id
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("deployment has no previous generation"))?;
+        let previous = self
+            .store
+            .fleet_deployment(previous_id)
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?
+            .ok_or_else(|| Status::failed_precondition("previous deployment is unavailable"))?;
+        let nodes: Vec<String> = serde_json::from_str(&deployment.node_ids_json)
+            .map_err(|_| Status::internal("deployment host list is invalid"))?;
+        let previous_command: Vec<String> = serde_json::from_str(&previous.command_json)
+            .map_err(|_| Status::internal("previous deployment command is invalid"))?;
+        let hub = self
+            .control
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("fleet control hub is required"))?
+            .fleet_hub();
+        let mut progress = serde_json::Map::new();
+        for node_id in nodes {
+            execute_checked(
+                &hub,
+                &node_id,
+                "remove_container",
+                serde_json::json!({"container":deployment.name}),
+            )
+            .await
+            .map_err(Status::failed_precondition)?;
+            execute_checked(
+                &hub,
+                &node_id,
+                "run_container",
+                serde_json::json!({
+                    "name":previous.name,
+                    "image":previous.image,
+                    "command":previous_command,
+                }),
+            )
+            .await
+            .map_err(Status::failed_precondition)?;
+            progress.insert(node_id, serde_json::json!("rolled_back"));
+        }
+        persist_deployment_progress(
+            &self.store,
+            &deployment,
+            "rolled_back",
+            &progress,
+            Some(chrono_like_now()),
+        )?;
+        let completed = self
+            .store
+            .fleet_deployment(&deployment.deployment_id)
+            .map_err(|_| Status::internal("manager deployment state unavailable"))?
+            .ok_or_else(|| Status::internal("deployment disappeared"))?;
+        Ok(Response::new(FleetDeployResponse {
+            deployment_json: deployment_value(&completed).to_string(),
+        }))
+    }
+}
+
+async fn execute_checked(
+    hub: &ControlHub,
+    node_id: &str,
+    action: &str,
+    arguments: serde_json::Value,
+) -> Result<(), String> {
+    let result = hub
+        .execute(
+            node_id,
+            action,
+            arguments,
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
+    if result.exit_code != 0 {
+        return Err(if result.stderr.is_empty() {
+            format!("host command exited {}", result.exit_code)
+        } else {
+            result.stderr
+        });
+    }
+    Ok(())
+}
+
+fn persist_deployment_progress(
+    store: &ManagerStore,
+    deployment: &FleetDeployment,
+    status: &str,
+    progress: &serde_json::Map<String, serde_json::Value>,
+    rolled_back_at: Option<i64>,
+) -> Result<(), Status> {
+    store
+        .update_fleet_deployment(
+            &deployment.deployment_id,
+            status,
+            &serde_json::Value::Object(progress.clone()).to_string(),
+            rolled_back_at,
+        )
+        .map_err(|_| Status::internal("failed to persist deployment progress"))
+}
+
+fn deployment_value(deployment: &FleetDeployment) -> serde_json::Value {
+    serde_json::json!({
+        "deployment_id": deployment.deployment_id,
+        "revision": deployment.revision,
+        "name": deployment.name,
+        "image": deployment.image,
+        "command": serde_json::from_str::<serde_json::Value>(&deployment.command_json)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        "node_ids": serde_json::from_str::<serde_json::Value>(&deployment.node_ids_json)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        "previous_deployment_id": deployment.previous_deployment_id,
+        "status": deployment.status,
+        "progress": serde_json::from_str::<serde_json::Value>(&deployment.progress_json)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        "created_at": deployment.created_at,
+        "rolled_back_at": deployment.rolled_back_at,
+    })
 }
 
 fn monotonic_like_now() -> u64 {

@@ -50,3 +50,18 @@ pub struct HostRecord {
     pub containers_json: String,
     pub acknowledged_revision: Option<u64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetDeployment {
+    pub deployment_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub image: String,
+    pub command_json: String,
+    pub node_ids_json: String,
+    pub previous_deployment_id: Option<String>,
+    pub status: String,
+    pub progress_json: String,
+    pub created_at: i64,
+    pub rolled_back_at: Option<i64>,
+}

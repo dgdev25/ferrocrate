@@ -6,6 +6,9 @@ service ControlService { rpc ControlStream(stream AgentMessage) returns (stream 
 service AdminService {
   rpc Inspect(AdminRequest) returns (AdminResponse);
   rpc PublishDesired(PublishDesiredRequest) returns (PublishDesiredResponse);
+  rpc FleetSnapshot(FleetSnapshotRequest) returns (FleetSnapshotResponse);
+  rpc FleetCommand(FleetCommandRequest) returns (FleetCommandResponse);
+  rpc RevokeHost(FleetRevokeRequest) returns (FleetRevokeResponse);
 }
 
 message EnrollRequest { string node_id = 1; bytes public_key = 2; string enrollment_token = 3; bytes csr = 4; string endpoint = 5; }
@@ -19,3 +22,9 @@ message AdminRequest { string cluster_id = 1; }
 message AdminResponse { uint32 node_count = 1; uint64 cluster_epoch = 2; }
 message PublishDesiredRequest { string cluster_id = 1; string node_id = 2; repeated OverlayState overlays = 3; }
 message PublishDesiredResponse { uint64 revision = 1; }
+message FleetSnapshotRequest { string cluster_id = 1; }
+message FleetSnapshotResponse { string snapshot_json = 1; }
+message FleetCommandRequest { string cluster_id = 1; string node_id = 2; string action = 3; string arguments_json = 4; }
+message FleetCommandResponse { int32 exit_code = 1; string stdout = 2; string stderr = 3; }
+message FleetRevokeRequest { string cluster_id = 1; string node_id = 2; string reason = 3; }
+message FleetRevokeResponse { bool revoked = 1; }

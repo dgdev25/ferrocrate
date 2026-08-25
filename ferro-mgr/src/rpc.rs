@@ -12,13 +12,14 @@ use crate::{
     controller_authorization::{ControllerAuthorizationError, ControllerGrantIssuer},
     desired_state::DesiredStateBuilder,
     enrollment::EnrollmentService,
-    fleet::{ControlHub, FleetCommandResult},
+    fleet::{build_agent_cli_args, ControlHub, FleetCommandResult},
     pki::CertificateAuthority,
     proto::{
         admin_service_server::AdminService, control_service_server::ControlService,
         enrollment_service_server::EnrollmentService as EnrollmentRpc, AdminRequest, AdminResponse,
-        AgentMessage, DesiredState, EnrollRequest, EnrollResponse, ManagerMessage,
-        PublishDesiredRequest, PublishDesiredResponse,
+        AgentMessage, DesiredState, EnrollRequest, EnrollResponse, FleetCommandRequest,
+        FleetCommandResponse, FleetRevokeRequest, FleetRevokeResponse, FleetSnapshotRequest,
+        FleetSnapshotResponse, ManagerMessage, PublishDesiredRequest, PublishDesiredResponse,
     },
     store::{Enrollment, HostObservation, ManagerStore},
 };
@@ -469,6 +470,20 @@ impl AdminServiceImpl {
             .map(|_| ())
             .map_err(|_| Status::permission_denied("administrator principal is not authorized"))
     }
+
+    fn validate_cluster(&self, cluster_id: &str) -> Result<(), Status> {
+        if cluster_id.is_empty() {
+            return Err(Status::invalid_argument("cluster_id is required"));
+        }
+        if self
+            .authorizer
+            .as_ref()
+            .is_none_or(|authorizer| authorizer.cluster_id() != cluster_id)
+        {
+            return Err(Status::permission_denied("request is for another cluster"));
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -522,6 +537,107 @@ impl AdminService for AdminServiceImpl {
                 Status::permission_denied(format!("desired update rejected: {error}"))
             })?;
         Ok(Response::new(PublishDesiredResponse { revision }))
+    }
+
+    async fn fleet_snapshot(
+        &self,
+        request: Request<FleetSnapshotRequest>,
+    ) -> Result<Response<FleetSnapshotResponse>, Status> {
+        self.authorize(&request, "FleetSnapshot")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        let hub = self
+            .control
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("fleet control hub is required"))?
+            .fleet_hub();
+        let hosts = self
+            .store
+            .list_hosts()
+            .map_err(|_| Status::internal("manager state unavailable"))?
+            .into_iter()
+            .map(|host| {
+                serde_json::json!({
+                    "node_id": host.node_id,
+                    "endpoint": host.endpoint,
+                    "enrollment_state": host.enrollment_state,
+                    "revocation_reason": host.revocation_reason,
+                    "last_seen_unix": host.last_seen_unix,
+                    "version": host.version,
+                    "health": host.health,
+                    "doctor_summary": host.doctor_summary,
+                    "containers": serde_json::from_str::<serde_json::Value>(&host.containers_json)
+                        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+                    "acknowledged_revision": host.acknowledged_revision,
+                    "connected": hub.is_connected(&host.node_id),
+                })
+            })
+            .collect::<Vec<_>>();
+        let snapshot_json = serde_json::to_string(&serde_json::json!({
+            "cluster_epoch": self.cluster_epoch,
+            "hosts": hosts,
+            "deploys": [],
+        }))
+        .map_err(|_| Status::internal("failed to encode fleet snapshot"))?;
+        Ok(Response::new(FleetSnapshotResponse { snapshot_json }))
+    }
+
+    async fn fleet_command(
+        &self,
+        request: Request<FleetCommandRequest>,
+    ) -> Result<Response<FleetCommandResponse>, Status> {
+        self.authorize(&request, "FleetCommand")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        if request.node_id.is_empty() || request.arguments_json.len() > 64 * 1024 {
+            return Err(Status::invalid_argument(
+                "node_id and bounded arguments_json are required",
+            ));
+        }
+        let arguments: serde_json::Value = serde_json::from_str(&request.arguments_json)
+            .map_err(|_| Status::invalid_argument("arguments_json is invalid"))?;
+        build_agent_cli_args(&request.action, &arguments)
+            .map_err(Status::invalid_argument)?;
+        let result = self
+            .control
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("fleet control hub is required"))?
+            .fleet_hub()
+            .execute(
+                &request.node_id,
+                &request.action,
+                arguments,
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(Status::unavailable)?;
+        Ok(Response::new(FleetCommandResponse {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+        }))
+    }
+
+    async fn revoke_host(
+        &self,
+        request: Request<FleetRevokeRequest>,
+    ) -> Result<Response<FleetRevokeResponse>, Status> {
+        self.authorize(&request, "RevokeHost")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        if request.node_id.is_empty() || request.reason.trim().is_empty() {
+            return Err(Status::invalid_argument("node_id and reason are required"));
+        }
+        let revoked = self
+            .store
+            .node_is_active(&request.node_id)
+            .map_err(|_| Status::internal("manager state unavailable"))?;
+        if revoked {
+            self.store
+                .revoke_node(&request.node_id, &request.reason)
+                .map_err(|_| Status::internal("manager state unavailable"))?;
+        }
+        Ok(Response::new(FleetRevokeResponse { revoked }))
     }
 }
 

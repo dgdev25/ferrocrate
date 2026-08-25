@@ -4,6 +4,13 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferro-desktop"
+path = "src/main.rs"
+
 [dependencies]
 clap = { workspace = true }
 ferro-core = { path = "../ferro-core" }

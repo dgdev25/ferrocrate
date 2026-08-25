@@ -4991,7 +4991,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
                 for image in docker_image_search_results(&images, &term, 25) {
-                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["StarCount"], image["Official"], image["Automated"]);
+                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["star_count"], image["is_official"], image["is_automated"]);
                 }
                 Ok(())
             }
@@ -9253,9 +9253,9 @@ fn format_remote_search_text(body: &[u8]) -> Result<String, String> {
             "{}\t{}\t{}\t{}\t{}\n",
             entry["Name"].as_str().unwrap_or_default(),
             entry["Description"].as_str().unwrap_or_default(),
-            entry["StarCount"],
-            entry["Official"],
-            entry["Automated"],
+            entry["star_count"],
+            entry["is_official"],
+            entry["is_automated"],
         ));
     }
     Ok(output)
@@ -21006,9 +21006,9 @@ fn docker_image_search_results(
                 "Index": "local",
                 "Name": record.reference,
                 "Description": "Locally available Ferrocrate image",
-                "Official": false,
-                "Automated": false,
-                "StarCount": 0,
+                "is_official": false,
+                "is_automated": false,
+                "star_count": 0,
             })
         })
         .collect::<Vec<_>>();
@@ -21070,9 +21070,9 @@ fn docker_hub_search_results_from_value(
                 "Index": "docker.io",
                 "Name": name,
                 "Description": entry.get("short_description").and_then(serde_json::Value::as_str).unwrap_or(""),
-                "Official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                "Automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                "StarCount": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                "is_official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "is_automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "star_count": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
             }))
         })
         .take(limit)
@@ -23809,7 +23809,7 @@ mod tests {
             "A /tmp/new\n"
         );
         assert!(super::format_remote_search_text(
-            br#"[{"Name":"demo","Description":"fixture","StarCount":2,"Official":false,"Automated":true}]"#
+            br#"[{"Name":"demo","Description":"fixture","star_count":2,"is_official":false,"is_automated":true}]"#
         )
         .expect("search text")
         .starts_with("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED\n"));
@@ -29661,8 +29661,8 @@ volumes:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["Name"], "library/alpine");
         assert_eq!(results[0]["Index"], "docker.io");
-        assert_eq!(results[0]["StarCount"], 99);
-        assert_eq!(results[0]["Official"], true);
+        assert_eq!(results[0]["star_count"], 99);
+        assert_eq!(results[0]["is_official"], true);
     }
 
     #[test]

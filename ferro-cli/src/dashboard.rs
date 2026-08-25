@@ -803,7 +803,13 @@ impl CommandDispatcher for ProcessDispatcher {
                 );
                 if let Some(object) = raw.as_object_mut() {
                     object.insert("surface".to_string(), json!("dashboard"));
-                    object.entry("checks".to_string()).or_insert_with(|| json!([])).as_array_mut().map(|checks| checks.push(json!({ "id": "dashboard_surface", "ok": true, "message": "dashboard browser surface is active", "hint": "Bearer-authenticated loopback session", "remediated": false, "action": null })));
+                    if let Some(checks) = object
+                        .entry("checks".to_string())
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                    {
+                        checks.push(json!({ "id": "dashboard_surface", "ok": true, "message": "dashboard browser surface is active", "hint": "Bearer-authenticated loopback session", "remediated": false, "action": null }));
+                    }
                 }
                 Ok(json!({ "ok": ok && raw["healthy"].as_bool().unwrap_or(false), "raw": raw }))
             }

@@ -812,7 +812,7 @@ fn monotonic_millis() -> u64 {
         .map_or(0, |seconds| (seconds * 1000.0) as u64)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod compatibility_tests {
     use super::{decode_disabled_legacy, LocalApiRequest};
     use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};

@@ -851,6 +851,8 @@ dependencies = [
  "ferro-mind",
  "ferro-net",
  "flate2",
+ "h2",
+ "http",
  "nix",
  "owo-colors",
  "proptest",
@@ -861,6 +863,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

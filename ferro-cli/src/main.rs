@@ -17213,6 +17213,7 @@ fn handle_docker_compat_connection(
     let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_session = None;
+    let mut buildkit_session_hijack = false;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
@@ -19011,10 +19012,10 @@ fn handle_docker_compat_connection(
                 let body = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
                 http_response(200, &body, "application/json")
             }
-            ("POST", "/session") => docker_error_response(
-                501,
-                "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder",
-            ),
+            ("POST", "/session") => {
+                buildkit_session_hijack = true;
+                docker_buildkit_session_hijack_headers()
+            }
             ("POST", "/build") => {
                 if query.get("version").is_some_and(|value| value == "2") {
                     return Ok(docker_error_response(
@@ -19629,6 +19630,9 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if buildkit_session_hijack {
+        return run_buildkit_session_transport(stream, Duration::from_secs(30 * 60));
+    }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
             Some(
@@ -21927,6 +21931,40 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_buildkit_session_hijack_headers() -> Vec<u8> {
+    b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
+}
+
+/// Switch an authenticated, hijacked Docker session socket into the daemon's
+/// HTTP/2 client role. BuildKit deliberately reverses the usual RPC direction:
+/// the Docker CLI hosts the gRPC services and FerroCrate calls them.
+#[cfg(target_os = "linux")]
+fn run_buildkit_session_transport(stream: UnixStream, lifetime: Duration) -> Result<(), String> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("buildkit session: set nonblocking failed: {error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("buildkit session: runtime failed: {error}"))?;
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|error| format!("buildkit session: socket handoff failed: {error}"))?;
+        let handshake = h2::client::handshake(stream);
+        let (_requests, connection) = tokio::time::timeout(lifetime, handshake)
+            .await
+            .map_err(|_| "buildkit session: h2 handshake timed out".to_string())?
+            .map_err(|error| format!("buildkit session: h2 handshake failed: {error}"))?;
+        match tokio::time::timeout(lifetime, connection).await {
+            Ok(Ok(())) | Err(_) => Ok(()),
+            Ok(Err(error)) if error.is_io() || error.is_go_away() || error.is_reset() => Ok(()),
+            Ok(Err(error)) => Err(format!("buildkit session: h2 connection failed: {error}")),
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -29232,6 +29270,50 @@ volumes:
         assert!(headers.contains("Connection: Upgrade\r\n"));
         assert!(headers.contains("Upgrade: tcp\r\n"));
         assert!(headers.contains("application/vnd.docker.raw-stream"));
+    }
+
+    #[test]
+    fn buildkit_session_hijack_switches_to_h2c() {
+        let headers = String::from_utf8(super::docker_buildkit_session_hijack_headers())
+            .expect("headers are utf8");
+        assert!(headers.starts_with("HTTP/1.1 101 UPGRADED\r\n"));
+        assert!(headers.contains("Connection: Upgrade\r\n"));
+        assert!(headers.contains("Upgrade: h2c\r\n"));
+        assert!(!headers.contains("Content-Length"));
+    }
+
+    #[test]
+    fn buildkit_session_transport_emits_h2_prior_knowledge_and_is_bounded() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (daemon, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let client_thread = std::thread::spawn(move || {
+            client.set_nonblocking(true).expect("nonblocking client");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("client runtime");
+            runtime.block_on(async move {
+                let client = tokio::net::UnixStream::from_std(client).expect("tokio client");
+                let _connection = h2::server::handshake(client)
+                    .await
+                    .expect("daemon must start an h2 prior-knowledge client");
+                ready_tx.send(()).expect("report handshake");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+        });
+
+        let started = std::time::Instant::now();
+        super::run_buildkit_session_transport(daemon, Duration::from_millis(150))
+            .expect("bounded idle session");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("h2 handshake completed");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        client_thread.join().expect("client thread");
     }
 
     #[test]

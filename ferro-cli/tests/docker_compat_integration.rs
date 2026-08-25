@@ -3034,15 +3034,45 @@ fn docker_compat_auth_validates_credentials_with_registry() {
 }
 
 #[test]
-fn docker_compat_buildkit_routes_name_the_supported_classic_mode() {
+fn docker_compat_buildkit_version_two_names_the_supported_classic_mode_until_solve_lands() {
     const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
     let harness = DaemonHarness::spawn();
-    for (method, path) in [("POST", "/build?version=2"), ("POST", "/session")] {
-        let (status, body) = harness.request(method, path);
-        assert_eq!(status, 501, "{path} response={body}");
-        let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
-        assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+    let (status, body) = harness.request("POST", "/build?version=2");
+    assert_eq!(status, 501, "/build response={body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("error JSON");
+    assert_eq!(payload, serde_json::json!({"message": MESSAGE}));
+}
+
+#[test]
+fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
+    stream
+        .write_all(
+            b"POST /session HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("write session request");
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).expect("read hijack response");
+        response.push(byte[0]);
     }
+    let response = String::from_utf8(response).expect("hijack response is utf8");
+    assert!(response.starts_with("HTTP/1.1 101 UPGRADED\r\n"), "{response}");
+    assert!(response.contains("Upgrade: h2c\r\n"), "{response}");
+
+    stream.set_nonblocking(true).expect("nonblocking session");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("h2 test runtime");
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream).expect("tokio session stream");
+        let _connection = h2::server::handshake(stream)
+            .await
+            .expect("FerroCrate must emit the h2 prior-knowledge client preface");
+    });
 }
 
 #[test]

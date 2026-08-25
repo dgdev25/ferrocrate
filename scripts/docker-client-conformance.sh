@@ -188,9 +188,10 @@ state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
 failure_context_dir="$work_root/failure-context"
+cold_base_context_dir="$work_root/cold-base-context"
 outputs_dir="$work_root/outputs"
 cgroup_root="$work_root/cgroup"
-mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$failure_context_dir" "$outputs_dir" "$cgroup_root" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$failure_context_dir" "$cold_base_context_dir" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
 printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
   harness_error "cannot initialize isolated cgroup controller fixture"
@@ -228,6 +229,7 @@ run_id="scoreboard"
 run_prefix="ferrocrate-conformance-$run_id"
 owner_label="io.ferrocrate.conformance-run=$run_id"
 image="$run_prefix:latest"
+cold_base_image="$run_prefix-cold-base:latest"
 tagged_image="$run_prefix:tagged"
 container="$run_prefix-main"
 attach_container="$run_prefix-attach"
@@ -461,6 +463,10 @@ else
     "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
 fi
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
+printf 'cold base pull marker\n' >"$cold_base_context_dir/marker.txt" ||
+  harness_error "cannot write cold base build fixture"
+printf 'FROM alpine:3.20\nCOPY marker.txt /cold-base-marker.txt\n' >"$cold_base_context_dir/Dockerfile" ||
+  harness_error "cannot write cold base Dockerfile fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 
 # The harness already runs inside a disposable root-mapped user+network
@@ -623,6 +629,16 @@ recorded_digest="$(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER
   docker image inspect --format '{{.Id}}' "$image")" || harness_error "cannot inspect recorded build image"
 [[ "$recorded_digest" == "$parity_digest" ]] ||
   harness_error "classic/BuildKit digest mismatch: $parity_digest != $recorded_digest"
+if env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+    docker image inspect alpine:3.20 >/dev/null 2>&1; then
+  harness_error "cold-base fixture unexpectedly found alpine:3.20 in the isolated image store"
+fi
+record_command image-build-cold-base image build --tag "$cold_base_image" "$cold_base_context_dir"
+printf -v cold_base_stderr '%s/%03d.stderr' "$outputs_dir" "$sequence"
+if [[ "$builder_mode" == buildkit ]]; then
+  grep -Fq '[internal] load metadata for docker.io/library/alpine:3.20' "$cold_base_stderr" ||
+    harness_error "cold-base BuildKit build did not emit the metadata vertex"
+fi
 printf 'FROM %s\nRUN ["/bin/busybox", "sh", "-c", "echo buildkit-expected-failure >&2; exit 23"]\n' \
   "$image" >"$failure_context_dir/Dockerfile" || harness_error "cannot write failing build fixture"
 failure_token="$process_token_base-builder-failure"

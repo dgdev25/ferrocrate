@@ -84,7 +84,7 @@ use ferro_core::image_tagging::{
     canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
 };
 use ferro_core::layer_compression::{open_decompressed_layer_reader, CompressionFormat};
-use ferro_core::registry::{parse_image_reference, RegistryClient};
+use ferro_core::registry::{parse_image_reference, RegistryAuth, RegistryClient};
 #[cfg(target_os = "linux")]
 use ferro_core::rootfs::construct_rootfs_with_dedup;
 #[cfg(target_os = "linux")]
@@ -10493,6 +10493,13 @@ fn execute_build(
                     .map_err(|err| format!("failed to get current directory: {err}"))?
                     .join(dockerfile)
             };
+            prefetch_dockerfile_bases(
+                store,
+                origin,
+                authorization,
+                &dockerfile_path,
+                None,
+            )?;
             let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
                 &dockerfile_path,
                 Some(tag),
@@ -10620,6 +10627,58 @@ fn execute_build(
         "build: {} tag={} layer_digest={} config_digest={}\n",
         source_desc, result.reference, result.layer_digest, result.config_digest
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn prefetch_dockerfile_bases(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    dockerfile: &Path,
+    session_auth: Option<&HashMap<String, RegistryAuth>>,
+) -> Result<Vec<String>, String> {
+    let mut pulled = Vec::new();
+    for base in ferro_core::dockerfile_build::dockerfile_external_base_images(dockerfile)
+        .map_err(|error| error.to_string())?
+    {
+        if resolve_reference(store, &base)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            continue;
+        }
+        let parsed = parse_image_reference(&base).map_err(|error| error.to_string())?;
+        let supplied_auth = session_auth.and_then(|auth| auth.get(&parsed.registry));
+        let binding = match supplied_auth {
+            Some(auth) => ferro_core::image_fetch::inspect_image_binding_with_auth(
+                &base,
+                Some(auth),
+            ),
+            None => ferro_core::image_fetch::inspect_image_binding(&base),
+        }
+        .map_err(|error| format!("build: pull base {base}: {error}"))?;
+        let permit = authorization
+            .authorize_image_fetch_plan(origin, &binding, 1)
+            .map_err(|error| error.to_string())?;
+        match supplied_auth {
+            Some(auth) => ferro_core::image_fetch::pull_image_with_store_authorized_with_auth(
+                &runtime_dir(),
+                &binding,
+                store,
+                permit,
+                Some(auth),
+            ),
+            None => ferro_core::image_fetch::pull_image_with_store_authorized(
+                &runtime_dir(),
+                &binding,
+                store,
+                permit,
+            ),
+        }
+        .map_err(|error| format!("build: pull base {base}: {error}"))?;
+        pulled.push(base);
+    }
+    Ok(pulled)
 }
 
 #[cfg(target_os = "linux")]
@@ -16315,6 +16374,10 @@ enum BuildkitSessionCommand {
         destination: PathBuf,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    Credentials {
+        host: String,
+        reply: tokio::sync::oneshot::Sender<Result<Option<RegistryAuth>, String>>,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -16359,6 +16422,51 @@ async fn receive_buildkit_session_local(
     tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
         .await
         .map_err(|_| "buildkit session: filesync timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_buildkit_session_credentials(
+    state: &DockerCompatState,
+    uuid: &str,
+    host: &str,
+    timeout: Duration,
+) -> Result<Option<RegistryAuth>, String> {
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session {
+            break session;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
+    if !session
+        .methods
+        .contains("/moby.session.auth.v1.Auth/Credentials")
+    {
+        return Ok(None);
+    }
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    session
+        .commands
+        .send(BuildkitSessionCommand::Credentials {
+            host: host.to_string(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
+        .map_err(|_| "buildkit session: credentials timed out".to_string())?
         .map_err(|_| "buildkit session: session disconnected".to_string())?
 }
 
@@ -22713,6 +22821,39 @@ async fn execute_buildkit_frontend(
     }
     std::fs::copy(&source_dockerfile, &dockerfile)
         .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
+    let dockerfile_contents = std::fs::read_to_string(&dockerfile)
+        .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
+    let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
+        .map_err(|error| error.to_string())?;
+    let mut session_auth = HashMap::new();
+    for base in &external_bases {
+        if resolve_reference(execution.store.as_ref(), base)
+            .map_err(|error| format!("buildkit solve: inspect base failed: {error}"))?
+            .is_some()
+        {
+            continue;
+        }
+        let registry = parse_image_reference(base)
+            .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?
+            .registry;
+        if let Some(auth) = receive_buildkit_session_credentials(
+            state,
+            &build.request.session,
+            &registry,
+            Duration::from_secs(30),
+        )
+        .await?
+        {
+            session_auth.insert(registry, auth);
+        }
+    }
+    let pulled_bases = prefetch_dockerfile_bases(
+        execution.store.as_ref(),
+        &execution.origin,
+        &execution.authorization,
+        &dockerfile,
+        Some(&session_auth),
+    )?;
 
     let exporter = build
         .request
@@ -22727,15 +22868,19 @@ async fn execute_buildkit_frontend(
         .unwrap_or("local/build:latest")
         .to_string();
     let platform = request.frontend_opt.get("platform").map(String::as_str);
-    let dockerfile_contents = std::fs::read_to_string(&dockerfile)
-        .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
-    let steps = dockerfile_contents
+    let mut steps = dockerfile_contents
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
-        .collect();
-    let output = execute_build(
+        .collect::<Vec<_>>();
+    for base in pulled_bases.iter().rev() {
+        steps.insert(0, format!(
+            "[internal] load metadata for {}",
+            buildkit_metadata_reference(base)?
+        ));
+    }
+    let build_output = execute_build(
         execution.store.as_ref(),
         &execution.origin,
         &execution.authorization,
@@ -22754,6 +22899,11 @@ async fn execute_buildkit_frontend(
         &[],
         None,
     )?;
+    let mut output = pulled_bases
+        .iter()
+        .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))
+        .collect::<String>();
+    output.push_str(&build_output);
     let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
@@ -22763,6 +22913,25 @@ async fn execute_buildkit_frontend(
         output,
         steps,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_metadata_reference(base: &str) -> Result<String, String> {
+    let parsed = parse_image_reference(base).map_err(|error| error.to_string())?;
+    let registry = if parsed.registry == "registry-1.docker.io" {
+        "docker.io"
+    } else {
+        parsed.registry.as_str()
+    };
+    Ok(format!(
+        "{registry}/{}{}{}",
+        parsed.repository,
+        match parsed.separator {
+            ferro_core::registry::ReferenceSeparator::Tag => ":",
+            ferro_core::registry::ReferenceSeparator::Digest => "@",
+        },
+        parsed.reference
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -22989,6 +23158,22 @@ fn parse_buildkit_control_session_registration(
         );
     }
     parse_buildkit_session_registration(&values)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct BuildkitCredentialsRequest {
+    #[prost(string, tag = "1")]
+    host: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
+struct BuildkitCredentialsResponse {
+    #[prost(string, tag = "1")]
+    username: String,
+    #[prost(string, tag = "2")]
+    secret: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -23242,6 +23427,10 @@ where
                                 let result = receive_buildkit_local(&mut requests, &name, &destination).await;
                                 let _ = reply.send(result);
                             }
+                            BuildkitSessionCommand::Credentials { host, reply } => {
+                                let result = request_buildkit_credentials(&mut requests, &host).await;
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 }
@@ -23256,6 +23445,56 @@ where
             Ok(result) => result,
             Err(_) => Ok(()),
         }
+}
+
+#[cfg(target_os = "linux")]
+async fn request_buildkit_credentials(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    host: &str,
+) -> Result<Option<RegistryAuth>, String> {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/moby.session.auth.v1.Auth/Credentials")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .body(())
+        .map_err(|error| format!("buildkit auth: request failed: {error}"))?;
+    let mut ready_requests = requests
+        .clone()
+        .ready()
+        .await
+        .map_err(|error| format!("buildkit auth: h2 client unavailable: {error}"))?;
+    let (response, mut outgoing) = ready_requests
+        .send_request(request, false)
+        .map_err(|error| format!("buildkit auth: start RPC failed: {error}"))?;
+    outgoing
+        .send_data(
+            grpc_message(&BuildkitCredentialsRequest {
+                host: host.to_string(),
+            }),
+            true,
+        )
+        .map_err(|error| format!("buildkit auth: request body failed: {error}"))?;
+    let response = response
+        .await
+        .map_err(|error| format!("buildkit auth: response failed: {error}"))?;
+    if response.status() != http::StatusCode::OK {
+        return Err(format!(
+            "buildkit auth: credentials returned HTTP {}",
+            response.status()
+        ));
+    }
+    let credentials = receive_buildkit_unary::<BuildkitCredentialsResponse>(response.into_body())
+        .await
+        .map_err(|error| format!("buildkit auth: {error}"))?;
+    if credentials.username.is_empty() && credentials.secret.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(RegistryAuth {
+            username: credentials.username,
+            password: credentials.secret,
+        }))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -30858,6 +31097,79 @@ volumes:
     }
 
     #[test]
+    fn buildkit_metadata_vertex_uses_docker_hub_display_name() {
+        assert_eq!(
+            super::buildkit_metadata_reference("alpine:3.20").expect("metadata reference"),
+            "docker.io/library/alpine:3.20"
+        );
+    }
+
+    #[test]
+    fn buildkit_session_requests_ephemeral_registry_credentials() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+            let (mut requests, client_connection) =
+                h2::client::handshake(client_io).await.expect("client handshake");
+            let client = tokio::spawn(async move {
+                client_connection.await.expect("client connection");
+            });
+            let server = tokio::spawn(async move {
+                let mut connection = h2::server::handshake(server_io).await.expect("server handshake");
+                let (request, mut respond) = connection
+                    .accept()
+                    .await
+                    .expect("request result")
+                    .expect("credentials request");
+                assert_eq!(
+                    request.uri().path(),
+                    "/moby.session.auth.v1.Auth/Credentials"
+                );
+                let credentials_request =
+                    super::receive_buildkit_unary::<super::BuildkitCredentialsRequest>(
+                        request.into_body(),
+                    )
+                    .await
+                    .expect("decode credentials request");
+                assert_eq!(credentials_request.host, "registry.example.test");
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .expect("credentials response");
+                let mut stream = respond.send_response(response, false).expect("send response");
+                stream
+                    .send_data(
+                        super::grpc_message(&super::BuildkitCredentialsResponse {
+                            username: "session-user".to_string(),
+                            secret: "session-secret".to_string(),
+                        }),
+                        true,
+                    )
+                    .expect("send credentials");
+                drop(stream);
+                while connection.accept().await.is_some() {}
+            });
+
+            let credentials = super::request_buildkit_credentials(
+                &mut requests,
+                "registry.example.test",
+            )
+            .await
+            .expect("credentials RPC")
+            .expect("credentials present");
+            assert_eq!(credentials.username, "session-user");
+            assert_eq!(credentials.password, "session-secret");
+            drop(requests);
+            server.await.expect("server task");
+            client.await.expect("client task");
+        });
+    }
+
+    #[test]
     fn buildkit_direct_dockerfile_solve_is_registered() {
         use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
 
@@ -30956,8 +31268,14 @@ volumes:
                     },
                 );
             let command = receiver.blocking_recv().expect("filesync command");
-            let super::BuildkitSessionCommand::ReceiveLocal { reply, .. } = command;
-            reply.send(Ok(())).expect("filesync reply");
+            match command {
+                super::BuildkitSessionCommand::ReceiveLocal { reply, .. } => {
+                    reply.send(Ok(())).expect("filesync reply");
+                }
+                super::BuildkitSessionCommand::Credentials { .. } => {
+                    panic!("unexpected credentials request")
+                }
+            }
         });
 
         let runtime = tokio::runtime::Builder::new_current_thread()

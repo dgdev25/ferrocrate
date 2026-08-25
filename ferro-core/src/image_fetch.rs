@@ -145,10 +145,19 @@ pub type InspectedImageBinding = ImageFetchPlan;
 /// writing image metadata or blobs. Authorization callers use this before
 /// opening the mutation boundary.
 pub fn inspect_image_binding(image: &str) -> Result<InspectedImageBinding, ImageFetchError> {
+    let auth = resolve_registry_auth(image)?;
+    inspect_image_binding_with_auth(image, auth.as_ref())
+}
+
+/// Resolve an immutable image binding with caller-supplied registry
+/// credentials. Session-scoped callers use this without persisting secrets.
+pub fn inspect_image_binding_with_auth(
+    image: &str,
+    auth: Option<&RegistryAuth>,
+) -> Result<InspectedImageBinding, ImageFetchError> {
     parse_image_reference(image)?;
     let client = RegistryClient::new()?;
-    let auth = resolve_registry_auth(image)?;
-    let manifest_json = resolve_manifest_json(&client, image, auth.as_ref())?;
+    let manifest_json = resolve_manifest_json(&client, image, auth)?;
     ImageFetchPlan::from_resolved_manifest(image, &manifest_json)
 }
 
@@ -217,13 +226,15 @@ pub(crate) fn pull_image_with_store(
 /// Execute an already inspected plan by addressing the manifest through its
 /// digest. The complete immutable binding is checked before any directory,
 /// blob, or store record is written.
+#[allow(dead_code)] // Directly exercises immutable-fetch fail-closed tests.
 fn pull_planned_image_with_store(
     runtime_dir: &Path,
     plan: &ImageFetchPlan,
     store: &LocalImageStore,
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
-    pull_planned_image_with_store_mode(runtime_dir, plan, store, true, authority)
+    let auth = resolve_registry_auth(plan.canonical_reference())?;
+    pull_planned_image_with_store_mode(runtime_dir, plan, store, true, authority, auth.as_ref())
 }
 
 fn pull_planned_image_with_store_mode(
@@ -232,10 +243,10 @@ fn pull_planned_image_with_store_mode(
     store: &LocalImageStore,
     include_layers: bool,
     authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    auth: Option<&RegistryAuth>,
 ) -> Result<ImageFetchResult, ImageFetchError> {
     let client = RegistryClient::new()?;
-    let auth = resolve_registry_auth(plan.canonical_reference())?;
-    let fetched_json = client.pull_manifest_raw(plan.immutable_reference(), auth.as_ref())?;
+    let fetched_json = client.pull_manifest_raw(plan.immutable_reference(), auth)?;
     let fetched =
         ImageFetchPlan::from_resolved_manifest(plan.canonical_reference(), &fetched_json)?;
     if fetched.manifest_digest != plan.manifest_digest
@@ -259,7 +270,7 @@ fn pull_planned_image_with_store_mode(
         client.pull_blob_to_file(
             plan.immutable_reference(),
             plan.config_digest(),
-            auth.as_ref(),
+            auth,
             &config_path,
         )?;
     }
@@ -277,7 +288,7 @@ fn pull_planned_image_with_store_mode(
     let layer_paths = pull_layers_concurrently(
         &client,
         plan.immutable_reference(),
-        auth.as_ref(),
+        auth,
         runtime_dir,
         &selected_layers,
     )?;
@@ -353,7 +364,15 @@ pub fn pull_manifest_only_with_store_authorized(
 ) -> Result<String, ImageFetchError> {
     validate_fetch_plan_permit(plan, &permit)?;
     let authority = permit.mutation_authority();
-    match pull_planned_image_with_store_mode(runtime_dir, plan, store, false, &authority) {
+    let auth = resolve_registry_auth(plan.canonical_reference())?;
+    match pull_planned_image_with_store_mode(
+        runtime_dir,
+        plan,
+        store,
+        false,
+        &authority,
+        auth.as_ref(),
+    ) {
         Ok(result) => {
             permit
                 .finish(true)
@@ -398,6 +417,19 @@ pub fn pull_image_with_store_authorized(
     store: &LocalImageStore,
     permit: crate::authorization::surface::SurfacePermit,
 ) -> Result<ImageFetchResult, ImageFetchError> {
+    let auth = resolve_registry_auth(plan.canonical_reference())?;
+    pull_image_with_store_authorized_with_auth(runtime_dir, plan, store, permit, auth.as_ref())
+}
+
+/// Execute an authorized immutable pull with caller-supplied credentials.
+/// Credentials are borrowed only for registry requests and are never stored.
+pub fn pull_image_with_store_authorized_with_auth(
+    runtime_dir: &Path,
+    plan: &ImageFetchPlan,
+    store: &LocalImageStore,
+    permit: crate::authorization::surface::SurfacePermit,
+    auth: Option<&RegistryAuth>,
+) -> Result<ImageFetchResult, ImageFetchError> {
     if let Err(error) = validate_fetch_plan_permit(plan, &permit) {
         permit
             .finish(false)
@@ -405,7 +437,7 @@ pub fn pull_image_with_store_authorized(
         return Err(error);
     }
     let authority = permit.mutation_authority();
-    match pull_planned_image_with_store(runtime_dir, plan, store, &authority) {
+    match pull_planned_image_with_store_mode(runtime_dir, plan, store, true, &authority, auth) {
         Ok(result) => {
             permit
                 .finish(true)

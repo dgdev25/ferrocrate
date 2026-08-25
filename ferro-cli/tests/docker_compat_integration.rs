@@ -3076,6 +3076,123 @@ fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
 }
 
 #[test]
+fn docker_compat_buildkit_control_hijacks_on_bare_and_versioned_paths() {
+    let harness = DaemonHarness::spawn();
+    for path in ["/grpc", "/v1.52/grpc"] {
+        let mut stream = UnixStream::connect(&harness.socket_path).expect("connect docker socket");
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .expect("write control request");
+        let mut response = [0_u8; 128];
+        let read = stream.read(&mut response).expect("read control response");
+        let response = String::from_utf8_lossy(&response[..read]);
+        assert!(
+            response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "path={path} response={response}"
+        );
+        assert!(response.contains("Connection: Upgrade\r\n"), "{response}");
+        assert!(response.contains("Upgrade: h2c\r\n"), "{response}");
+    }
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitPlatform {
+    #[prost(string, tag = "1")]
+    architecture: String,
+    #[prost(string, tag = "2")]
+    os: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitWorker {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(map = "string, string", tag = "2")]
+    labels: std::collections::HashMap<String, String>,
+    #[prost(message, repeated, tag = "3")]
+    platforms: Vec<TestBuildkitPlatform>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestBuildkitWorkers {
+    #[prost(message, repeated, tag = "1")]
+    records: Vec<TestBuildkitWorker>,
+}
+
+#[test]
+fn docker_compat_buildkit_control_lists_a_running_worker() {
+    use bytes::Bytes;
+    use prost::Message;
+
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
+    stream
+        .write_all(b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n")
+        .expect("write control request");
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read control upgrade");
+        response.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"));
+    stream.set_nonblocking(true).expect("nonblocking control");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("control runtime");
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream).expect("tokio control stream");
+        let (mut sender, connection) = h2::client::handshake(stream).await.expect("h2 handshake");
+        tokio::spawn(async move { connection.await.expect("h2 control connection") });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/moby.buildkit.v1.Control/ListWorkers")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .expect("list workers request");
+        let (response, mut request_body) = sender
+            .send_request(request, false)
+            .expect("send list workers request");
+        request_body
+            .send_data(Bytes::from_static(&[0, 0, 0, 0, 0]), true)
+            .expect("send empty grpc request");
+        let response = response.await.expect("list workers response");
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.data().await {
+            bytes.extend_from_slice(&chunk.expect("grpc response data"));
+        }
+        assert!(bytes.len() >= 5, "missing grpc response frame");
+        let size = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let workers = TestBuildkitWorkers::decode(&bytes[5..5 + size]).expect("workers protobuf");
+        assert_eq!(workers.records.len(), 1);
+        let worker = &workers.records[0];
+        assert!(!worker.id.is_empty());
+        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.executor"], "oci");
+        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.snapshotter"], "overlayfs");
+        assert!(worker
+            .labels
+            .contains_key("org.mobyproject.buildkit.worker.moby.host-gateway-ip"));
+        let expected_architecture = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            architecture => architecture,
+        };
+        assert!(worker.platforms.iter().any(|platform| {
+            platform.os == "linux" && platform.architecture == expected_architecture
+        }));
+    });
+}
+
+#[test]
 fn docker_compat_buildx_bootstrap_names_the_supported_classic_mode() {
     const MESSAGE: &str = "BuildKit is not supported; set DOCKER_BUILDKIT=0 to use FerroCrate's supported classic Docker builder";
     let harness = DaemonHarness::spawn();

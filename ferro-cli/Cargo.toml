@@ -2,6 +2,7 @@
 name = "ferro-cli"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [features]
 test-console = []
@@ -35,7 +36,16 @@ h2 = "0.4"
 http = "1"
 bytes = "1"
 prost = "0.14"
+prost-types = "0.14"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-stream = "0.1"
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }

@@ -1,6 +1,12 @@
-BuildKit protocol files auth.proto and filesync.proto are derived from
-github.com/moby/buildkit and are licensed under Apache License 2.0. A copy of
-that license is at https://www.apache.org/licenses/LICENSE-2.0.
+BuildKit protocol files auth.proto and filesync.proto, plus the Control,
+worker, solver, API-capability, and source-policy definitions under
+github.com/moby/buildkit, are vendored from github.com/moby/buildkit v0.32.2,
+the revision required by docker/buildx v0.36.1. They are licensed under Apache
+License 2.0. A copy of that license is at
+https://www.apache.org/licenses/LICENSE-2.0.
+
+google/rpc/status.proto is vendored from googleapis/googleapis and is licensed
+under Apache License 2.0.
 
 fsutil protocol files wire.proto and stat.proto are derived from
 github.com/tonistiigi/fsutil, Copyright 2017 Tonis Tiigi, and are licensed

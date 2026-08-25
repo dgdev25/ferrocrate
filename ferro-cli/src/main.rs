@@ -131,6 +131,35 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod buildkit_proto {
+    pub mod pb {
+        tonic::include_proto!("pb");
+    }
+    pub mod google {
+        pub mod rpc {
+            tonic::include_proto!("google.rpc");
+        }
+    }
+    pub mod moby {
+        pub mod buildkit {
+            pub mod v1 {
+                tonic::include_proto!("moby.buildkit.v1");
+                pub mod apicaps {
+                    tonic::include_proto!("moby.buildkit.v1.apicaps");
+                }
+                pub mod sourcepolicy {
+                    tonic::include_proto!("moby.buildkit.v1.sourcepolicy");
+                }
+                pub mod types {
+                    tonic::include_proto!("moby.buildkit.v1.types");
+                }
+            }
+        }
+    }
+}
 #[cfg(target_os = "linux")]
 use std::net::TcpListener;
 #[cfg(target_os = "macos")]
@@ -17277,6 +17306,7 @@ fn handle_docker_compat_connection(
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut exec_hijack_session = None;
     let mut buildkit_session_hijack: Option<BuildkitSessionRegistration> = None;
+    let mut buildkit_control_hijack = false;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
             ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
@@ -19079,6 +19109,10 @@ fn handle_docker_compat_connection(
                 buildkit_session_hijack = Some(parse_buildkit_session_registration(&request.headers)?);
                 docker_buildkit_session_hijack_headers()
             }
+            ("POST", "/grpc") => {
+                buildkit_control_hijack = true;
+                docker_buildkit_control_hijack_headers()
+            }
             ("POST", "/build") => {
                 if query.get("version").is_some_and(|value| value == "2") {
                     return Ok(docker_error_response(
@@ -19693,6 +19727,9 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if buildkit_control_hijack {
+        return run_buildkit_control_transport(stream, Duration::from_secs(30 * 60));
+    }
     if let Some(registration) = buildkit_session_hijack {
         return run_buildkit_session_transport(
             stream,
@@ -22014,6 +22051,118 @@ fn docker_hijack_headers() -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_buildkit_session_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_buildkit_control_hijack_headers() -> Vec<u8> {
+    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn run_buildkit_control_transport(stream: UnixStream, lifetime: Duration) -> Result<(), String> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("buildkit control: set nonblocking failed: {error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("buildkit control: runtime failed: {error}"))?;
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream)
+            .map_err(|error| format!("buildkit control: socket handoff failed: {error}"))?;
+        let mut connection = h2::server::Builder::new()
+            .max_concurrent_streams(32)
+            .max_frame_size(16 * 1024)
+            .handshake::<_, Bytes>(stream)
+            .await
+            .map_err(|error| format!("buildkit control: h2 handshake failed: {error}"))?;
+        tokio::time::timeout(lifetime, async move {
+            while let Some(result) = connection.accept().await {
+                let (request, mut respond) = result
+                    .map_err(|error| format!("buildkit control: accept failed: {error}"))?;
+                let path = request.uri().path().to_string();
+                let response = http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .map_err(|error| format!("buildkit control: response failed: {error}"))?;
+                let mut response_stream = respond
+                    .send_response(response, false)
+                    .map_err(|error| format!("buildkit control: response send failed: {error}"))?;
+                if path == "/moby.buildkit.v1.Control/ListWorkers" {
+                    let payload = buildkit_list_workers_response();
+                    response_stream
+                        .send_data(grpc_message(&payload), false)
+                        .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
+                    let mut trailers = http::HeaderMap::new();
+                    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                    response_stream
+                        .send_trailers(trailers)
+                        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))?;
+                } else {
+                    let mut trailers = http::HeaderMap::new();
+                    trailers.insert("grpc-status", http::HeaderValue::from_static("12"));
+                    trailers.insert(
+                        "grpc-message",
+                        http::HeaderValue::from_static("method%20not%20implemented"),
+                    );
+                    response_stream
+                        .send_trailers(trailers)
+                        .map_err(|error| format!("buildkit control: response trailers failed: {error}"))?;
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap_or(Ok(()))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_list_workers_response() -> buildkit_proto::moby::buildkit::v1::ListWorkersResponse {
+    use buildkit_proto::moby::buildkit::v1::{types::WorkerRecord, ListWorkersResponse};
+    use buildkit_proto::pb::Platform;
+
+    let gateway = std::env::var("FERROCRATE_BRIDGE_CIDR")
+        .unwrap_or_else(|_| "10.0.0.1/24".to_string())
+        .split('/')
+        .next()
+        .unwrap_or("10.0.0.1")
+        .to_string();
+    let mut labels = HashMap::new();
+    labels.insert(
+        "org.mobyproject.buildkit.worker.executor".to_string(),
+        "oci".to_string(),
+    );
+    labels.insert(
+        "org.mobyproject.buildkit.worker.snapshotter".to_string(),
+        "overlayfs".to_string(),
+    );
+    labels.insert(
+        "org.mobyproject.buildkit.worker.moby.host-gateway-ip".to_string(),
+        gateway,
+    );
+    #[allow(unused_mut)]
+    let mut platforms = vec![Platform {
+        architecture: "amd64".to_string(),
+        os: "linux".to_string(),
+        ..Default::default()
+    }];
+    #[cfg(target_arch = "aarch64")]
+    platforms.push(Platform {
+        architecture: "arm64".to_string(),
+        os: "linux".to_string(),
+        ..Default::default()
+    });
+    ListWorkersResponse {
+        record: vec![WorkerRecord {
+            id: "ferrocrate-oci-worker".to_string(),
+            labels,
+            platforms,
+            ..Default::default()
+        }],
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -55,7 +55,7 @@ impl HostCapabilities {
     pub fn require_network_mutation(&self) -> Result<(), ExecError> {
         if !self.linux {
             return Err(ExecError::CapabilityRequired {
-                capability: "Linux".into(),
+                capability: "Linux engine required".into(),
             });
         }
         if !self.root {
@@ -99,6 +99,18 @@ pub enum ExecError {
     CapabilityRequired { capability: String },
 }
 
+#[cfg(target_os = "linux")]
+fn require_linux_engine() -> Result<(), ExecError> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn require_linux_engine() -> Result<(), ExecError> {
+    Err(ExecError::CapabilityRequired {
+        capability: "Linux engine required".into(),
+    })
+}
+
 /// Execute a command vector, returning Ok(()) on success or ExecError on failure.
 ///
 /// The command vector format is `[program, arg1, arg2, ...]`.
@@ -109,6 +121,7 @@ pub fn exec_cmd(args: &[String]) -> Result<(), ExecError> {
             stderr: "empty command".to_string(),
         });
     }
+    require_linux_engine()?;
 
     let (program, cmd_args) = args.split_first().expect("checked non-empty");
     let cmd_str = args.join(" ");
@@ -142,6 +155,7 @@ pub fn exec_cmd_capture(args: &[String]) -> Result<String, ExecError> {
             stderr: "empty command".to_string(),
         });
     }
+    require_linux_engine()?;
 
     let (program, cmd_args) = args.split_first().expect("checked non-empty");
     let cmd_str = args.join(" ");
@@ -173,6 +187,7 @@ pub fn exec_cmd_with_stdin(args: &[String], input: &str) -> Result<String, ExecE
             stderr: "empty command".to_string(),
         });
     }
+    require_linux_engine()?;
     let (program, cmd_args) = args.split_first().expect("checked non-empty");
     let cmd_str = args.join(" ");
     let mut child = Command::new(program)
@@ -219,6 +234,7 @@ pub fn exec_cmd_status(args: &[String]) -> Result<bool, ExecError> {
             stderr: "empty command".to_string(),
         });
     }
+    require_linux_engine()?;
     let (program, cmd_args) = args.split_first().expect("checked non-empty");
     let cmd_str = args.join(" ");
     let status = Command::new(program)
@@ -345,6 +361,13 @@ impl Default for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn network_execution_requires_linux_engine() {
+        let error = exec_cmd(&["ip".to_string()]).expect_err("non-Linux execution must fail");
+        assert!(error.to_string().contains("Linux engine required"));
+    }
 
     #[test]
     fn exec_empty_command_fails() {

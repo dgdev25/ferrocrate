@@ -2,6 +2,7 @@ use crate::executor::{exec_cmd, exec_cmd_capture, ExecError};
 use crate::validate::{validate_interface_name, validate_netns_name, ValidationError};
 #[cfg(target_os = "linux")]
 use nix::sched::{setns, CloneFlags};
+#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -40,6 +41,7 @@ pub fn select_netns_root(
     system_root.to_path_buf()
 }
 
+#[cfg(target_os = "linux")]
 fn root_mapped_user_namespace() -> bool {
     let Ok(uid_map) = fs::read_to_string("/proc/self/uid_map") else {
         return false;
@@ -53,6 +55,7 @@ fn root_mapped_user_namespace() -> bool {
     fields.len() >= 3 && !(fields[0] == "0" && fields[1] == "0" && fields[2] == "4294967295")
 }
 
+#[cfg(target_os = "linux")]
 fn system_netns_root_usable(path: &Path) -> bool {
     path.is_dir() && nix::unistd::access(path, nix::unistd::AccessFlags::W_OK).is_ok()
 }
@@ -61,11 +64,19 @@ pub fn netns_root() -> PathBuf {
     if let Some(explicit) = std::env::var_os("FERROCRATE_NETNS_ROOT") {
         return PathBuf::from(explicit);
     }
+    #[cfg(not(target_os = "linux"))]
+    {
+        return PathBuf::from(SYSTEM_NETNS_ROOT);
+    }
+    #[cfg(target_os = "linux")]
     let rootless = !nix::unistd::Uid::effective().is_root() || root_mapped_user_namespace();
+    #[cfg(target_os = "linux")]
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .or_else(|| std::env::var_os("FERROCRATE_RUNTIME_DIR"))
         .map(PathBuf::from);
+    #[cfg(target_os = "linux")]
     let system_root = Path::new(SYSTEM_NETNS_ROOT);
+    #[cfg(target_os = "linux")]
     select_netns_root(
         rootless,
         runtime_dir.as_deref(),
@@ -244,7 +255,8 @@ pub fn enter_netns(path: &Path) -> Result<(), NetnsError> {
 pub fn enter_netns(_path: &Path) -> Result<(), NetnsError> {
     Err(NetnsError::Exec(ExecError::CommandFailed {
         cmd: "enter_netns".to_string(),
-        stderr: "enter_netns is only available on Linux".to_string(),
+        stderr: "Linux engine required: network namespaces are unavailable on this host"
+            .to_string(),
     }))
 }
 

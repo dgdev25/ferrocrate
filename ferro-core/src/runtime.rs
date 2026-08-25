@@ -128,7 +128,7 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12444,33 +12444,38 @@ fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Run
     let parent = path.parent().ok_or_else(|| {
         RuntimeError::Network(format!("runtime file has no parent: {}", path.display()))
     })?;
+    static RUNTIME_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let temporary = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().unwrap().to_string_lossy()
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id(),
+        RUNTIME_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ));
-    let result = (|| {
+    let result = (|| -> Result<(), RuntimeError> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o644)
-            .open(&temporary)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        OpenOptions::new().read(true).open(parent)?.sync_all()?;
-        let read_back = fs::read(path)?;
-        if read_back != contents {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "runtime file read-back mismatch",
-            ));
-        }
-        Ok::<(), io::Error>(())
+            .open(&temporary)
+            .map_err(path_io("create runtime file staging file", &temporary))?;
+        file.write_all(contents)
+            .map_err(path_io("write runtime file staging file", &temporary))?;
+        file.sync_all()
+            .map_err(path_io("sync runtime file staging file", &temporary))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(path_io("publish runtime file", path))?;
+        OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(path_io("sync runtime file parent directory", parent))?;
+        Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && temporary.exists() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map_err(RuntimeError::Io)
+    result
 }
 
 fn runtime_dns_config() -> ferro_net::dns::DnsConfig {
@@ -14560,7 +14565,33 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
+
+    #[test]
+    fn runtime_file_publication_is_safe_for_eight_concurrent_writers() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("shared.hosts");
+        let barrier = Arc::new(Barrier::new(8));
+        let mut writers = Vec::new();
+        for writer in 0..8_u8 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            writers.push(std::thread::spawn(move || {
+                let contents = vec![b'a' + writer; 1024 * 1024];
+                barrier.wait();
+                super::write_runtime_file_atomically(&path, &contents)
+            }));
+        }
+        for writer in writers {
+            writer
+                .join()
+                .expect("writer thread")
+                .expect("concurrent atomic publication");
+        }
+        let published = std::fs::read(&path).expect("published file");
+        assert_eq!(published.len(), 1024 * 1024);
+        assert!(published.iter().all(|byte| *byte == published[0]));
+    }
 
     #[test]
     fn embedded_dns_returns_nodata_for_known_name_without_requested_family() {

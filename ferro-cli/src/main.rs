@@ -23611,6 +23611,7 @@ mod tests {
 
         let result = EngineAccess::select(runtime.path());
         let _ = holder.kill();
+        let _ = holder.wait();
         let access = result.expect("reclaim non-daemon lock holder");
         assert!(matches!(access, EngineAccess::Direct(_)));
     }

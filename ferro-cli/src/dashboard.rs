@@ -312,7 +312,7 @@ struct ProcessDispatcher {
     log_process: Arc<Mutex<Option<Child>>>,
     terminal: Arc<Mutex<Option<TerminalState>>>,
     backend: Arc<dyn Backend>,
-    restart_specs: Arc<Mutex<HashMap<String, (String, Vec<String>)>>>,
+    stopped_container_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ProcessDispatcher {
@@ -321,7 +321,7 @@ impl ProcessDispatcher {
             log_process: Arc::new(Mutex::new(None)),
             terminal: Arc::new(Mutex::new(None)),
             backend: Arc::from(select_backend().map_err(|error| error.to_string())?),
-            restart_specs: Arc::new(Mutex::new(HashMap::new())),
+            stopped_container_ids: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -611,31 +611,33 @@ impl CommandDispatcher for ProcessDispatcher {
                 let target = args.target.unwrap_or_default();
                 if value_string(&args.action)? == "stop_container" {
                     if let Ok(detail) = run_json(&["inspect", &target, "--format", "json"]) {
-                        let image = detail
-                            .pointer("/Config/Image")
+                        let id = detail
+                            .get("Id")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string();
-                        let command = detail
-                            .pointer("/Config/Cmd")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect::<Vec<_>>();
-                        if !image.is_empty() {
-                            self.restart_specs
+                        if !id.is_empty() {
+                            self.stopped_container_ids
                                 .lock()
-                                .map_err(|_| "restart state is unavailable".to_string())?
-                                .insert(target.clone(), (image, command));
+                                .map_err(|_| "stopped-container state is unavailable".to_string())?
+                                .insert(target.clone(), id);
                         }
                     }
                 }
+                let resolved_target = if value_string(&args.action)? == "start_container" {
+                    self.stopped_container_ids
+                        .lock()
+                        .map_err(|_| "stopped-container state is unavailable".to_string())?
+                        .get(&target)
+                        .cloned()
+                        .unwrap_or_else(|| target.clone())
+                } else {
+                    target.clone()
+                };
                 let command = match value_string(&args.action)? {
                     "pull_image" => vec!["pull", &target],
                     "remove_image" => vec!["rmi", &target],
-                    "start_container" => vec!["start", &target],
+                    "start_container" => vec!["start", &resolved_target],
                     "stop_container" => vec!["stop", &target],
                     "remove_container" => vec!["rm", &target],
                     "container_prune" => vec!["container-prune"],
@@ -654,25 +656,12 @@ impl CommandDispatcher for ProcessDispatcher {
                 };
                 let result = run_command_result(&command)?;
                 if value_string(&args.action)? == "start_container"
-                    && !result["ok"].as_bool().unwrap_or(false)
+                    && result["ok"].as_bool().unwrap_or(false)
                 {
-                    let spec = self
-                        .restart_specs
+                    self.stopped_container_ids
                         .lock()
-                        .map_err(|_| "restart state is unavailable".to_string())?
-                        .get(&target)
-                        .cloned();
-                    if let Some((image, command)) = spec {
-                        let mut values = vec![
-                            "run".to_string(),
-                            "--detach".to_string(),
-                            "--name".to_string(),
-                            target,
-                            image,
-                        ];
-                        values.extend(command);
-                        return desktop_command(&values, None).map(command_result);
-                    }
+                        .map_err(|_| "stopped-container state is unavailable".to_string())?
+                        .remove(&target);
                 }
                 Ok(result)
             }

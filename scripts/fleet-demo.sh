@@ -48,7 +48,7 @@ arm_ssh() { for_command "${arm_user}@${arm_host}" "$@"; }
 ship_guest_binary() {
   local source="$1" destination="/var/tmp/$(basename -- "$1")" expected actual
   expected="$(sha256sum "$source" | awk '{print $1}')"
-  actual="$(guest_ssh "sha256sum '$destination' 2>/dev/null | awk '{print \\$1}'" 2>/dev/null || true)"
+  actual="$(guest_ssh "sha256sum '$destination' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
   if [[ "$actual" == "$expected" ]]; then
     note "using matching staged guest binary $destination"
     return

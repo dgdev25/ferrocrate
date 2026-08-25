@@ -16846,14 +16846,77 @@ mod tests {
 
     #[test]
     fn unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement() {
+        const NAMESPACE_MARKER: &str = "FERRO_MOUNT_PLAN_NAMESPACE_CHILD";
+        if !nix::unistd::Uid::effective().is_root()
+            && std::env::var_os(NAMESPACE_MARKER).is_none()
+        {
+            let child = std::process::Command::new("unshare")
+                .args(["--user", "--map-root-user", "--mount", "--fork"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::tests::unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement",
+                    "--nocapture",
+                ])
+                .env(NAMESPACE_MARKER, "1")
+                .output();
+            match child {
+                Ok(output) if output.status.success() => return,
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.contains("running 1 test") {
+                        panic!(
+                            "mount-plan namespace child failed:\n{stdout}\n{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    eprintln!(
+                        "skipping: cannot create a user+mount namespace for mount-plan identity testing: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "skipping: cannot create a user+mount namespace for mount-plan identity testing: {error}"
+                    );
+                    return;
+                }
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
         let rootfs = temp.path().join("container/rootfs");
         let target = rootfs.join("data");
         let source = temp.path().join("source");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::create_dir_all(&source).unwrap();
+        let mount = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "tmpfs"])
+            .arg(&target)
+            .output();
+        match mount {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                eprintln!(
+                    "skipping: cannot create a distinct tmpfs mount for mount-plan identity testing: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!(
+                    "skipping: cannot create a distinct tmpfs mount for mount-plan identity testing: {error}"
+                );
+                return;
+            }
+        }
         let baseline = std::fs::metadata(&target).unwrap();
         let baseline_mount_id = super::mount_id_for_path(&target).unwrap();
+        let Some(baseline_mount_id) = baseline_mount_id else {
+            let _ = std::process::Command::new("umount").arg(&target).status();
+            eprintln!("skipping: distinct tmpfs mount has no visible mount ID");
+            return;
+        };
         let source_identity = std::fs::metadata(&source).unwrap();
         let plan = super::ResourcePlan::BindMount {
             target: "data".into(),
@@ -16862,18 +16925,27 @@ mod tests {
             source_inode: source_identity.ino(),
             baseline_device: baseline.dev(),
             baseline_inode: baseline.ino(),
-            baseline_mount_id,
+            baseline_mount_id: Some(baseline_mount_id),
             operation_id: Some([9; 16]),
         };
         assert!(super::classify_unmarked_mount(
             Some(&rootfs),
             std::path::Path::new("data"),
-            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            (baseline.dev(), baseline.ino(), Some(baseline_mount_id)),
             Some((source_identity.dev(), source_identity.ino(), None)),
             None,
         )
         .unwrap()
         .is_none());
+        let unmount = std::process::Command::new("umount")
+            .arg(&target)
+            .output()
+            .expect("launch umount for mount-plan fixture");
+        assert!(
+            unmount.status.success(),
+            "unmount mount-plan fixture: {}",
+            String::from_utf8_lossy(&unmount.stderr).trim()
+        );
         #[cfg(target_env = "musl")]
         std::fs::rename(&target, rootfs.join("replaced-data")).unwrap();
         #[cfg(not(target_env = "musl"))]
@@ -16885,7 +16957,7 @@ mod tests {
                 super::ResourcePlan::BindMount { target, .. } => target,
                 _ => unreachable!(),
             },
-            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            (baseline.dev(), baseline.ino(), Some(baseline_mount_id)),
             Some((source_identity.dev(), source_identity.ino(), None)),
             None,
         )
@@ -19203,6 +19275,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn public_run_and_restart_survive_real_sigkill_at_resource_and_launch_barriers() {
         let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        if !nix::unistd::Uid::effective().is_root() && !crate::rootless::bubblewrap_available() {
+            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            return;
+        }
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {
                 if nix::unistd::Uid::effective().is_root() {

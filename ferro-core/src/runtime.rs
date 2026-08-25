@@ -36,6 +36,7 @@ pub struct NamedNetworkEndpointConfig {
     pub ipv4_subnet: String,
     pub ipv4_gateway: String,
     pub ipv6_gateway_cidr: Option<String>,
+    pub aliases: Vec<String>,
 }
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
@@ -117,7 +118,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 #[cfg(test)]
 use std::io::Seek;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
@@ -128,7 +129,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -3416,6 +3417,16 @@ impl ContainerRuntime {
             }),
         };
         record.network_endpoints = record.effective_network_endpoints();
+        if let Some(aliases) = record.annotations.get("io.ferrocrate.network.aliases") {
+            if let Some(endpoint) = record.network_endpoints.first_mut() {
+                endpoint.aliases = aliases
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|alias| !alias.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
 
         rollback.persist_network()?;
         let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
@@ -4479,13 +4490,15 @@ impl ContainerRuntime {
     ) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
             runtime.connect_network_authorized(proof, intent, id, &config)
-        })
+        })?;
+        update_container_hosts(&self.runtime_dir, &self.store.list()?)
     }
 
     pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
             runtime.disconnect_network_authorized(proof, intent, id, network_name)
-        })
+        })?;
+        update_container_hosts(&self.runtime_dir, &self.store.list()?)
     }
 
     fn connect_network_authorized(
@@ -4698,6 +4711,7 @@ impl ContainerRuntime {
             interface_name,
             ipv4_address: Some(ipv4),
             ipv6_address,
+            aliases: config.aliases.clone(),
             generation: config.generation,
             namespace_identity: Some(namespace_identity),
             network_backend: None,
@@ -12164,25 +12178,35 @@ fn update_container_hosts(
     runtime_dir: &Path,
     containers: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
-    let mut entries: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for record in containers {
-        if record.status != "running" && record.status != "paused" {
+    let dns_dir = runtime_dir.join("dns");
+    fs::create_dir_all(&dns_dir)?;
+    let mut network_entries = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+    for peer in containers {
+        if !matches!(peer.status.as_str(), "running" | "paused") {
             continue;
         }
-        let mut add_entry = |ip: &Option<String>| {
-            if let Some(ip) = ip.as_ref() {
+        for endpoint in peer.effective_network_endpoints() {
+            let entries = network_entries.entry(endpoint.network_name.clone()).or_default();
+            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 let names = entries.entry(ip.clone()).or_default();
-                names.insert(record.id.clone());
-                if let Some(name) = record.name.as_ref() {
+                names.insert(peer.id.clone());
+                if let Some(name) = peer.name.as_ref() {
                     names.insert(name.clone());
                 }
+                names.extend(endpoint.aliases.iter().cloned());
             }
-        };
-        add_entry(&record.ip_address);
-        add_entry(&record.ipv6_address);
+        }
+    }
+    for (network_name, entries) in &network_entries {
+        write_runtime_file_atomically(
+            &dns_dir.join(format!("{network_name}.hosts")),
+            render_hosts(entries).as_bytes(),
+        )?;
     }
 
-    let hosts_body = (!entries.is_empty()).then(|| render_hosts(&entries));
     for record in containers {
         if record.status != "running" && record.status != "paused" {
             continue;
@@ -12192,7 +12216,9 @@ fn update_container_hosts(
             .join(&record.id)
             .join("rootfs")
             .join("etc");
-        if let Some(hosts_body) = hosts_body.as_deref() {
+        let entries = container_hosts_entries(record, containers);
+        if !entries.is_empty() {
+            let hosts_body = render_hosts(&entries);
             let hosts_path = etc_dir.join("hosts");
             if let Some(parent) = hosts_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -12208,7 +12234,24 @@ fn update_container_hosts(
         if let Some(parent) = resolv_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let dns_config = if rootless_netns_enabled()
+        let endpoint_gateways = record
+            .effective_network_endpoints()
+            .iter()
+            .filter_map(endpoint_gateway)
+            .collect::<BTreeSet<_>>();
+        for (endpoint, gateway) in record
+            .effective_network_endpoints()
+            .iter()
+            .filter_map(|endpoint| endpoint_gateway(endpoint).map(|gateway| (endpoint, gateway)))
+        {
+            ensure_embedded_dns(runtime_dir, &endpoint.network_name, gateway)?;
+        }
+        let dns_config = if !endpoint_gateways.is_empty() {
+            ferro_net::dns::DnsConfig {
+                servers: endpoint_gateways.into_iter().map(|gateway| gateway.to_string()).collect(),
+                search: Vec::new(),
+            }
+        } else if rootless_netns_enabled()
             && record.ip_address.is_none()
             && record.ipv6_address.is_none()
         {
@@ -12224,6 +12267,132 @@ fn update_container_hosts(
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
     }
     Ok(())
+}
+
+fn container_hosts_entries(
+    target: &ContainerRecord,
+    containers: &[ContainerRecord],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let target_networks = target
+        .effective_network_endpoints()
+        .into_iter()
+        .map(|endpoint| endpoint.network_name)
+        .collect::<BTreeSet<_>>();
+    let mut entries = BTreeMap::<String, BTreeSet<String>>::new();
+    for peer in containers {
+        if !matches!(peer.status.as_str(), "running" | "paused") {
+            continue;
+        }
+        for endpoint in peer.effective_network_endpoints() {
+            if !target_networks.contains(&endpoint.network_name) {
+                continue;
+            }
+            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let names = entries.entry(ip.clone()).or_default();
+                names.insert(peer.id.clone());
+                if let Some(name) = peer.name.as_ref() {
+                    names.insert(name.clone());
+                }
+                names.extend(endpoint.aliases.iter().cloned());
+            }
+        }
+    }
+    entries
+}
+
+static EMBEDDED_DNS_SERVERS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+
+fn endpoint_gateway(endpoint: &NetworkEndpointRecord) -> Option<Ipv4Addr> {
+    let cidr = endpoint.ownership.as_ref()?.source_cidr.as_deref()?;
+    let (address, prefix) = cidr.split_once('/')?;
+    let address = address.parse::<Ipv4Addr>().ok()?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+    let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+    Some(Ipv4Addr::from((u32::from(address) & mask).checked_add(1)?))
+}
+
+fn ensure_embedded_dns(
+    runtime_dir: &Path,
+    network_name: &str,
+    gateway: Ipv4Addr,
+) -> Result<(), RuntimeError> {
+    let key = gateway.to_string();
+    let servers = EMBEDDED_DNS_SERVERS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let mut servers = servers
+        .lock()
+        .map_err(|_| RuntimeError::Network("embedded DNS registry lock poisoned".into()))?;
+    if servers.contains(&key) {
+        return Ok(());
+    }
+    let socket = UdpSocket::bind((gateway, 53)).map_err(|error| {
+        RuntimeError::Network(format!(
+            "embedded DNS could not bind {gateway}:53 for network {network_name}: {error}"
+        ))
+    })?;
+    let hosts_path = runtime_dir.join("dns").join(format!("{network_name}.hosts"));
+    thread::Builder::new()
+        .name(format!("ferro-dns-{network_name}"))
+        .spawn(move || {
+            let mut buffer = [0_u8; 512];
+            while let Ok((length, peer)) = socket.recv_from(&mut buffer) {
+                if let Some(response) = dns_response(&buffer[..length], &hosts_path) {
+                    let _ = socket.send_to(&response, peer);
+                }
+            }
+        })
+        .map_err(|error| RuntimeError::Network(format!("embedded DNS start failed: {error}")))?;
+    servers.insert(key);
+    Ok(())
+}
+
+fn dns_response(query: &[u8], hosts_path: &Path) -> Option<Vec<u8>> {
+    if query.len() < 17 {
+        return None;
+    }
+    let mut cursor = 12;
+    let mut labels = Vec::new();
+    loop {
+        let length = *query.get(cursor)? as usize;
+        cursor += 1;
+        if length == 0 {
+            break;
+        }
+        labels.push(std::str::from_utf8(query.get(cursor..cursor + length)?).ok()?);
+        cursor += length;
+    }
+    let question_end = cursor.checked_add(4)?;
+    let qtype = u16::from_be_bytes(query.get(cursor..cursor + 2)?.try_into().ok()?);
+    let name = labels.join(".");
+    let address = (qtype == 1).then(|| {
+        fs::read_to_string(hosts_path).ok()?.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let address = fields.next()?.parse::<Ipv4Addr>().ok()?;
+            fields.any(|candidate| candidate == name).then_some(address)
+        })
+    }).flatten();
+    let mut response = Vec::with_capacity(question_end + 16);
+    response.extend_from_slice(&query[..2]);
+    response.extend_from_slice(&if address.is_some() { 0x8180_u16 } else { 0x8183_u16 }.to_be_bytes());
+    response.extend_from_slice(&1_u16.to_be_bytes());
+    response.extend_from_slice(&(u16::from(address.is_some())).to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(query.get(12..question_end)?);
+    if let Some(address) = address {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&0_u32.to_be_bytes());
+        response.extend_from_slice(&4_u16.to_be_bytes());
+        response.extend_from_slice(&address.octets());
+    }
+    Some(response)
 }
 
 fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), RuntimeError> {
@@ -15928,6 +16097,58 @@ mod tests {
     }
 
     #[test]
+    fn network_aliases_are_visible_only_to_peers_on_the_same_network() {
+        let mut target = ContainerRecord::authorization_candidate("target".into(), "image".into());
+        target.status = "running".into();
+        target.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "frontend".into(),
+            endpoint_id: "target-front".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.10.0.2".into()),
+            ipv6_address: None,
+            aliases: vec![],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+        let mut frontend = ContainerRecord::authorization_candidate("front".into(), "image".into());
+        frontend.status = "running".into();
+        frontend.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "frontend".into(),
+            endpoint_id: "front-endpoint".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.10.0.3".into()),
+            ipv6_address: None,
+            aliases: vec!["api".into()],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+        let mut backend = ContainerRecord::authorization_candidate("back".into(), "image".into());
+        backend.status = "running".into();
+        backend.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "backend".into(),
+            endpoint_id: "back-endpoint".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.20.0.3".into()),
+            ipv6_address: None,
+            aliases: vec!["database".into()],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+
+        let entries = super::container_hosts_entries(&target, &[target.clone(), frontend, backend]);
+        let hosts = super::render_hosts(&entries);
+        assert!(hosts.contains("10.10.0.3 api front"), "{hosts}");
+        assert!(!hosts.contains("database"), "{hosts}");
+        assert!(!hosts.contains("10.20.0.3"), "{hosts}");
+    }
+
+    #[test]
     fn rootless_runtime_host_update_publishes_slirp_resolver_before_launch() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
@@ -17763,6 +17984,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 interface_name: format!("eth{index}"),
                 ipv4_address: Some(format!("172.{}.0.2", 30 + index)),
                 ipv6_address: None,
+                aliases: Vec::new(),
                 generation: 1,
                 namespace_identity: None,
                 network_backend: None,
@@ -17790,6 +18012,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 interface_name: format!("eth{index}"),
                 ipv4_address: Some(format!("172.30.{index}.2")),
                 ipv6_address: None,
+                aliases: Vec::new(),
                 generation: 1,
                 namespace_identity: None,
                 network_backend: None,

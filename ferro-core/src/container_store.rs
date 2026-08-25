@@ -308,6 +308,7 @@ impl ContainerRecord {
             interface_name: "eth0".to_string(),
             ipv4_address: self.ip_address.clone(),
             ipv6_address: self.ipv6_address.clone(),
+            aliases: Vec::new(),
             generation: 1,
             namespace_identity: self.namespace_identity,
             network_backend: self.network_backend.clone(),
@@ -325,6 +326,8 @@ pub struct NetworkEndpointRecord {
     pub ipv4_address: Option<String>,
     #[serde(default)]
     pub ipv6_address: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default = "default_endpoint_generation")]
     pub generation: u64,
     #[serde(default)]

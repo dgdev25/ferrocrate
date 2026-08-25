@@ -260,6 +260,8 @@ volume="$run_prefix-volume"
 network="$run_prefix-network"
 write_only_log_container="$run_prefix-write-only-log"
 secondary_network="$run_prefix-secondary"
+alias_network="$run_prefix-alias-network"
+alias_target="$run_prefix-alias-target"
 compose_project="$run_prefix-compose"
 compose_frontend_network="${compose_project}_frontend"
 compose_backend_network="${compose_project}_backend"
@@ -413,12 +415,12 @@ cleanup() {
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker rm --force "$container" "$attach_container" "$write_only_log_container" \
+        docker rm --force "$container" "$attach_container" "$write_only_log_container" "$alias_target" \
       >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker network rm "$network" "$secondary_network" >/dev/null 2>&1 || true
+        docker network rm "$network" "$secondary_network" "$alias_network" >/dev/null 2>&1 || true
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
       env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
@@ -691,6 +693,19 @@ record_command network-create network network create "$network"
 record_command network-list network network ls
 record_command network-inspect network network inspect "$network"
 record_command network-remove network network rm "$network"
+
+# Per-network aliases must resolve through the bridge's embedded DNS from a
+# distinct peer. This uses BusyBox nslookup so the row cannot pass through
+# libc's /etc/hosts fallback.
+record_command network-alias-create network network create --driver bridge \
+  --subnet 172.30.245.0/24 "$alias_network"
+record_command network-alias-target network run --detach --name "$alias_target" \
+  --network "$alias_network" --network-alias conformance-alias \
+  "$image" /bin/busybox sleep 120
+record_command network-alias-nslookup network run --rm --network "$alias_network" \
+  "$image" /bin/busybox nslookup conformance-alias
+record_command network-alias-target-remove network rm --force "$alias_target"
+record_command network-alias-remove network network rm "$alias_network"
 
 # Attach uses a finite workload so a conforming client closes naturally.
 record_command attach-container-create container create --label "$owner_label" --name "$attach_container" \

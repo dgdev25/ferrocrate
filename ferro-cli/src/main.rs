@@ -12930,6 +12930,7 @@ fn docker_named_endpoint_config(
             ipv4_subnet: format!("{subnet}/{prefix}"),
             ipv4_gateway: gateway.to_string(),
             ipv6_gateway_cidr: std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok(),
+            aliases: Vec::new(),
         });
     }
     let record = resolve_named_network(runtime_dir, name)?;
@@ -12940,6 +12941,7 @@ fn docker_named_endpoint_config(
         ipv4_subnet: record.subnet,
         ipv4_gateway: record.gateway,
         ipv6_gateway_cidr: record.ipv6_cidr,
+        aliases: Vec::new(),
     })
 }
 
@@ -15863,6 +15865,15 @@ struct DockerCreateRequest {
     tty: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
+    #[serde(rename = "NetworkingConfig", default)]
+    networking_config: DockerNetworkingConfig,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, serde::Deserialize)]
+struct DockerNetworkingConfig {
+    #[serde(rename = "EndpointsConfig", default)]
+    endpoints: HashMap<String, DockerEndpointConfig>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16065,6 +16076,8 @@ struct DockerCreateSpec {
     name: Option<String>,
     network_mode: String,
     #[serde(default)]
+    network_aliases: Vec<String>,
+    #[serde(default)]
     tty: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
@@ -16116,6 +16129,12 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if !spec.network_aliases.is_empty() {
+        annotations.push(format!(
+            "io.ferrocrate.network.aliases={}",
+            spec.network_aliases.join(",")
+        ));
+    }
 
     DockerStartRunInputs {
         path_binds,
@@ -16282,10 +16301,28 @@ struct DockerNetworkConnectWireRequest {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default, Deserialize)]
 struct DockerEndpointConfig {
-    #[serde(rename = "Aliases", default)]
+    #[serde(rename = "Aliases", default, deserialize_with = "deserialize_null_aliases")]
     aliases: Vec<String>,
-    #[serde(rename = "IPAMConfig", default)]
+    #[serde(rename = "IPAMConfig", default, deserialize_with = "deserialize_null_endpoint_ipam")]
     ipam: DockerEndpointIpamConfig,
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_aliases<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_endpoint_ipam<'de, D>(
+    deserializer: D,
+) -> Result<DockerEndpointIpamConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<DockerEndpointIpamConfig>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[cfg(target_os = "linux")]
@@ -19684,7 +19721,8 @@ fn handle_docker_compat_connection(
                     .trim_end_matches('/');
                 let request = parse_docker_network_connect_request(&request.body)?;
                 let id = resolve_container_id(&runtime, &request.container)?;
-                let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                let mut config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                config.aliases = request.aliases;
                 let permit = surface_authorization
                     .authorize_named(
                         &origin,
@@ -21130,6 +21168,13 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
             other.to_string()
         }
     };
+    let network_aliases = request
+        .networking_config
+        .endpoints
+        .get(&network_mode)
+        .or_else(|| request.networking_config.endpoints.values().next())
+        .map(|endpoint| endpoint.aliases.clone())
+        .unwrap_or_default();
     let health = parse_docker_healthcheck(request.healthcheck)?;
     let memory_max = normalize_docker_limit(host_config.memory, "Memory")?;
     let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
@@ -21163,6 +21208,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        network_aliases,
         tty: request.tty,
         log_options,
         log_driver,
@@ -21641,6 +21687,10 @@ fn docker_network_settings(
     let ipv6 = record.ipv6_address.clone().unwrap_or_default();
     let mut networks = serde_json::Map::new();
     for endpoint in record.effective_network_endpoints() {
+        let mut dns_names = record.name.clone().into_iter().collect::<Vec<_>>();
+        dns_names.extend(endpoint.aliases.iter().cloned());
+        dns_names.sort();
+        dns_names.dedup();
         let ipv4_prefix = endpoint
             .ownership
             .as_ref()
@@ -21660,7 +21710,7 @@ fn docker_network_settings(
                 "GlobalIPv6Address": endpoint.ipv6_address.clone().unwrap_or_default(),
                 "GlobalIPv6PrefixLen": if endpoint.ipv6_address.is_some() { 64 } else { 0 },
                 "MacAddress": "",
-                "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+                "DNSNames": dns_names,
             }),
         );
     }
@@ -26623,6 +26673,16 @@ volumes:
     }
 
     #[test]
+    fn container_create_preserves_network_aliases() {
+        let spec = super::parse_docker_create_spec(
+            br#"{"Image":"alpine:3.20","HostConfig":{"NetworkMode":"app"},"NetworkingConfig":{"EndpointsConfig":{"app":{"Aliases":["api","api.internal"]}}}}"#,
+            None,
+        )
+        .expect("network aliases");
+        assert_eq!(spec.network_aliases, vec!["api", "api.internal"]);
+    }
+
+    #[test]
     fn parses_docker_network_connect_and_disconnect_payloads() {
         let connect = super::parse_docker_network_connect_request(
             br#"{"Container":"api","EndpointConfig":{"Aliases":["api-alias"]}}"#,
@@ -28548,6 +28608,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -28776,6 +28837,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                network_aliases: Vec::new(),
                 tty: false,
                 log_options: HashMap::new(),
                 log_driver: "json-file".to_string(),
@@ -28854,6 +28916,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -28993,6 +29056,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),

@@ -53,8 +53,10 @@ ship_guest_binary() {
     note "using matching staged guest binary $destination"
     return
   fi
-  scp -q "$source" "${guest_user}@${guest_host}:$destination" || die "could not stage $(basename -- "$source") on the guest; free space is required under /var/tmp (remove only demo-scoped artifacts or set up more guest disk)"
-  guest_ssh "chmod 700 '$destination'" || die "could not mark staged guest binary executable: $destination"
+  # stage beside the live binary and rename over it: a running agent keeps the old inode open, and
+  # writing the file in place fails with "text file busy".
+  scp -q "$source" "${guest_user}@${guest_host}:$destination.new" || die "could not stage $(basename -- "$source") on the guest (scp failed: check free space under /var/tmp and the guest user's write access)"
+  guest_ssh "chmod 700 '$destination.new' && mv -f '$destination.new' '$destination'" || die "could not install staged guest binary: $destination"
 }
 
 ensure_layout() {

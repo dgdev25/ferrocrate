@@ -50,6 +50,23 @@ capturing stdout. The listener exists only while `dashboard` is running.
 Non-loopback binds fail closed unless `--tls-cert`, `--tls-key`, and
 `--operator-gate` are supplied together.
 
+Run the manager-backed Fleet tab against the existing operator-authenticated
+admin gRPC endpoint:
+
+```bash
+ferro-mgr fleet-ui --listen 127.0.0.1:8443 \
+  --tls-cert manager.crt --tls-key manager.key \
+  --admin-endpoint https://127.0.0.1:50052 \
+  --admin-domain localhost --admin-server-ca node-ca.crt \
+  --operator-cert operator.crt --operator-key operator.key
+```
+
+The Fleet tab shows hosts, per-host containers and logs, desired-state
+deployments with rollback, and Doctor summaries. Certificate-bound `view`
+sessions are read-only; `operate` actions are appended to the fleet witness
+journal. Plain HTTP is rejected except for explicit loopback-only test runs
+using `--insecure-loopback`.
+
 Or point the real Docker CLI at Ferrocrate's daemon. The classic build protocol
 is supported; BuildKit session builds fail cleanly with an actionable
 `DOCKER_BUILDKIT=0` message while the protocol work remains unimplemented:

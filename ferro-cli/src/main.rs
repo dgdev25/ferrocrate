@@ -1453,6 +1453,13 @@ pub fn main() {
     }
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
+    #[cfg(feature = "dashboard")]
+    if matches!(&cli.command, Commands::Dashboard { .. }) {
+        if let Some(message) = super::dashboard::unavailable_message() {
+            eprintln!("error: {message}");
+            process::exit(2);
+        }
+    }
     if let Err(err) = dispatch(cli.command) {
         let normalized = normalize_cli_error(err);
         let _ = ferro_core::observability::persist_authorization_fixture_evidence(

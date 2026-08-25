@@ -86,7 +86,7 @@ create_pki() {
 
 build_local() {
   note "building local x86_64 release binaries (CARGO_BUILD_JOBS=6)"
-  (cd "$repo_root" && CARGO_BUILD_JOBS=6 cargo build --release -p ferro-mgr --bin ferro-mgr --bin ferro-agent-linux -p ferro-cli)
+  (cd "$repo_root" && CARGO_BUILD_JOBS=6 cargo build --release -p ferro-mgr --bin ferro-mgr --bin ferro-agent -p ferro-cli)
 }
 
 start_manager() {
@@ -159,7 +159,7 @@ prepare_arm_repo() {
   local bundle="$state_root/ferrocrate-fleet.bundle"
   (cd "$repo_root" && git bundle create "$bundle" HEAD)
   scp -q "$bundle" "${arm_user}@${arm_host}:/tmp/ferrocrate-fleet.bundle"
-  arm_ssh "set -e; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent-linux -p ferro-cli"
+  arm_ssh "set -e; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent -p ferro-cli"
 }
 
 start_reverse_forwards() {
@@ -192,14 +192,14 @@ issue_token() {
 
 enroll_guest() {
   local token="$1" remote_state='.local/state/ferrocrate-fleet-demo'
-  scp -q "$repo_root/target/release/ferro-agent-linux" "$repo_root/target/release/ferro-cli" "${guest_user}@${guest_host}:/var/tmp/"
+  scp -q "$repo_root/target/release/ferro-agent" "$repo_root/target/release/ferro-cli" "${guest_user}@${guest_host}:/var/tmp/"
   if ! guest_ssh "test -s \$HOME/$remote_state/agent.pem"; then
     local enrollment; enrollment="$(issue_token "$token" lab-x86 "$guest_host")"
     guest_ssh "mkdir -p \$HOME/$remote_state; chmod 700 \$HOME/$remote_state"
     scp -q "$state_root/pki/node-ca.pem" "${guest_user}@${guest_host}:/var/tmp/fleet-node-ca.pem"
-    guest_ssh "/var/tmp/ferro-agent-linux enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
+    guest_ssh "/var/tmp/ferro-agent enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
   fi
-  guest_ssh "pkill -f '/var/tmp/ferro-agent-linux fleet --node-id lab-x86' || true; nohup /var/tmp/ferro-agent-linux fleet --node-id lab-x86 --control-endpoint https://$guest_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 &"
+  guest_ssh "pkill -f '/var/tmp/ferro-agent fleet --node-id lab-x86' || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 &"
 }
 
 enroll_arm() {
@@ -207,9 +207,9 @@ enroll_arm() {
   if ! arm_ssh "test -s \$HOME/$arm_state/agent.pem"; then
     local enrollment; enrollment="$(issue_token "$token" oracle-arm "$arm_host")"
     scp -q "$state_root/pki/node-ca.pem" "${arm_user}@${arm_host}:/tmp/fleet-node-ca.pem"
-    arm_ssh "mkdir -p \$HOME/$arm_state; chmod 700 \$HOME/$arm_state; $arm_repo/target/release/ferro-agent-linux enroll --node-id oracle-arm --endpoint $arm_host --token '$enrollment' --manager-endpoint https://127.0.0.1:55051 --server-ca /tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$arm_state/agent.pem --key-out \$HOME/$arm_state/agent.key --node-ca-out \$HOME/$arm_state/node-ca.pem"
+    arm_ssh "mkdir -p \$HOME/$arm_state; chmod 700 \$HOME/$arm_state; $arm_repo/target/release/ferro-agent enroll --node-id oracle-arm --endpoint $arm_host --token '$enrollment' --manager-endpoint https://127.0.0.1:55051 --server-ca /tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$arm_state/agent.pem --key-out \$HOME/$arm_state/agent.key --node-ca-out \$HOME/$arm_state/node-ca.pem"
   fi
-  arm_ssh "pkill -f '$arm_repo/target/release/ferro-agent-linux fleet --node-id oracle-arm' || true; nohup $arm_repo/target/release/ferro-agent-linux fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 &"
+  arm_ssh "pkill -f '$arm_repo/target/release/ferro-agent fleet --node-id oracle-arm' || true; nohup $arm_repo/target/release/ferro-agent fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 &"
 }
 
 snapshot() { invoke "$(operate_session)" get_fleet_snapshot '{}'; }
@@ -246,8 +246,8 @@ stop_pid() {
 
 down() {
   [[ -d "$state_root" ]] || exit 0
-  guest_ssh "pkill -f '/var/tmp/ferro-agent-linux fleet --node-id lab-x86' || true" >/dev/null 2>&1 || true
-  arm_ssh "pkill -f 'ferro-agent-linux fleet --node-id oracle-arm' || true" >/dev/null 2>&1 || true
+  guest_ssh "pkill -f '/var/tmp/ferro-agent fleet --node-id lab-x86' || true" >/dev/null 2>&1 || true
+  arm_ssh "pkill -f 'ferro-agent fleet --node-id oracle-arm' || true" >/dev/null 2>&1 || true
   stop_pid "$state_root/pids/arm-forward" 'Oracle reverse forwards'
   stop_pid "$state_root/pids/ui" 'Fleet UI'
   stop_pid "$state_root/pids/manager" 'manager'

@@ -8,7 +8,8 @@ export type CommandResult = {
 
 export type DesktopSnapshot = {
   daemon: {
-    state: "starting" | "running" | "stopped" | "failed";
+    state: "starting" | "running" | "stopping" | "stopped" | "failed" | "unavailable";
+    healthy: boolean;
     socket_path: string;
     reason: string | null;
     platform: "linux-native" | "desktop-vm";

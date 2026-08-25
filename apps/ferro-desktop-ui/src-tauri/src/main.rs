@@ -6,7 +6,10 @@ mod web_bridge;
 mod webkit_rendering;
 
 use base64::Engine as _;
-use ferro_desktop::backend::{select_backend, Backend, BackendState};
+use ferro_desktop::backend::{
+    select_backend, Backend, BackendState, BackendStatus, DuplexStream,
+    ExecRequest as BackendExecRequest, TerminalRequest,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
@@ -15,7 +18,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
@@ -54,8 +57,7 @@ static DESKTOP_DAEMON_STARTING: AtomicBool = AtomicBool::new(false);
 static DESKTOP_DAEMON_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
 struct TerminalProcess {
-    child: Child,
-    stdin: ChildStdin,
+    stream: Box<dyn DuplexStream>,
     exec_id: String,
 }
 
@@ -194,6 +196,7 @@ struct DesktopSnapshot {
 #[derive(Debug, Serialize)]
 struct DaemonStatus {
     state: String,
+    healthy: bool,
     socket_path: String,
     reason: Option<String>,
     platform: String,
@@ -263,6 +266,7 @@ fn daemon_capabilities(socket: &std::path::Path) -> Result<DaemonCapabilities, S
 fn running_daemon_status(socket_path: &str, capabilities: DaemonCapabilities) -> DaemonStatus {
     DaemonStatus {
         state: "running".to_string(),
+        healthy: true,
         socket_path: socket_path.to_string(),
         reason: None,
         platform: "linux-native".to_string(),
@@ -361,6 +365,7 @@ fn legacy_daemon_status() -> DaemonStatus {
                     );
                     DaemonStatus {
                         state: state.to_string(),
+                        healthy: false,
                         socket_path: socket.display().to_string(),
                         reason: lifecycle_reason.or(Some(reason)),
                         platform: "linux-native".to_string(),
@@ -370,6 +375,7 @@ fn legacy_daemon_status() -> DaemonStatus {
             },
             Err(reason) => DaemonStatus {
                 state: "failed".to_string(),
+                healthy: false,
                 socket_path: String::new(),
                 reason: Some(reason),
                 platform: "linux-native".to_string(),
@@ -380,6 +386,7 @@ fn legacy_daemon_status() -> DaemonStatus {
     #[cfg(not(target_os = "linux"))]
     DaemonStatus {
         state: "running".to_string(),
+        healthy: true,
         socket_path: "desktop bridge".to_string(),
         reason: None,
         platform: "desktop-vm".to_string(),
@@ -515,6 +522,7 @@ fn daemon_status() -> DaemonStatus {
         Err(reason) => {
             return DaemonStatus {
                 state: "failed".to_string(),
+                healthy: false,
                 socket_path: String::new(),
                 reason: Some(reason),
                 platform: "unsupported".to_string(),
@@ -522,6 +530,10 @@ fn daemon_status() -> DaemonStatus {
             };
         }
     };
+    daemon_status_from_backend(status)
+}
+
+fn daemon_status_from_backend(status: BackendStatus) -> DaemonStatus {
     DaemonStatus {
         state: match status.state {
             BackendState::Stopped => "stopped",
@@ -532,6 +544,7 @@ fn daemon_status() -> DaemonStatus {
             BackendState::Unavailable => "unavailable",
         }
         .to_string(),
+        healthy: status.healthy,
         socket_path: status.endpoint,
         reason: status.reason,
         platform: status.backend,
@@ -1739,11 +1752,7 @@ fn execute_volume_proxy(
     target: Option<&str>,
 ) -> Result<CommandResult, String> {
     let args = volume_proxy_command(action, target)?;
-    let output = Command::new("ferro-desktop")
-        .args(&args)
-        .output()
-        .map_err(|error| format!("failed to run volume proxy: {error}"))?;
-    Ok(command_result_from_output(output))
+    Ok(run_owned_command("ferro-desktop", &args))
 }
 
 fn execute_network_proxy(
@@ -1756,6 +1765,16 @@ fn execute_network_proxy(
 }
 
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(
+            binary,
+            &args
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>(),
+            &[],
+        );
+    }
     match Command::new(binary).args(args).output() {
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
@@ -1763,6 +1782,9 @@ fn run_command(binary: &str, args: &[&str]) -> CommandResult {
 }
 
 fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(binary, args, &[]);
+    }
     match Command::new(binary).args(args).output() {
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
@@ -1770,6 +1792,16 @@ fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
 }
 
 fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(
+            binary,
+            &args
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>(),
+            envs,
+        );
+    }
     let mut command = Command::new(binary);
     command.args(args);
     for (k, v) in envs {
@@ -1778,6 +1810,39 @@ fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> Comm
     match command.output() {
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
+    }
+}
+
+fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -> CommandResult {
+    let (program, routed_args) =
+        if binary == "ferro-desktop" && args.first().is_some_and(|arg| arg == "exec") {
+            let split = args
+                .iter()
+                .position(|arg| arg == "--")
+                .map(|index| index + 1)
+                .unwrap_or(1);
+            match args.get(split) {
+                Some(program) => (program.clone(), args[split + 1..].to_vec()),
+                None => return command_input_failure("desktop exec command is required"),
+            }
+        } else {
+            (binary.to_string(), args.to_vec())
+        };
+    let mut request = BackendExecRequest::new(program).args(routed_args);
+    for (name, value) in envs {
+        request = request.env(*name, value.clone());
+    }
+    match desktop_backend()
+        .and_then(|backend| backend.exec(request).map_err(|error| error.to_string()))
+    {
+        Ok(output) => CommandResult {
+            ok: output.code == 0,
+            code: output.code,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            message: actionable_error(&String::from_utf8_lossy(&output.stderr)),
+        },
+        Err(error) => command_spawn_failure(binary, error),
     }
 }
 
@@ -1896,94 +1961,27 @@ fn start_terminal_impl(
     let mut current = TERMINAL_PROCESS
         .lock()
         .map_err(|_| "terminal state is unavailable".to_string())?;
-    if let Some(process) = current.as_mut() {
-        if process
-            .child
-            .try_wait()
-            .map_err(|err| format!("failed to inspect terminal process: {err}"))?
-            .is_none()
-        {
-            return Err("an exec terminal is already active".to_string());
-        }
+    if current.is_some() {
+        return Err("an exec terminal is already active".to_string());
     }
-    *current = None;
-
-    let mut child = Command::new("ferro-desktop")
-        .args(terminal_exec_command(
-            target,
-            shell,
-            &env,
-            user.as_deref(),
-            workdir.as_deref(),
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to start exec terminal: {err}"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "exec terminal stdin missing".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "exec terminal stdout missing".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "exec terminal stderr missing".to_string())?;
-    let mut stderr = BufReader::new(stderr);
-    let mut handshake = String::new();
-    stderr
-        .read_line(&mut handshake)
-        .map_err(|err| format!("failed to read terminal proxy handshake: {err}"))?;
-    let exec_id = match parse_terminal_exec_id(&handshake) {
-        Ok(exec_id) => exec_id,
-        Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("failed to start exec terminal: {err}"));
-        }
-    };
-    let stdout_events = events.clone();
-    thread::spawn(move || emit_terminal_output(stdout, stdout_events, false));
-    let stderr_events = events.clone();
-    thread::spawn(move || emit_terminal_output(stderr, stderr_events, true));
+    let session = desktop_backend()?
+        .open_terminal(TerminalRequest {
+            container: target.to_string(),
+            command: vec![shell.to_string()],
+            env,
+            user,
+            workdir,
+        })
+        .map_err(|error| error.to_string())?;
+    let output = session
+        .stream
+        .try_clone_stream()
+        .map_err(|error| error.to_string())?;
+    let output_events = events.clone();
+    thread::spawn(move || emit_terminal_output(output, output_events, false));
     *current = Some(TerminalProcess {
-        child,
-        stdin,
-        exec_id,
-    });
-    drop(current);
-
-    thread::spawn(move || loop {
-        let status = {
-            let mut process = match TERMINAL_PROCESS.lock() {
-                Ok(process) => process,
-                Err(_) => return,
-            };
-            let Some(terminal) = process.as_mut() else {
-                return;
-            };
-            match terminal.child.try_wait() {
-                Ok(Some(status)) => {
-                    *process = None;
-                    Some(status)
-                }
-                Ok(None) => None,
-                Err(err) => {
-                    events.emit("terminal-error", err.to_string());
-                    *process = None;
-                    return;
-                }
-            }
-        };
-        if let Some(status) = status {
-            events.emit("terminal-ended", status.success());
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
+        stream: session.stream,
+        exec_id: session.exec_id,
     });
     Ok(())
 }
@@ -2012,9 +2010,9 @@ fn write_terminal(data: Vec<u8>) -> Result<(), String> {
         .as_mut()
         .ok_or_else(|| "no exec terminal is active".to_string())?;
     process
-        .stdin
+        .stream
         .write_all(&data)
-        .and_then(|_| process.stdin.flush())
+        .and_then(|_| process.stream.flush())
         .map_err(|err| format!("failed to write terminal input: {err}"))
 }
 
@@ -2029,22 +2027,9 @@ fn resize_terminal(columns: u16, rows: u16) -> Result<(), String> {
         .as_ref()
         .map(|process| process.exec_id.clone())
         .ok_or_else(|| "no exec terminal is active".to_string())?;
-    let output = Command::new("ferro-desktop")
-        .args(terminal_resize_command(&exec_id, columns, rows))
-        .output()
-        .map_err(|err| format!("failed to resize exec terminal: {err}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if message.is_empty() {
-        format!(
-            "failed to resize exec terminal: status {}",
-            output.status.code().unwrap_or(-1)
-        )
-    } else {
-        message
-    })
+    desktop_backend()?
+        .resize_terminal(&exec_id, columns, rows)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2052,15 +2037,11 @@ fn close_terminal() -> Result<(), String> {
     let mut current = TERMINAL_PROCESS
         .lock()
         .map_err(|_| "terminal state is unavailable".to_string())?;
-    if let Some(mut process) = current.take() {
+    if let Some(process) = current.take() {
         process
-            .child
-            .kill()
-            .map_err(|err| format!("failed to detach exec terminal: {err}"))?;
-        process
-            .child
-            .wait()
-            .map_err(|err| format!("failed to reap exec terminal: {err}"))?;
+            .stream
+            .shutdown_write()
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -3270,13 +3251,48 @@ mod tests {
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
-        registry_logout_command, run_container_bridge_command, terminal_exec_command,
-        terminal_resize_command, volume_proxy_command, BuildProgressFrame, CommandResult,
-        ComposeAction, ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
-        JsonValue, LogBuffer, NativeContainerStats, NetworkAction, NetworkInspectRecord,
-        NetworkIpam, NetworkIpamConfig, NetworkListRecord, TimedNativeContainerStats, VolumeAction,
-        VolumeListResponse,
+        registry_logout_command, run_backend_command, run_container_bridge_command,
+        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
+        CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
+        ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
+        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
+        TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
+    use ferro_desktop::backend::{BackendCapabilities, BackendState, BackendStatus, Platform};
+
+    #[test]
+    fn tauri_cli_consumer_routes_exec_through_backend() {
+        let result = run_backend_command(
+            "ferro-desktop",
+            &[
+                "exec".into(),
+                "--".into(),
+                "sh".into(),
+                "-c".into(),
+                "printf routed".into(),
+            ],
+            &[],
+        );
+        assert!(result.ok, "{}", result.stderr);
+        assert_eq!(result.stdout, "routed");
+    }
+
+    #[test]
+    fn daemon_status_preserves_backend_health_and_state() {
+        let status = super::daemon_status_from_backend(BackendStatus {
+            backend: "wsl2".into(),
+            platform: Platform::Windows,
+            state: BackendState::Failed,
+            healthy: false,
+            endpoint: "http://127.0.0.1:4288".into(),
+            reason: Some("backend health check failed".into()),
+            capabilities: BackendCapabilities::native(),
+        });
+
+        assert_eq!(status.state, "failed");
+        assert!(!status.healthy);
+        assert_eq!(status.platform, "wsl2");
+    }
 
     #[test]
     fn container_stats_aggregate_usage_limit_and_unavailable_samples() {

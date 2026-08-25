@@ -3,7 +3,8 @@
 use clap::{Parser, Subcommand};
 use ferro_core::entitlements::{self, Feature};
 use ferro_desktop::backend::{
-    select_backend, Backend, LinuxNativeBackend, LinuxNativeConfig, Platform, TransportRequest,
+    select_backend, Backend, ExecRequest as BackendExecRequest, LinuxNativeBackend,
+    LinuxNativeConfig, Platform, TerminalRequest, TransportRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,9 +16,6 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -369,6 +367,7 @@ fn percent_encode_terminal_path_component(value: &str) -> String {
     encoded
 }
 
+#[cfg(test)]
 fn terminal_exec_create_path(container: &str) -> String {
     format!(
         "/containers/{}/exec",
@@ -376,6 +375,7 @@ fn terminal_exec_create_path(container: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn terminal_resize_path(exec_id: &str, columns: u16, rows: u16) -> String {
     format!(
         "/exec/{}/resize?w={columns}&h={rows}",
@@ -383,6 +383,7 @@ fn terminal_resize_path(exec_id: &str, columns: u16, rows: u16) -> String {
     )
 }
 
+#[cfg(test)]
 fn terminal_exec_create_payload(
     cmd: &[String],
     env: &[String],
@@ -401,7 +402,7 @@ fn terminal_exec_create_payload(
     }))?)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn terminal_http_request(
     socket: &Path,
     method: &str,
@@ -444,7 +445,7 @@ fn terminal_daemon_error(status: u16, body: &[u8]) -> DesktopError {
     DesktopError::Invalid(format!("daemon returned HTTP {status}: {message}"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn create_terminal_exec(
     socket: &Path,
     container: &str,
@@ -478,7 +479,7 @@ fn create_terminal_exec(
         .ok_or_else(|| DesktopError::Invalid("daemon exec create omitted Id".to_string()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn read_terminal_http_headers(
     stream: &mut std::os::unix::net::UnixStream,
 ) -> Result<(u16, Vec<u8>), DesktopError> {
@@ -504,7 +505,7 @@ fn read_terminal_http_headers(
     Ok((status, headers))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn open_terminal_exec(
     socket: &Path,
     exec_id: &str,
@@ -532,7 +533,7 @@ fn open_terminal_exec(
     Ok(stream)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn resize_terminal_exec(
     socket: &Path,
     exec_id: &str,
@@ -551,7 +552,7 @@ fn resize_terminal_exec(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn ferrocrate_socket_candidates(
     explicit: Option<&str>,
     rootless_socket: Option<&str>,
@@ -576,7 +577,7 @@ fn ferrocrate_socket_candidates(
     candidates
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopError> {
     use std::os::unix::fs::FileTypeExt;
 
@@ -609,21 +610,7 @@ fn select_terminal_socket(explicit: Option<&str>) -> Result<PathBuf, DesktopErro
     )))
 }
 
-#[cfg(target_os = "linux")]
-fn desktop_runtime_socket() -> Result<PathBuf, DesktopError> {
-    std::env::var_os("FERROCRATE_RUNTIME_DIR")
-        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
-        .map(PathBuf::from)
-        .map(|directory| directory.join("ferrocrate.sock"))
-        .ok_or_else(|| {
-            DesktopError::Invalid(
-                "FERROCRATE_RUNTIME_DIR or XDG_RUNTIME_DIR is required for the rootless desktop daemon"
-                    .to_string(),
-            )
-        })
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(test)]
 fn ferrocrate_daemon_command(socket: &Path) -> Vec<String> {
     vec![
         "daemon".to_string(),
@@ -633,7 +620,7 @@ fn ferrocrate_daemon_command(socket: &Path) -> Vec<String> {
     ]
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(test)]
 fn daemon_health_response_ok(response: &str) -> bool {
     let Some((headers, body)) = response.split_once("\r\n\r\n") else {
         return false;
@@ -641,141 +628,6 @@ fn daemon_health_response_ok(response: &str) -> bool {
     headers.starts_with("HTTP/1.1 200") && body.trim() == "OK"
 }
 
-#[cfg(target_os = "linux")]
-fn daemon_is_healthy(socket: &Path) -> bool {
-    use std::os::unix::net::UnixStream;
-    let Ok(mut stream) = UnixStream::connect(socket) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    if stream
-        .write_all(b"GET /_ping HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
-    let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok() && daemon_health_response_ok(&response)
-}
-
-#[cfg(target_os = "linux")]
-fn spawn_ferrocrate_daemon(socket: &Path) -> Result<std::process::Child, DesktopError> {
-    let binary = std::env::var_os("FERROCRATE_BIN").unwrap_or_else(|| "ferrocrate".into());
-    let mut command = Command::new(&binary);
-    command
-        .args(ferrocrate_daemon_command(socket))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
-    command.spawn().map_err(DesktopError::Io)
-}
-
-#[cfg(target_os = "linux")]
-struct RuntimeSupervisor {
-    socket: PathBuf,
-    child: Arc<Mutex<Option<std::process::Child>>>,
-    stop: Arc<AtomicBool>,
-    owned: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for RuntimeSupervisor {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Ok(mut slot) = self.child.lock() {
-            if let Some(mut child) = slot.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-        if self.owned && self.socket.exists() {
-            let _ = fs::remove_file(&self.socket);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn start_runtime_supervisor() -> Result<RuntimeSupervisor, DesktopError> {
-    let socket = desktop_runtime_socket()?;
-    let child_slot = Arc::new(Mutex::new(None));
-    let stop = Arc::new(AtomicBool::new(false));
-    if let Some(parent) = socket.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if daemon_is_healthy(&socket) {
-        eprintln!(
-            "Ferrocrate API daemon already running at {}",
-            socket.display()
-        );
-        return Ok(RuntimeSupervisor {
-            socket,
-            child: child_slot,
-            stop,
-            owned: false,
-        });
-    }
-    let mut child = spawn_ferrocrate_daemon(&socket)?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if daemon_is_healthy(&socket) {
-            eprintln!("Ferrocrate API daemon running at {}", socket.display());
-            *child_slot.lock().map_err(|_| {
-                DesktopError::Invalid("daemon supervisor state poisoned".to_string())
-            })? = Some(child);
-            let monitored_socket = socket.clone();
-            let monitored_child = child_slot.clone();
-            let monitored_stop = stop.clone();
-            thread::spawn(move || loop {
-                if monitored_stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let status = monitored_child.lock().ok().and_then(|mut slot| {
-                    slot.as_mut()
-                        .and_then(|child| child.try_wait().ok())
-                        .flatten()
-                });
-                match status {
-                    Some(status) => {
-                        eprintln!("Ferrocrate API daemon exited with {status}; restarting");
-                        thread::sleep(Duration::from_millis(250));
-                        match spawn_ferrocrate_daemon(&monitored_socket) {
-                            Ok(replacement) => {
-                                if let Ok(mut slot) = monitored_child.lock() {
-                                    *slot = Some(replacement);
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("Ferrocrate API daemon restart failed: {error}");
-                                thread::sleep(Duration::from_secs(1));
-                            }
-                        }
-                    }
-                    None => thread::sleep(Duration::from_millis(250)),
-                }
-            });
-            return Ok(RuntimeSupervisor {
-                socket,
-                child: child_slot,
-                stop,
-                owned: true,
-            });
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(DesktopError::Invalid(format!(
-                "Ferrocrate API daemon failed during startup with {status}"
-            )));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(DesktopError::Invalid(format!(
-        "Ferrocrate API daemon did not become healthy at {}",
-        socket.display()
-    )))
-}
-
-#[cfg(target_os = "linux")]
 fn run_terminal_proxy(
     socket: Option<&str>,
     container: &str,
@@ -784,39 +636,34 @@ fn run_terminal_proxy(
     user: Option<&str>,
     workdir: Option<&str>,
 ) -> Result<(), DesktopError> {
-    let socket = select_terminal_socket(socket)?;
-    let exec_id = create_terminal_exec(&socket, container, cmd, env, user, workdir)?;
-    let mut stream = open_terminal_exec(&socket, &exec_id)?;
-    eprintln!("FERROCRATE_EXEC_ID={exec_id}");
+    let backend = selected_proxy_backend(socket)?;
+    let mut session = backend
+        .open_terminal(TerminalRequest {
+            container: container.to_string(),
+            command: cmd.to_vec(),
+            env: env.to_vec(),
+            user: user.map(str::to_owned),
+            workdir: workdir.map(str::to_owned),
+        })
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    eprintln!("FERROCRATE_EXEC_ID={}", session.exec_id);
     std::io::stderr().flush()?;
 
-    let mut input_stream = stream.try_clone()?;
+    let mut input_stream = session
+        .stream
+        .try_clone_stream()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
     thread::spawn(move || {
         let mut input = std::io::stdin().lock();
         let _ = std::io::copy(&mut input, &mut input_stream);
-        let _ = input_stream.shutdown(std::net::Shutdown::Write);
+        let _ = input_stream.shutdown_write();
     });
     let mut output = std::io::stdout().lock();
-    std::io::copy(&mut stream, &mut output)?;
+    std::io::copy(&mut session.stream, &mut output)?;
     output.flush()?;
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn run_terminal_proxy(
-    _socket: Option<&str>,
-    _container: &str,
-    _cmd: &[String],
-    _env: &[String],
-    _user: Option<&str>,
-    _workdir: Option<&str>,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "terminal daemon proxy is supported only on Linux".to_string(),
-    ))
-}
-
-#[cfg(target_os = "linux")]
 fn run_terminal_resize(
     socket: Option<&str>,
     exec_id: &str,
@@ -828,20 +675,9 @@ fn run_terminal_resize(
             "terminal dimensions must be non-zero".to_string(),
         ));
     }
-    let socket = select_terminal_socket(socket)?;
-    resize_terminal_exec(&socket, exec_id, columns, rows)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_terminal_resize(
-    _socket: Option<&str>,
-    _exec_id: &str,
-    _columns: u16,
-    _rows: u16,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "terminal daemon proxy is supported only on Linux".to_string(),
-    ))
+    selected_proxy_backend(socket)?
+        .resize_terminal(exec_id, columns, rows)
+        .map_err(|error| DesktopError::Invalid(error.to_string()))
 }
 
 fn volume_proxy_request(
@@ -1444,31 +1280,15 @@ fn run_daemon(
         return run_daemon_pipe(pipe_name, default_wsl_distro);
     }
     validate_daemon_addr(addr, allow_remote)?;
-    #[cfg(target_os = "linux")]
-    let runtime_supervisor = start_runtime_supervisor()?;
-    #[cfg(target_os = "linux")]
-    {
-        signal_hook::flag::register(
-            signal_hook::consts::SIGTERM,
-            runtime_supervisor.stop.clone(),
-        )?;
-        signal_hook::flag::register(signal_hook::consts::SIGINT, runtime_supervisor.stop.clone())?;
-    }
+    let runtime_backend =
+        select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    runtime_backend
+        .start()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
     let listener = TcpListener::bind(addr)?;
-    #[cfg(target_os = "linux")]
-    listener.set_nonblocking(true)?;
     loop {
-        #[cfg(target_os = "linux")]
-        if runtime_supervisor.stop.load(Ordering::SeqCst) {
-            return Ok(());
-        }
         let (mut stream, _) = match listener.accept() {
             Ok(connection) => connection,
-            #[cfg(target_os = "linux")]
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50));
-                continue;
-            }
             Err(error) => return Err(error.into()),
         };
         let default_wsl_distro = default_wsl_distro.clone();
@@ -1556,42 +1376,6 @@ fn replay_follow_frames<R: BufRead, O: Write, E: Write>(
     }
 }
 
-fn send_follow_frame(
-    stream: &Arc<Mutex<TcpStream>>,
-    frame: &FollowFrame,
-) -> Result<(), DesktopError> {
-    let mut stream = stream
-        .lock()
-        .map_err(|_| DesktopError::Invalid("follow stream is unavailable".to_string()))?;
-    write_follow_frame(&mut *stream, frame)
-}
-
-fn forward_follow_output<R: Read>(
-    mut reader: R,
-    channel: FollowChannel,
-    stream: Arc<Mutex<TcpStream>>,
-    child: Arc<Mutex<std::process::Child>>,
-) {
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let bytes = match reader.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(bytes) => bytes,
-            Err(_) => return,
-        };
-        let frame = FollowFrame::Data {
-            channel: channel.clone(),
-            data: buffer[..bytes].to_vec(),
-        };
-        if send_follow_frame(&stream, &frame).is_err() {
-            if let Ok(mut child) = child.lock() {
-                let _ = child.kill();
-            }
-            return;
-        }
-    }
-}
-
 fn copy_interactive_input<R: Read, W: Write>(mut reader: R, mut writer: W) -> std::io::Result<()> {
     std::io::copy(&mut reader, &mut writer)?;
     writer.flush()
@@ -1618,8 +1402,8 @@ fn proxy_interactive_request(
         request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
     }
 
-    let mut child = match run_follow_request(&request) {
-        Ok(child) => child,
+    let mut process = match run_follow_request(&request) {
+        Ok(process) => process,
         Err(err) => {
             write_follow_frame(
                 stream,
@@ -1632,54 +1416,16 @@ fn proxy_interactive_request(
             return Ok(());
         }
     };
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| DesktopError::Invalid("interactive command stdin missing".to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| DesktopError::Invalid("interactive command stdout missing".to_string()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| DesktopError::Invalid("interactive command stderr missing".to_string()))?;
-    let child = Arc::new(Mutex::new(child));
-    let output_stream = Arc::new(Mutex::new(stream.try_clone()?));
-
+    let stdin = process
+        .take_stdin()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
     let input_stream = stream.try_clone()?;
     thread::spawn(move || copy_interactive_input(input_stream, stdin));
-    let stdout_stream = Arc::clone(&output_stream);
-    let stdout_child = Arc::clone(&child);
-    let stdout_worker = thread::spawn(move || {
-        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
-    });
-    let stderr_stream = Arc::clone(&output_stream);
-    let stderr_child = Arc::clone(&child);
-    let stderr_worker = thread::spawn(move || {
-        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
-    });
-
-    let status = loop {
-        let status = child
-            .lock()
-            .map_err(|_| {
-                DesktopError::Invalid("interactive command state is unavailable".to_string())
-            })?
-            .try_wait()?;
-        if let Some(status) = status {
-            break status;
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
-    let _ = stdout_worker.join();
-    let _ = stderr_worker.join();
-    let _ = send_follow_frame(
-        &output_stream,
-        &FollowFrame::Terminal {
-            status: status.code().unwrap_or(-1),
-        },
-    );
+    forward_backend_stream(stream, process.as_mut())?;
+    let status = process
+        .wait()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    write_follow_frame(stream, &FollowFrame::Terminal { status })?;
     Ok(())
 }
 
@@ -1703,8 +1449,8 @@ fn proxy_follow_request(
         request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
     }
 
-    let mut child = match run_follow_request(&request) {
-        Ok(child) => child,
+    let mut process = match run_follow_request(&request) {
+        Ok(process) => process,
         Err(err) => {
             write_follow_frame(
                 stream,
@@ -1717,46 +1463,32 @@ fn proxy_follow_request(
             return Ok(());
         }
     };
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| DesktopError::Invalid("follow command stdout missing".to_string()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| DesktopError::Invalid("follow command stderr missing".to_string()))?;
-    let child = Arc::new(Mutex::new(child));
-    let stream = Arc::new(Mutex::new(stream.try_clone()?));
-    let stdout_stream = Arc::clone(&stream);
-    let stdout_child = Arc::clone(&child);
-    let stdout_worker = thread::spawn(move || {
-        forward_follow_output(stdout, FollowChannel::Stdout, stdout_stream, stdout_child)
-    });
-    let stderr_stream = Arc::clone(&stream);
-    let stderr_child = Arc::clone(&child);
-    let stderr_worker = thread::spawn(move || {
-        forward_follow_output(stderr, FollowChannel::Stderr, stderr_stream, stderr_child)
-    });
-
-    let status = loop {
-        let status = child
-            .lock()
-            .map_err(|_| DesktopError::Invalid("follow command state is unavailable".to_string()))?
-            .try_wait()?;
-        if let Some(status) = status {
-            break status;
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
-    let _ = stdout_worker.join();
-    let _ = stderr_worker.join();
-    let _ = send_follow_frame(
-        &stream,
-        &FollowFrame::Terminal {
-            status: status.code().unwrap_or(-1),
-        },
-    );
+    forward_backend_stream(stream, process.as_mut())?;
+    let status = process
+        .wait()
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    write_follow_frame(stream, &FollowFrame::Terminal { status })?;
     Ok(())
+}
+
+fn forward_backend_stream(
+    stream: &mut TcpStream,
+    process: &mut dyn ferro_desktop::backend::ExecStream,
+) -> Result<(), DesktopError> {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = process.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        write_follow_frame(
+            stream,
+            &FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data: buffer[..read].to_vec(),
+            },
+        )?;
+    }
 }
 
 fn process_exec_request(
@@ -1772,7 +1504,7 @@ fn process_exec_request(
 
     let output = run_request(&request)?;
     Ok(ExecResponse {
-        status: output.status.code().unwrap_or(-1),
+        status: output.code,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
@@ -3265,57 +2997,34 @@ fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, 
     }
 }
 
-fn run_request(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
-    if request.use_wsl {
-        return run_wsl_command(request);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if should_route_to_macos_guest(&request.cmd, exec_mode_from_env()) {
-            return run_macos_guest_command(request);
-        }
-    }
-    let (program, args) = request
-        .cmd
+fn backend_exec_request(cmd: &[String]) -> Result<BackendExecRequest, DesktopError> {
+    let (program, args) = cmd
         .split_first()
         .ok_or_else(|| DesktopError::Invalid("command is required".to_string()))?;
-    let mut command = Command::new(program);
-    command.args(args);
-    // Prevent recursive host-desktop forwarding loops when daemon executes `ferrocrate`.
-    command
+    Ok(BackendExecRequest::new(program.clone())
+        .args(args.iter().cloned())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .env("RUST_LOG", "error")
         .env("FERROCRATE_LOG", "error")
-        .env("NO_COLOR", "1");
-    Ok(command.output()?)
+        .env("NO_COLOR", "1"))
 }
 
-fn run_follow_request(request: &ExecRequest) -> Result<std::process::Child, DesktopError> {
-    if request.use_wsl {
-        return run_wsl_follow_command(request);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if should_route_to_macos_guest(&request.cmd, exec_mode_from_env()) {
-            return run_macos_guest_follow_command(request);
-        }
-    }
-    let (program, args) = request
-        .cmd
-        .split_first()
-        .ok_or_else(|| DesktopError::Invalid("command is required".to_string()))?;
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-        .env("FERROCRATE_DESKTOP_FORWARD", "0")
-        .env("RUST_LOG", "error")
-        .env("FERROCRATE_LOG", "error")
-        .env("NO_COLOR", "1");
-    Ok(command.spawn()?)
+fn run_request(
+    request: &ExecRequest,
+) -> Result<ferro_desktop::backend::ExecResponse, DesktopError> {
+    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    backend
+        .exec(backend_exec_request(&request.cmd)?)
+        .map_err(|error| DesktopError::Invalid(error.to_string()))
+}
+
+fn run_follow_request(
+    request: &ExecRequest,
+) -> Result<Box<dyn ferro_desktop::backend::ExecStream>, DesktopError> {
+    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    backend
+        .exec_stream(backend_exec_request(&request.cmd)?)
+        .map_err(|error| DesktopError::Invalid(error.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3397,49 +3106,6 @@ fn is_interactive_exec_command(cmd: &[String]) -> bool {
     interactive && tty
 }
 
-#[cfg(target_os = "macos")]
-fn run_macos_guest_command(request: &ExecRequest) -> Result<std::process::Output, DesktopError> {
-    let state_path = default_vm_state_path();
-    let state = load_vm_state(&state_path).map_err(|err| {
-        DesktopError::Invalid(format!(
-            "cannot route to guest runtime: failed to load vm state {}: {err}",
-            state_path.display()
-        ))
-    })?;
-    if !vm_state_running(&state) {
-        return Err(DesktopError::Invalid(format!(
-            "cannot route to guest runtime: vm is not running (state={})",
-            state.status
-        )));
-    }
-    let mut cmd = build_guest_ssh_command(request, &state)?;
-    cmd.output().map_err(DesktopError::Io)
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_guest_follow_command(
-    request: &ExecRequest,
-) -> Result<std::process::Child, DesktopError> {
-    let state_path = default_vm_state_path();
-    let state = load_vm_state(&state_path).map_err(|err| {
-        DesktopError::Invalid(format!(
-            "cannot route to guest runtime: failed to load vm state {}: {err}",
-            state_path.display()
-        ))
-    })?;
-    if !vm_state_running(&state) {
-        return Err(DesktopError::Invalid(format!(
-            "cannot route to guest runtime: vm is not running (state={})",
-            state.status
-        )));
-    }
-    let mut cmd = build_guest_ssh_command(request, &state)?;
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    cmd.spawn().map_err(DesktopError::Io)
-}
-
 #[allow(dead_code)]
 fn vm_state_running(state: &VmState) -> bool {
     if state.status.eq_ignore_ascii_case("running") {
@@ -3448,6 +3114,7 @@ fn vm_state_running(state: &VmState) -> bool {
     state.pid.map(pid_alive).unwrap_or(false)
 }
 
+/*
 #[cfg(target_os = "macos")]
 fn build_guest_ssh_command(
     request: &ExecRequest,
@@ -3535,11 +3202,12 @@ fn run_wsl_follow_command(request: &ExecRequest) -> Result<std::process::Child, 
         ))
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_path_for_disk, build_vm_command, command_exists,
+        backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
         copy_interactive_input, desktop_addr_default_from, exec_mode_from_env, gather_phase0_check,
         is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
@@ -3560,6 +3228,19 @@ mod tests {
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
+
+    #[test]
+    fn cli_exec_consumer_builds_one_backend_program_request() {
+        let request = backend_exec_request(&[
+            "ferrocrate".into(),
+            "images".into(),
+            "--format".into(),
+            "json".into(),
+        ])
+        .unwrap();
+        assert_eq!(request.program, "ferrocrate");
+        assert_eq!(request.args, ["images", "--format", "json"]);
+    }
     use std::path::PathBuf;
 
     #[cfg(target_os = "linux")]
@@ -3916,7 +3597,7 @@ mod tests {
             interactive: false,
         };
         let out = run_request(&req).expect("run command");
-        assert!(out.status.success());
+        assert_eq!(out.code, 0);
     }
 
     #[test]

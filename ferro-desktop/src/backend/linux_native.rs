@@ -38,7 +38,7 @@ impl LinuxNativeBackend {
             socket,
             "--docker-compat".into(),
         ]);
-        let exec = CommandSpec::new(config.ferrocrate_binary);
+        let exec = CommandSpec::launcher();
         Self {
             core: BackendCore::new(
                 "linux-native",
@@ -90,6 +90,12 @@ impl Backend for LinuxNativeBackend {
     }
     fn request(&self, request: TransportRequest) -> Result<TransportResponse, BackendError> {
         self.core.host.request(&self.core.transport, &request)
+    }
+    fn open_terminal(&self, request: TerminalRequest) -> Result<TerminalSession, BackendError> {
+        self.core.open_terminal(request)
+    }
+    fn resize_terminal(&self, exec_id: &str, columns: u16, rows: u16) -> Result<(), BackendError> {
+        self.core.resize_terminal(exec_id, columns, rows)
     }
     fn socket_path(&self) -> Option<PathBuf> {
         match &self.core.transport {

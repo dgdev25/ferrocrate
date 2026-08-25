@@ -47,6 +47,11 @@ impl MacosVmBackend {
             format!("{}@127.0.0.1", config.guest_user),
             "--".into(),
         ]);
+        let relay = exec.clone().args([
+            "ferrocrate-desktop-relay".to_string(),
+            "--listen".into(),
+            config.relay_addr.to_string(),
+        ]);
         Self {
             core: BackendCore::new(
                 "macos-vm",
@@ -55,7 +60,8 @@ impl MacosVmBackend {
                 exec,
                 Transport::Loopback(config.relay_addr),
                 host,
-            ),
+            )
+            .with_auxiliary_start(relay),
         }
     }
 }
@@ -92,6 +98,12 @@ impl Backend for MacosVmBackend {
     }
     fn request(&self, request: TransportRequest) -> Result<TransportResponse, BackendError> {
         self.core.host.request(&self.core.transport, &request)
+    }
+    fn open_terminal(&self, request: TerminalRequest) -> Result<TerminalSession, BackendError> {
+        self.core.open_terminal(request)
+    }
+    fn resize_terminal(&self, exec_id: &str, columns: u16, rows: u16) -> Result<(), BackendError> {
+        self.core.resize_terminal(exec_id, columns, rows)
     }
     fn socket_path(&self) -> Option<PathBuf> {
         None

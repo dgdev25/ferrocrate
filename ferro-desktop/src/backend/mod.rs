@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -102,6 +102,10 @@ impl CommandSpec {
         }
     }
 
+    pub fn launcher() -> Self {
+        Self::new(PathBuf::new())
+    }
+
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -120,6 +124,18 @@ impl CommandSpec {
         let mut command = Command::new(&self.program);
         command.args(&self.args).envs(self.env.iter().cloned());
         command
+    }
+
+    fn exec_command(&self, request: &ExecRequest) -> Command {
+        if self.program.as_os_str().is_empty() {
+            let mut command = Command::new(&request.program);
+            command.args(&self.args).envs(self.env.iter().cloned());
+            command
+        } else {
+            let mut command = self.to_command();
+            command.arg(&request.program);
+            command
+        }
     }
 }
 
@@ -184,6 +200,7 @@ pub struct TransportResponse {
 pub struct ExecRequest {
     pub program: String,
     pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
     pub stdin: Vec<u8>,
 }
 
@@ -192,6 +209,7 @@ impl ExecRequest {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env: Vec::new(),
             stdin: Vec::new(),
         }
     }
@@ -209,6 +227,11 @@ impl ExecRequest {
         self.stdin = stdin;
         self
     }
+
+    pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,7 +241,29 @@ pub struct ExecResponse {
     pub stderr: Vec<u8>,
 }
 
-pub trait ExecStream: Read + Send {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalRequest {
+    pub container: String,
+    pub command: Vec<String>,
+    pub env: Vec<String>,
+    pub user: Option<String>,
+    pub workdir: Option<String>,
+}
+
+pub trait DuplexStream: Read + Write + Send {
+    fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError>;
+    fn shutdown_write(&self) -> Result<(), BackendError>;
+}
+
+pub struct TerminalSession {
+    pub exec_id: String,
+    pub stream: Box<dyn DuplexStream>,
+}
+
+pub trait ExecStream: Read + Write + Send {
+    fn take_stdin(&mut self) -> Result<Box<dyn Write + Send>, BackendError>;
+    fn close_stdin(&mut self) -> Result<(), BackendError>;
+    fn try_wait(&mut self) -> Result<Option<i32>, BackendError>;
     fn wait(&mut self) -> Result<i32, BackendError>;
 }
 
@@ -256,6 +301,16 @@ pub trait BackendHost: Send + Sync {
         command: &CommandSpec,
         request: &ExecRequest,
     ) -> Result<Box<dyn ExecStream>, BackendError>;
+    fn readiness_timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+    fn open_terminal(
+        &self,
+        transport: &Transport,
+        request: &TerminalRequest,
+    ) -> Result<TerminalSession, BackendError> {
+        open_terminal_via_host(self, transport, request)
+    }
 }
 
 pub trait Backend: Send + Sync {
@@ -269,6 +324,8 @@ pub trait Backend: Send + Sync {
     fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError>;
     fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError>;
     fn request(&self, request: TransportRequest) -> Result<TransportResponse, BackendError>;
+    fn open_terminal(&self, request: TerminalRequest) -> Result<TerminalSession, BackendError>;
+    fn resize_terminal(&self, exec_id: &str, columns: u16, rows: u16) -> Result<(), BackendError>;
     fn socket_path(&self) -> Option<PathBuf>;
 }
 
@@ -276,12 +333,13 @@ pub(crate) struct BackendCore {
     pub name: &'static str,
     pub platform: Platform,
     pub capabilities: BackendCapabilities,
-    pub start_command: CommandSpec,
+    pub start_commands: Vec<CommandSpec>,
     pub exec_command: CommandSpec,
     pub transport: Transport,
     pub host: Arc<dyn BackendHost>,
     state: Mutex<BackendState>,
     failure: Mutex<Option<String>>,
+    owned: Mutex<bool>,
 }
 
 impl BackendCore {
@@ -297,22 +355,125 @@ impl BackendCore {
             name,
             platform,
             capabilities: BackendCapabilities::native(),
-            start_command,
+            start_commands: vec![start_command],
             exec_command,
             transport,
             host,
             state: Mutex::new(BackendState::Stopped),
             failure: Mutex::new(None),
+            owned: Mutex::new(false),
         }
+    }
+}
+
+fn open_terminal_via_host<H: BackendHost + ?Sized>(
+    host: &H,
+    transport: &Transport,
+    request: &TerminalRequest,
+) -> Result<TerminalSession, BackendError> {
+    if request.container.trim().is_empty() || request.command.is_empty() {
+        return Err(BackendError::Transport(
+            "terminal container and command are required".into(),
+        ));
+    }
+    let create_body = serde_json::to_vec(&serde_json::json!({
+        "Cmd": request.command,
+        "AttachStdin": true,
+        "AttachStdout": true,
+        "AttachStderr": true,
+        "Tty": true,
+        "Env": request.env,
+        "User": request.user,
+        "WorkingDir": request.workdir,
+    }))
+    .map_err(|error| BackendError::Transport(error.to_string()))?;
+    let create = TransportRequest::new(
+        "POST",
+        format!(
+            "/containers/{}/exec",
+            percent_encode_path(&request.container)
+        ),
+    )
+    .header("content-type", "application/json")
+    .body(create_body);
+    let response = host.request(transport, &create)?;
+    if !(200..300).contains(&response.status) {
+        return Err(BackendError::Transport(format!(
+            "terminal create returned HTTP {}",
+            response.status
+        )));
+    }
+    let exec_id = serde_json::from_slice::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| value.get("Id")?.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| BackendError::Transport("terminal create omitted Id".into()))?;
+    let body = br#"{"Detach":false,"Tty":true}"#;
+    let mut stream = connect_transport(transport)?;
+    let token = match transport {
+        Transport::AuthenticatedLoopback { bearer_token, .. } => Some(bearer_token.as_str()),
+        _ => None,
+    };
+    let mut wire = format!(
+            "POST /exec/{}/start HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            percent_encode_path(&exec_id),
+            body.len()
+        );
+    if let Some(token) = token {
+        wire.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    wire.push_str("\r\n");
+    stream.write_all(wire.as_bytes())?;
+    stream.write_all(body)?;
+    let status = read_http_status(stream.as_mut())?;
+    if status != 101 {
+        return Err(BackendError::Transport(format!(
+            "terminal attach returned HTTP {status}"
+        )));
+    }
+    Ok(TerminalSession { exec_id, stream })
+}
+
+impl BackendCore {
+    pub fn with_auxiliary_start(mut self, command: CommandSpec) -> Self {
+        self.start_commands.push(command);
+        self
     }
 
     pub fn start(&self) -> Result<BackendStatus, BackendError> {
         *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Starting;
-        match self.host.start(&self.start_command) {
+        if self.host.health(&self.transport).unwrap_or(false) {
+            *self.owned.lock().map_err(|_| BackendError::State)? = false;
+            *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Running;
+            *self.failure.lock().map_err(|_| BackendError::State)? = None;
+            return Ok(self.status());
+        }
+        let start_result = self
+            .start_commands
+            .iter()
+            .try_for_each(|command| self.host.start(command));
+        match start_result {
             Ok(()) => {
-                *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Running;
-                *self.failure.lock().map_err(|_| BackendError::State)? = None;
-                Ok(self.status())
+                *self.owned.lock().map_err(|_| BackendError::State)? = true;
+                let deadline = std::time::Instant::now() + self.host.readiness_timeout();
+                loop {
+                    if self.host.health(&self.transport).unwrap_or(false) {
+                        *self.state.lock().map_err(|_| BackendError::State)? =
+                            BackendState::Running;
+                        *self.failure.lock().map_err(|_| BackendError::State)? = None;
+                        return Ok(self.status());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let reason = "backend did not become healthy before the readiness deadline";
+                let _ = self.host.stop();
+                *self.owned.lock().map_err(|_| BackendError::State)? = false;
+                *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Failed;
+                *self.failure.lock().map_err(|_| BackendError::State)? = Some(reason.into());
+                Err(BackendError::Unavailable(reason.into()))
             }
             Err(error) => {
                 *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Failed;
@@ -328,6 +489,7 @@ impl BackendCore {
             Ok(()) => {
                 *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Stopped;
                 *self.failure.lock().map_err(|_| BackendError::State)? = None;
+                *self.owned.lock().map_err(|_| BackendError::State)? = false;
                 Ok(self.status())
             }
             Err(error) => {
@@ -345,14 +507,16 @@ impl BackendCore {
             .map(|value| *value)
             .unwrap_or(BackendState::Failed);
         let mut reason = self.failure.lock().ok().and_then(|value| value.clone());
+        let owned = self.owned.lock().map(|value| *value).unwrap_or(false);
         let running = self.host.is_running().unwrap_or(false);
-        if state == BackendState::Running && !running {
+        if state == BackendState::Running && owned && !running {
             state = BackendState::Failed;
             reason = Some("backend process is not running".into());
         }
         let healthy =
             state == BackendState::Running && self.host.health(&self.transport).unwrap_or(false);
         if state == BackendState::Running && !healthy && reason.is_none() {
+            state = BackendState::Failed;
             reason = Some("backend health check failed".into());
         }
         BackendStatus {
@@ -365,16 +529,48 @@ impl BackendCore {
             capabilities: self.capabilities,
         }
     }
+
+    pub fn open_terminal(&self, request: TerminalRequest) -> Result<TerminalSession, BackendError> {
+        self.host.open_terminal(&self.transport, &request)
+    }
+
+    pub fn resize_terminal(
+        &self,
+        exec_id: &str,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), BackendError> {
+        if columns == 0 || rows == 0 {
+            return Err(BackendError::Transport(
+                "terminal dimensions must be non-zero".into(),
+            ));
+        }
+        let path = format!(
+            "/exec/{}/resize?w={columns}&h={rows}",
+            percent_encode_path(exec_id)
+        );
+        let response = self
+            .host
+            .request(&self.transport, &TransportRequest::new("POST", path))?;
+        if (200..300).contains(&response.status) {
+            Ok(())
+        } else {
+            Err(BackendError::Transport(format!(
+                "terminal resize returned HTTP {}",
+                response.status
+            )))
+        }
+    }
 }
 
 pub struct SystemBackendHost {
-    child: Mutex<Option<Child>>,
+    children: Mutex<Vec<Child>>,
 }
 
 impl Default for SystemBackendHost {
     fn default() -> Self {
         Self {
-            child: Mutex::new(None),
+            children: Mutex::new(Vec::new()),
         }
     }
 }
@@ -387,24 +583,22 @@ impl SystemBackendHost {
 
 impl BackendHost for SystemBackendHost {
     fn start(&self, command: &CommandSpec) -> Result<(), BackendError> {
-        let mut slot = self.child.lock().map_err(|_| BackendError::State)?;
-        if let Some(child) = slot.as_mut() {
-            if child.try_wait()?.is_none() {
-                return Ok(());
-            }
-        }
         let child = command
             .to_command()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()?;
-        *slot = Some(child);
+        self.children
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .push(child);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), BackendError> {
-        if let Some(mut child) = self.child.lock().map_err(|_| BackendError::State)?.take() {
+        let mut children = self.children.lock().map_err(|_| BackendError::State)?;
+        for mut child in children.drain(..) {
             child.kill()?;
             child.wait()?;
         }
@@ -412,11 +606,16 @@ impl BackendHost for SystemBackendHost {
     }
 
     fn is_running(&self) -> Result<bool, BackendError> {
-        let mut slot = self.child.lock().map_err(|_| BackendError::State)?;
-        Ok(match slot.as_mut() {
-            Some(child) => child.try_wait()?.is_none(),
-            None => false,
-        })
+        let mut children = self.children.lock().map_err(|_| BackendError::State)?;
+        if children.is_empty() {
+            return Ok(false);
+        }
+        for child in children.iter_mut() {
+            if child.try_wait()?.is_some() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn health(&self, transport: &Transport) -> Result<bool, BackendError> {
@@ -443,22 +642,23 @@ impl BackendHost for SystemBackendHost {
         command: &CommandSpec,
         request: &ExecRequest,
     ) -> Result<ExecResponse, BackendError> {
-        let mut process = command.to_command();
+        let mut process = command.exec_command(request);
         process
-            .arg(&request.program)
             .args(&request.args)
+            .envs(request.env.iter().cloned())
             .stdin(Stdio::piped());
         let mut child = process
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| BackendError::Command("stdin is unavailable".into()))?;
         if !request.stdin.is_empty() {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| BackendError::Command("stdin is unavailable".into()))?
-                .write_all(&request.stdin)?;
+            stdin.write_all(&request.stdin)?;
         }
+        drop(stdin);
         let output = child.wait_with_output()?;
         Ok(ExecResponse {
             code: output.status.code().unwrap_or(1),
@@ -472,32 +672,37 @@ impl BackendHost for SystemBackendHost {
         command: &CommandSpec,
         request: &ExecRequest,
     ) -> Result<Box<dyn ExecStream>, BackendError> {
-        let mut process = command.to_command();
+        let mut process = command.exec_command(request);
         process
-            .arg(&request.program)
             .args(&request.args)
+            .envs(request.env.iter().cloned())
             .stdin(Stdio::piped());
         let mut child = process
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| BackendError::Command("stdin is unavailable".into()))?;
         if !request.stdin.is_empty() {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| BackendError::Command("stdin is unavailable".into()))?
-                .write_all(&request.stdin)?;
+            stdin.write_all(&request.stdin)?;
         }
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| BackendError::Command("stdout is unavailable".into()))?;
-        Ok(Box::new(ProcessExecStream { child, stdout }))
+        Ok(Box::new(ProcessExecStream {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        }))
     }
 }
 
 struct ProcessExecStream {
     child: Child,
+    stdin: Option<ChildStdin>,
     stdout: ChildStdout,
 }
 
@@ -507,10 +712,158 @@ impl Read for ProcessExecStream {
     }
 }
 
+impl Write for ProcessExecStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin is closed"))?
+            .write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin is closed"))?
+            .flush()
+    }
+}
+
 impl ExecStream for ProcessExecStream {
+    fn take_stdin(&mut self) -> Result<Box<dyn Write + Send>, BackendError> {
+        self.stdin
+            .take()
+            .map(|stdin| Box::new(stdin) as Box<dyn Write + Send>)
+            .ok_or_else(|| BackendError::Command("stdin is closed".into()))
+    }
+
+    fn close_stdin(&mut self) -> Result<(), BackendError> {
+        self.stdin.take();
+        Ok(())
+    }
+
     fn wait(&mut self) -> Result<i32, BackendError> {
         Ok(self.child.wait()?.code().unwrap_or(1))
     }
+
+    fn try_wait(&mut self) -> Result<Option<i32>, BackendError> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(1)))
+    }
+}
+
+enum TransportStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+}
+
+impl Read for TransportStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for TransportStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.write(buffer),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
+}
+
+impl DuplexStream for TransportStream {
+    fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError> {
+        Ok(match self {
+            Self::Tcp(stream) => Box::new(Self::Tcp(stream.try_clone()?)),
+            #[cfg(unix)]
+            Self::Unix(stream) => Box::new(Self::Unix(stream.try_clone()?)),
+        })
+    }
+
+    fn shutdown_write(&self) -> Result<(), BackendError> {
+        match self {
+            Self::Tcp(stream) => stream.shutdown(std::net::Shutdown::Write)?,
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(std::net::Shutdown::Write)?,
+        }
+        Ok(())
+    }
+}
+
+fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, BackendError> {
+    match transport {
+        Transport::UnixSocket(path) => {
+            #[cfg(unix)]
+            {
+                Ok(Box::new(TransportStream::Unix(
+                    std::os::unix::net::UnixStream::connect(path)?,
+                )))
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                Err(BackendError::Unavailable(
+                    "Unix sockets are unavailable".into(),
+                ))
+            }
+        }
+        Transport::Loopback(addr) | Transport::AuthenticatedLoopback { addr, .. } => {
+            if !addr.ip().is_loopback() {
+                return Err(BackendError::Transport(
+                    "backend relay must use loopback".into(),
+                ));
+            }
+            Ok(Box::new(TransportStream::Tcp(TcpStream::connect_timeout(
+                addr,
+                Duration::from_secs(2),
+            )?)))
+        }
+    }
+}
+
+fn read_http_status(stream: &mut dyn DuplexStream) -> Result<u16, BackendError> {
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+        if headers.len() > 64 * 1024 {
+            return Err(BackendError::Transport("HTTP headers are too large".into()));
+        }
+    }
+    std::str::from_utf8(&headers)
+        .ok()
+        .and_then(|value| value.lines().next())
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| BackendError::Transport("malformed HTTP status".into()))
+}
+
+fn percent_encode_path(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn serialize_request(request: &TransportRequest, token: Option<&str>) -> Vec<u8> {
@@ -618,6 +971,9 @@ pub fn select_backend_for(
 ) -> Result<Box<dyn Backend>, BackendError> {
     match platform {
         Platform::Linux => Ok(Box::new(LinuxNativeBackend::with_host(linux, host))),
+        Platform::Windows if wsl2.relay_token.trim().is_empty() => Err(BackendError::Unavailable(
+            "WSL2 relay token is required".into(),
+        )),
         Platform::Windows => Ok(Box::new(Wsl2Backend::with_host(wsl2, host))),
         Platform::Macos => Ok(Box::new(MacosVmBackend::with_host(macos, host))),
         Platform::Unsupported => Err(BackendError::Unavailable(

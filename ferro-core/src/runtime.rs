@@ -12224,7 +12224,7 @@ fn update_container_hosts(
     containers: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
     let dns_dir = runtime_dir.join("dns");
-    fs::create_dir_all(&dns_dir)?;
+    fs::create_dir_all(&dns_dir).map_err(path_io("create runtime DNS directory", &dns_dir))?;
     let mut network_entries = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
     for peer in containers {
         if !matches!(peer.status.as_str(), "running" | "paused") {
@@ -12266,7 +12266,8 @@ fn update_container_hosts(
             let hosts_body = render_hosts(&entries);
             let hosts_path = etc_dir.join("hosts");
             if let Some(parent) = hosts_path.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)
+                    .map_err(path_io("create container hosts directory", parent))?;
             }
             write_runtime_file_atomically(&hosts_path, hosts_body.as_bytes())?;
         }
@@ -12277,7 +12278,8 @@ fn update_container_hosts(
         // it to the privileged bridge IPAM path.
         let resolv_path = etc_dir.join("resolv.conf");
         if let Some(parent) = resolv_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(path_io("create container resolver directory", parent))?;
         }
         let endpoint_gateways = record
             .effective_network_endpoints()
@@ -12308,8 +12310,12 @@ fn update_container_hosts(
         } else {
             runtime_dns_config()
         };
-        ferro_net::dns::write_resolv_conf(&resolv_path, &dns_config)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        ferro_net::dns::write_resolv_conf(&resolv_path, &dns_config).map_err(|error| {
+            RuntimeError::Network(format!(
+                "write container resolver configuration {}: {error}",
+                resolv_path.display()
+            ))
+        })?;
     }
     Ok(())
 }

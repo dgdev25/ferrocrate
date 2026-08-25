@@ -16422,7 +16422,9 @@ impl DockerCompatState {
         if request.r#ref.is_empty() || request.r#ref.len() > 128 {
             return Err("buildkit solve: missing valid build ref".to_string());
         }
-        if !request.frontend.is_empty() || request.definition.is_some() {
+        if request.definition.is_some()
+            || (!request.frontend.is_empty() && request.frontend != "dockerfile.v0")
+        {
             return Err("buildkit solve: arbitrary direct solves are unsupported".to_string());
         }
         let build = Arc::new(BuildkitBuild {
@@ -22337,6 +22339,25 @@ async fn handle_buildkit_control_request(
             "received BuildKit outer solve"
         );
         let build = state.register_buildkit_solve(solve)?;
+        if build.request.frontend == "dockerfile.v0" {
+            let frontend = buildkit_proto::moby::buildkit::v1::frontend::SolveRequest {
+                frontend: build.request.frontend.clone(),
+                frontend_opt: build.request.frontend_attrs.clone(),
+                ..Default::default()
+            };
+            let result = execute_buildkit_frontend(
+                state.as_ref(),
+                execution.as_ref(),
+                build.as_ref(),
+                &frontend,
+            )?;
+            *build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))? = Some(result);
+            build.is_completed.store(true, Ordering::Release);
+            build.completed.notify_waiters();
+        }
         wait_for_buildkit_completion(&build, lifetime).await?;
         let returned = build
             .returned
@@ -30635,6 +30656,32 @@ volumes:
             "dockerfile.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_direct_dockerfile_solve_is_registered() {
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "direct-build".to_string(),
+                session: "session-id".to_string(),
+                frontend: "dockerfile.v0".to_string(),
+                frontend_attrs: HashMap::from([(
+                    "filename".to_string(),
+                    "Dockerfile.custom".to_string(),
+                )]),
+                ..Default::default()
+            })
+            .expect("register direct dockerfile solve");
+
+        assert_eq!(build.request.frontend, "dockerfile.v0");
+        assert_eq!(
+            build.request.frontend_attrs["filename"],
+            "Dockerfile.custom"
+        );
     }
 
     #[test]

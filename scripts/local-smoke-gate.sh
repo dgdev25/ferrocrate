@@ -44,6 +44,18 @@ fi
 
 cd "$repo_root"
 
+if [[ "${FERROCRATE_SMOKE_PLATFORM:-linux}" == "desktop" ]]; then
+  : "${FERROCRATE_DESKTOP_BIN:?FERROCRATE_DESKTOP_BIN is required for desktop package smoke}"
+  test -x "$FERROCRATE_DESKTOP_BIN"
+  "$FERROCRATE_DESKTOP_BIN" --help >/dev/null
+  if [[ -n "${FERROCRATE_BIN:-}" ]]; then
+    test -x "$FERROCRATE_BIN"
+    file "$FERROCRATE_BIN"
+  fi
+  echo "local desktop package smoke gate passed"
+  exit 0
+fi
+
 echo "[smoke] 1/3 rootless prerequisite doctor"
 doctor_args=()
 if (( strict_doctor )); then

@@ -38,4 +38,14 @@ if bash "$gate" --timeout notanumber 2>/dev/null; then
   exit 1
 fi
 
+tmp="$(mktemp -d /tmp/ferrocrate-desktop-smoke.XXXXXX)"
+trap 'rm -rf "$tmp"' EXIT
+printf '#!/bin/sh\nexit 0\n' >"$tmp/ferro-desktop"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/ferrocrate"
+chmod 0755 "$tmp/ferro-desktop" "$tmp/ferrocrate"
+FERROCRATE_SMOKE_PLATFORM=desktop \
+  FERROCRATE_DESKTOP_BIN="$tmp/ferro-desktop" \
+  FERROCRATE_BIN="$tmp/ferrocrate" \
+  bash "$gate" | grep -Fq 'local desktop package smoke gate passed'
+
 printf '%s\n' 'local-smoke-gate=pass'

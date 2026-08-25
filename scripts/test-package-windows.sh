@@ -7,5 +7,7 @@ nsis="$(find "$artifact_dir" -name '*setup.exe' -print -quit)"
 [[ -n "$msi" && -n "$nsis" ]] || { echo "Windows MSI and NSIS artifacts are required" >&2; exit 1; }
 powershell.exe -NoProfile -NonInteractive -Command \
   "Start-Process msiexec.exe -ArgumentList '/i', '$msi', '/qn', '/norestart' -Wait"
-ferrocrate.exe --help >/dev/null
-bash scripts/local-smoke-gate.sh
+desktop_bin="$(find '/c/Program Files' -name 'ferro-desktop.exe' -print -quit)"
+cli_bin="$(find '/c/Program Files' -name 'ferrocrate.exe' -print -quit)"
+FERROCRATE_SMOKE_PLATFORM=desktop FERROCRATE_DESKTOP_BIN="$desktop_bin" FERROCRATE_BIN="$cli_bin" \
+  bash scripts/local-smoke-gate.sh

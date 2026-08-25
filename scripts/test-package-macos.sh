@@ -10,6 +10,8 @@ hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -quiet
 app="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
 [[ -n "$app" ]] || { echo "DMG contains no app" >&2; exit 1; }
 codesign --verify --deep --strict "$app"
-"$app/Contents/MacOS/ferro-desktop-ui" --help >/dev/null
-FERROCRATE_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" \
+FERROCRATE_SMOKE_PLATFORM=desktop \
+  FERROCRATE_DESKTOP_BIN="$app/Contents/MacOS/ferro-desktop" \
+  FERROCRATE_BIN="$app/Contents/MacOS/ferrocrate" \
+  FERROCRATE_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" \
   bash scripts/local-smoke-gate.sh

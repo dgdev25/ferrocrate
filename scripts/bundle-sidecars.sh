@@ -25,7 +25,9 @@ mkdir -p "$destination_dir"
 for output in ferrocrate ferro-desktop; do
   source_name="$output"
   [[ "$output" != "ferrocrate" ]] || source_name="ferro-cli"
+  destination_name="$output"
+  [[ "$output" != "ferro-desktop" ]] || destination_name="ferro-desktop-sidecar"
   install -m 0755 "$source_dir/${source_name}$extension" \
-    "$destination_dir/${output}-${target}${extension}"
+    "$destination_dir/${destination_name}-${target}${extension}"
 done
 echo "staged FerroCrate sidecars for $target"

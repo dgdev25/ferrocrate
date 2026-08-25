@@ -13,5 +13,5 @@ CARGO_TARGET_DIR="$tmp/target" FERROCRATE_SIDECAR_DIR="$tmp/out" \
   bash "$repo_root/scripts/bundle-sidecars.sh" test-triple
 
 cmp "$tmp/target/test-triple/release/ferro-cli" "$tmp/out/ferrocrate-test-triple"
-cmp "$tmp/target/test-triple/release/ferro-desktop" "$tmp/out/ferro-desktop-test-triple"
+cmp "$tmp/target/test-triple/release/ferro-desktop" "$tmp/out/ferro-desktop-sidecar-test-triple"
 echo "sidecar staging regression passed"

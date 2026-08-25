@@ -26,7 +26,7 @@
     "active": true,
     "targets": ["appimage", "deb", "dmg", "nsis", "msi"],
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/ferrocrate", "binaries/ferro-desktop"],
+    "externalBin": ["binaries/ferrocrate", "binaries/ferro-desktop-sidecar"],
     "resources": {
       "../../../packaging/apparmor/usr.local.bin.ferrocrate": "packaging/apparmor/usr.local.bin.ferrocrate",
       "../../../packaging/debian/postinst": "packaging/debian/postinst",

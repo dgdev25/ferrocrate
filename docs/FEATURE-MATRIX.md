@@ -28,8 +28,8 @@ Snapshot: 2026-08-25, BuildKit fresh-store and Round 10 desktop-backend qualific
 | Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
 | Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Qualified 60/60 with opt-in `legacy-peercred`; default remains unavailable without `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md) |
 | Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed by default; `legacy-peercred` is an explicit downgrade with a PID-reuse race | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; old-kernel boundaries are recorded above |
-| Windows 11 via WSL2 backend | Implemented; native/browser acceptance on a Windows 11 VM is pending | Backend contract and installer tests in `ferro-desktop/tests/backend_contract.rs` and `scripts/test-desktop-backend-contracts.sh`; a Linux/WSL run is not Windows-host acceptance. The Windows 11 VM rerun remains recorded in the Round 10 plan |
-| macOS Tahoe via Linux VM backend | Implemented; native/browser acceptance on a Tahoe VM is pending | vfkit-first/QEMU-fallback provisioning contract in `scripts/install-macos.sh`; non-macOS runs explicitly skip this row. The Tahoe VM rerun remains recorded in the Round 10 plan |
+| Windows 11 via WSL2 backend | Host-blocked boundary: native supervisor, Tauri UI, and WSL engine build, but the supplied Ubuntu distro lacks the required `socat` relay dependency | [`VM-ACCEPTANCE-2026-08-25.md`](desktop/VM-ACCEPTANCE-2026-08-25.md): exact relay error; no daemon, Doctor, token, or browser/runtime claim |
+| macOS Tahoe via Linux VM backend | Host-blocked boundary: nested HV unavailable and neither vfkit/QEMU nor Node/npm is installed | [`VM-ACCEPTANCE-2026-08-25.md`](desktop/VM-ACCEPTANCE-2026-08-25.md): exact `kern.hv_support: 0` and Node/npm errors; no VM/runtime claim |
 
 ## Product areas
 

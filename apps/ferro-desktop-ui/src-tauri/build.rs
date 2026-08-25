@@ -14,7 +14,7 @@ fn stage_non_bundle_placeholders() {
     let directory = manifest.join("binaries");
     std::fs::create_dir_all(&directory).expect("create sidecar placeholder directory");
 
-    for name in ["ferrocrate", "ferro-desktop"] {
+    for name in ["ferrocrate", "ferro-desktop-sidecar"] {
         let path = directory.join(format!("{name}-{target}{extension}"));
         if !path.exists() {
             write_placeholder(&path);

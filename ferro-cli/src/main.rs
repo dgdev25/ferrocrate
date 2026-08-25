@@ -17570,6 +17570,7 @@ fn handle_docker_compat_connection(
     let mut stats_follow: Option<String> = None;
     let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
+    let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
     let response_result: Result<Vec<u8>, String> = (|| {
         let (request, origin) = read_docker_request_after_auth(&mut stream, |socket| {
@@ -18302,16 +18303,42 @@ fn handle_docker_compat_connection(
                     http_response(200, &body, "application/vnd.docker.raw-stream")
                 }
             }
-            ("GET", path)
+            ("GET", path) | ("POST", path)
                 if path.starts_with("/containers/") && path.ends_with("/attach/ws") =>
             {
-                // The websocket attach variant is a recognized Docker route
-                // with no local implementation; report the boundary
-                // explicitly instead of a generic unknown-route 404.
-                docker_error_response(
-                    501,
-                    "websocket attach is unsupported: use the TCP hijack attach endpoint",
-                )
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/attach/ws");
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let key = request
+                    .headers
+                    .get("sec-websocket-key")
+                    .ok_or_else(|| "docker: websocket attach requires Sec-WebSocket-Key".to_string())?;
+                if request
+                    .headers
+                    .get("sec-websocket-version")
+                    .is_none_or(|version| version != "13")
+                {
+                    return Err("docker: websocket attach requires Sec-WebSocket-Version 13".into());
+                }
+                let stdout_requested = query
+                    .get("stdout")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdout"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let stderr_requested = query
+                    .get("stderr")
+                    .map(|value| parse_docker_bool_query(Some(value), "stderr"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let (stdout, stderr) = runtime.logs_split(&id).unwrap_or_default();
+                let tty = runtime.inspect(&id).map_err(|error| error.to_string())?.tty;
+                websocket_attach = Some(docker_attach_output(
+                    tty,
+                    if stdout_requested { &stdout } else { "" },
+                    if stderr_requested { &stderr } else { "" },
+                ));
+                docker_websocket_upgrade_headers(key)
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
                 let requested_id = path
@@ -19988,6 +20015,19 @@ fn handle_docker_compat_connection(
         Err(err) => docker_error_response(docker_status_for_error(&err), &err),
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
+    if let Some(output) = websocket_attach {
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message, WebSocket};
+        let mut websocket = WebSocket::from_raw_socket(stream, Role::Server, None);
+        if !output.is_empty() {
+            websocket
+                .send(Message::Binary(output.into()))
+                .map_err(|error| format!("docker: websocket attach send failed: {error}"))?;
+        }
+        websocket
+            .close(None)
+            .map_err(|error| format!("docker: websocket attach close failed: {error}"))?;
+        return Ok(());
+    }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
             Some(
@@ -22298,6 +22338,15 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn docker_hijack_headers() -> Vec<u8> {
     b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n".to_vec()
+}
+
+#[cfg(target_os = "linux")]
+fn docker_websocket_upgrade_headers(key: &str) -> Vec<u8> {
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 #[cfg(target_os = "linux")]
@@ -29627,6 +29676,16 @@ volumes:
         assert!(headers.contains("Connection: Upgrade\r\n"));
         assert!(headers.contains("Upgrade: tcp\r\n"));
         assert!(headers.contains("application/vnd.docker.raw-stream"));
+    }
+
+    #[test]
+    fn websocket_attach_handshake_uses_rfc6455_accept_key() {
+        let response = super::docker_websocket_upgrade_headers(
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        );
+        let text = String::from_utf8(response).expect("HTTP response");
+        assert!(text.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(text.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
     }
 
     #[test]

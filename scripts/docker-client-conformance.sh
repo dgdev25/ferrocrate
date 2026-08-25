@@ -96,6 +96,14 @@ command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
 command -v ldd >/dev/null 2>&1 || harness_error "ldd is required to verify the offline image fixture"
+websocat_bin="${FERROCRATE_CONFORMANCE_WEBSOCAT:-}"
+if [[ -z "$websocat_bin" ]]; then
+  websocat_bin="$(command -v websocat 2>/dev/null || true)"
+fi
+if [[ -z "$websocat_bin" && -x /tmp/ferrocrate-websocat/bin/websocat ]]; then
+  websocat_bin=/tmp/ferrocrate-websocat/bin/websocat
+fi
+[[ -x "$websocat_bin" ]] || harness_error "websocat is required for WebSocket attach conformance"
 busybox_bin=""
 if [[ -n "${FERROCRATE_CONFORMANCE_BUSYBOX:-}" ]]; then
   busybox_candidates=("$FERROCRATE_CONFORMANCE_BUSYBOX")
@@ -692,6 +700,35 @@ record_compose_watch_sync() {
     "$sequence" "$id" "$area" "$command_text" "$watch_exit" "$status" "$duration" >>"$log_tmp"
 }
 
+record_websocket_attach() {
+  local id="container-attach-websocket" area="container"
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="websocat --binary --one-message --ws-c-uri ws://localhost/v1.45/containers/$attach_container/attach/ws?stdout=1\\&stderr=1 - ws-c:unix:<docker-socket>"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  if run_bounded_owned "$command_timeout" 5 "$command_token" \
+      "$websocat_bin" --binary --one-message \
+        --ws-c-uri="ws://localhost/v1.45/containers/$attach_container/attach/ws?stdout=1&stderr=1" \
+        - "ws-c:unix:$socket" \
+      >"$stdout_file" 2>"$stderr_file" \
+      && grep -aFq ferrocrate-conformance-attach "$stdout_file"; then
+    exit_code=0
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    exit_code=$?
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+}
+
 # Client identity and engine prerequisites.
 record_command cli-version client version
 record_command compose-version compose compose version
@@ -790,6 +827,7 @@ record_command attach-container-create container create --label "$owner_label" -
 record_command attach-container-start container start "$attach_container"
 record_command container-attach container attach --no-stdin --sig-proxy=false "$attach_container"
 record_command attach-container-wait container wait "$attach_container"
+record_websocket_attach
 record_command attach-container-remove container rm --force "$attach_container"
 
 # Discovery/auth use isolated Docker credentials. Login intentionally targets

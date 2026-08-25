@@ -156,10 +156,11 @@ ensure_guest() {
 
 prepare_arm_repo() {
   note "shipping matching source bundle and building aarch64 agent on Oracle A1"
-  local bundle="$state_root/ferrocrate-fleet.bundle"
+  local bundle="$state_root/ferrocrate-fleet.bundle" assets="$state_root/fleet-ui-dist.tar.gz"
   (cd "$repo_root" && git bundle create "$bundle" HEAD)
-  scp -q "$bundle" "${arm_user}@${arm_host}:/tmp/ferrocrate-fleet.bundle"
-  arm_ssh "set -e; . \$HOME/.cargo/env || { echo 'Oracle Rust environment is unavailable at ~/.cargo/env' >&2; exit 2; }; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; npm ci --prefix apps/ferro-desktop-ui; npm run --prefix apps/ferro-desktop-ui build; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent -p ferro-cli"
+  (cd "$repo_root/apps/ferro-desktop-ui" && tar -czf "$assets" dist)
+  scp -q "$bundle" "$assets" "${arm_user}@${arm_host}:/tmp/"
+  arm_ssh "set -e; . \$HOME/.cargo/env || { echo 'Oracle Rust environment is unavailable at ~/.cargo/env' >&2; exit 2; }; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; tar -xzf /tmp/fleet-ui-dist.tar.gz -C apps/ferro-desktop-ui; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent -p ferro-cli"
 }
 
 start_reverse_forwards() {

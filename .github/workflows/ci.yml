@@ -18,8 +18,8 @@ jobs:
             runner: [self-hosted, linux, x64, ferro-lab]
           - name: macos
             runner: [self-hosted, macos, ferro-lab]
-          # windows tier temporarily removed 2026-08-25: the runner VM's 40 GB disk cannot hold a CI checkout
-          # beside the backends3 build; restore the entry once the disk is expanded to 80 GB.
+          - name: windows
+            runner: [self-hosted, windows, ferro-lab]
     runs-on: ${{ matrix.runner }}
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60

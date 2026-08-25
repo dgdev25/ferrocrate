@@ -22,34 +22,34 @@ jobs:
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
         env:
-          USERPROFILE: E:\ferrocrate-runner-profile
-          HOMEDRIVE: E:
-          HOMEPATH: \ferrocrate-runner-profile
-          APPDATA: E:\ferrocrate-runner-profile\AppData\Roaming
-          LOCALAPPDATA: E:\ferrocrate-runner-profile\AppData\Local
-          TEMP: E:\ferrocrate-runner-profile\Temp
-          TMP: E:\ferrocrate-runner-profile\Temp
+          USERPROFILE: 'E:\ferrocrate-runner-profile'
+          HOMEDRIVE: 'E:'
+          HOMEPATH: '\ferrocrate-runner-profile'
+          APPDATA: 'E:\ferrocrate-runner-profile\AppData\Roaming'
+          LOCALAPPDATA: 'E:\ferrocrate-runner-profile\AppData\Local'
+          TEMP: 'E:\ferrocrate-runner-profile\Temp'
+          TMP: 'E:\ferrocrate-runner-profile\Temp'
       - shell: bash
         run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
         env:
-          USERPROFILE: E:\ferrocrate-runner-profile
-          HOMEDRIVE: E:
-          HOMEPATH: \ferrocrate-runner-profile
-          APPDATA: E:\ferrocrate-runner-profile\AppData\Roaming
-          LOCALAPPDATA: E:\ferrocrate-runner-profile\AppData\Local
-          TEMP: E:\ferrocrate-runner-profile\Temp
-          TMP: E:\ferrocrate-runner-profile\Temp
+          USERPROFILE: 'E:\ferrocrate-runner-profile'
+          HOMEDRIVE: 'E:'
+          HOMEPATH: '\ferrocrate-runner-profile'
+          APPDATA: 'E:\ferrocrate-runner-profile\AppData\Roaming'
+          LOCALAPPDATA: 'E:\ferrocrate-runner-profile\AppData\Local'
+          TEMP: 'E:\ferrocrate-runner-profile\Temp'
+          TMP: 'E:\ferrocrate-runner-profile\Temp'
       - run: npm run tauri:build -- --bundles nsis,msi --config '{"bundle":{"createUpdaterArtifacts":false}}'
         shell: bash
         working-directory: apps/ferro-desktop-ui
         env:
-          USERPROFILE: E:\ferrocrate-runner-profile
-          HOMEDRIVE: E:
-          HOMEPATH: \ferrocrate-runner-profile
-          APPDATA: E:\ferrocrate-runner-profile\AppData\Roaming
-          LOCALAPPDATA: E:\ferrocrate-runner-profile\AppData\Local
-          TEMP: E:\ferrocrate-runner-profile\Temp
-          TMP: E:\ferrocrate-runner-profile\Temp
+          USERPROFILE: 'E:\ferrocrate-runner-profile'
+          HOMEDRIVE: 'E:'
+          HOMEPATH: '\ferrocrate-runner-profile'
+          APPDATA: 'E:\ferrocrate-runner-profile\AppData\Roaming'
+          LOCALAPPDATA: 'E:\ferrocrate-runner-profile\AppData\Local'
+          TEMP: 'E:\ferrocrate-runner-profile\Temp'
+          TMP: 'E:\ferrocrate-runner-profile\Temp'
       - name: Secret-leak canary
         shell: bash
         env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }

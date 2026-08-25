@@ -5,15 +5,15 @@
 Ferrocrate is a container engine you use exactly like Docker — same commands,
 same Dockerfiles, same images — implemented from scratch in Rust as a single
 binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 60 default-BuildKit
-scenarios, and all 60 pass (rootless and rootful). Images are standard OCI, so anything Ferrocrate
+conformance suite drives a real Docker client through 61 default-BuildKit
+scenarios, and all 61 pass (rootless and rootful). Images are standard OCI, so anything Ferrocrate
 builds runs under Docker, podman, or Kubernetes, and the other way round.
 
 ## ✨ Highlights
 
-- **Docker-compatible, verified** — 60/60 default-BuildKit conformance against
-  the real `docker` client, including multi-network connect/disconnect and
-  non-readable log-driver behavior.
+- **Docker-compatible, verified** — 61/61 default-BuildKit conformance against
+  the real `docker` client, including cold base-image pulls, multi-network
+  connect/disconnect, and non-readable log-driver behavior.
 - **Fast** — the dated benchmark register records host-local paired results;
   Round 9 closes the previously recorded attached-run loss.
 - **One binary** — daemon, native CLI, Compose, and a Kubernetes CRI endpoint
@@ -129,7 +129,7 @@ need a separate operator gate).
 ```bash
 cargo test --workspace          # full suite
 cargo test -p ferro-core --lib  # runtime core
-bash scripts/docker-client-conformance.sh   # 47-scenario classic-builder gate
+bash scripts/docker-client-conformance.sh   # 61-scenario default-BuildKit gate
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and

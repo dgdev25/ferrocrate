@@ -15,7 +15,7 @@ Status vocabulary (extends `docs/compatibility/reference-index.md`):
 - **Host-blocked** — proof requires a host capability this repository's
   current hosts do not provide; the exact blocker is recorded.
 
-Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
+Snapshot: 2026-08-25, BuildKit fresh-store qualification.
 
 ## Host tiers
 
@@ -39,12 +39,12 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 | Registry auth/TLS, transient retry (429/5xx/timeout) | Supported (local fixture scope) | [`verification/2026-08-21-registry-transient-retry-current-head.md`](evidence/verification/2026-08-21-registry-transient-retry-current-head.md) |
 | External live-registry exchange (pull/push beyond fixture) | Experimental | not claimed by any current evidence; boundary recorded in registry retry evidence |
 | Dockerfile build, cache identity, provenance | Supported | [`build/2026-08-22-parallel-build-graphs.md`](evidence/build/2026-08-22-parallel-build-graphs.md) |
-| BuildKit session builds | Supported for local `dockerfile.v0` builds through the authenticated docker driver: session FileSync, RUN/COPY progress, failure propagation, tagging, and classic digest parity; arbitrary LLB and `gateway.v0` remain unsupported | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md) |
+| BuildKit session builds | Supported for local `dockerfile.v0` builds through the authenticated docker driver: session FileSync and Auth.Credentials, fresh-store base pulls with metadata progress, RUN/COPY progress, failure propagation, tagging, and classic digest parity; arbitrary LLB and `gateway.v0` remain unsupported | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md) |
 | Dockerfile secrets/SSH mounts | Supported (root-qualified on this host) | [`build/2026-08-21-build-secrets-ssh-mounts.md`](evidence/build/2026-08-21-build-secrets-ssh-mounts.md) |
 | Container lifecycle (create/start/stop/kill/wait/restart) | Supported | [`verification/2026-08-21-docker-tty-container-lifecycle-current-head.md`](evidence/verification/2026-08-21-docker-tty-container-lifecycle-current-head.md) |
 | Logs, exec, attach, TTY, resize | Supported | same TTY lifecycle witness; PTY qualification [`verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md`](evidence/verification/2026-08-21-pty-docker-qualification-current-head-b8d464d4.md) |
 | Container log drivers | `json-file` supported; `journald` and `syslog` supported behind crate features with live proofs; signed manifest plugins supported (fixture scope). Readback is supported only for `json-file`, matching Docker. | [`log-drivers/2026-08-24-live-drivers.md`](evidence/log-drivers/2026-08-24-live-drivers.md) |
-| Docker-client builder conformance | Supported: 60/60 with default BuildKit and 60/60 with `DOCKER_BUILDKIT=0`; the harness requires digest identity and failing-RUN propagation | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md) |
+| Docker-client builder conformance | Supported: 61/61 with default BuildKit and 61/61 with `DOCKER_BUILDKIT=0`; the harness requires a fresh-store base pull, digest identity, and failing-RUN propagation | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md), [`design/buildkit-session-endpoint.md`](design/buildkit-session-endpoint.md) |
 | Named and bind volumes, read-only mounts | Supported | [`verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md`](evidence/verification/2026-08-21-rootless-shared-compose-fixed-current-head-c7c15505.md) |
 | Bridge networking via iptables and nftables | Supported | four-distro privileged rerun witness (host tiers above) |
 | Multi-network containers, Docker connect/disconnect, and Compose multi-network services | Supported on the rootful qualified tier; per-network DNS aliases are not implemented | [`networking/2026-08-24-multi-network-connect-disconnect.md`](evidence/networking/2026-08-24-multi-network-connect-disconnect.md) |

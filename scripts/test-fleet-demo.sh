@@ -8,3 +8,15 @@ bash -n "$script"
 help="$($script --help)"
 grep -Fq 'fleet-demo.sh [up|down|--status|verify]' <<<"$help"
 grep -Fq 'FLEET_DEMO_STATE_DIR' <<<"$help"
+
+# The demo must not inherit a host's pre-existing rootless runtime.  Apart
+# from making the run non-reproducible, a stale file where a runtime directory
+# belongs makes every fleet command fail before it reaches the container.
+grep -Fq 'FERROCRATE_HOME=\$HOME/$remote_state/runtime' "$script"
+grep -Fq 'FERROCRATE_RUNTIME_DIR=\$HOME/$remote_state/runtime' "$script"
+grep -Fq 'FERROCRATE_HOME=\$HOME/$arm_state/runtime' "$script"
+grep -Fq 'FERROCRATE_RUNTIME_DIR=\$HOME/$arm_state/runtime' "$script"
+
+# `fleet` invokes ferro-cli for commands, so the remote release build must
+# explicitly emit the CLI alongside the aarch64 agent.
+grep -Fq -- '-p ferro-cli --bin ferro-cli' "$script"

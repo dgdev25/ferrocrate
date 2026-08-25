@@ -161,7 +161,7 @@ prepare_arm_repo() {
   (cd "$repo_root" && git bundle create "$bundle" HEAD)
   (cd "$repo_root/apps/ferro-desktop-ui" && tar -czf "$assets" dist)
   scp -q "$bundle" "$assets" "${arm_user}@${arm_host}:/tmp/"
-  arm_ssh "set -e; . \$HOME/.cargo/env || { echo 'Oracle Rust environment is unavailable at ~/.cargo/env' >&2; exit 2; }; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; tar -xzf /tmp/fleet-ui-dist.tar.gz -C apps/ferro-desktop-ui; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent -p ferro-cli"
+  arm_ssh "set -e; . \$HOME/.cargo/env || { echo 'Oracle Rust environment is unavailable at ~/.cargo/env' >&2; exit 2; }; if [ -d $arm_repo/.git ]; then cd $arm_repo; test -z \"\$(git status --porcelain)\" || { echo 'remote repo is dirty' >&2; exit 2; }; git fetch /tmp/ferrocrate-fleet.bundle HEAD; git checkout --detach FETCH_HEAD; else git clone /tmp/ferrocrate-fleet.bundle $arm_repo; cd $arm_repo; fi; tar -xzf /tmp/fleet-ui-dist.tar.gz -C apps/ferro-desktop-ui; CARGO_BUILD_JOBS=2 cargo build --release -p ferro-mgr --bin ferro-agent -p ferro-cli --bin ferro-cli"
 }
 
 start_reverse_forwards() {
@@ -201,7 +201,7 @@ enroll_guest() {
     scp -q "$state_root/pki/node-ca.pem" "${guest_user}@${guest_host}:/var/tmp/fleet-node-ca.pem"
     guest_ssh "/var/tmp/ferro-agent enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_manager_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
   fi
-  guest_ssh "pkill -x ferro-agent || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_manager_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 </dev/null &"
+  guest_ssh "mkdir -p \$HOME/$remote_state/runtime; chmod 700 \$HOME/$remote_state/runtime; pkill -x ferro-agent || true; FERROCRATE_HOME=\$HOME/$remote_state/runtime FERROCRATE_RUNTIME_DIR=\$HOME/$remote_state/runtime nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_manager_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 </dev/null &"
 }
 
 enroll_arm() {
@@ -211,7 +211,7 @@ enroll_arm() {
     scp -q "$state_root/pki/node-ca.pem" "${arm_user}@${arm_host}:/tmp/fleet-node-ca.pem"
     arm_ssh "mkdir -p \$HOME/$arm_state; chmod 700 \$HOME/$arm_state; $arm_repo/target/release/ferro-agent enroll --node-id oracle-arm --endpoint $arm_host --token '$enrollment' --manager-endpoint https://127.0.0.1:55051 --server-ca /tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$arm_state/agent.pem --key-out \$HOME/$arm_state/agent.key --node-ca-out \$HOME/$arm_state/node-ca.pem"
   fi
-  arm_ssh "pkill -x ferro-agent || true; nohup $arm_repo/target/release/ferro-agent fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 </dev/null &"
+  arm_ssh "mkdir -p \$HOME/$arm_state/runtime; chmod 700 \$HOME/$arm_state/runtime; pkill -x ferro-agent || true; FERROCRATE_HOME=\$HOME/$arm_state/runtime FERROCRATE_RUNTIME_DIR=\$HOME/$arm_state/runtime nohup $arm_repo/target/release/ferro-agent fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 </dev/null &"
 }
 
 snapshot() { invoke "$(operate_session)" get_fleet_snapshot '{}'; }

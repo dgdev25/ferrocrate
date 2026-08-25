@@ -215,7 +215,17 @@ async fn invoke(
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"unknown fleet command"})))
             .into_response();
     }
-    if !identity.role.can_operate() {
+    let read_only_command = command == "fleet_command"
+        && arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    "list_containers" | "container_logs" | "inspect_container" | "doctor"
+                )
+            });
+    if !read_only_command && !identity.role.can_operate() {
         let _ = state.audit.append(
             &identity.principal,
             identity.role,

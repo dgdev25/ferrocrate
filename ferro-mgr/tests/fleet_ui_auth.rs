@@ -82,7 +82,11 @@ async fn view_role_reads_but_operate_is_forbidden_and_witnessed() {
     let denied = client
         .post(format!("http://{}/__tauri/fleet_command", server.addr()))
         .bearer_auth(token)
-        .json(&json!({"node_id":"node-a","action":"doctor","arguments":{}}))
+        .json(&json!({
+            "node_id":"node-a",
+            "action":"run_container",
+            "arguments":{"name":"demo","image":"alpine","command":[]}
+        }))
         .send()
         .await
         .unwrap();

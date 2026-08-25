@@ -25,6 +25,11 @@ const ICON_PATHS = {
     ["circle", { cx: 12, cy: 12, r: 9 }],
     ["path", { d: "M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" }],
   ],
+  servers: [
+    ["rect", { x: 4, y: 4, width: 16, height: 6, rx: 2 }],
+    ["rect", { x: 4, y: 14, width: 16, height: 6, rx: 2 }],
+    ["path", { d: "M8 7h.01M8 17h.01M12 7h5M12 17h5" }],
+  ],
   pulse: [
     ["path", { d: "M3 12h4l2-5 4 10 2-5h6" }],
   ],

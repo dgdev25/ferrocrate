@@ -81,6 +81,7 @@ import {
   statusTone,
 } from "./forgeShell.mjs";
 import type { ContainerStatusFilter } from "./forgeShell.mjs";
+import { FleetApp } from "./FleetApp";
 
 const EMPTY = "Nothing to show.";
 const THEME_KEY = "ferro_desktop_theme";
@@ -108,7 +109,7 @@ function commandMessage(result: CommandResult, fallback: string): string {
   return result.message || result.stderr || fallback;
 }
 
-function App(): JSX.Element {
+function LocalApp(): JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [containerStats, setContainerStats] = useState<ContainerStatsResponse | null>(null);
   const [documentVisible, setDocumentVisible] = useState(document.visibilityState === "visible");
@@ -1267,6 +1268,7 @@ function App(): JSX.Element {
     volumes: "Volumes",
     compose: "Compose",
     networks: "Networks",
+    fleet: "Fleet",
     doctor: "Doctor",
     settings: "Settings",
   };
@@ -1319,6 +1321,7 @@ function App(): JSX.Element {
           compose: composeSnapshot?.services.length ?? 0,
           volumes: volumes.length,
           networks: networks.length,
+          fleet: 0,
         }}
         doctorIssues={doctorResult?.raw.checks.filter((check) => !check.ok).length ?? 0}
         onSelect={selectSection}
@@ -1373,6 +1376,8 @@ function App(): JSX.Element {
               ) : activeSection === "builds" ? (
                 null
               ) : activeSection === "doctor" || activeSection === "settings" ? (
+                null
+              ) : activeSection === "fleet" ? (
                 null
               ) : (
                 <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}>
@@ -1677,6 +1682,16 @@ function App(): JSX.Element {
 
             {activeSection === "doctor" ? <DoctorPage result={doctorResult} busy={runtimeBusy} resultsTableRef={doctorResultsTableRef} onRun={() => setDoctorDialogOpen(true)} onStart={() => void runAction("vm_start", "Ferrocrate Start")} onStop={() => void runAction("vm_stop", "Ferrocrate Stop")} /> : null}
 
+            {activeSection === "fleet" ? (
+              <section className="panel empty-page-panel" aria-label="Fleet control">
+                <div className="empty-state resource-empty-state">
+                  <span className="empty-state-icon" aria-hidden="true"><Icon name="servers" size={22} /></span>
+                  <strong>Fleet control runs on ferro-mgr</strong>
+                  <span className="empty-state-copy">Start <span className="mono">ferro-mgr fleet-ui</span> with an enrolled operator identity to manage remote hosts.</span>
+                </div>
+              </section>
+            ) : null}
+
             {activeSection === "settings" ? <SettingsPage authState={authState} installerResult={installerResult} nativeLinux={snapshot?.daemon.platform === "linux-native"} daemonStatus={snapshot?.daemon} onOpenAccount={() => setSettingsDialog("account")} onOpenInstall={() => setSettingsDialog("install")} /> : null}
 
             {lastAction ? <section className="last-action"><strong>{actionLabel}</strong><span className={lastAction.ok ? "ok-text" : "bad-text"}>{lastAction.ok ? "completed" : "did not complete"}</span>{lastAction.stderr || !lastAction.ok ? <details><summary>Technical details</summary><pre>{`${lastAction.stderr || "No error output was returned."}\nStatus ${lastAction.code}`}</pre></details> : null}</section> : null}
@@ -1742,6 +1757,12 @@ function App(): JSX.Element {
     </div>
   );
 
+}
+
+function App(): JSX.Element {
+  const fleet = typeof window !== "undefined"
+    && Boolean((window as Window & { __FERROCRATE_FLEET__?: boolean }).__FERROCRATE_FLEET__);
+  return fleet ? <FleetApp /> : <LocalApp />;
 }
 
 export default App;

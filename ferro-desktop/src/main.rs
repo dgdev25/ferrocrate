@@ -1109,14 +1109,21 @@ fn ensure_vm_disk(disk_path: &Path, vm_dir: &Path) -> Result<(), DesktopError> {
 }
 
 fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
-    require_command("ssh-keygen")?;
+    // Apple's ssh-keygen has no `--version` flag, so the generic version-based
+    // probe rejects an installed executable before this provisioning path runs.
+    Command::new("ssh-keygen")
+        .arg("-h")
+        .output()
+        .map_err(|_| DesktopError::Invalid("missing required command: ssh-keygen".to_string()))?;
     let key_path = vm_dir.join("vm_ssh_key");
     let pub_path = vm_dir.join("vm_ssh_key.pub");
     if key_path.exists() && pub_path.exists() {
         return Ok((key_path, pub_path));
     }
     let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-f"])
+        // macOS's ssh-keygen drops an empty argv value after `-N`; use its
+        // attached option form so this is unambiguously an empty passphrase.
+        .args(["-t", "ed25519", "-N=", "-f"])
         .arg(&key_path)
         .status()?;
     if !status.success() {
@@ -3457,7 +3464,7 @@ mod tests {
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
         copy_interactive_input, decode_wsl_output, desktop_addr_default_from, exec_mode_from_env,
-        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        ensure_ssh_key, gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
         load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
         parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
@@ -4157,6 +4164,15 @@ mod tests {
         assert!(vm_state_running(&state));
         state.status = "stopped".to_string();
         assert!(!vm_state_running(&state));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_ssh_key_creates_an_unencrypted_key_on_macos() {
+        let directory = tempfile::tempdir().expect("temp vm directory");
+        let (private_key, public_key) = ensure_ssh_key(directory.path()).expect("generate key");
+        assert!(private_key.is_file());
+        assert!(public_key.is_file());
     }
 
     #[test]

@@ -39,10 +39,12 @@ impl NetworkBackend {
                 ))
             }
             Self::Iptables if !probe.command_exists("iptables") => Err(BackendError::Unavailable(
-                "iptables backend unavailable: command not found".into(),
+                "iptables backend unavailable: install the iptables package (command not found)"
+                    .into(),
             )),
             Self::Nftables if !probe.command_exists("nft") => Err(BackendError::Unavailable(
-                "nftables backend unavailable: command not found".into(),
+                "nftables backend unavailable: install the nftables package (command not found)"
+                    .into(),
             )),
             _ => Ok(()),
         }
@@ -167,5 +169,24 @@ mod tests {
     fn explicit_firewall_backends_remain_selected() {
         assert_eq!("iptables".parse(), Ok(NetworkBackend::Iptables));
         assert_eq!("nftables".parse(), Ok(NetworkBackend::Nftables));
+    }
+
+    #[test]
+    fn missing_packet_filter_backend_names_the_install_package() {
+        let probe = FakeProbe::unavailable();
+        assert_eq!(
+            NetworkBackend::Iptables
+                .ensure_available(&probe)
+                .unwrap_err()
+                .to_string(),
+            "iptables backend unavailable: install the iptables package (command not found)"
+        );
+        assert_eq!(
+            NetworkBackend::Nftables
+                .ensure_available(&probe)
+                .unwrap_err()
+                .to_string(),
+            "nftables backend unavailable: install the nftables package (command not found)"
+        );
     }
 }

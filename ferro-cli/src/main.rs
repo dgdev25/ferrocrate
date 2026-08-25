@@ -2169,6 +2169,25 @@ fn handle_doctor(
 
     #[cfg(target_os = "linux")]
     {
+        let packet_filter = packet_filter_backend();
+        checks.push(DoctorCheck {
+            id: "packet_filter_backend".to_string(),
+            ok: packet_filter.is_some(),
+            message: packet_filter.as_ref().map_or_else(
+                || "packet-filter backend unavailable: install the iptables or nftables package"
+                    .to_string(),
+                |(backend, path)| {
+                    format!("packet-filter backend: {backend} ({})", path.display())
+                },
+            ),
+            hint: packet_filter.is_none().then_some(
+                "install the iptables or nftables package before starting containers with published ports"
+                    .to_string(),
+            ),
+            remediated: false,
+            action: None,
+        });
+
         let configured = std::env::var("FERROCRATE_PEER_AUTH").ok();
         let status = peer_authentication_status(configured.as_deref(), kernel_has_peer_pidfd());
         checks.push(DoctorCheck {
@@ -10933,6 +10952,20 @@ fn command_exists(bin: &str) -> bool {
     resolve_command_path(bin).is_some()
 }
 
+#[cfg(target_os = "linux")]
+fn packet_filter_backend_with(
+    mut resolve: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<(&'static str, PathBuf)> {
+    resolve("nft")
+        .map(|path| ("nft", path))
+        .or_else(|| resolve("iptables").map(|path| ("iptables", path)))
+}
+
+#[cfg(target_os = "linux")]
+fn packet_filter_backend() -> Option<(&'static str, PathBuf)> {
+    packet_filter_backend_with(resolve_command_path)
+}
+
 fn validate_compression(value: &str) -> Result<String, String> {
     match value {
         "gzip" | "zstd" => Ok(value.to_string()),
@@ -17080,6 +17113,11 @@ fn run_daemon(
     let peer_auth_mode = resolve_peer_auth_mode(peer_auth)?;
     if peer_auth_mode == PeerAuthMode::LegacyPeercred {
         eprintln!("WARN peer authentication legacy-peercred active; PID reuse can race identity resolution");
+    }
+    if packet_filter_backend().is_none() {
+        eprintln!(
+            "WARN packet-filter backend unavailable; install the iptables or nftables package before starting containers with published ports"
+        );
     }
     let runtime_dir = runtime_dir();
     let engine_runtime_dir = engine_runtime_dir();
@@ -30527,6 +30565,18 @@ volumes:
         validate_network_backend("nftables").expect("ok");
         let err = validate_network_backend("bogus").expect_err("invalid backend");
         assert!(err.contains("network-backend"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packet_filter_detection_prefers_nft_and_reports_binary_path() {
+        let detected = super::packet_filter_backend_with(|name| match name {
+            "nft" => Some(PathBuf::from("/usr/sbin/nft")),
+            "iptables" => Some(PathBuf::from("/usr/sbin/iptables")),
+            _ => None,
+        });
+        assert_eq!(detected, Some(("nft", PathBuf::from("/usr/sbin/nft"))));
+        assert_eq!(super::packet_filter_backend_with(|_| None), None);
     }
 
     #[test]

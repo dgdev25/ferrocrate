@@ -6882,6 +6882,7 @@ mod tests {
 
     #[test]
     fn registry_cache_export_import_round_trip_proves_cache_hit() {
+        let _env = crate::test_support::acquire_env_lock();
         let registry = LocalTestRegistry::run();
         let source = tempfile::tempdir().unwrap();
         let context = source.path().join("context");
@@ -7799,6 +7800,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn secret_mount_run_sees_secret_then_all_artifacts_stay_clean() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         let Some(busybox) = static_busybox() else {
@@ -7909,6 +7911,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn optional_secret_skips_silently_when_not_provided() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         let Some(busybox) = static_busybox() else {
@@ -7951,6 +7954,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ssh_mount_binds_socket_and_sets_auth_sock_inside_run() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         use std::os::unix::net::UnixListener;

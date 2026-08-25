@@ -1131,6 +1131,8 @@ pub enum NetworkCommands {
         ipv6_subnet: Option<String>,
         #[arg(long = "ipv6-gateway")]
         ipv6_gateway: Option<String>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
     /// List networks.
     Ls {
@@ -8797,6 +8799,7 @@ fn dispatch_remote_socket(
                     gateway,
                     ipv6_subnet,
                     ipv6_gateway,
+                    labels,
                 },
         } => {
             let mut configs = Vec::new();
@@ -8817,6 +8820,10 @@ fn dispatch_remote_socket(
                 "Driver": "bridge",
                 "EnableIPv6": ipv6_subnet.is_some(),
                 "IPAM": {"Config": configs},
+                "Labels": match parse_key_values("network: label", &labels) {
+                    Ok(labels) => labels,
+                    Err(error) => return Some(Err(error)),
+                },
             });
             let body = match serde_json::to_vec(&body) {
                 Ok(body) => body,
@@ -12840,6 +12847,7 @@ fn create_network_record(
         bridge_name: bridge_name_for_network(name),
         bridge_cidr: format!("{gateway_ip}/{prefix}"),
         ipv6_cidr,
+        labels: BTreeMap::new(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -12989,6 +12997,7 @@ fn handle_network_authorized(
             gateway,
             ipv6_subnet,
             ipv6_gateway,
+            labels,
         } => {
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
@@ -12997,13 +13006,16 @@ fn handle_network_authorized(
             if records.iter().any(|record| record.name == name) {
                 return Err(format!("network: already exists {name}"));
             }
-            let record = create_network_record(
+            let mut record = create_network_record(
                 &name,
                 subnet.as_deref(),
                 gateway.as_deref(),
                 ipv6_subnet.as_deref(),
                 ipv6_gateway.as_deref(),
             )?;
+            record.labels = parse_key_values("network: label", &labels)?
+                .into_iter()
+                .collect();
             if records.iter().any(|existing| {
                 existing.bridge_name == record.bridge_name && existing.name != record.name
             }) {
@@ -13037,6 +13049,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -13046,6 +13059,7 @@ fn handle_network_authorized(
                 &DockerNetworkView {
                     name: "bridge",
                     driver: "bridge",
+                    labels: &BTreeMap::new(),
                 },
                 &filters,
             );
@@ -13170,6 +13184,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -16240,6 +16255,8 @@ struct DockerNetworkCreateSpec {
     enable_ipv6: bool,
     #[serde(rename = "IPAM")]
     ipam: Option<DockerIpamSpec>,
+    #[serde(rename = "Labels", default)]
+    labels: BTreeMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -19529,6 +19546,7 @@ fn handle_docker_compat_connection(
                     &DockerNetworkView {
                         name: "bridge",
                         driver: "bridge",
+                        labels: &BTreeMap::new(),
                     },
                     &filters,
                 ) {
@@ -19544,6 +19562,7 @@ fn handle_docker_compat_connection(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -19561,6 +19580,7 @@ fn handle_docker_compat_connection(
                             "Id": record.name,
                             "Driver": record.driver,
                             "Scope": "local",
+                            "Labels": record.labels,
                             "IPAM": {
                                 "Config": ipam_config
                             }
@@ -19600,7 +19620,8 @@ fn handle_docker_compat_connection(
                         "Scope": "local",
                         "EnableIPv6": record.ipv6_cidr.is_some(),
                         "IPAM": {"Config": ipam_config},
-                        "Containers": containers
+                        "Containers": containers,
+                        "Labels": record.labels
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
@@ -19644,6 +19665,7 @@ fn handle_docker_compat_connection(
                         gateway,
                         ipv6_subnet,
                         ipv6_gateway,
+                        labels: spec.labels.iter().map(|(key, value)| format!("{key}={value}")).collect(),
                     },
                     &origin,
                     &surface_authorization,
@@ -19662,6 +19684,7 @@ fn handle_docker_compat_connection(
                             &DockerNetworkView {
                                 name: &record.name,
                                 driver: &record.driver,
+                                labels: &record.labels,
                             },
                             &filters,
                         )
@@ -21151,6 +21174,7 @@ fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Res
 struct DockerNetworkView<'a> {
     name: &'a str,
     driver: &'a str,
+    labels: &'a BTreeMap<String, String>,
 }
 
 fn docker_network_matches_filters(
@@ -21173,12 +21197,12 @@ fn docker_network_matches_filters(
                     || (value == "custom" && record.name != "bridge")
             })
     });
-    // Network records do not persist labels; a label selector can therefore
-    // only match when it selects nothing. Compose uses this filter to find
-    // its own project networks and treats an empty result as "create it".
-    let label_matches = filters
-        .get("label")
-        .is_none_or(|values| values.is_empty());
+    let label_matches = filters.get("label").is_none_or(|values| {
+        values.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        })
+    });
     name_matches && driver_matches && scope_matches && type_matches && label_matches
 }
 
@@ -27047,6 +27071,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27311,6 +27336,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27372,6 +27398,7 @@ volumes:
                 gateway: Some("172.31.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         );
@@ -27427,6 +27454,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27479,6 +27507,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27522,6 +27551,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27584,6 +27614,7 @@ volumes:
             bridge_name: first.clone(),
             bridge_cidr: "172.32.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -27604,6 +27635,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27631,6 +27663,7 @@ volumes:
                 gateway: Some("172.33.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -27706,6 +27739,7 @@ volumes:
             bridge_name: super::canonical_bridge_name("orphan-net"),
             bridge_cidr: "172.35.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -29625,9 +29659,11 @@ volumes:
 
     #[test]
     fn docker_network_filters_match_name_driver_and_type() {
+        let labels = BTreeMap::from([("x".to_string(), "y".to_string())]);
         let custom = super::DockerNetworkView {
             name: "app-net",
             driver: "bridge",
+            labels: &labels,
         };
         let filters = serde_json::from_value(serde_json::json!({
             "name": ["app-net"],
@@ -29645,14 +29681,13 @@ volumes:
         let builtin = super::DockerNetworkView {
             name: "bridge",
             driver: "bridge",
+            labels: &BTreeMap::new(),
         };
         assert!(!docker_network_matches_filters(&builtin, &filters));
-        // Labels are accepted (compose probes with them) but never stored,
-        // so a valued selector matches no network.
         let labeled =
             serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
         assert!(validate_docker_network_filters(&labeled).is_ok());
-        assert!(!docker_network_matches_filters(&custom, &labeled));
+        assert!(docker_network_matches_filters(&custom, &labeled));
         let unsupported =
             serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
         assert!(validate_docker_network_filters(&unsupported).is_err());
@@ -31038,7 +31073,7 @@ volumes:
         let owned = super::network_lifecycle::NetworkRecord {
             name: "blue".into(), driver: "bridge".into(), subnet: "10.0.0.0/24".into(),
             gateway: "10.0.0.1".into(), bridge_name: "fc-owned000001".into(),
-            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, created_at_unix: 0, generation: 1,
+            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, labels: BTreeMap::new(), created_at_unix: 0, generation: 1,
         };
         assert_eq!(
             super::orphan_bridge_names(

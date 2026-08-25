@@ -411,6 +411,81 @@ fn macos_vm_defaults_match_the_installer_layout() {
     assert_eq!(config.relay_addr, "127.0.0.1:4288".parse().unwrap());
 }
 
+fn captured_macos_remote_command(request: ExecRequest) -> (CommandSpec, ExecRequest) {
+    let host = FakeHost::healthy(true);
+    let backend = MacosVmBackend::with_host(MacosVmConfig::default(), host.clone());
+
+    backend.exec(request).unwrap();
+
+    let captured = host.execs.lock().unwrap().pop().unwrap();
+    captured
+}
+
+#[test]
+fn macos_exec_quotes_semicolons_in_remote_programs() {
+    let (ssh, request) = captured_macos_remote_command(ExecRequest::new(
+        "x; touch /home/ferro/pwned #",
+    ));
+
+    assert_eq!(ssh.args.last().unwrap(), "ferro@127.0.0.1");
+    assert_eq!(
+        request.program,
+        "exec env -- 'x; touch /home/ferro/pwned #'"
+    );
+    assert!(request.args.is_empty());
+    assert!(request.env.is_empty());
+}
+
+#[test]
+fn macos_exec_quotes_command_substitution_in_remote_arguments() {
+    let (_, request) = captured_macos_remote_command(
+        ExecRequest::new("printf").args(["$(touch /home/ferro/pwned)"]),
+    );
+
+    assert_eq!(
+        request.program,
+        "exec env -- 'printf' '$(touch /home/ferro/pwned)'"
+    );
+}
+
+#[test]
+fn macos_exec_preserves_spaces_in_one_remote_argument() {
+    let (_, request) = captured_macos_remote_command(
+        ExecRequest::new("printf").args(["one argument with spaces"]),
+    );
+
+    assert_eq!(
+        request.program,
+        "exec env -- 'printf' 'one argument with spaces'"
+    );
+}
+
+#[test]
+fn macos_exec_escapes_single_quotes_in_remote_arguments() {
+    let (_, request) =
+        captured_macos_remote_command(ExecRequest::new("printf").args(["it's literal"]));
+
+    assert_eq!(
+        request.program,
+        "exec env -- 'printf' 'it'\"'\"'s literal'"
+    );
+}
+
+#[test]
+fn macos_exec_quotes_hostile_remote_environment_values() {
+    let (_, request) = captured_macos_remote_command(
+        ExecRequest::new("printenv")
+            .args(["PAYLOAD"])
+            .env("PAYLOAD", "x; $(touch /home/ferro/pwned) 'quoted'"),
+    );
+
+    assert_eq!(
+        request.program,
+        "exec env -- 'PAYLOAD=x; $(touch /home/ferro/pwned) '\"'\"'quoted'\"'\"'' 'printenv' 'PAYLOAD'"
+    );
+    assert!(request.env.is_empty());
+}
+
 #[test]
 fn start_does_not_report_running_before_the_health_check_passes() {
     let host = Arc::new(FakeHost::default());

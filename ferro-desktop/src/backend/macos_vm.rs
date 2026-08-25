@@ -82,7 +82,6 @@ impl MacosVmBackend {
             "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
             format!("{}@127.0.0.1", config.guest_user),
-            "--".into(),
         ]);
         let tunnel = CommandSpec::new("ssh").args([
             "-i".to_string(),
@@ -162,12 +161,14 @@ impl Backend for MacosVmBackend {
         self.core.host.health(&self.core.transport)
     }
     fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError> {
-        self.core.host.exec(&self.core.exec_command, &request)
+        self.core
+            .host
+            .exec(&self.core.exec_command, &remote_exec_request(request))
     }
     fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError> {
         self.core
             .host
-            .exec_stream(&self.core.exec_command, &request)
+            .exec_stream(&self.core.exec_command, &remote_exec_request(request))
     }
     fn request(&self, request: TransportRequest) -> Result<TransportResponse, BackendError> {
         self.core.host.request(&self.core.transport, &request)
@@ -181,6 +182,23 @@ impl Backend for MacosVmBackend {
     fn socket_path(&self) -> Option<PathBuf> {
         Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
     }
+}
+
+fn remote_exec_request(request: ExecRequest) -> ExecRequest {
+    let mut command = String::from("exec env --");
+    for (name, value) in &request.env {
+        command.push(' ');
+        command.push_str(&posix_shell_quote(&format!("{name}={value}")));
+    }
+    for value in std::iter::once(&request.program).chain(request.args.iter()) {
+        command.push(' ');
+        command.push_str(&posix_shell_quote(value));
+    }
+    ExecRequest::new(command).stdin(request.stdin)
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 impl Drop for MacosVmBackend {

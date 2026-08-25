@@ -22404,8 +22404,8 @@ async fn handle_buildkit_control_request(
                     Vertex {
                         digest: format!("sha256:{:x}", Sha256::digest(step.as_bytes())),
                         name: step.clone(),
-                        started: Some(timestamp.clone()),
-                        completed: Some(timestamp.clone()),
+                        started: Some(timestamp),
+                        completed: Some(timestamp),
                         ..Default::default()
                     }
                 })
@@ -23190,9 +23190,7 @@ async fn run_buildkit_control_session(
     input.abort();
     let input_result = input.await;
     let output_result = output.await;
-    if let Err(error) = worker {
-        return Err(error);
-    }
+    worker?;
     if let Ok(Err(error)) = input_result {
         return Err(error);
     }

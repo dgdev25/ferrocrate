@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod web_bridge;
 #[cfg(target_os = "linux")]

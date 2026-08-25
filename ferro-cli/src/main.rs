@@ -30298,6 +30298,7 @@ fn runtime_dir() -> PathBuf {
 
 fn engine_runtime_dir() -> PathBuf {
     std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("FERROCRATE_HOME"))
         .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(runtime_dir)

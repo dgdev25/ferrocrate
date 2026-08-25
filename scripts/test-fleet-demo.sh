@@ -6,7 +6,7 @@ script="$repo_root/scripts/fleet-demo.sh"
 
 bash -n "$script"
 help="$($script --help)"
-grep -Fq 'fleet-demo.sh [up|down|--status|verify]' <<<"$help"
+grep -Fq 'fleet-demo.sh [up|down|--status|verify|--refresh-login]' <<<"$help"
 grep -Fq 'FLEET_DEMO_STATE_DIR' <<<"$help"
 
 # The demo must not inherit a host's pre-existing rootless runtime.  Apart
@@ -22,6 +22,8 @@ grep -Fq 'FERROCRATE_RUNTIME_DIR=\$HOME/$arm_state/runtime' "$script"
 grep -Fq 'Fleet UI login expired; restarting it' "$script"
 grep -Fq 'wait_for_pid_exit' "$script"
 grep -Fq 'setsid env' "$script"
+grep -Fq 'kill -- "-$pid"' "$script"
+grep -Fq 'fleet/refresh-login' "$script"
 
 # Re-runs keep the already staged matching guest binaries.  The guest has a
 # deliberately small disk, so copying a byte-identical release again is both

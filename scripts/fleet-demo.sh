@@ -18,12 +18,17 @@ ui_url="http://${ui_addr}"
 
 die() { echo "fleet-demo: $*" >&2; exit 1; }
 note() { echo "fleet-demo: $*" >&2; }
-pid_alive() { [[ -s "$1" ]] && kill -0 "$(<"$1")" 2>/dev/null; }
+pid_alive() {
+  [[ -s "$1" ]] || return 1
+  local pid; pid="$(<"$1")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null \
+    && ! ps -o stat= -p "$pid" 2>/dev/null | grep -q '^[[:space:]]*Z'
+}
 require() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
 usage() {
   cat <<'EOF'
-usage: scripts/fleet-demo.sh [up|down|--status|verify]
+usage: scripts/fleet-demo.sh [up|down|--status|verify|--refresh-login]
 
 Starts the local manager, libvirt x86_64 guest, and Oracle A1 agent, then
 prints the short-lived browser login credentials. Runtime CA, credentials,
@@ -35,6 +40,7 @@ Commands:
   down      stop agents, SSH forwards, manager/UI, then shut down the guest
   --status  print manager/UI process and both host connection states
   verify    require both hosts connected; run and read logs on each host
+  --refresh-login  mint replacement browser credentials without restarting services
 EOF
 }
 
@@ -195,11 +201,14 @@ start_reverse_forwards() {
   pid_alive "$state_root/pids/arm-forward" || die "Oracle reverse forwards failed; see $state_root/arm-forward.log"
 }
 
-operate_session() {
-  [[ -f "$state_root/ui/operate.login" ]] || die "Fleet UI login credential is missing; run up"
+login_session() {
+  local credential_path="$1"
+  [[ -f "$credential_path" ]] || die "Fleet UI login credential is missing; run up"
   curl --fail --silent --show-error -X POST "$ui_url/fleet/login" -H 'content-type: application/json' \
-    --data "{\"credential\":\"$(tr -d '\n' <"$state_root/ui/operate.login")\"}" | jq -er '.token'
+    --data "{\"credential\":\"$(tr -d '\n' <"$credential_path")\"}" | jq -er '.token'
 }
+
+operate_session() { login_session "$state_root/ui/operate.login"; }
 
 invoke() {
   local token="$1" command="$2" body="$3"
@@ -253,6 +262,28 @@ print_logins() {
   printf 'Operate URL: %s\nOperate token: %s\nView URL: %s\nView token: %s\n' "$ui_url" "$operate" "$ui_url" "$view"
 }
 
+refresh_login_credential() {
+  local credential_path="$1" session credential temporary
+  session="$(login_session "$credential_path")" || return
+  credential="$(curl --fail --silent --show-error -X POST "$ui_url/fleet/refresh-login" \
+    -H "authorization: Bearer $session" | jq -er '.credential')" || return
+  temporary="$(mktemp "${credential_path}.XXXXXX")"
+  printf '%s\n' "$credential" >"$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$credential_path"
+}
+
+refresh_login() {
+  require curl; require jq
+  pid_alive "$state_root/pids/ui" || die "Fleet UI is not running; run up"
+  refresh_login_credential "$state_root/ui/operate.login" \
+    || die "Fleet UI login credential expired; run up to restart the UI"
+  refresh_login_credential "$state_root/ui/view.login" \
+    || die "Fleet UI view login credential expired; run up to restart the UI"
+  note "refreshed Fleet UI login credentials without restarting it"
+  print_logins
+}
+
 up() {
   require cargo; require curl; require jq; require openssl; require ssh; require scp; require git; require setsid
   ensure_layout; create_pki; build_local; start_manager; ensure_guest; prepare_arm_repo; start_reverse_forwards; start_ui
@@ -273,7 +304,8 @@ wait_for_pid_exit() {
 stop_pid() {
   local path="$1" label="$2"
   if pid_alive "$path"; then
-    kill "$(<"$path")" 2>/dev/null || true
+    local pid; pid="$(<"$path")"
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     wait_for_pid_exit "$path" "$label" || return
   fi
   rm -f "$path"
@@ -324,6 +356,7 @@ case "${1:-up}" in
   up) up ;;
   down) down ;;
   --status) status ;;
+  --refresh-login) refresh_login ;;
   verify) verify ;;
   --help|-h) usage ;;
   *) usage >&2; exit 2 ;;

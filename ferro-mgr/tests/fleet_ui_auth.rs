@@ -145,3 +145,59 @@ async fn expired_browser_session_is_rejected() {
     assert_eq!(response.status(), 401);
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_authenticated_session_can_mint_a_replacement_login_credential() {
+    let directory = tempfile::tempdir().unwrap();
+    let ui = FleetUi::new(
+        Arc::new(TestAssets),
+        Arc::new(TestBackend),
+        Arc::new(AuditJournal::open(directory.path().join("audit.jsonl")).unwrap()),
+        60,
+    )
+    .unwrap();
+    let credential = ui
+        .mint_login(
+            BrowserIdentity {
+                principal: "mtls:operator-cert".into(),
+                role: FleetRole::Operate,
+            },
+            60,
+        )
+        .unwrap();
+    let server = ui
+        .spawn_insecure_loopback("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let login: Value = client
+        .post(format!("http://{}/fleet/login", server.addr()))
+        .json(&json!({"credential":credential}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let replacement = client
+        .post(format!("http://{}/fleet/refresh-login", server.addr()))
+        .bearer_auth(login["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), 200);
+    let replacement: Value = replacement.json().await.unwrap();
+    let replacement = replacement["credential"].as_str().unwrap();
+    assert!(!replacement.is_empty());
+    assert_eq!(
+        client
+            .post(format!("http://{}/fleet/login", server.addr()))
+            .json(&json!({"credential":replacement}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    server.shutdown().await;
+}

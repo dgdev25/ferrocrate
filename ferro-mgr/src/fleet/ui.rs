@@ -143,6 +143,7 @@ impl FleetUiServer {
 fn router(state: UiState) -> Router {
     Router::new()
         .route("/fleet/login", post(login))
+        .route("/fleet/refresh-login", post(refresh_login))
         .route("/__tauri/{command}", post(invoke))
         .fallback(asset)
         .with_state(state)
@@ -183,17 +184,37 @@ async fn login(State(state): State<UiState>, Json(request): Json<LoginRequest>) 
     }
 }
 
+async fn refresh_login(State(state): State<UiState>, headers: axum::http::HeaderMap) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(identity) = state.sessions.authenticate(token, unix_now()) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state.logins.mint(identity, unix_now(), 300) {
+        Ok(credential) => Json(json!({"credential": credential})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
 async fn invoke(
     State(state): State<UiState>,
     Path(command): Path<String>,
     headers: axum::http::HeaderMap,
     Json(arguments): Json<Value>,
 ) -> Response {
-    let Some(token) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
+    let Some(token) = bearer_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let Some(identity) = state.sessions.authenticate(token, unix_now()) else {

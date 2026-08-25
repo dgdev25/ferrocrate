@@ -224,7 +224,11 @@ fn reported_client_version(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::reported_client_version;
+    use std::os::unix::fs::PermissionsExt;
+
+    use serde_json::json;
+
+    use super::{execute_agent_command, reported_client_version, FleetCommand};
 
     #[test]
     fn observation_extracts_the_client_version_from_docker_style_output() {
@@ -236,5 +240,29 @@ mod tests {
             reported_client_version("Client:\n Version: \"0.1.0\"\n API version: \"1.45\"\n"),
             "0.1.0"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_agent_commands_preserve_cli_stderr_verbatim() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("runtime");
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'registry denied\\n' >&2\nexit 125\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = execute_agent_command(
+            &executable,
+            FleetCommand {
+                request_id: 7,
+                action: "run_container".into(),
+                arguments: json!({
+                    "name":"stderr-test",
+                    "image":"nosuch/image:1",
+                    "command":[],
+                }),
+            },
+        )
+        .await;
+        assert_eq!(result.exit_code, 125);
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stderr, "registry denied\n");
     }
 }

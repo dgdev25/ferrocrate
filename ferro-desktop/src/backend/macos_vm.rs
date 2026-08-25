@@ -12,18 +12,41 @@ pub struct MacosVmConfig {
 
 impl Default for MacosVmConfig {
     fn default() -> Self {
-        let root = std::env::var_os("FERROCRATE_VM_DIR")
+        let root = std::env::var_os("FERROCRATE_CONFIG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("ferrocrate-vm"));
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join(".ferrocrate")
+            });
+        let vm_root = std::env::var_os("FERROCRATE_VM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("vm"));
         Self {
             launcher: std::env::var_os("FERROCRATE_VM_LAUNCHER")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("vfkit")),
-            vm_config: root.join("vm.json"),
-            relay_addr: "127.0.0.1:4288".parse().expect("constant loopback address"),
-            ssh_port: 2222,
-            guest_user: "ferrocrate".into(),
-            ssh_key: root.join("id_ed25519"),
+                .unwrap_or_else(|| PathBuf::from("ferro-desktop")),
+            vm_config: std::env::var_os("FERROCRATE_DESKTOP_VM_STATE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("desktop-vm.json")),
+            relay_addr: std::env::var("FERROCRATE_VM_API_PORT")
+                .ok()
+                .and_then(|port| format!("127.0.0.1:{port}").parse().ok())
+                .unwrap_or_else(|| {
+                    "127.0.0.1:4288"
+                        .parse()
+                        .expect("constant loopback address")
+                }),
+            ssh_port: std::env::var("FERROCRATE_VM_SSH_PORT")
+                .ok()
+                .and_then(|port| port.parse().ok())
+                .unwrap_or(2222),
+            guest_user: std::env::var("FERROCRATE_VM_GUEST_USER")
+                .unwrap_or_else(|_| "ferro".into()),
+            ssh_key: std::env::var_os("FERROCRATE_VM_SSH_KEY")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| vm_root.join("desktop_vm_ed25519")),
         }
     }
 }
@@ -37,20 +60,46 @@ impl MacosVmBackend {
         Self::with_host(config, SystemBackendHost::shared())
     }
     pub fn with_host(config: MacosVmConfig, host: Arc<dyn BackendHost>) -> Self {
-        let start = CommandSpec::new(config.launcher)
-            .args(["--config", config.vm_config.to_string_lossy().as_ref()]);
+        let start = CommandSpec::new(config.launcher).args([
+            "vm",
+            "--state-file",
+            config.vm_config.to_string_lossy().as_ref(),
+            "start",
+            "--foreground",
+        ]);
+        let guest_socket = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
         let exec = CommandSpec::new("ssh").args([
             "-i".to_string(),
             config.ssh_key.display().to_string(),
             "-p".into(),
             config.ssh_port.to_string(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
             format!("{}@127.0.0.1", config.guest_user),
             "--".into(),
         ]);
-        let relay = exec.clone().args([
-            "ferrocrate-desktop-relay".to_string(),
-            "--listen".into(),
-            config.relay_addr.to_string(),
+        let tunnel = CommandSpec::new("ssh").args([
+            "-i".to_string(),
+            config.ssh_key.display().to_string(),
+            "-p".into(),
+            config.ssh_port.to_string(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ExitOnForwardFailure=yes".into(),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+            "-N".into(),
+            "-L".into(),
+            format!(
+                "{}:/home/{}/{}",
+                config.relay_addr,
+                config.guest_user,
+                guest_socket.display()
+            ),
+            format!("{}@127.0.0.1", config.guest_user),
         ]);
         Self {
             core: BackendCore::new(
@@ -61,7 +110,7 @@ impl MacosVmBackend {
                 Transport::Loopback(config.relay_addr),
                 host,
             )
-            .with_auxiliary_start(relay),
+            .with_auxiliary_start(tunnel),
         }
     }
 }
@@ -106,6 +155,6 @@ impl Backend for MacosVmBackend {
         self.core.resize_terminal(exec_id, columns, rows)
     }
     fn socket_path(&self) -> Option<PathBuf> {
-        None
+        Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
     }
 }

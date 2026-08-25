@@ -29,5 +29,21 @@ require_text "$macos" 'virtiofs' 'virtiofs share'
 require_text "$macos" 'ssh' 'SSH execution'
 require_text "$macos" 'LocalForward|-[[:space:]]*L' 'daemon socket forwarding'
 require_text "$macos" 'nested virtualization|kern\.hv_support' 'virtualization diagnosis'
+require_text "$macos" 'dhcpd_leases' 'vfkit guest address discovery'
+require_text "$macos" 'socat.*TCP-LISTEN.*VM_SSH_PORT|TCP-LISTEN.*VM_SSH_PORT.*socat' 'vfkit SSH host forwarding'
+require_text "$macos" 'FERROCRATE_CONFIG_DIR=.*\.ferrocrate' 'shared config root'
+require_text "$macos" 'VM_STATE_FILE=.*desktop-vm\.json' 'shared VM state path'
+require_text "$macos" 'VM_GUEST_USER=.*ferro' 'shared guest user'
+require_text "$macos" 'desktop_vm_ed25519' 'shared SSH key'
+require_text "$macos" 'FERROCRATE_DESKTOP_VM_STATE' 'runtime VM state override'
+require_text "$macos" 'FERROCRATE_VM_GUEST_USER' 'runtime guest user override'
+require_text "$macos" 'FERROCRATE_VM_SSH_KEY' 'runtime SSH key override'
+require_text "$macos" 'ferrocrate daemon --socket' 'guest daemon socket'
+require_text "$macos" 'systemctl.*enable.*--now|enable --now.*ferrocrate' 'guest daemon supervision'
+require_text "$macos" 'qemu-tcg-' 'software QEMU acceleration fallback'
+if grep -Fq 'ferrocrate-desktop-relay' "$macos"; then
+  printf 'obsolete macOS relay executable contract remains in %s\n' "$macos" >&2
+  exit 1
+fi
 
 printf 'desktop backend provisioning contracts passed\n'

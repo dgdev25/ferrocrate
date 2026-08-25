@@ -2123,7 +2123,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                 .collect::<Vec<_>>();
 
             match state.config.backend.as_str() {
-                "qemu-hvf" | "qemu-x86_64" => {
+                "qemu-hvf" | "qemu-x86_64" | "qemu-tcg-aarch64" | "qemu-tcg-x86_64" => {
                     if !cfg!(target_os = "macos") {
                         return Err(DesktopError::Invalid(
                             "qemu vm backend is currently supported on macOS hosts only"
@@ -2786,8 +2786,8 @@ fn qemu_escape_option_value(value: &str) -> String {
 
 fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Command, DesktopError> {
     let qemu_bin = match config.backend.as_str() {
-        "qemu-hvf" => "qemu-system-aarch64",
-        "qemu-x86_64" => "qemu-system-x86_64",
+        "qemu-hvf" | "qemu-tcg-aarch64" => "qemu-system-aarch64",
+        "qemu-x86_64" | "qemu-tcg-x86_64" => "qemu-system-x86_64",
         other => {
             return Err(DesktopError::Invalid(format!(
                 "unsupported vm backend: {other}"
@@ -2795,19 +2795,17 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
         }
     };
     let mut cmd = Command::new(qemu_bin);
-    if cfg!(target_os = "macos")
-        && (config.backend == "qemu-hvf" || config.backend == "qemu-x86_64")
-    {
+    let software_emulation = config.backend.starts_with("qemu-tcg-");
+    if software_emulation {
+        cmd.arg("-accel").arg("tcg");
+    } else if cfg!(target_os = "macos") {
         cmd.arg("-accel").arg("hvf");
     }
     if cfg!(target_os = "macos") {
         cmd.arg("-display").arg("none");
     }
-    let machine = if config.backend == "qemu-x86_64" {
-        "q35"
-    } else {
-        "virt"
-    };
+    let x86_64 = matches!(config.backend.as_str(), "qemu-x86_64" | "qemu-tcg-x86_64");
+    let machine = if x86_64 { "q35" } else { "virt" };
     if let Some((code, vars)) = find_uefi_firmware(config.backend.as_str()) {
         if let Some(vars_path) = vars {
             cmd.arg("-drive")
@@ -2820,17 +2818,16 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
                     "if=pflash,format=raw,file={}",
                     qemu_escape_option_value(&vars_path.display().to_string())
                 ));
-        } else if config.backend != "qemu-x86_64" {
+        } else if !x86_64 {
             cmd.arg("-bios").arg(code);
         }
     }
-    let mut host_forward_specs = vec![
-        format!("hostfwd=tcp:127.0.0.1:{}-:22", config.ssh_port),
-        format!("hostfwd=tcp:127.0.0.1:{}-:4288", config.api_port),
-    ];
+    let mut host_forward_specs = vec![format!(
+        "hostfwd=tcp:127.0.0.1:{}-:22",
+        config.ssh_port
+    )];
     let mut used_bind_ports = HashSet::new();
     used_bind_ports.insert(("127.0.0.1".to_string(), config.ssh_port));
-    used_bind_ports.insert(("127.0.0.1".to_string(), config.api_port));
     for entry in forwards {
         if !is_loopback_host(&entry.target_host) {
             continue;
@@ -2853,7 +2850,7 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
     cmd.arg("-machine")
         .arg(machine)
         .arg("-cpu")
-        .arg("host")
+        .arg(if software_emulation { "max" } else { "host" })
         .arg("-smp")
         .arg(config.cpus.to_string())
         .arg("-m")
@@ -2904,7 +2901,7 @@ fn build_vm_command(config: &VmConfig, forwards: &[ForwardEntry]) -> Result<Comm
 }
 
 fn find_uefi_firmware(backend: &str) -> Option<(PathBuf, Option<PathBuf>)> {
-    let candidates = if backend == "qemu-x86_64" {
+    let candidates = if matches!(backend, "qemu-x86_64" | "qemu-tcg-x86_64") {
         vec![
             ("OVMF_CODE.fd", Some("OVMF_VARS.fd")),
             ("edk2-x86_64-code.fd", Some("edk2-x86_64-vars.fd")),
@@ -4225,6 +4222,64 @@ mod tests {
             .find(|arg| arg.contains("user,id=net0"))
             .expect("netdev arg");
         assert!(netdev.contains("hostfwd=tcp:127.0.0.1:8080-:80"));
+    }
+
+    #[test]
+    fn qemu_tcg_fallback_does_not_require_hvf() {
+        let cfg = VmConfig {
+            backend: "qemu-tcg-x86_64".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_path: "/tmp/disk.qcow2".to_string(),
+            host_share_path: "/tmp/share".to_string(),
+            fs_backend: "9p".to_string(),
+            virtiofs_socket_path: None,
+            hyperv_switch: None,
+            ssh_port: 2222,
+            api_port: 4288,
+            guest_user: Some("ferro".to_string()),
+            ssh_private_key_path: Some("/tmp/key".to_string()),
+            cloud_init_image_path: None,
+        };
+        let cmd = build_vm_command(&cfg, &[]).expect("build software-emulated VM command");
+        let args = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(cmd.get_program().to_string_lossy(), "qemu-system-x86_64");
+        assert!(!args.windows(2).any(|pair| pair == ["-accel", "hvf"]));
+        assert!(args.windows(2).any(|pair| pair == ["-accel", "tcg"]));
+    }
+
+    #[test]
+    fn qemu_reserves_only_ssh_for_the_guest_socket_tunnel() {
+        let cfg = VmConfig {
+            backend: "qemu-x86_64".to_string(),
+            vm_name: "FerroCrateDesktopVM".to_string(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_path: "/tmp/disk.qcow2".to_string(),
+            host_share_path: "/tmp/share".to_string(),
+            fs_backend: "9p".to_string(),
+            virtiofs_socket_path: None,
+            hyperv_switch: None,
+            ssh_port: 2222,
+            api_port: 4288,
+            guest_user: Some("ferro".to_string()),
+            ssh_private_key_path: Some("/tmp/key".to_string()),
+            cloud_init_image_path: None,
+        };
+        let cmd = build_vm_command(&cfg, &[]).expect("build VM command");
+        let netdev = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .find(|arg| arg.starts_with("user,id=net0"))
+            .expect("QEMU user network");
+
+        assert!(netdev.contains("hostfwd=tcp:127.0.0.1:2222-:22"));
+        assert!(!netdev.contains("4288"), "SSH owns the API tunnel: {netdev}");
     }
 
     #[test]

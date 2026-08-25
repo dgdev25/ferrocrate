@@ -283,15 +283,15 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
 }
 
 #[test]
-fn macos_vm_prefers_vfkit_and_stops_the_owned_vm() {
+fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
     let host = FakeHost::ready_after_start();
     let config = MacosVmConfig {
-        launcher: PathBuf::from("/opt/homebrew/bin/vfkit"),
-        vm_config: PathBuf::from("/Users/test/.ferrocrate/vm.json"),
+        launcher: PathBuf::from("/usr/local/bin/ferro-desktop"),
+        vm_config: PathBuf::from("/Users/test/.ferrocrate/desktop-vm.json"),
         relay_addr: "127.0.0.1:4288".parse().unwrap(),
         ssh_port: 2222,
-        guest_user: "ferrocrate".into(),
-        ssh_key: PathBuf::from("/Users/test/.ferrocrate/id_ed25519"),
+        guest_user: "ferro".into(),
+        ssh_key: PathBuf::from("/Users/test/.ferrocrate/vm/desktop_vm_ed25519"),
     };
     let backend = MacosVmBackend::with_host(config, host.clone());
 
@@ -299,22 +299,52 @@ fn macos_vm_prefers_vfkit_and_stops_the_owned_vm() {
     assert_eq!(
         host.starts.lock().unwrap().as_slice(),
         &[
-            CommandSpec::new("/opt/homebrew/bin/vfkit")
-                .args(["--config", "/Users/test/.ferrocrate/vm.json",]),
+            CommandSpec::new("/usr/local/bin/ferro-desktop").args([
+                "vm",
+                "--state-file",
+                "/Users/test/.ferrocrate/desktop-vm.json",
+                "start",
+                "--foreground",
+            ]),
             CommandSpec::new("ssh").args([
                 "-i",
-                "/Users/test/.ferrocrate/id_ed25519",
+                "/Users/test/.ferrocrate/vm/desktop_vm_ed25519",
                 "-p",
                 "2222",
-                "ferrocrate@127.0.0.1",
-                "--",
-                "ferrocrate-desktop-relay",
-                "--listen",
-                "127.0.0.1:4288",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-N",
+                "-L",
+                "127.0.0.1:4288:/home/ferro/.local/state/ferrocrate/ferrocrate.sock",
+                "ferro@127.0.0.1",
             ]),
         ]
     );
+    assert_eq!(
+        backend.socket_path(),
+        Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
+    );
     assert_eq!(backend.stop().unwrap().state, BackendState::Stopped);
+}
+
+#[test]
+fn macos_vm_defaults_match_the_installer_layout() {
+    let config = MacosVmConfig::default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let root = home.join(".ferrocrate");
+
+    assert_eq!(config.launcher, PathBuf::from("ferro-desktop"));
+    assert_eq!(config.vm_config, root.join("desktop-vm.json"));
+    assert_eq!(config.guest_user, "ferro");
+    assert_eq!(config.ssh_key, root.join("vm/desktop_vm_ed25519"));
+    assert_eq!(config.ssh_port, 2222);
+    assert_eq!(config.relay_addr, "127.0.0.1:4288".parse().unwrap());
 }
 
 #[test]
@@ -455,7 +485,7 @@ fn terminal_open_and_resize_route_through_the_backend_transport() {
 }
 
 #[test]
-fn partial_relay_start_rolls_back_every_owned_child() {
+fn partial_macos_tunnel_start_rolls_back_every_owned_child() {
     let host = FakeHost::ready_after_start();
     *host.fail_program.lock().unwrap() = Some("ssh".into());
     let backend = MacosVmBackend::with_host(MacosVmConfig::default(), host.clone());

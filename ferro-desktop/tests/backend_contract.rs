@@ -582,7 +582,7 @@ fn wsl_exec_forwards_environment_inside_the_guest() {
         &[(
             CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--"]),
             ExecRequest::new("env")
-                .args(["--", "NO_COLOR=1", "sh", "-c", "printf '%s' \"$NO_COLOR\"",])
+                .args(["NO_COLOR=1", "sh", "-c", "printf '%s' \"$NO_COLOR\"",])
                 .stdin(b"input".to_vec()),
         )]
     );

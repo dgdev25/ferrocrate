@@ -28,8 +28,7 @@ fn guest_exec_request(request: ExecRequest) -> ExecRequest {
         env,
         stdin,
     } = request;
-    let mut guest_args = Vec::with_capacity(env.len() + args.len() + 2);
-    guest_args.push("--".to_string());
+    let mut guest_args = Vec::with_capacity(env.len() + args.len() + 1);
     guest_args.extend(
         env.into_iter()
             .map(|(name, value)| format!("{name}={value}")),

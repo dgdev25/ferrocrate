@@ -16312,41 +16312,53 @@ enum BuildkitSessionCommand {
     ReceiveLocal {
         name: String,
         destination: PathBuf,
-        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }
 
 #[cfg(target_os = "linux")]
 #[allow(dead_code)] // Consumed by the version-2 build route in delivery step 3.
-fn receive_buildkit_session_local(
+async fn receive_buildkit_session_local(
     state: &DockerCompatState,
     uuid: &str,
     name: &str,
     destination: &Path,
     timeout: Duration,
 ) -> Result<(), String> {
-    let session = state
-        .buildkit_sessions
-        .lock()
-        .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
-        .get(uuid)
-        .cloned()
-        .ok_or_else(|| format!("buildkit session: unknown or expired session {uuid}"))?;
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session {
+            break session;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
     if !session.methods.contains("/moby.filesync.v1.FileSync/DiffCopy") {
         return Err("buildkit session: FileSync.DiffCopy was not exposed".to_string());
     }
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     session
         .commands
-        .blocking_send(BuildkitSessionCommand::ReceiveLocal {
+        .send(BuildkitSessionCommand::ReceiveLocal {
             name: name.to_string(),
             destination: destination.to_path_buf(),
             reply: reply_tx,
         })
+        .await
         .map_err(|_| "buildkit session: session disconnected".to_string())?;
-    reply_rx
-        .recv_timeout(timeout)
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
         .map_err(|_| "buildkit session: filesync timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
 }
 
 #[cfg(target_os = "linux")]
@@ -22331,7 +22343,8 @@ async fn handle_buildkit_control_request(
                 execution.as_ref(),
                 build.as_ref(),
                 &frontend,
-            )?;
+            )
+            .await?;
             *build
                 .result
                 .lock()
@@ -22421,7 +22434,8 @@ async fn handle_buildkit_control_request(
             execution.as_ref(),
             build.as_ref(),
             &solve,
-        )?;
+        )
+        .await?;
         *build
             .result
             .lock()
@@ -22602,7 +22616,7 @@ fn buildkit_outer_solve_response(
 }
 
 #[cfg(target_os = "linux")]
-fn execute_buildkit_frontend(
+async fn execute_buildkit_frontend(
     state: &DockerCompatState,
     execution: &BuildkitExecutionContext,
     build: &BuildkitBuild,
@@ -22633,14 +22647,16 @@ fn execute_buildkit_frontend(
         "context",
         &context,
         Duration::from_secs(120),
-    )?;
+    )
+    .await?;
     receive_buildkit_session_local(
         state,
         &build.request.session,
         "dockerfile",
         &dockerfile_local,
         Duration::from_secs(120),
-    )?;
+    )
+    .await?;
     let source_dockerfile = dockerfile_local.join(filename_path);
     if !source_dockerfile.is_file() {
         return Err(format!("buildkit solve: Dockerfile not found: {filename}"));
@@ -22693,9 +22709,7 @@ fn execute_buildkit_frontend(
         &[],
         None,
     )?;
-    let image = execution
-        .store
-        .resolve_reference(&image_name)
+    let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
     Ok(BuildkitBuildResult {
@@ -23235,8 +23249,7 @@ async fn receive_buildkit_local(
         for packet in drain_grpc_packets(&mut frame_buffer)? {
             match FsutilPacketType::try_from(packet.packet_type).ok() {
                 Some(FsutilPacketType::Stat) if !listing_done => {
-                    let stat = packet.stat.ok_or_else(|| "buildkit filesync: STAT missing metadata".to_string())?;
-                    if stat.path.is_empty() {
+                    let Some(stat) = packet.stat else {
                         listing_done = true;
                         for (id, stat) in stats.iter().enumerate() {
                             if stat.mode & MODE_DIR != 0 { continue; }
@@ -23245,7 +23258,7 @@ async fn receive_buildkit_local(
                                 .map_err(|error| format!("buildkit filesync: request file failed: {error}"))?;
                         }
                         continue;
-                    }
+                    };
                     let relative = Path::new(&stat.path);
                     if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_))) {
                         return Err(format!("buildkit filesync: context path escapes root: {}", stat.path));
@@ -30853,6 +30866,55 @@ volumes:
     }
 
     #[test]
+    fn buildkit_filesync_waits_for_concurrent_session_registration() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let register_state = state.clone();
+        let destination = temp.path().join("context");
+        let register = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let (commands, mut receiver) = tokio::sync::mpsc::channel(1);
+            register_state
+                .buildkit_sessions
+                .lock()
+                .expect("session registry")
+                .insert(
+                    "late-session".to_string(),
+                    super::BuildkitSessionHandle {
+                        commands,
+                        methods: Arc::new(HashSet::from([
+                            "/moby.filesync.v1.FileSync/DiffCopy".to_string(),
+                        ])),
+                    },
+                );
+            let command = receiver.blocking_recv().expect("filesync command");
+            let super::BuildkitSessionCommand::ReceiveLocal { reply, .. } = command;
+            reply.send(Ok(())).expect("filesync reply");
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime
+            .block_on(async {
+                super::receive_buildkit_session_local(
+                    state.as_ref(),
+                    "late-session",
+                    "context",
+                    &destination,
+                    Duration::from_secs(1),
+                )
+                .await
+            })
+            .expect("wait for session registration inside async runtime");
+        register.join().expect("registration thread");
+    }
+
+    #[test]
     fn buildkit_session_transport_emits_h2_prior_knowledge_and_is_bounded() {
         use std::sync::mpsc;
         use std::time::Duration;
@@ -30949,7 +31011,7 @@ volumes:
                 };
                 let end = super::FsutilPacket {
                     packet_type: super::FsutilPacketType::Stat as i32,
-                    stat: Some(super::FsutilStat { path: String::new(), mode: 0, uid: 0, gid: 0, size: 0, mod_time: 0, linkname: String::new() }),
+                    stat: None,
                     id: 0,
                     data: Vec::new(),
                 };
@@ -30987,13 +31049,17 @@ volumes:
             std::thread::sleep(Duration::from_millis(10));
         }
         let destination = temp.path().join("received");
-        let receive_result = super::receive_buildkit_session_local(
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("receiver runtime");
+        let receive_result = runtime.block_on(super::receive_buildkit_session_local(
             state.as_ref(),
             "filesync-fixture",
             "context",
             &destination,
             Duration::from_secs(2),
-        );
+        ));
         let server_result = server.join();
         let worker_result = worker.join();
         receive_result.expect("receive local");

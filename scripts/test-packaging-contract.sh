@@ -10,6 +10,12 @@ grep -Fq 'build-deb-package.sh' "$repo_root/scripts/build-release-artifacts.sh"
 grep -Fq 'archive="ferrocrate-${version}-linux-${arch}${archive_suffix}.tar.gz"' "$repo_root/scripts/install.sh"
 ! grep -Fq 'ferrocrate-${version}-${arch}.AppImage' "$repo_root/scripts/install.sh"
 test -x "$repo_root/scripts/bundle-sidecars.sh"
+grep -Fq 'FERROCRATE NON-BUNDLE SIDECAR PLACEHOLDER' \
+  "$repo_root/apps/ferro-desktop-ui/src-tauri/build.rs"
+grep -Fq 'validate-bundled-sidecars.mjs' \
+  "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json"
+grep -Fq 'scripts/bundle-sidecars.sh' "$repo_root/scripts/dev-desktop.sh"
+test -f "$repo_root/scripts/validate-bundled-sidecars.mjs"
 test -x "$repo_root/scripts/fix-appimage.sh"
 test -x "$repo_root/scripts/build-updater-manifest.mjs"
 for os in linux macos windows; do

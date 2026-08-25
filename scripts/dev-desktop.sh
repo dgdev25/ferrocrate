@@ -92,9 +92,9 @@ export FERROCRATE_ENTITLEMENT_PUBKEY="$(cat "$lic_dir/entitlement.pub")"
 
 # 2. binaries (cargo is incremental; these are no-ops when up to date)
 say "building daemon and runtime"
-cargo build -q -p ferro-desktop
-cargo build -q --release -p ferro-cli
+cargo build -q --release -p ferro-cli -p ferro-desktop
 ln -sf ferro-cli "$root/target/release/ferrocrate"
+bash "$root/scripts/bundle-sidecars.sh"
 
 # 3. frontend + tauri shell
 say "building UI"

@@ -42,6 +42,7 @@ fn now_unix() -> i64 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let arguments = std::env::args().collect::<Vec<_>>();
     match arguments.get(1).map(String::as_str) {
         Some("enroll") => return enroll(&arguments[2..]).await,

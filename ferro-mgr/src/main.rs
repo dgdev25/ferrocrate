@@ -29,6 +29,7 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     if std::env::args().nth(1).as_deref() == Some("fleet-ui") {
         return run_fleet_ui().await;
     }

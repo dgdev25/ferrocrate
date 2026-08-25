@@ -45,6 +45,18 @@ for_command() {
 guest_ssh() { for_command "${guest_user}@${guest_host}" "$@"; }
 arm_ssh() { for_command "${arm_user}@${arm_host}" "$@"; }
 
+ship_guest_binary() {
+  local source="$1" destination="/var/tmp/$(basename -- "$1")" expected actual
+  expected="$(sha256sum "$source" | awk '{print $1}')"
+  actual="$(guest_ssh "sha256sum '$destination' 2>/dev/null | awk '{print \\$1}'" 2>/dev/null || true)"
+  if [[ "$actual" == "$expected" ]]; then
+    note "using matching staged guest binary $destination"
+    return
+  fi
+  scp -q "$source" "${guest_user}@${guest_host}:$destination" || die "could not stage $(basename -- "$source") on the guest; free space is required under /var/tmp (remove only demo-scoped artifacts or set up more guest disk)"
+  guest_ssh "chmod 700 '$destination'" || die "could not mark staged guest binary executable: $destination"
+}
+
 ensure_layout() {
   umask 077
   mkdir -p "$state_root" "$state_root/pids" "$state_root/pki" "$state_root/ui"
@@ -200,7 +212,8 @@ issue_token() {
 
 enroll_guest() {
   local token="$1" remote_state='.local/state/ferrocrate-fleet-demo'
-  scp -q "$repo_root/target/release/ferro-agent" "$repo_root/target/release/ferro-cli" "${guest_user}@${guest_host}:/var/tmp/"
+  ship_guest_binary "$repo_root/target/release/ferro-agent"
+  ship_guest_binary "$repo_root/target/release/ferro-cli"
   if ! guest_ssh "test -s \$HOME/$remote_state/agent.pem"; then
     local enrollment; enrollment="$(issue_token "$token" lab-x86 "$guest_host")"
     guest_ssh "mkdir -p \$HOME/$remote_state; chmod 700 \$HOME/$remote_state"

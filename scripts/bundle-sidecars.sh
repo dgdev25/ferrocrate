@@ -12,9 +12,10 @@ destination_dir="${FERROCRATE_SIDECAR_DIR:-$repo_root/apps/ferro-desktop-ui/src-
 extension=""
 [[ "$target" != *windows* ]] || extension=".exe"
 
-declare -A sources=( [ferrocrate]="ferro-cli" [ferro-desktop]="ferro-desktop" )
 for output in ferrocrate ferro-desktop; do
-  source="$source_dir/${sources[$output]}$extension"
+  source_name="$output"
+  [[ "$output" != "ferrocrate" ]] || source_name="ferro-cli"
+  source="$source_dir/${source_name}$extension"
   [[ -x "$source" || ( "$extension" == ".exe" && -f "$source" ) ]] || {
     echo "bundle-sidecars: missing $source; build ferro-cli and ferro-desktop for $target first" >&2
     exit 1
@@ -22,7 +23,9 @@ for output in ferrocrate ferro-desktop; do
 done
 mkdir -p "$destination_dir"
 for output in ferrocrate ferro-desktop; do
-  install -m 0755 "$source_dir/${sources[$output]}$extension" \
+  source_name="$output"
+  [[ "$output" != "ferrocrate" ]] || source_name="ferro-cli"
+  install -m 0755 "$source_dir/${source_name}$extension" \
     "$destination_dir/${output}-${target}${extension}"
 done
 echo "staged FerroCrate sidecars for $target"

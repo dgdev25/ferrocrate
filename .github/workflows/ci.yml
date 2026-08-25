@@ -15,7 +15,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            runner: [self-hosted, linux, ferro-lab]
+            runner: [self-hosted, linux, x64, ferro-lab]
           - name: macos
             runner: [self-hosted, macos, ferro-lab]
           - name: windows

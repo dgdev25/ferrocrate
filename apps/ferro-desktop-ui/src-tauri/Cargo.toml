@@ -28,3 +28,9 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [workspace]
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[lints]
+workspace = true

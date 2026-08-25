@@ -3311,10 +3311,21 @@ fn backend_exec_request(cmd: &[String]) -> Result<BackendExecRequest, DesktopErr
         .env("NO_COLOR", "1"))
 }
 
+fn select_exec_backend(_cmd: &[String]) -> Result<Box<dyn Backend>, DesktopError> {
+    #[cfg(target_os = "macos")]
+    if !should_route_to_macos_guest(_cmd, exec_mode_from_env()) {
+        return Ok(Box::new(LinuxNativeBackend::new(
+            LinuxNativeConfig::default(),
+        )));
+    }
+
+    select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))
+}
+
 fn run_request(
     request: &ExecRequest,
 ) -> Result<ferro_desktop::backend::ExecResponse, DesktopError> {
-    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let backend = select_exec_backend(&request.cmd)?;
     backend
         .exec(backend_exec_request(&request.cmd)?)
         .map_err(|error| DesktopError::Invalid(error.to_string()))
@@ -3323,7 +3334,7 @@ fn run_request(
 fn run_follow_request(
     request: &ExecRequest,
 ) -> Result<Box<dyn ferro_desktop::backend::ExecStream>, DesktopError> {
-    let backend = select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    let backend = select_exec_backend(&request.cmd)?;
     backend
         .exec_stream(backend_exec_request(&request.cmd)?)
         .map_err(|error| DesktopError::Invalid(error.to_string()))

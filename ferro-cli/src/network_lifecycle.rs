@@ -1159,10 +1159,14 @@ pub(crate) fn run_network_create(
     // exact identity is adopted; a mismatched identity is deleted using the
     // just-observed identity and recreated. Recorded bridges never reach this
     // path. This makes cleanup bounded to the requested fc-* name.
-    let adopted = match kernel
-        .observe_bridge(&bridge_name)
-        .map_err(NetworkLifecycleError::Kernel)?
-    {
+    let orphan_observation = if bridge_name.starts_with("fc-") {
+        kernel
+            .observe_bridge(&bridge_name)
+            .map_err(NetworkLifecycleError::Kernel)?
+    } else {
+        None
+    };
+    let adopted = match orphan_observation {
         Some(observed) if bridge_name.starts_with("fc-") && is_intended_create_observation(&intended, &observed) => {
             tracing::warn!(bridge = %bridge_name, "adopting orphan deterministic network bridge");
             Some(observed)

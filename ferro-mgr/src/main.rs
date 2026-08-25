@@ -17,7 +17,7 @@ use ferro_mgr::{
         TonicFleetBackend,
     },
     pki::CertificateAuthority,
-    pki::{CertificateIdentity, CertificateRole},
+    pki::{certificate_identity_from_der, CertificateIdentity, CertificateRole},
     proto::{
         admin_service_server::AdminServiceServer, control_service_server::ControlServiceServer,
         enrollment_service_server::EnrollmentServiceServer,
@@ -63,9 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("FERROCRATE_MANAGER_TLS_KEY")
             .expect("FERROCRATE_MANAGER_TLS_KEY is required"),
     )?;
-    let node_ca = Certificate::from_pem(std::fs::read(
+    let node_ca_pem = std::fs::read(
         std::env::var("FERROCRATE_NODE_CA_CERT").expect("FERROCRATE_NODE_CA_CERT is required"),
-    )?);
+    )?;
+    let node_ca = Certificate::from_pem(node_ca_pem.clone());
     let admin_ca = Certificate::from_pem(std::fs::read(
         std::env::var("FERROCRATE_ADMIN_CA_CERT").expect("FERROCRATE_ADMIN_CA_CERT is required"),
     )?);
@@ -75,9 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(ManagerStore::open(database)?);
     let cluster_epoch = store.cluster_epoch()?;
     let enrollment = Arc::new(EnrollmentService::new(cluster_id.clone(), store.clone()));
-    let authority = Arc::new(CertificateAuthority::new(&format!(
-        "{cluster_id}-node-root"
-    ))?);
+    let node_ca_key = std::fs::read_to_string(
+        std::env::var("FERROCRATE_NODE_CA_KEY").expect("FERROCRATE_NODE_CA_KEY is required"),
+    )?;
+    let authority = Arc::new(CertificateAuthority::from_pem(
+        std::str::from_utf8(&node_ca_pem)?,
+        &node_ca_key,
+    )?);
     let enrollment_service = EnrollmentServiceServer::new(EnrollmentServiceImpl::new(
         enrollment.clone(),
         authority.clone(),
@@ -121,7 +126,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.clone(),
         controller,
     ));
-    let control_service = ControlServiceServer::from_arc(control_impl.clone());
+    let control_service = ControlServiceServer::with_interceptor(
+        control_impl.as_ref().clone(),
+        move |mut request: tonic::Request<()>| {
+            use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
+            let identity = request
+                .extensions()
+                .get::<TlsConnectInfo<TcpConnectInfo>>()
+                .and_then(TlsConnectInfo::peer_certs)
+                .and_then(|certificates| {
+                    certificates
+                        .first()
+                        .map(|certificate| certificate_identity_from_der(certificate.as_ref()))
+                })
+                .ok_or_else(|| {
+                    tonic::Status::unauthenticated("node client certificate is required")
+                })?
+                .map_err(|_| {
+                    tonic::Status::unauthenticated("node certificate principal is invalid")
+                })?;
+            if !matches!(identity.role, CertificateRole::Node { .. }) {
+                return Err(tonic::Status::permission_denied(
+                    "node certificate role is required",
+                ));
+            }
+            request.extensions_mut().insert(identity);
+            Ok(request)
+        },
+    );
     let admin_impl =
         AdminServiceImpl::new_authorized(store, cluster_epoch, cluster_id.clone(), control_impl);
     let admin_cluster = cluster_id.clone();
@@ -192,12 +224,11 @@ impl FleetUiOptions {
         let mut tls_key = std::env::var_os("FERROCRATE_MANAGER_TLS_KEY").map(PathBuf::from);
         let mut admin_endpoint = std::env::var("FERROCRATE_ADMIN_ENDPOINT")
             .unwrap_or_else(|_| "https://127.0.0.1:50052".into());
-        let mut admin_domain = std::env::var("FERROCRATE_ADMIN_TLS_DOMAIN")
-            .unwrap_or_else(|_| "localhost".into());
-        let mut admin_server_ca = std::env::var_os("FERROCRATE_ADMIN_SERVER_CA_CERT")
-            .map(PathBuf::from);
-        let mut operator_cert =
-            std::env::var_os("FERROCRATE_ADMIN_TLS_CERT").map(PathBuf::from);
+        let mut admin_domain =
+            std::env::var("FERROCRATE_ADMIN_TLS_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let mut admin_server_ca =
+            std::env::var_os("FERROCRATE_ADMIN_SERVER_CA_CERT").map(PathBuf::from);
+        let mut operator_cert = std::env::var_os("FERROCRATE_ADMIN_TLS_CERT").map(PathBuf::from);
         let mut operator_key = std::env::var_os("FERROCRATE_ADMIN_TLS_KEY").map(PathBuf::from);
         let mut state_dir = std::env::var_os("FERROCRATE_FLEET_STATE_DIR")
             .map(PathBuf::from)
@@ -220,9 +251,7 @@ impl FleetUiOptions {
                 "--insecure-loopback" => insecure_loopback = true,
                 "--tls-cert" => tls_cert = Some(value(&mut arguments, "--tls-cert")?.into()),
                 "--tls-key" => tls_key = Some(value(&mut arguments, "--tls-key")?.into()),
-                "--admin-endpoint" => {
-                    admin_endpoint = value(&mut arguments, "--admin-endpoint")?
-                }
+                "--admin-endpoint" => admin_endpoint = value(&mut arguments, "--admin-endpoint")?,
                 "--admin-domain" => admin_domain = value(&mut arguments, "--admin-domain")?,
                 "--admin-server-ca" => {
                     admin_server_ca = Some(value(&mut arguments, "--admin-server-ca")?.into())
@@ -254,8 +283,7 @@ impl FleetUiOptions {
                 .ok_or_else(|| "--admin-server-ca is required".to_string())?,
             operator_cert: operator_cert
                 .ok_or_else(|| "--operator-cert is required".to_string())?,
-            operator_key: operator_key
-                .ok_or_else(|| "--operator-key is required".to_string())?,
+            operator_key: operator_key.ok_or_else(|| "--operator-key is required".to_string())?,
             state_dir,
             cluster_id,
         })
@@ -265,10 +293,7 @@ impl FleetUiOptions {
 async fn run_fleet_ui() -> Result<(), Box<dyn std::error::Error>> {
     let options = FleetUiOptions::parse()?;
     std::fs::create_dir_all(&options.state_dir)?;
-    std::fs::set_permissions(
-        &options.state_dir,
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    std::fs::set_permissions(&options.state_dir, std::fs::Permissions::from_mode(0o700))?;
     let server_ca = std::fs::read(&options.admin_server_ca)?;
     let operator_cert = std::fs::read(&options.operator_cert)?;
     let operator_key = std::fs::read(&options.operator_key)?;
@@ -311,7 +336,10 @@ async fn run_fleet_ui() -> Result<(), Box<dyn std::error::Error>> {
         view_path.display()
     );
     if options.insecure_loopback {
-        ui.spawn_insecure_loopback(options.listen).await?.wait().await?;
+        ui.spawn_insecure_loopback(options.listen)
+            .await?
+            .wait()
+            .await?;
     } else {
         ui.serve_tls(
             options.listen,

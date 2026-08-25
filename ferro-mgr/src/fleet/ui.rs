@@ -74,10 +74,7 @@ impl FleetUi {
         self.state.logins.mint(identity, unix_now(), ttl_seconds)
     }
 
-    pub async fn spawn_insecure_loopback(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<FleetUiServer, String> {
+    pub async fn spawn_insecure_loopback(&self, addr: SocketAddr) -> Result<FleetUiServer, String> {
         if !addr.ip().is_loopback() {
             return Err(format!(
                 "--insecure-loopback requires a loopback listener, got {addr}"
@@ -113,12 +110,9 @@ impl FleetUi {
         private_key: &std::path::Path,
     ) -> Result<(), String> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            certificate,
-            private_key,
-        )
-        .await
-        .map_err(|error| format!("failed to load fleet UI TLS identity: {error}"))?;
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, private_key)
+            .await
+            .map_err(|error| format!("failed to load fleet UI TLS identity: {error}"))?;
         axum_server::bind_rustls(addr, config)
             .serve(router(self.state.clone()).into_make_service())
             .await
@@ -162,7 +156,10 @@ struct LoginRequest {
 async fn login(State(state): State<UiState>, Json(request): Json<LoginRequest>) -> Response {
     let now = unix_now();
     let Some(identity) = state.logins.authenticate(&request.credential, now) else {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error":"login rejected"})))
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"login rejected"})),
+        )
             .into_response();
     };
     let role = identity.role;
@@ -210,9 +207,16 @@ async fn invoke(
     }
     if !matches!(
         command.as_str(),
-        "fleet_command" | "fleet_deploy" | "fleet_rollback" | "fleet_revoke"
+        "fleet_command"
+            | "fleet_deploy"
+            | "fleet_rollback"
+            | "fleet_revoke"
+            | "fleet_enrollment_token"
     ) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"unknown fleet command"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"unknown fleet command"})),
+        )
             .into_response();
     }
     let read_only_command = command == "fleet_command"
@@ -234,7 +238,10 @@ async fn invoke(
             AuditResult::Denied,
             unix_now(),
         );
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"operate role required"})))
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"operate role required"})),
+        )
             .into_response();
     }
     let result = state.backend.operate(&command, arguments.clone()).await;

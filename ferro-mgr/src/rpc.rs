@@ -20,7 +20,8 @@ use crate::{
         AgentMessage, DesiredState, EnrollRequest, EnrollResponse, FleetCommandRequest,
         FleetCommandResponse, FleetDeployRequest, FleetDeployResponse, FleetRevokeRequest,
         FleetRevokeResponse, FleetRollbackRequest, FleetSnapshotRequest, FleetSnapshotResponse,
-        ManagerMessage, PublishDesiredRequest, PublishDesiredResponse,
+        IssueEnrollmentTokenRequest, IssueEnrollmentTokenResponse, ManagerMessage,
+        PublishDesiredRequest, PublishDesiredResponse,
     },
     store::{Enrollment, FleetDeployment, HostObservation, ManagerStore},
 };
@@ -75,6 +76,7 @@ impl EnrollmentRpc for EnrollmentServiceImpl {
     }
 }
 
+#[derive(Clone)]
 pub struct ControlServiceImpl {
     builder: Arc<DesiredStateBuilder>,
     revision: u64,
@@ -187,6 +189,25 @@ impl ControlService for ControlServiceImpl {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ControlStreamStream>, Status> {
+        let certificate_node = match request
+            .extensions()
+            .get::<crate::pki::CertificateIdentity>()
+        {
+            Some(crate::pki::CertificateIdentity {
+                cluster_id,
+                role: crate::pki::CertificateRole::Node { node_id },
+                expires_at,
+            }) if cluster_id == self.builder.cluster_id()
+                && *expires_at > crate::pki::unix_now() =>
+            {
+                node_id.clone()
+            }
+            _ => {
+                return Err(Status::unauthenticated(
+                    "valid node certificate identity is required",
+                ))
+            }
+        };
         let mut inbound = request.into_inner();
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
         let builder = self.builder.clone();
@@ -208,6 +229,17 @@ impl ControlService for ControlServiceImpl {
                         }))
                         .await;
                     continue;
+                }
+                if message.node_id != certificate_node {
+                    let _ = sender
+                        .send(Ok(ManagerMessage {
+                            desired_state: None,
+                            error: "node_id does not match certificate identity".into(),
+                            desired_authorization_bundle: Vec::new(),
+                            command_json: Vec::new(),
+                        }))
+                        .await;
+                    break;
                 }
                 if bound_node.as_deref() != Some(message.node_id.as_str()) {
                     if bound_node.is_some() {
@@ -249,7 +281,7 @@ impl ControlService for ControlServiceImpl {
                                 command_json: Vec::new(),
                             }))
                             .await;
-                        continue;
+                        break;
                     }
                 }
                 if command_forward.is_none() {
@@ -400,8 +432,7 @@ fn handle_fleet_payload(hub: &ControlHub, message: &AgentMessage) {
                 version,
                 health,
                 doctor_summary,
-                containers_json: serde_json::to_string(&containers)
-                    .unwrap_or_else(|_| "[]".into()),
+                containers_json: serde_json::to_string(&containers).unwrap_or_else(|_| "[]".into()),
                 acknowledged_revision: message.acknowledged_revision,
             });
         }
@@ -607,8 +638,7 @@ impl AdminService for AdminServiceImpl {
         }
         let arguments: serde_json::Value = serde_json::from_str(&request.arguments_json)
             .map_err(|_| Status::invalid_argument("arguments_json is invalid"))?;
-        build_agent_cli_args(&request.action, &arguments)
-            .map_err(Status::invalid_argument)?;
+        build_agent_cli_args(&request.action, &arguments).map_err(Status::invalid_argument)?;
         let result = self
             .control
             .as_ref()
@@ -812,6 +842,36 @@ impl AdminService for AdminServiceImpl {
             .ok_or_else(|| Status::internal("deployment disappeared"))?;
         Ok(Response::new(FleetDeployResponse {
             deployment_json: deployment_value(&completed).to_string(),
+        }))
+    }
+
+    async fn issue_enrollment_token(
+        &self,
+        request: Request<IssueEnrollmentTokenRequest>,
+    ) -> Result<Response<IssueEnrollmentTokenResponse>, Status> {
+        self.authorize(&request, "IssueEnrollmentToken")?;
+        let request = request.into_inner();
+        self.validate_cluster(&request.cluster_id)?;
+        if request.node_id.trim().is_empty()
+            || request.endpoint.trim().is_empty()
+            || request.overlay_scope.trim().is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "node_id, endpoint, and overlay_scope are required",
+            ));
+        }
+        let expires_at = chrono_like_now().saturating_add(600);
+        let enrollment_token = EnrollmentService::new(request.cluster_id, self.store.clone())
+            .create_scoped_token(
+                request.node_id,
+                request.endpoint,
+                request.overlay_scope,
+                expires_at,
+            )
+            .map_err(|_| Status::internal("failed to issue enrollment token"))?;
+        Ok(Response::new(IssueEnrollmentTokenResponse {
+            enrollment_token,
+            expires_at,
         }))
     }
 }

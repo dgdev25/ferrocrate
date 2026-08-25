@@ -41,7 +41,7 @@ impl AdminAuthorizer {
         }
         if !(method.starts_with("Inspect")
             || method.starts_with("Fleet")
-            || method.starts_with("IssueToken")
+            || method.starts_with("Issue")
             || method.starts_with("Revoke")
             || method == "PublishDesired")
         {

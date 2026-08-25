@@ -6,8 +6,9 @@ use ferro_mgr::{
     fleet::FleetCommandResult,
     pki::{CertificateIdentity, CertificateRole},
     proto::{
-        admin_service_server::AdminService, FleetCommandRequest, FleetRevokeRequest,
-        FleetDeployRequest, FleetRollbackRequest, FleetSnapshotRequest,
+        admin_service_server::AdminService, FleetCommandRequest, FleetDeployRequest,
+        FleetRevokeRequest, FleetRollbackRequest, FleetSnapshotRequest,
+        IssueEnrollmentTokenRequest,
     },
     rpc::{AdminServiceImpl, ControlServiceImpl},
     store::{Enrollment, HostObservation, ManagerStore},
@@ -53,12 +54,7 @@ async fn existing_admin_service_lists_hosts_and_relays_commands() {
         vec![9; 32],
         store.clone(),
     ));
-    let admin = AdminServiceImpl::new_authorized(
-        store.clone(),
-        1,
-        "cluster-a",
-        control.clone(),
-    );
+    let admin = AdminServiceImpl::new_authorized(store.clone(), 1, "cluster-a", control.clone());
 
     let snapshot = admin
         .fleet_snapshot(authenticated(FleetSnapshotRequest {
@@ -129,16 +125,18 @@ async fn admin_revocation_is_idempotent_and_visible_in_snapshot() {
         .unwrap()
         .into_inner();
     assert!(response.revoked);
-    assert!(!admin
-        .revoke_host(authenticated(FleetRevokeRequest {
-            cluster_id: "cluster-a".into(),
-            node_id: "node-a".into(),
-            reason: "repeat".into(),
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .revoked);
+    assert!(
+        !admin
+            .revoke_host(authenticated(FleetRevokeRequest {
+                cluster_id: "cluster-a".into(),
+                node_id: "node-a".into(),
+                reason: "repeat".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .revoked
+    );
 }
 
 #[tokio::test]
@@ -158,12 +156,7 @@ async fn desired_deploy_rolls_forward_and_back_over_the_control_stream() {
         vec![9; 32],
         store.clone(),
     ));
-    let admin = AdminServiceImpl::new_authorized(
-        store.clone(),
-        1,
-        "cluster-a",
-        control.clone(),
-    );
+    let admin = AdminServiceImpl::new_authorized(store.clone(), 1, "cluster-a", control.clone());
     let hub = control.fleet_hub();
     let mut connection = hub.connect("node-a").unwrap();
     let responder_hub = hub.clone();
@@ -227,4 +220,38 @@ async fn desired_deploy_rolls_forward_and_back_over_the_control_stream() {
     .unwrap();
     assert_eq!(rolled_back["status"], "rolled_back");
     responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn administrator_issues_a_scoped_short_lived_enrollment_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(ManagerStore::open(directory.path().join("manager.sqlite")).unwrap());
+    let control = Arc::new(ControlServiceImpl::new(
+        "cluster-a",
+        1,
+        vec![9; 32],
+        store.clone(),
+    ));
+    let admin = AdminServiceImpl::new_authorized(store.clone(), 1, "cluster-a", control);
+    let response = admin
+        .issue_enrollment_token(authenticated(IssueEnrollmentTokenRequest {
+            cluster_id: "cluster-a".into(),
+            node_id: "node-a".into(),
+            endpoint: "192.0.2.1:50053".into(),
+            overlay_scope: "fleet".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.expires_at > 0);
+    ferro_mgr::enrollment::EnrollmentService::new("cluster-a", store)
+        .enroll(
+            &response.enrollment_token,
+            Enrollment {
+                node_id: "node-a".into(),
+                public_key: vec![7; 32],
+                endpoint: "192.0.2.1:50053".into(),
+            },
+        )
+        .unwrap();
 }

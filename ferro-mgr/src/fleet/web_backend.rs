@@ -7,7 +7,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 
 use crate::proto::{
     admin_service_client::AdminServiceClient, FleetCommandRequest, FleetDeployRequest,
-    FleetRevokeRequest, FleetRollbackRequest, FleetSnapshotRequest,
+    FleetRevokeRequest, FleetRollbackRequest, FleetSnapshotRequest, IssueEnrollmentTokenRequest,
 };
 
 use super::FleetUiBackend;
@@ -198,6 +198,26 @@ impl FleetUiBackend for TonicFleetBackend {
                         .into_inner();
                     serde_json::from_str(&response.deployment_json)
                         .map_err(|error| format!("admin rollback response was invalid: {error}"))
+                }
+                "fleet_enrollment_token" => {
+                    let response = client
+                        .issue_enrollment_token(IssueEnrollmentTokenRequest {
+                            cluster_id,
+                            node_id: string_field(&arguments, "node_id")?,
+                            endpoint: string_field(&arguments, "endpoint")?,
+                            overlay_scope: arguments
+                                .get("overlay_scope")
+                                .and_then(Value::as_str)
+                                .unwrap_or("fleet")
+                                .to_string(),
+                        })
+                        .await
+                        .map_err(|error| format!("admin enrollment token failed: {error}"))?
+                        .into_inner();
+                    Ok(json!({
+                        "enrollment_token": response.enrollment_token,
+                        "expires_at": response.expires_at,
+                    }))
                 }
                 _ => Err("unknown fleet operation".into()),
             }

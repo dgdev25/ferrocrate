@@ -4,9 +4,9 @@ use std::{sync::Arc, time::Duration};
 
 use ferro_mgr::{
     fleet::{FleetCommand, FleetCommandResult},
+    pki::{CertificateIdentity, CertificateRole},
     proto::{
-        control_service_client::ControlServiceClient,
-        control_service_server::ControlServiceServer,
+        control_service_client::ControlServiceClient, control_service_server::ControlServiceServer,
         AgentMessage,
     },
     rpc::ControlServiceImpl,
@@ -39,7 +39,19 @@ async fn control_stream_carries_inventory_commands_and_results() {
     let server_service = service.clone();
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(ControlServiceServer::from_arc(server_service))
+            .add_service(ControlServiceServer::with_interceptor(
+                server_service.as_ref().clone(),
+                |mut request: tonic::Request<()>| {
+                    request.extensions_mut().insert(CertificateIdentity {
+                        cluster_id: "cluster-a".into(),
+                        role: CertificateRole::Node {
+                            node_id: "node-a".into(),
+                        },
+                        expires_at: i64::MAX,
+                    });
+                    Ok(request)
+                },
+            ))
             .serve(address)
             .await
     });
@@ -111,6 +123,68 @@ async fn control_stream_carries_inventory_commands_and_results() {
             stdout: "fleet log line\n".into(),
             stderr: String::new(),
         }
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn control_stream_rejects_a_node_id_that_does_not_match_the_certificate() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(ManagerStore::open(directory.path().join("manager.sqlite")).unwrap());
+    store
+        .register_node(Enrollment {
+            node_id: "node-a".into(),
+            public_key: vec![1; 32],
+            endpoint: "127.0.0.1:50053".into(),
+        })
+        .unwrap();
+    let service = ControlServiceImpl::new("cluster-a", 1, vec![9; 32], store);
+    let address = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ControlServiceServer::with_interceptor(
+                service,
+                |mut request: tonic::Request<()>| {
+                    request.extensions_mut().insert(CertificateIdentity {
+                        cluster_id: "cluster-a".into(),
+                        role: CertificateRole::Node {
+                            node_id: "node-b".into(),
+                        },
+                        expires_at: i64::MAX,
+                    });
+                    Ok(request)
+                },
+            ))
+            .serve(address)
+            .await
+    });
+    let mut client = loop {
+        match ControlServiceClient::connect(format!("http://{address}")).await {
+            Ok(client) => break client,
+            Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    };
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let mut stream = client
+        .control_stream(ReceiverStream::new(receiver))
+        .await
+        .unwrap()
+        .into_inner();
+    sender
+        .send(AgentMessage {
+            node_id: "node-a".into(),
+            acknowledged_revision: 0,
+            payload: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let response = stream.message().await.unwrap().unwrap();
+    assert_eq!(
+        response.error,
+        "node_id does not match certificate identity"
     );
     server.abort();
 }

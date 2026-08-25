@@ -20,9 +20,13 @@ use ferro_mgr::{
         Agent, AgentError, StateStore,
     },
     fleet::{collect_agent_observation, execute_agent_command, FleetCommand},
-    proto::{control_service_client::ControlServiceClient, AgentMessage},
+    proto::{
+        control_service_client::ControlServiceClient,
+        enrollment_service_client::EnrollmentServiceClient, AgentMessage, EnrollRequest,
+    },
 };
 use ipnet::Ipv4Net;
+use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
@@ -38,6 +42,12 @@ fn now_unix() -> i64 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    match arguments.get(1).map(String::as_str) {
+        Some("enroll") => return enroll(&arguments[2..]).await,
+        Some("fleet") => return run_fleet_agent(&arguments[2..]).await,
+        _ => {}
+    }
     let service_mode = authorization_service_mode()?;
     let instance_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
@@ -171,6 +181,170 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime_executable,
     )
     .await
+}
+
+fn option(arguments: &[String], name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    arguments
+        .windows(2)
+        .find_map(|pair| (pair[0] == name).then(|| pair[1].clone()))
+        .ok_or_else(|| format!("{name} is required").into())
+}
+
+fn client_channel(
+    endpoint: String,
+    server_ca: Vec<u8>,
+    domain: String,
+    identity: Option<(Vec<u8>, Vec<u8>)>,
+) -> Result<Endpoint, Box<dyn std::error::Error>> {
+    let mut tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(server_ca))
+        .domain_name(domain);
+    if let Some((certificate, key)) = identity {
+        tls = tls.identity(Identity::from_pem(certificate, key));
+    }
+    Ok(Endpoint::from_shared(endpoint)?.tls_config(tls)?)
+}
+
+async fn enroll(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let node_id = option(arguments, "--node-id")?;
+    let approved_endpoint = option(arguments, "--endpoint")?;
+    let token = option(arguments, "--token")?;
+    let manager_endpoint = option(arguments, "--manager-endpoint")?;
+    let server_ca_path = option(arguments, "--server-ca")?;
+    let tls_domain = option(arguments, "--tls-domain")?;
+    let certificate_path = PathBuf::from(option(arguments, "--cert-out")?);
+    let key_path = PathBuf::from(option(arguments, "--key-out")?);
+    let node_ca_path = PathBuf::from(option(arguments, "--node-ca-out")?);
+
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::default();
+    params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ClientAuth);
+    let csr = params.serialize_request(&key)?.pem()?;
+    let mut public_key = [0_u8; 32];
+    getrandom::fill(&mut public_key)?;
+    let channel = client_channel(
+        manager_endpoint,
+        std::fs::read(server_ca_path)?,
+        tls_domain,
+        None,
+    )?
+    .connect()
+    .await?;
+    let response = EnrollmentServiceClient::new(channel)
+        .enroll(EnrollRequest {
+            node_id,
+            public_key: public_key.to_vec(),
+            enrollment_token: token,
+            csr: csr.into_bytes(),
+            endpoint: approved_endpoint,
+        })
+        .await?
+        .into_inner();
+    write_private(&key_path, key.serialize_pem().as_bytes())?;
+    write_private(&certificate_path, &response.certificate)?;
+    write_private(&node_ca_path, &response.ca_certificate)?;
+    println!(
+        "enrolled in {} at epoch {}",
+        response.cluster_id, response.cluster_epoch
+    );
+    Ok(())
+}
+
+fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("credential"),
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)
+}
+
+async fn run_fleet_agent(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let node_id = option(arguments, "--node-id")?;
+    let endpoint = option(arguments, "--control-endpoint")?;
+    let ca = std::fs::read(option(arguments, "--server-ca")?)?;
+    let cert = std::fs::read(option(arguments, "--cert")?)?;
+    let key = std::fs::read(option(arguments, "--key")?)?;
+    let domain = option(arguments, "--tls-domain")?;
+    let runtime_executable = PathBuf::from(option(arguments, "--runtime-exe")?);
+    let channel = client_channel(endpoint, ca, domain, Some((cert, key)))?
+        .connect()
+        .await?;
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let observation = collect_agent_observation(&runtime_executable, now_unix()).await;
+    sender
+        .send(AgentMessage {
+            node_id: node_id.clone(),
+            acknowledged_revision: 0,
+            payload: serde_json::to_vec(&observation)?,
+        })
+        .await?;
+    let keepalive_sender = sender.clone();
+    let keepalive_node = node_id.clone();
+    let keepalive_runtime = runtime_executable.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let observation = collect_agent_observation(&keepalive_runtime, now_unix()).await;
+            if keepalive_sender
+                .send(AgentMessage {
+                    node_id: keepalive_node.clone(),
+                    acknowledged_revision: 0,
+                    payload: serde_json::to_vec(&observation).unwrap_or_default(),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut control = ControlServiceClient::new(channel)
+        .control_stream(ReceiverStream::new(receiver))
+        .await?
+        .into_inner();
+    while let Some(message) = control.message().await? {
+        if !message.error.is_empty() {
+            return Err(format!("manager control error: {}", message.error).into());
+        }
+        if message.command_json.is_empty() {
+            continue;
+        }
+        let command: FleetCommand = serde_json::from_slice(&message.command_json)?;
+        let result = execute_agent_command(&runtime_executable, command).await;
+        sender
+            .send(AgentMessage {
+                node_id: node_id.clone(),
+                acknowledged_revision: 0,
+                payload: serde_json::to_vec(&serde_json::json!({
+                    "kind": "command_result",
+                    "request_id": result.request_id,
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }))?,
+            })
+            .await?;
+    }
+    Err("manager control stream ended".into())
 }
 
 fn authorization_service_mode() -> Result<AuthorizationServiceMode, Box<dyn std::error::Error>> {

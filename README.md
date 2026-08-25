@@ -5,13 +5,13 @@
 Ferrocrate is a container engine you use exactly like Docker — same commands,
 same Dockerfiles, same images — implemented from scratch in Rust as a single
 binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 47 classic-builder
-scenarios, and all 47 pass. Images are standard OCI, so anything Ferrocrate
+conformance suite drives a real Docker client through 60 classic-builder
+scenarios, and all 60 pass (rootless and rootful). Images are standard OCI, so anything Ferrocrate
 builds runs under Docker, podman, or Kubernetes, and the other way round.
 
 ## ✨ Highlights
 
-- **Docker-compatible, verified** — 47/47 classic-builder conformance against
+- **Docker-compatible, verified** — 60/60 classic-builder conformance against
   the real `docker` client, including multi-network connect/disconnect and
   non-readable log-driver behavior.
 - **Fast** — the dated benchmark register records host-local paired results;
@@ -100,7 +100,8 @@ can be developed and unit-tested there.
 
 | Platform | Status |
 |---|---|
-| Ubuntu 26.04 / 24.04, Debian 12, Fedora 42, Rocky 9, Alpine 3.22 (x86_64, rootful) | Qualified with dated evidence per distro |
+| Ubuntu 26.04 / 24.04, Debian 12 / 13, Fedora 42, Alpine 3.22 (x86_64, rootful) | Qualified with dated evidence per distro; full matrix re-run 2026-08-25 on main 90595943, conformance 60/60 per row |
+| Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Host-blocked for the Docker socket: peer-pidfd authentication needs `SO_PEERPIDFD` (Linux 6.5+); native lifecycle gates pass |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified with the restriction active; hosts without `SO_PEERPIDFD` fail closed |
 | Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |

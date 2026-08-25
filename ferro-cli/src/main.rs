@@ -19367,7 +19367,12 @@ fn handle_docker_compat_connection(
             ("GET", "/images/search") => {
                 let (term, limit) = parse_docker_image_search_query(&query)?;
                 let images = store.list_references().map_err(|err| err.to_string())?;
-                let entries = docker_image_search_results(&images, &term, limit);
+                let local_entries = docker_image_search_results(&images, &term, limit);
+                let entries = if local_entries.is_empty() {
+                    docker_hub_search(&term, limit)?
+                } else {
+                    local_entries
+                };
                 let json = serde_json::to_string(&entries)
                     .map_err(|error| format!("docker: image search response failed: {error}"))?;
                 http_response(200, json.as_bytes(), "application/json")
@@ -20255,6 +20260,9 @@ fn docker_status_for_error(err: &str) -> u16 {
     if lowered.contains("so_peerpidfd") {
         return 503;
     }
+    if lowered.contains("docker hub search unavailable") {
+        return 503;
+    }
     if lowered.contains("still running") {
         return 409;
     }
@@ -20840,6 +20848,68 @@ fn docker_image_search_results(
     results.sort_by(|left, right| left["Name"].as_str().cmp(&right["Name"].as_str()));
     results.truncate(limit);
     results
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search(term: &str, limit: usize) -> Result<Vec<serde_json::Value>, String> {
+    let endpoint = std::env::var("FERROCRATE_DOCKER_HUB_SEARCH_URL")
+        .unwrap_or_else(|_| "https://hub.docker.com/v2/search/repositories/".to_string());
+    docker_hub_search_with_endpoint(&endpoint, term, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_with_endpoint(
+    endpoint: &str,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("ferrocrate/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    let response = client
+        .get(endpoint)
+        .query(&[("query", term), ("page_size", &limit.to_string())])
+        .send()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "docker: Docker Hub search unavailable: upstream returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let payload = response
+        .json::<serde_json::Value>()
+        .map_err(|error| format!("docker: Docker Hub search returned invalid JSON: {error}"))?;
+    docker_hub_search_results_from_value(payload, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_results_from_value(
+    payload: serde_json::Value,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let results = payload
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "docker: Docker Hub search response omitted results".to_string())?;
+    Ok(results
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("repo_name")?.as_str()?;
+            Some(serde_json::json!({
+                "Index": "docker.io",
+                "Name": name,
+                "Description": entry.get("short_description").and_then(serde_json::Value::as_str).unwrap_or(""),
+                "Official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "Automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "StarCount": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            }))
+        })
+        .take(limit)
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -29398,6 +29468,35 @@ volumes:
         assert!(parse_docker_image_search_query(&query).is_err());
         query.remove("term");
         assert!(parse_docker_image_search_query(&query).is_err());
+    }
+
+    #[test]
+    fn docker_hub_search_projects_engine_wire_fields_and_limit() {
+        let payload = serde_json::json!({
+            "results": [
+                {"repo_name":"library/alpine","short_description":"small","star_count":99,"is_official":true,"is_automated":false},
+                {"repo_name":"example/extra","short_description":null,"star_count":3,"is_official":false,"is_automated":true}
+            ]
+        });
+        let results = super::docker_hub_search_results_from_value(payload, 1)
+            .expect("Docker Hub response");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["Name"], "library/alpine");
+        assert_eq!(results[0]["Index"], "docker.io");
+        assert_eq!(results[0]["StarCount"], 99);
+        assert_eq!(results[0]["Official"], true);
+    }
+
+    #[test]
+    fn docker_hub_search_reports_clean_offline_error() {
+        let error = super::docker_hub_search_with_endpoint(
+            "http://127.0.0.1:1/v2/search/repositories/",
+            "busybox",
+            5,
+        )
+        .expect_err("closed endpoint");
+        assert!(error.starts_with("docker: Docker Hub search unavailable:"), "{error}");
+        assert_eq!(super::docker_status_for_error(&error), 503);
     }
 
     #[test]

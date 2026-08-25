@@ -34,7 +34,7 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 
 | Area | Status | Boundary / evidence |
 |---|---|---|
-| Image pull (warm), list, inspect, tag, remove | Supported | [`performance/benchmark-register.md`](evidence/performance/benchmark-register.md) (paired ten-feature snapshot at `4e515d87`) |
+| Image pull (warm), list, inspect, tag, remove, and Docker Hub search proxy | Supported; Hub search uses a five-second total timeout and returns a clean 503-class offline error | [`compatibility/parity-scoreboard.md`](compatibility/parity-scoreboard.md) (`registry-search`) |
 | Image save/load, export/import | Supported | [`docker-api/2026-08-21-api-endpoint-completion.md`](evidence/docker-api/2026-08-21-api-endpoint-completion.md) |
 | Registry auth/TLS, transient retry (429/5xx/timeout) | Supported (local fixture scope) | [`verification/2026-08-21-registry-transient-retry-current-head.md`](evidence/verification/2026-08-21-registry-transient-retry-current-head.md) |
 | LAN image mirror (mDNS discovery, read-only registry-v2 pulls) | Experimental: opt-in, private-IPv4 listener, digest verified with registry fallback | [`networking/2026-08-25-lan-image-mirror.md`](evidence/networking/2026-08-25-lan-image-mirror.md), [`design/lan-image-mirror.md`](design/lan-image-mirror.md) |
@@ -77,7 +77,6 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 |---|---|---|
 | `POST /plugins/pull` | 404 with explicit message | matrix test in [`ferro-cli/tests/api_compat_matrix.rs`](../ferro-cli/tests/api_compat_matrix.rs) |
 | `POST /auth` | 501 | same matrix test |
-| Remote Docker Hub image search | local catalog only | [`verification/2026-08-19-docker-image-search-current-head.md`](evidence/verification/2026-08-19-docker-image-search-current-head.md) |
 | Cross-platform native execution (Windows/macOS) | deferred; cross-target compile evidence only | cross-target witness (host tiers above) |
 
 ## Performance snapshot

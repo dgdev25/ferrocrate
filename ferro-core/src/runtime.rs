@@ -3738,6 +3738,8 @@ impl ContainerRuntime {
         result
     }
 
+    // Authorization proof and streaming callbacks make this cohesive boundary wider than usual.
+    #[allow(clippy::too_many_arguments)]
     fn exec_streaming_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -3799,6 +3801,8 @@ impl ContainerRuntime {
         Ok(result)
     }
 
+    // Authorization proof and exec protocol options make this cohesive boundary wider than usual.
+    #[allow(clippy::too_many_arguments)]
     fn exec_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -5023,6 +5027,8 @@ impl ContainerRuntime {
         Ok(())
     }
 
+    // Authorization and recovery policy flags are all required at this lifecycle boundary.
+    #[allow(clippy::too_many_arguments)]
     fn restart_authorized(
         &self,
         _proof: &AuthorizedRequest,
@@ -7638,6 +7644,8 @@ fn resolve_rootfs_command(rootfs: &Path, cmd: &str) -> String {
     cmd.to_string()
 }
 
+// Process, terminal, and log-driver settings form one atomic spawn operation.
+#[allow(clippy::too_many_arguments)]
 fn spawn_child_with_logs(
     mut command: Command,
     stdout_path: &Path,

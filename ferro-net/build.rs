@@ -51,6 +51,9 @@ fn main() {
     require_bpf_toolchain();
     require_bpf_linker();
 
+    // aya-build forwards nested Cargo stderr as cargo warnings, so silence progress output only.
+    env::set_var("CARGO_TERM_QUIET", "true");
+
     build_ebpf(
         [
             Package {

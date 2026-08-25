@@ -1137,15 +1137,6 @@ enum FollowFrame {
     },
 }
 
-impl FollowFrame {
-    fn data(channel: FollowChannel, data: &[u8]) -> Self {
-        Self::Data {
-            channel,
-            data: data.to_vec(),
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Phase0CheckResult {
     host_os: String,
@@ -1595,7 +1586,7 @@ fn replay_follow_frames<R: BufRead, O: Write, E: Write>(
                 stderr.write_all(&data)?;
                 stderr.flush()?;
             }
-            FollowFrame::Terminal { status } if status == 0 => return Ok(()),
+            FollowFrame::Terminal { status: 0 } => return Ok(()),
             FollowFrame::Terminal { status } => {
                 return Err(DesktopError::Invalid(format!(
                     "remote command exited with status {status}"
@@ -4109,12 +4100,18 @@ mod tests {
         let mut wire = Vec::new();
         write_follow_frame(
             &mut wire,
-            &FollowFrame::data(FollowChannel::Stdout, b"cost: \xe2"),
+            &FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data: b"cost: \xe2".to_vec(),
+            },
         )
         .expect("first byte frame");
         write_follow_frame(
             &mut wire,
-            &FollowFrame::data(FollowChannel::Stdout, b"\x82\xac\n"),
+            &FollowFrame::Data {
+                channel: FollowChannel::Stdout,
+                data: b"\x82\xac\n".to_vec(),
+            },
         )
         .expect("second byte frame");
         write_follow_frame(&mut wire, &FollowFrame::Terminal { status: 0 })

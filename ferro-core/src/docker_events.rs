@@ -75,6 +75,7 @@ impl DockerEventJournal {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(lock_path)
             .map_err(|error| error.to_string())?;
         #[cfg(unix)]

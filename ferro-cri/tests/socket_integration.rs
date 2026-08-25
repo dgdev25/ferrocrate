@@ -2610,6 +2610,7 @@ async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
             resource_limits: None,
             network_backend: None,
             network_ownership: None,
+            network_endpoints: Vec::new(),
             managed_overlay: None,
             managed_cleanup_provenance: None,
             managed_host_veth: None,

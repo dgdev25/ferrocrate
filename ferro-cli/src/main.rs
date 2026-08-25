@@ -7139,7 +7139,7 @@ fn parse_detach_keys(value: &str) -> Result<Vec<u8>, String> {
             match control {
                 Some(key) if key.len() == 1 => {
                     let byte = key.as_bytes()[0];
-                    if !(b'@'..=b'_').contains(&byte) && !(b'a'..=b'z').contains(&byte) && !(b'A'..=b'Z').contains(&byte) {
+                    if !(b'@'..=b'_').contains(&byte) && !byte.is_ascii_lowercase() {
                         return Err(format!("detach keys: invalid control key {name:?}"));
                     }
                     Ok(byte.to_ascii_uppercase() & 0x1f)
@@ -7213,11 +7213,7 @@ fn proxy_docker_hijacked_stream(
             let mut input = std::io::stdin().lock();
             let mut matcher = DetachKeyMatcher::new(detach_keys);
             let mut buffer = [0_u8; 16 * 1024];
-            loop {
-                let size = match input.read(&mut buffer) {
-                    Ok(size) => size,
-                    Err(_) => break,
-                };
+            while let Ok(size) = input.read(&mut buffer) {
                 if size == 0 {
                     let _ = input_stream.write_all(&matcher.finish());
                     break;
@@ -11691,6 +11687,8 @@ fn handle_image_prune(
 }
 
 #[cfg(target_os = "linux")]
+// Docker's list filters are independent CLI options passed through this command boundary.
+#[allow(clippy::too_many_arguments)]
 fn handle_containers(
     runtime: &ContainerRuntime,
     format: &str,
@@ -13189,6 +13187,8 @@ fn parse_capabilities(entries: &[String]) -> Result<Vec<caps::Capability>, Strin
 }
 
 #[cfg(target_os = "linux")]
+// Docker exec's stream and process options are independent CLI protocol fields.
+#[allow(clippy::too_many_arguments)]
 fn handle_exec(
     runtime: &ContainerRuntime,
     container: &str,

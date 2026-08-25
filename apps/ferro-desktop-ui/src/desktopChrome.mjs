@@ -28,7 +28,7 @@ function tabButton(section, icon, label, activeSection, onSelect, count, iconOnl
   count == null ? null : createElement("span", { className: "tab-count" }, count));
 }
 
-export function DesktopTabBar({ activeSection, counts, doctorIssues = 0, onSelect }) {
+export function DesktopTabBar({ activeSection, counts, onSelect }) {
   return createElement("nav", { className: "desktop-tabs", "aria-label": "Primary" },
     RESOURCE_TABS.map(([section, icon, label]) => (
       tabButton(section, icon, label, activeSection, onSelect, counts[section])

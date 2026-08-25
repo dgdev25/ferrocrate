@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 use clap::{Parser, Subcommand};
 use ferro_core::entitlements::{self, Feature};
 use serde::{Deserialize, Serialize};

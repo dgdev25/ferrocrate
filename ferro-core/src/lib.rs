@@ -20,6 +20,10 @@
 //! ```
 
 #![cfg(any(not(test), target_os = "linux"))]
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, unused_imports, unused_mut)
+)]
 
 pub mod ai_runtime;
 pub mod authorization;

@@ -650,6 +650,12 @@ pub enum Commands {
         docker_compat: bool,
         #[arg(long)]
         metrics_addr: Option<String>,
+        #[arg(long)]
+        lan_mirror: bool,
+        #[arg(long)]
+        lan_mirror_addr: Option<String>,
+        #[arg(long)]
+        lan_mirror_secret: Option<String>,
     },
     /// Print shell completion scripts.
     Completion {
@@ -1369,6 +1375,14 @@ pub fn main() {
         }
     }
     let cli = Cli::parse();
+    if let Ok(config) = load_cli_config() {
+        if config.lan_mirror {
+            unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR", "1") };
+        }
+        if let Some(secret) = config.lan_mirror_secret {
+            unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR_SECRET", secret) };
+        }
+    }
     if matches!(&cli.command, Commands::Daemon { .. }) {
         if let Err(error) = ferro_core::cgroups::validate_explicit_delegated_daemon() {
             eprintln!("error: delegated cgroup daemon validation failed: {error}");
@@ -2467,6 +2481,33 @@ fn handle_doctor(
             }
         }
     }
+
+    let lan_config = load_cli_config().unwrap_or_default();
+    let lan_enabled = lan_config.lan_mirror;
+    let lan_peers = if lan_enabled {
+        ferro_core::lan_mirror::discover(Duration::from_millis(300), None)
+            .unwrap_or_default()
+            .len()
+    } else {
+        0
+    };
+    checks.push(DoctorCheck {
+        id: "lan_image_mirror".to_string(),
+        ok: true,
+        message: if lan_enabled {
+            format!(
+                "LAN image mirror enabled (peers={lan_peers}, auth={})",
+                if lan_config.lan_mirror_secret.is_some() { "shared-secret" } else { "none" }
+            )
+        } else {
+            "LAN image mirror disabled (default)".to_string()
+        },
+        hint: lan_enabled.then_some(
+            "listener is restricted to the configured private LAN address".to_string(),
+        ),
+        remediated: false,
+        action: None,
+    });
 
     let healthy = checks.iter().all(|check| check.ok);
     #[cfg(target_os = "macos")]
@@ -4555,9 +4596,19 @@ fn dispatch(command: Commands) -> Result<(), String> {
             ref socket,
             docker_compat,
             ref metrics_addr,
+            lan_mirror,
+            ref lan_mirror_addr,
+            ref lan_mirror_secret,
         } = command
         {
-            return run_daemon(socket, docker_compat, metrics_addr.as_deref());
+            return run_daemon(
+                socket,
+                docker_compat,
+                metrics_addr.as_deref(),
+                lan_mirror,
+                lan_mirror_addr.as_deref(),
+                lan_mirror_secret.as_deref(),
+            );
         }
 
         let _engine_owner = if CommandOwnership::for_command(&command) == CommandOwnership::Engine {
@@ -6614,9 +6665,14 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
                     }
                     config.ai_backend = Some(normalized);
                 }
+                "lan_mirror.enabled" => {
+                    config.lan_mirror = value.parse::<bool>().map_err(|_| "config set: lan_mirror.enabled must be true or false".to_string())?;
+                }
+                "lan_mirror.address" => config.lan_mirror_addr = Some(value),
+                "lan_mirror.secret" => config.lan_mirror_secret = Some(value),
                 _ => {
                     return Err(format!(
-                        "config set: unsupported key '{}'. supported: ai.backend",
+                        "config set: unsupported key '{}'. supported: ai.backend, lan_mirror.enabled, lan_mirror.address, lan_mirror.secret",
                         key
                     ))
                 }
@@ -6635,8 +6691,11 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
                     }
                     Ok(())
                 }
+                "lan_mirror.enabled" => { println!("{}", config.lan_mirror); Ok(()) }
+                "lan_mirror.address" => { println!("{}", config.lan_mirror_addr.as_deref().unwrap_or("<unset>")); Ok(()) }
+                "lan_mirror.secret" => { println!("{}", if config.lan_mirror_secret.is_some() { "<configured>" } else { "<unset>" }); Ok(()) }
                 _ => Err(format!(
-                    "config get: unsupported key '{}'. supported: ai.backend",
+                    "config get: unsupported key '{}'. supported: ai.backend, lan_mirror.enabled, lan_mirror.address, lan_mirror.secret",
                     key
                 )),
             }
@@ -9416,6 +9475,12 @@ fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CliConfig {
     ai_backend: Option<String>,
+    #[serde(default)]
+    lan_mirror: bool,
+    #[serde(default)]
+    lan_mirror_addr: Option<String>,
+    #[serde(default)]
+    lan_mirror_secret: Option<String>,
     #[serde(default)]
     contexts: BTreeMap<String, CliContext>,
     #[serde(default)]
@@ -16858,6 +16923,9 @@ fn run_daemon(
     socket: &str,
     docker_compat: bool,
     metrics_addr: Option<&str>,
+    lan_mirror: bool,
+    lan_mirror_addr: Option<&str>,
+    lan_mirror_secret: Option<&str>,
 ) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -16916,6 +16984,18 @@ fn run_daemon(
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime.clone(), store.clone(), addr)?;
     }
+    let mirror_config = load_cli_config().unwrap_or_default();
+    let mirror_enabled = lan_mirror || mirror_config.lan_mirror;
+    let _mirror_registration = if mirror_enabled {
+        Some(start_lan_mirror_server(
+            runtime_dir.as_ref(),
+            store.clone(),
+            lan_mirror_addr.or(mirror_config.lan_mirror_addr.as_deref()),
+            lan_mirror_secret.or(mirror_config.lan_mirror_secret.as_deref()),
+        )?)
+    } else {
+        None
+    };
     engine_owner.publish_daemon_owner(socket_path)?;
 
     for stream in listener.incoming() {
@@ -16982,6 +17062,130 @@ fn start_metrics_server(
             let _ = stream.write_all(response.as_bytes());
         }
     });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_lan_mirror_server(
+    runtime_dir: &Path,
+    store: Arc<LocalImageStore>,
+    configured_addr: Option<&str>,
+    secret: Option<&str>,
+) -> Result<mdns_sd::ServiceDaemon, String> {
+    use std::net::{IpAddr, SocketAddr};
+    let address = if let Some(value) = configured_addr {
+        value.parse::<SocketAddr>().map_err(|error| format!("lan mirror address: {error}"))?
+    } else {
+        let ip = if_addrs::get_if_addrs()
+            .map_err(|error| format!("lan mirror interfaces: {error}"))?
+            .into_iter()
+            .filter_map(|interface| match interface.ip() {
+                IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+                _ => None,
+            })
+            .next()
+            .ok_or_else(|| "lan mirror: no private LAN IPv4 address found; use --lan-mirror-addr".to_string())?;
+        SocketAddr::new(IpAddr::V4(ip), 0)
+    };
+    if address.ip().is_loopback() || address.ip().is_unspecified() || address.ip().is_multicast() {
+        return Err("lan mirror: listener must bind a specific non-loopback LAN address".to_string());
+    }
+    if !matches!(address.ip(), IpAddr::V4(ip) if ip.is_private()) {
+        return Err("lan mirror: listener address must be a private LAN IPv4 address".to_string());
+    }
+    let listener = TcpListener::bind(address).map_err(|error| format!("lan mirror bind: {error}"))?;
+    let bound = listener.local_addr().map_err(|error| format!("lan mirror address: {error}"))?;
+    let instance_path = runtime_dir.join("lan-mirror-instance-id");
+    let instance_id = std::fs::read_to_string(&instance_path).ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+        let value = uuid::Uuid::new_v4().simple().to_string();
+        let _ = ferro_core::fs_atomic::write_atomic(&instance_path, value.as_bytes());
+        value
+    });
+    let digests = store.list_references().map_err(|error| error.to_string())?.into_iter().map(|record| {
+        format!("sha256:{:x}", Sha256::digest(record.manifest_json.as_bytes()))
+    }).collect::<Vec<_>>();
+    let registration = ferro_core::lan_mirror::register(&instance_id, bound.ip(), bound.port(), &digests)?;
+    let runtime_dir = runtime_dir.to_path_buf();
+    let secret = secret.map(str::to_owned);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let store = store.clone();
+            let runtime_dir = runtime_dir.clone();
+            let secret = secret.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref()) {
+                    tracing::debug!(%error, "lan mirror request rejected");
+                }
+            });
+        }
+    });
+    tracing::info!(address = %bound, instance = %instance_id, "LAN image mirror enabled");
+    Ok(registration)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_lan_mirror_connection(
+    mut stream: std::net::TcpStream,
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    secret: Option<&str>,
+) -> Result<(), String> {
+    use std::time::Duration;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|error| error.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
+    let mut request = Vec::new();
+    let mut byte = [0u8; 1];
+    while request.len() < 16 * 1024 && !request.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).map_err(|error| error.to_string())? == 0 { break; }
+        request.push(byte[0]);
+    }
+    let request = String::from_utf8(request).map_err(|_| "lan mirror: request is not UTF-8".to_string())?;
+    let mut lines = request.lines();
+    let first = lines.next().ok_or_else(|| "lan mirror: empty request".to_string())?;
+    let mut parts = first.split_whitespace();
+    if parts.next() != Some("GET") {
+        stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let path = parts.next().unwrap_or("/");
+    if let Some(expected) = secret {
+        let supplied = lines.find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("x-ferrocrate-mirror-secret")).map(|(_, value)| value.trim()));
+        if supplied != Some(expected) {
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    let (body, content_type) = if let Some((name, reference)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/manifests/")) {
+        let record = store.list_references().map_err(|error| error.to_string())?.into_iter().find(|record| {
+            let canonical = record.reference.strip_prefix("registry-1.docker.io/").unwrap_or(&record.reference);
+            canonical == format!("{name}:{reference}") || canonical == format!("{name}@{reference}") || format!("sha256:{:x}", Sha256::digest(record.manifest_json.as_bytes())) == reference
+        }).ok_or_else(|| "lan mirror: manifest not found".to_string())?;
+        (record.manifest_json.into_bytes(), record.manifest_media_type)
+    } else if let Some((_name, digest)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/blobs/")) {
+        if !ferro_core::lan_mirror::valid_sha256_digest(digest) { return Err("lan mirror: invalid digest".to_string()); }
+        let filename = digest.replace(':', "_");
+        let candidates = [runtime_dir.join("images/blobs").join(&filename), runtime_dir.join("images/configs").join(&filename)];
+        let path = candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| "lan mirror: blob not found".to_string())?;
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        if !ferro_core::lan_mirror::verify_bytes(&bytes, digest) { return Err("lan mirror: stored blob digest mismatch".to_string()); }
+        (bytes, "application/octet-stream".to_string())
+    } else {
+        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+        return Ok(());
+    };
+    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: private, max-age=60\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes()).map_err(|error| error.to_string())?;
+    // Bound each client to 16 MiB/s. This deliberately simple per-connection
+    // limiter prevents a LAN pull from monopolising daemon disk/network IO.
+    let started = Instant::now();
+    for (index, chunk) in body.chunks(64 * 1024).enumerate() {
+        stream.write_all(chunk).map_err(|error| error.to_string())?;
+        let expected = Duration::from_secs_f64(((index + 1) * 64 * 1024) as f64 / (16.0 * 1024.0 * 1024.0));
+        if let Some(delay) = expected.checked_sub(started.elapsed()) {
+            std::thread::sleep(delay);
+        }
+    }
     Ok(())
 }
 

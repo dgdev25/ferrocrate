@@ -23,6 +23,9 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] 
 flate2 = "1.0"
 tar = "0.4"
 base64 = "0.22"
+if-addrs = "0.13"
+mdns-sd = "0.13"
+uuid = { version = "1.0", features = ["v4"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ferro-core = { path = "../ferro-core" }

@@ -42,6 +42,24 @@ pub enum SupplementaryGroupPolicy {
     AcceptKernelReported,
 }
 
+/// Kernel mechanism used to bind a local socket peer to its process identity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeerAuthMode {
+    #[default]
+    Pidfd,
+    LegacyPeercred,
+}
+
+impl std::fmt::Display for PeerAuthMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pidfd => formatter.write_str("pidfd"),
+            Self::LegacyPeercred => formatter.write_str("legacy-peercred"),
+        }
+    }
+}
+
 impl InvocationChannel {
     pub fn supplementary_group_policy(self) -> SupplementaryGroupPolicy {
         match self {
@@ -154,6 +172,7 @@ pub struct TransportPrincipal {
     channel: InvocationChannel,
     #[serde(skip)]
     pidfd: Option<Arc<OwnedFd>>,
+    peer_auth_mode: PeerAuthMode,
 }
 
 impl PartialEq for TransportPrincipal {
@@ -178,22 +197,31 @@ impl TransportPrincipal {
         self.channel
     }
 
+    pub fn peer_auth_mode(&self) -> PeerAuthMode {
+        self.peer_auth_mode
+    }
+
     /// Revalidates the retained kernel process handle and executable identity
     /// immediately before a privileged executor is entered.
     pub fn revalidate_for_execution(&self) -> Result<(), PrincipalResolutionError> {
-        let pidfd = self
-            .pidfd
-            .as_ref()
-            .ok_or(PrincipalResolutionError::PeerPidfdUnsupported)?;
-        self.revalidate_with_reader(&SystemProcReader, pidfd.as_raw_fd())
+        self.revalidate_with_reader(
+            &SystemProcReader,
+            self.pidfd.as_ref().map(|pidfd| pidfd.as_raw_fd()),
+        )
     }
 
     fn revalidate_with_reader<R: ProcReader>(
         &self,
         reader: &R,
-        pidfd: RawFd,
+        pidfd: Option<RawFd>,
     ) -> Result<(), PrincipalResolutionError> {
-        procfs::verify_process_identity(reader, pidfd, &self.identity)
+        match pidfd {
+            Some(pidfd) => procfs::verify_process_identity(reader, pidfd, &self.identity),
+            None if self.peer_auth_mode == PeerAuthMode::LegacyPeercred => {
+                procfs::verify_legacy_process_identity(reader, &self.identity)
+            }
+            None => Err(PrincipalResolutionError::PeerPidfdUnsupported),
+        }
     }
 }
 
@@ -278,7 +306,7 @@ pub enum PrincipalResolutionError {
     PeerCredentials(#[source] Errno),
     #[error("operating system peer pidfd lookup failed")]
     PeerPidfd(#[source] Errno),
-    #[error("the kernel does not provide SO_PEERPIDFD; secure CRI peer identity requires a kernel with peer-pidfd support (upgrade the kernel or use a supported local socket host)")]
+    #[error("the kernel does not provide SO_PEERPIDFD; secure CRI peer identity requires a kernel with peer-pidfd support (upgrade the kernel or use a supported local socket host); Docker daemon operators may explicitly accept the PID-reuse risk with --peer-auth legacy-peercred")]
     PeerPidfdUnsupported,
     #[error("required process identity fact is unavailable: {fact}")]
     ProcUnavailable {
@@ -315,20 +343,34 @@ impl PrincipalResolver {
     pub fn from_peer_credentials<Fd: AsFd>(
         fd: &Fd,
     ) -> Result<TransportPrincipal, PrincipalResolutionError> {
-        Self::from_peer_credentials_for_channel(fd, InvocationChannel::DockerUnix)
+        Self::from_peer_credentials_with_mode(fd, PeerAuthMode::Pidfd)
+    }
+
+    pub fn from_peer_credentials_with_mode<Fd: AsFd>(
+        fd: &Fd,
+        mode: PeerAuthMode,
+    ) -> Result<TransportPrincipal, PrincipalResolutionError> {
+        Self::from_peer_credentials_for_channel(fd, InvocationChannel::DockerUnix, mode)
     }
 
     pub fn from_cri_peer_credentials<Fd: AsFd>(
         fd: &Fd,
     ) -> Result<TransportPrincipal, PrincipalResolutionError> {
-        Self::from_peer_credentials_for_channel(fd, InvocationChannel::Cri)
+        Self::from_peer_credentials_for_channel(fd, InvocationChannel::Cri, PeerAuthMode::Pidfd)
     }
 
     pub(crate) fn from_peer_credentials_for_channel<Fd: AsFd>(
         fd: &Fd,
         channel: InvocationChannel,
+        mode: PeerAuthMode,
     ) -> Result<TransportPrincipal, PrincipalResolutionError> {
-        Self::resolve_from_sources(&SystemKernelIdentityReader, &SystemProcReader, fd, channel)
+        Self::resolve_from_sources(
+            &SystemKernelIdentityReader,
+            &SystemProcReader,
+            fd,
+            channel,
+            mode,
+        )
     }
 
     pub fn resolve_proxy(
@@ -356,15 +398,19 @@ impl PrincipalResolver {
         reader: &R,
         fd: &Fd,
         channel: InvocationChannel,
+        mode: PeerAuthMode,
     ) -> Result<TransportPrincipal, PrincipalResolutionError> {
         let peer = kernel.peer_credentials(fd)?;
         let pidfd = match kernel.peer_pidfd(fd) {
             Ok(pidfd) => pidfd,
+            Err(Errno::ENOPROTOOPT) if mode == PeerAuthMode::LegacyPeercred => {
+                return Self::resolve_with_reader(reader, peer, None, channel, mode)
+            }
             Err(Errno::ENOPROTOOPT) => return Err(PrincipalResolutionError::PeerPidfdUnsupported),
             Err(error) => return Err(PrincipalResolutionError::PeerPidfd(error)),
         };
         let mut principal =
-            Self::resolve_with_reader(reader, peer, Some(pidfd.as_raw_fd()), channel)?;
+            Self::resolve_with_reader(reader, peer, Some(pidfd.as_raw_fd()), channel, mode)?;
         // The owned pidfd is deliberately retained for the full request/connection
         // lifetime through cloned `TransportPrincipal` values.
         let owned = kernel
@@ -379,8 +425,11 @@ impl PrincipalResolver {
         peer: KernelPeerCredentials,
         pidfd: Option<RawFd>,
         channel: InvocationChannel,
+        mode: PeerAuthMode,
     ) -> Result<TransportPrincipal, PrincipalResolutionError> {
-        let pidfd = pidfd.ok_or(PrincipalResolutionError::PeerPidfdUnsupported)?;
+        if pidfd.is_none() && mode != PeerAuthMode::LegacyPeercred {
+            return Err(PrincipalResolutionError::PeerPidfdUnsupported);
+        }
         let identity = procfs::collect_process_identity(reader, peer, pidfd, channel)?;
         let role = if identity.effective_uid() == 0 && identity.trusted_user_namespace {
             Role::Administrator
@@ -399,6 +448,7 @@ impl PrincipalResolver {
             identity,
             channel,
             pidfd: None,
+            peer_auth_mode: mode,
         })
     }
 }

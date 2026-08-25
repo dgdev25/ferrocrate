@@ -246,8 +246,8 @@ pub use runtime::test_support;
 #[cfg(target_os = "linux")]
 pub use principal::{
     DelegatedPrincipal, DelegationPolicy, EffectivePrincipal, IdMapEntry, InvocationChannel,
-    LinuxProcessIdentity, PrincipalResolutionError, PrincipalResolver, SupplementaryGroupPolicy,
-    TransportPrincipal,
+    LinuxProcessIdentity, PeerAuthMode, PrincipalResolutionError, PrincipalResolver,
+    SupplementaryGroupPolicy, TransportPrincipal,
 };
 
 #[cfg(not(target_os = "linux"))]

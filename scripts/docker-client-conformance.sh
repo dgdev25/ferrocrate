@@ -663,12 +663,16 @@ record_command_expect() {
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
   command_text="$(shell_command "$@") [expected stdout: $expected_stdout]"
+  if ((${#record_env[@]})); then
+    command_text="${record_env[*]} $command_text"
+  fi
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" "${record_env[@]}")
+  if [[ "$record_docker_buildkit" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned "$command_timeout" 5 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
-      >"$stdout_file" 2>"$stderr_file"; then
+      "${client_env[@]}" FERROCRATE_CONFORMANCE_RECORD_ID="$id" "${client_command[@]}" \
+      <"$record_stdin" >"$stdout_file" 2>"$stderr_file"; then
     exit_code=0
   else
     exit_code=$?
@@ -687,16 +691,20 @@ record_command_expect() {
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+  record_stdin="/dev/null"
+  record_docker_buildkit="$builder_mode"
+  record_env=()
 }
 
 record_created_container_wait() {
   local starter_pid
+  local -a starter_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then starter_env+=(DOCKER_BUILDKIT=0); fi
   record_command created-container-create container create --name "$created_wait_container" \
     "$image" /bin/busybox true
   (
     sleep 1
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker start "$created_wait_container" >/dev/null 2>&1
+    "${starter_env[@]}" docker start "$created_wait_container" >/dev/null 2>&1
   ) &
   starter_pid=$!
   record_command_expect created-container-wait container 0 0 wait "$created_wait_container"
@@ -756,9 +764,10 @@ record_compose_watch_sync() {
   (sleep 2; printf 'synced\n' >"$compose_parity_dir/watch-source/marker.txt") &
   modifier_pid=$!
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   if run_bounded_owned 8 3 "$command_token" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        "${compose_client[@]}" --ansi never --project-name "$compose_parity_project" \
+      "${client_env[@]}" "${compose_client[@]}" --ansi never --project-name "$compose_parity_project" \
           --file "$compose_parity_dir/compose.yml" watch --no-up \
       >"$stdout_file" 2>"$stderr_file"; then
     watch_exit=0
@@ -767,8 +776,7 @@ record_compose_watch_sync() {
   fi
   wait "$modifier_pid" 2>/dev/null || true
   if run_bounded_owned 10 3 "$command_token-proof" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker cp "${compose_parity_project}-watcher-1:/marker.txt" \
+      "${client_env[@]}" docker cp "${compose_parity_project}-watcher-1:/marker.txt" \
           "$work_root/watch-proof.txt" \
       >>"$stdout_file" 2>>"$stderr_file" \
       && grep -Fxq synced "$work_root/watch-proof.txt"; then
@@ -828,16 +836,16 @@ record_foreground_output() {
   command_text="docker run --rm alpine:3.20 echo hi && docker run --rm -t alpine:3.20 echo hi [stdout exact]"
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   exit_code=0
   run_bounded_owned "$command_timeout" 5 "$command_token" \
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker run --rm alpine:3.20 echo hi \
+    "${client_env[@]}" docker run --rm alpine:3.20 echo hi \
     >"$stdout_file" 2>"$stderr_file" || exit_code=$?
   if [[ "$exit_code" == 0 && "$(tr -d '\r' <"$stdout_file")" == hi && ! -s "$stderr_file" ]]; then
     tty_output="$work_root/foreground-tty.stdout"
     run_bounded_owned "$command_timeout" 5 "$command_token-tty" \
-      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-        docker run --rm -t alpine:3.20 echo hi \
+      "${client_env[@]}" docker run --rm -t alpine:3.20 echo hi \
       >"$tty_output" 2>>"$stderr_file" || exit_code=$?
     [[ "$exit_code" == 0 && "$(tr -d '\r' <"$tty_output")" == hi && ! -s "$stderr_file" ]] || exit_code=1
     printf '\nTTY invocation:\n' >>"$stdout_file"
@@ -867,10 +875,11 @@ record_foreground_stderr() {
   command_text="docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' [stderr exact]"
   started="$(date +%s%N)"
   command_token="$process_token_base-client-$sequence"
+  local -a client_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+  if [[ "$builder_mode" == classic ]]; then client_env+=(DOCKER_BUILDKIT=0); fi
   exit_code=0
   run_bounded_owned "$command_timeout" 5 "$command_token" \
-    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-      docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
+    "${client_env[@]}" docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
     >"$stdout_file" 2>"$stderr_file" || exit_code=$?
   [[ "$exit_code" == 0 && ! -s "$stdout_file" && "$(tr -d '\r' <"$stderr_file")" == foreground-error ]] || exit_code=1
   ended="$(date +%s%N)"

@@ -3774,6 +3774,77 @@ fn docker_compat_network_labels_persist_and_filter() {
 }
 
 #[test]
+fn docker_compat_compose_labeled_networks_remain_resolvable_at_container_start() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/compose-networks:latest");
+
+    for (name, logical, subnet) in [
+        ("cu_frontend", "frontend", "172.30.243.0/24"),
+        ("cu_backend", "backend", "172.30.244.0/24"),
+    ] {
+        let body = serde_json::json!({
+            "Name": name,
+            "Driver": "bridge",
+            "Labels": {
+                "com.docker.compose.network": logical,
+                "com.docker.compose.project": "cu",
+                "com.docker.compose.version": "2.40.0"
+            },
+            "IPAM": {"Config": [{"Subnet": subnet}]}
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            "/v1.45/networks/create",
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "create {name} response={response}");
+    }
+
+    for (name, network) in [("cu-web-1", "cu_frontend"), ("cu-db-1", "cu_backend")] {
+        let body = serde_json::json!({
+            "Image": "compat/compose-networks:latest",
+            "Cmd": ["/bin/busybox", "sleep", "30"],
+            "Labels": {
+                "com.docker.compose.project": "cu",
+                "com.docker.compose.service": name
+            },
+            "HostConfig": {"NetworkMode": network},
+            "NetworkingConfig": {
+                "EndpointsConfig": {
+                    (network): {"Aliases": [name]}
+                }
+            }
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "create {name} response={response}");
+        let (status, response) =
+            harness.request("POST", &format!("/v1.45/containers/{name}/start"));
+        assert_eq!(
+            status, 204,
+            "Compose-labeled network {network} must resolve at START: {response}"
+        );
+    }
+
+    for name in ["cu-web-1", "cu-db-1"] {
+        let (status, response) =
+            harness.request("DELETE", &format!("/v1.45/containers/{name}?force=true"));
+        assert_eq!(status, 204, "remove {name} response={response}");
+    }
+    for network in ["cu_frontend", "cu_backend"] {
+        let (status, response) = harness.request("DELETE", &format!("/v1.45/networks/{network}"));
+        assert_eq!(status, 204, "remove {network} response={response}");
+    }
+}
+
+#[test]
 fn docker_compat_dual_stack_network_preserves_ipv6_ipam_on_list_and_inspect() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{

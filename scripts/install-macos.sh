@@ -19,16 +19,20 @@ PAID_RELEASE_TOKEN="${PAID_RELEASE_TOKEN:-}"
 PAID_SESSION_TOKEN="${PAID_SESSION_TOKEN:-}"
 PAID_RELEASE_TOKEN_ENDPOINT="${PAID_RELEASE_TOKEN_ENDPOINT:-}"
 PAID_ENTITLEMENT_FILE="${PAID_ENTITLEMENT_FILE:-$HOME/.ferrocrate/entitlement.lic}"
-VM_STATE_FILE="${VM_STATE_FILE:-$HOME/.ferrocrate/desktop-vm.json}"
-VM_DIR="${VM_DIR:-$HOME/.ferrocrate/vm}"
+FERROCRATE_CONFIG_DIR="${FERROCRATE_CONFIG_DIR:-$HOME/.ferrocrate}"
+VM_STATE_FILE="${VM_STATE_FILE:-${FERROCRATE_DESKTOP_VM_STATE:-$FERROCRATE_CONFIG_DIR/desktop-vm.json}}"
+VM_DIR="${VM_DIR:-${FERROCRATE_VM_DIR:-$FERROCRATE_CONFIG_DIR/vm}}"
+VM_DISK_PATH_OVERRIDE="${VM_DISK_PATH:-}"
 VM_DISK_PATH="${VM_DISK_PATH:-$VM_DIR/ferrocrate-desktop.qcow2}"
 VM_CLOUD_INIT_PATH="${VM_CLOUD_INIT_PATH:-$VM_DIR/cloud-init-seed.iso}"
 VM_SIZE_GB="${VM_SIZE_GB:-20}"
-VM_SSH_PORT="${VM_SSH_PORT:-2222}"
-VM_API_PORT="${VM_API_PORT:-4288}"
+VM_SSH_PORT="${VM_SSH_PORT:-${FERROCRATE_VM_SSH_PORT:-2222}}"
+VM_API_PORT="${VM_API_PORT:-${FERROCRATE_VM_API_PORT:-4288}}"
 VM_HOST_SHARE="${VM_HOST_SHARE:-$HOME}"
-VM_GUEST_USER="${VM_GUEST_USER:-ferro}"
-VM_SSH_KEY_PATH="${VM_SSH_KEY_PATH:-$VM_DIR/desktop_vm_ed25519}"
+VM_GUEST_USER="${VM_GUEST_USER:-${FERROCRATE_VM_GUEST_USER:-ferro}}"
+VM_SSH_KEY_PATH="${VM_SSH_KEY_PATH:-${FERROCRATE_VM_SSH_KEY:-$VM_DIR/desktop_vm_ed25519}}"
+VM_GUEST_SOCKET="${VM_GUEST_SOCKET:-/home/${VM_GUEST_USER}/.local/state/ferrocrate/ferrocrate.sock}"
+VFKIT_MAC="${VFKIT_MAC:-5a:94:ef:e4:0c:ee}"
 FORCE="0"
 RESOLVED_RELEASE_TAG=""
 DESKTOP_BIN_SET="0"
@@ -439,7 +443,14 @@ ensure_host_dependencies() {
   require_cmd hdiutil
   require_cmd ssh-keygen
   ensure_homebrew
+  # vfkit is the preferred Apple Virtualization.framework launcher. QEMU is
+  # installed as the portable fallback for Intel hosts and hosts where nested
+  # virtualization is unavailable.
+  if ! command -v vfkit >/dev/null 2>&1; then
+    brew install vfkit || true
+  fi
   brew_install_if_missing qemu-img qemu
+  brew_install_if_missing socat socat
   case "$(arch_name)" in
     aarch64)
       brew_install_if_missing qemu-system-aarch64 qemu
@@ -471,12 +482,98 @@ ensure_host_dependencies() {
   }
 }
 
-vm_backend_for_host() {
-  if [[ "$(uname -m)" == "x86_64" ]]; then
-    echo "qemu-x86_64"
-  else
-    echo "qemu-hvf"
+diagnose_virtualization() {
+  if [[ "$(sysctl -n kern.hv_support 2>/dev/null || echo 0)" != "1" ]]; then
+    echo "nested virtualization unavailable: kern.hv_support is not enabled; using QEMU software acceleration" >&2
+    return 1
   fi
+  return 0
+}
+
+vm_backend_for_host() {
+  if command -v vfkit >/dev/null 2>&1 && diagnose_virtualization; then
+    # The shared macos-vm backend launches vfkit first. The legacy vm command
+    # remains the QEMU fallback used by this bootstrap when no vfkit kernel
+    # bundle has been supplied.
+    if [[ -n "${FERROCRATE_VFKIT_KERNEL:-}" && -n "${FERROCRATE_VFKIT_INITRD:-}" ]]; then
+      echo "vfkit"
+      return
+    fi
+    echo "vfkit is available but no kernel bundle was supplied; using QEMU fallback" >&2
+  fi
+  if [[ "$(uname -m)" == "x86_64" ]]; then
+    if diagnose_virtualization; then
+      echo "qemu-x86_64"
+    else
+      echo "qemu-tcg-x86_64"
+    fi
+  else
+    if diagnose_virtualization; then
+      echo "qemu-hvf"
+    else
+      echo "qemu-tcg-aarch64"
+    fi
+  fi
+}
+
+start_vfkit_vm() {
+  local disk="$1" cloud_init="$2"
+  vfkit \
+    --cpus 4 \
+    --memory 4096 \
+    --bootloader "linux,kernel=${FERROCRATE_VFKIT_KERNEL},initrd=${FERROCRATE_VFKIT_INITRD},cmdline=console=hvc0 root=/dev/vda1" \
+    --device "virtio-blk,path=${disk}" \
+    --device "virtio-blk,path=${cloud_init}" \
+    --device "virtio-fs,sharedDir=${VM_HOST_SHARE},mountTag=ferrocrate" \
+    --device "virtio-net,nat,mac=${VFKIT_MAC}" \
+    >"${VM_DIR}/vfkit.log" 2>&1 &
+  echo $! >"${VM_DIR}/vfkit.pid"
+}
+
+vfkit_guest_address() {
+  awk -v mac="$VFKIT_MAC" '
+    BEGIN { RS = "}" }
+    index(tolower($0), tolower(mac)) {
+      if (match($0, /ip_address=[0-9.]+/)) {
+        value = substr($0, RSTART, RLENGTH)
+        sub(/^ip_address=/, "", value)
+        print value
+        exit
+      }
+    }
+  ' /var/db/dhcpd_leases 2>/dev/null
+}
+
+start_vfkit_ssh_forward() {
+  local guest_ip="" pidfile="$VM_DIR/vfkit-ssh-forward.pid" started now
+  started="$(date +%s)"
+  while [[ -z "$guest_ip" ]]; do
+    guest_ip="$(vfkit_guest_address)"
+    now="$(date +%s)"
+    if (( now - started >= 120 )); then
+      echo "vfkit guest address was not recorded in /var/db/dhcpd_leases" >&2
+      return 1
+    fi
+    [[ -n "$guest_ip" ]] || sleep 2
+  done
+  socat "TCP-LISTEN:${VM_SSH_PORT},bind=127.0.0.1,reuseaddr,fork" "TCP:${guest_ip}:22" &
+  echo $! >"$pidfile"
+}
+
+start_guest_socket_forward() {
+  local pidfile="$VM_DIR/socket-forward.pid"
+  if [[ -s "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    return
+  fi
+  ssh -N \
+    -i "$VM_SSH_KEY_PATH" \
+    -p "$VM_SSH_PORT" \
+    -o ExitOnForwardFailure=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -L "127.0.0.1:${VM_API_PORT}:${VM_GUEST_SOCKET}" \
+    "${VM_GUEST_USER}@127.0.0.1" &
+  echo $! >"$pidfile"
 }
 
 base_cloud_image_url() {
@@ -495,7 +592,7 @@ base_cloud_image_url() {
 }
 
 prepare_vm_image() {
-  local base_url base_img cache_dir
+  local backend="$1" base_url base_img cache_dir
   cache_dir="$VM_DIR/cache"
   base_url="$(base_cloud_image_url)"
   base_img="$cache_dir/base-cloudimg.qcow2"
@@ -506,7 +603,16 @@ prepare_vm_image() {
     curl -fL "$base_url" -o "$base_img"
   fi
 
-  if [[ ! -f "$VM_DISK_PATH" ]]; then
+  if [[ "$backend" == "vfkit" ]]; then
+    VM_DISK_PATH="${VM_DISK_PATH_OVERRIDE:-$VM_DIR/ferrocrate-desktop.raw}"
+    if [[ ! -f "$VM_DISK_PATH" ]]; then
+      echo "creating raw vfkit desktop VM disk at $VM_DISK_PATH..."
+      qemu-img convert -O raw "$base_img" "$VM_DISK_PATH"
+      qemu-img resize "$VM_DISK_PATH" "${VM_SIZE_GB}G" >/dev/null
+    else
+      echo "reusing existing vfkit VM disk: $VM_DISK_PATH"
+    fi
+  elif [[ ! -f "$VM_DISK_PATH" ]]; then
     echo "creating desktop VM disk at $VM_DISK_PATH..."
     qemu-img create -f qcow2 -F qcow2 -b "$base_img" "$VM_DISK_PATH" "${VM_SIZE_GB}G" >/dev/null
   else
@@ -646,8 +752,15 @@ ensure_guest_ferrocrate_installed() {
   guest_ssh "command -v ferrocrate >/dev/null"
 }
 
+ensure_guest_daemon_running() {
+  local service_cmd
+  service_cmd="set -euo pipefail; sudo install -d -o '${VM_GUEST_USER}' -g '${VM_GUEST_USER}' '/home/${VM_GUEST_USER}/.local/state/ferrocrate'; printf '%s\\n' '[Unit]' 'Description=FerroCrate guest daemon' 'After=network-online.target' '' '[Service]' 'Type=simple' 'User=${VM_GUEST_USER}' 'Environment=HOME=/home/${VM_GUEST_USER}' 'ExecStart=/usr/local/bin/ferrocrate daemon --socket ${VM_GUEST_SOCKET} --docker-compat' 'Restart=on-failure' 'RestartSec=2' '' '[Install]' 'WantedBy=multi-user.target' | sudo tee /etc/systemd/system/ferrocrate.service >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable --now ferrocrate.service; sudo systemctl is-active --quiet ferrocrate.service"
+  guest_ssh "$service_cmd"
+}
+
 bootstrap_desktop_vm() {
   local ferro_desktop vm_backend
+  local -a vm_init_args
   ferro_desktop="$PREFIX/ferro-desktop"
   [[ -x "$ferro_desktop" ]] || ferro_desktop="$(command -v ferro-desktop || true)"
   if [[ -z "$ferro_desktop" || ! -x "$ferro_desktop" ]]; then
@@ -655,23 +768,31 @@ bootstrap_desktop_vm() {
     exit 1
   fi
 
-  prepare_vm_image
+  vm_backend="$(vm_backend_for_host)"
+  prepare_vm_image "$vm_backend"
   generate_vm_ssh_key
   generate_cloud_init_seed
-  vm_backend="$(vm_backend_for_host)"
   echo "initializing desktop VM state..."
-  "$ferro_desktop" vm \
-    --state-file "$VM_STATE_FILE" \
-    init \
-    --backend "$vm_backend" \
-    --disk-path "$VM_DISK_PATH" \
-    --host-share-path "$VM_HOST_SHARE" \
-    --fs-backend 9p \
-    --ssh-port "$VM_SSH_PORT" \
-    --api-port "$VM_API_PORT" \
-    --guest-user "$VM_GUEST_USER" \
-    --ssh-private-key-path "$VM_SSH_KEY_PATH" \
-    --cloud-init-image-path "$VM_CLOUD_INIT_PATH" >/dev/null
+  vm_init_args=(
+    vm --state-file "$VM_STATE_FILE" init
+    --backend "$vm_backend"
+    --disk-path "$VM_DISK_PATH"
+    --host-share-path "$VM_HOST_SHARE"
+    --fs-backend virtiofs
+    --ssh-port "$VM_SSH_PORT"
+    --api-port "$VM_API_PORT"
+    --guest-user "$VM_GUEST_USER"
+    --ssh-private-key-path "$VM_SSH_KEY_PATH"
+    --cloud-init-image-path "$VM_CLOUD_INIT_PATH"
+  )
+  if [[ "$vm_backend" == "vfkit" ]]; then
+    vm_init_args+=(
+      --vfkit-kernel-path "$FERROCRATE_VFKIT_KERNEL"
+      --vfkit-initrd-path "$FERROCRATE_VFKIT_INITRD"
+      --vfkit-mac "$VFKIT_MAC"
+    )
+  fi
+  "$ferro_desktop" "${vm_init_args[@]}" >/dev/null
 
   echo "starting desktop VM..."
   if ! "$ferro_desktop" vm --state-file "$VM_STATE_FILE" start; then
@@ -697,6 +818,8 @@ bootstrap_desktop_vm() {
   fi
 
   ensure_guest_ferrocrate_installed
+  ensure_guest_daemon_running
+  start_guest_socket_forward
 }
 
 main() {

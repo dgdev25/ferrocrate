@@ -36,6 +36,7 @@ pub struct NamedNetworkEndpointConfig {
     pub ipv4_subnet: String,
     pub ipv4_gateway: String,
     pub ipv6_gateway_cidr: Option<String>,
+    pub aliases: Vec<String>,
 }
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
@@ -117,7 +118,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 #[cfg(test)]
 use std::io::Seek;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
@@ -128,7 +129,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -890,7 +891,7 @@ impl CreationRollback {
             (Some(_), false) => None,
             (Some(name), true) if self.network_ownership.is_none() => {
                 match netns_deletion_decision(
-                    Path::new("/var/run/netns"),
+                    &netns::netns_root(),
                     name,
                     self.namespace_identity,
                 ) {
@@ -1516,6 +1517,13 @@ pub enum RuntimeError {
     Cgroup(#[from] crate::cgroups::CgroupError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("io error during {operation} on {path}: {source}")]
+    PathIo {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("image store error: {0}")]
     ImageStore(#[from] crate::image_store::ImageStoreError),
     #[error("exec error: {0}")]
@@ -1554,6 +1562,17 @@ pub enum RuntimeError {
     Witness(#[from] crate::witness::JournalError),
     #[error("kernel effect completed but lifecycle state persistence failed: {0}")]
     PostEffectPersistence(ContainerStoreError),
+}
+
+fn path_io<'a>(
+    operation: &'static str,
+    path: &'a Path,
+) -> impl FnOnce(std::io::Error) -> RuntimeError + 'a {
+    move |source| RuntimeError::PathIo {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 impl From<MediationError> for RuntimeError {
@@ -3000,7 +3019,7 @@ impl ContainerRuntime {
         let exec_cmd = apply_selinux_if_enabled(&exec_cmd)?;
         let container_dir = self.runtime_dir.join("containers").join(&container_id);
         let log_dir = container_dir.join("logs");
-        fs::create_dir_all(&log_dir)?;
+        fs::create_dir_all(&log_dir).map_err(path_io("create log directory", &log_dir))?;
         rollback.track_container_dir(container_dir.clone());
 
         let stdout_path = log_dir.join("stdout.log");
@@ -3056,7 +3075,8 @@ impl ContainerRuntime {
                 &layer_cache_root,
             )?;
         } else {
-            fs::create_dir_all(&rootfs_dir)?;
+            fs::create_dir_all(&rootfs_dir)
+                .map_err(path_io("create container rootfs directory", &rootfs_dir))?;
         }
         if let Some(workdir) = resolved_workdir.as_deref() {
             ensure_rootfs_workdir(&rootfs_dir, workdir)?;
@@ -3088,11 +3108,14 @@ impl ContainerRuntime {
                 &rootfs_dir,
             )
             .map_err(RuntimeError::InvalidState)?;
-            let source_is_dir = fs::metadata(&mount.source)?.is_dir();
+            let source_is_dir = fs::metadata(&mount.source)
+                .map_err(path_io("inspect bind mount source", &mount.source))?
+                .is_dir();
             let _target =
                 open_mount_target_beneath_for_source(&rootfs_dir, &mount.target, source_is_dir)?;
             let target = path_resource_identity(&rootfs_dir.join(&mount.target))?;
-            let source_metadata = fs::metadata(&mount.source)?;
+            let source_metadata = fs::metadata(&mount.source)
+                .map_err(path_io("inspect bind mount source", &mount.source))?;
             let ResourceIdentity::Path {
                 device,
                 inode,
@@ -3252,7 +3275,8 @@ impl ContainerRuntime {
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
             rollback.track_cgroup(cgroup_name)?;
-            let cgroup_metadata = fs::metadata(&group)?;
+            let cgroup_metadata = fs::metadata(&group)
+                .map_err(path_io("inspect container cgroup", &group))?;
             rollback.mark_typed_resource(
                 cgroup_plan.expect("cgroup plan exists"),
                 ResourceIdentity::Cgroup {
@@ -3416,6 +3440,16 @@ impl ContainerRuntime {
             }),
         };
         record.network_endpoints = record.effective_network_endpoints();
+        if let Some(aliases) = record.annotations.get("io.ferrocrate.network.aliases") {
+            if let Some(endpoint) = record.network_endpoints.first_mut() {
+                endpoint.aliases = aliases
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|alias| !alias.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+        }
 
         rollback.persist_network()?;
         let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
@@ -4479,13 +4513,15 @@ impl ContainerRuntime {
     ) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
             runtime.connect_network_authorized(proof, intent, id, &config)
-        })
+        })?;
+        update_container_hosts(&self.runtime_dir, &self.store.list()?)
     }
 
     pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
             runtime.disconnect_network_authorized(proof, intent, id, network_name)
-        })
+        })?;
+        update_container_hosts(&self.runtime_dir, &self.store.list()?)
     }
 
     fn connect_network_authorized(
@@ -4585,10 +4621,7 @@ impl ContainerRuntime {
                 &config.bridge_name,
             )?)?;
             run_cmd(&veth::build_ip_link_set_up_cmd(&host_interface)?)?;
-            run_cmd(&netns::build_ip_link_set_netns_cmd(
-                &peer_interface,
-                netns_name,
-            )?)?;
+            move_link_to_runtime_netns(&peer_interface, netns_name)?;
             run_cmd(&ip_netns_exec(
                 netns_name,
                 &["ip", "link", "set", &peer_interface, "name", &interface_name],
@@ -4701,6 +4734,7 @@ impl ContainerRuntime {
             interface_name,
             ipv4_address: Some(ipv4),
             ipv6_address,
+            aliases: config.aliases.clone(),
             generation: config.generation,
             namespace_identity: Some(namespace_identity),
             network_backend: None,
@@ -8896,7 +8930,7 @@ fn setup_network(
                 return Ok(NetworkSetup::isolated(None, None, None));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+            create_runtime_netns(&netns_name)?;
             rollback.track_namespace_created(netns_name.clone())?;
             let identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
             rollback.identify_namespace(identity)?;
@@ -8919,7 +8953,7 @@ fn setup_network(
                 ));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+            create_runtime_netns(&netns_name)?;
             rollback.track_namespace_created(netns_name.clone())?;
             let identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
             rollback.identify_namespace(identity)?;
@@ -8993,7 +9027,7 @@ fn setup_network(
     let subnet = network_cidr_v4(&bridge_config.gateway, bridge_config.prefix)
         .map_err(RuntimeError::Network)?;
     let netns_name = format!("ferro-{container_id}");
-    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+    create_runtime_netns(&netns_name)?;
     rollback.track_namespace_created(netns_name.clone())?;
     let namespace_identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
     rollback.identify_namespace(namespace_identity)?;
@@ -9030,10 +9064,7 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(
-        &cont_veth,
-        &netns_name,
-    )?)?;
+    move_link_to_runtime_netns(&cont_veth, &netns_name)?;
     // Rename the moved interface to eth0 inside the netns (while still down).
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -9280,7 +9311,7 @@ fn setup_managed_network(
         ));
     };
     let netns_name = attachment.netns.clone();
-    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+    create_runtime_netns(&netns_name)?;
     rollback.track_namespace_created(netns_name.clone())?;
     rollback.identify_namespace(kernel_path_identity(&netns::netns_path(&netns_name))?)?;
     let host_veth = format!("veth{}", short_id(container_id, 8));
@@ -9306,10 +9337,7 @@ fn setup_managed_network(
         &attachment.bridge,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(
-        &cont_veth,
-        &netns_name,
-    )?)?;
+    move_link_to_runtime_netns(&cont_veth, &netns_name)?;
     run_cmd(&ip_netns_exec(
         &netns_name,
         &["ip", "link", "set", &cont_veth, "name", "eth0"],
@@ -10743,7 +10771,7 @@ fn verify_container_kernel_ownership(
     let netns_name = netns_name.ok_or_else(|| {
         RuntimeError::Network("network ownership has no namespace name".to_string())
     })?;
-    let netns_path = Path::new("/var/run/netns").join(netns_name);
+    let netns_path = netns::netns_path(netns_name);
     let namespace_verified = match fs::symlink_metadata(&netns_path) {
         Ok(metadata) => match verify_kernel_identity(
             KernelIdentity {
@@ -11128,7 +11156,7 @@ fn cleanup_network(
             ])?;
         }
         if let Some(netns_name) = record.netns.as_deref() {
-            run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+            delete_runtime_netns(netns_name)?;
         }
         return Ok(());
     }
@@ -11157,7 +11185,7 @@ fn cleanup_network(
                     (record.netns.as_deref(), record.namespace_identity)
                 {
                     verify_endpoint_namespace_identity(netns_name, expected)?;
-                    run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                    delete_runtime_netns(netns_name)?;
                 }
             }
             return Ok(());
@@ -11192,7 +11220,7 @@ fn cleanup_network(
                             observed,
                         )? {
                             OwnedResourceState::Present => {
-                                run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                                delete_runtime_netns(netns_name)?;
                             }
                             OwnedResourceState::Missing => {}
                         }
@@ -11333,8 +11361,7 @@ fn cleanup_network_resources(
     }
 
     if let Some(netns_name) = netns_name {
-        let command = netns::build_ip_netns_del_cmd(netns_name)?;
-        run_cmd_allow_missing(&command)?;
+        delete_runtime_netns(netns_name)?;
     }
     if let Some(ownership) = ownership {
         run_cmd_allow_missing(&[
@@ -12174,25 +12201,35 @@ fn update_container_hosts(
     runtime_dir: &Path,
     containers: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
-    let mut entries: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for record in containers {
-        if record.status != "running" && record.status != "paused" {
+    let dns_dir = runtime_dir.join("dns");
+    fs::create_dir_all(&dns_dir)?;
+    let mut network_entries = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+    for peer in containers {
+        if !matches!(peer.status.as_str(), "running" | "paused") {
             continue;
         }
-        let mut add_entry = |ip: &Option<String>| {
-            if let Some(ip) = ip.as_ref() {
+        for endpoint in peer.effective_network_endpoints() {
+            let entries = network_entries.entry(endpoint.network_name.clone()).or_default();
+            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 let names = entries.entry(ip.clone()).or_default();
-                names.insert(record.id.clone());
-                if let Some(name) = record.name.as_ref() {
+                names.insert(peer.id.clone());
+                if let Some(name) = peer.name.as_ref() {
                     names.insert(name.clone());
                 }
+                names.extend(endpoint.aliases.iter().cloned());
             }
-        };
-        add_entry(&record.ip_address);
-        add_entry(&record.ipv6_address);
+        }
+    }
+    for (network_name, entries) in &network_entries {
+        write_runtime_file_atomically(
+            &dns_dir.join(format!("{network_name}.hosts")),
+            render_hosts(entries).as_bytes(),
+        )?;
     }
 
-    let hosts_body = (!entries.is_empty()).then(|| render_hosts(&entries));
     for record in containers {
         if record.status != "running" && record.status != "paused" {
             continue;
@@ -12202,7 +12239,9 @@ fn update_container_hosts(
             .join(&record.id)
             .join("rootfs")
             .join("etc");
-        if let Some(hosts_body) = hosts_body.as_deref() {
+        let entries = container_hosts_entries(record, containers);
+        if !entries.is_empty() {
+            let hosts_body = render_hosts(&entries);
             let hosts_path = etc_dir.join("hosts");
             if let Some(parent) = hosts_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -12218,7 +12257,24 @@ fn update_container_hosts(
         if let Some(parent) = resolv_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let dns_config = if rootless_netns_enabled()
+        let endpoint_gateways = record
+            .effective_network_endpoints()
+            .iter()
+            .filter_map(endpoint_gateway)
+            .collect::<BTreeSet<_>>();
+        for (endpoint, gateway) in record
+            .effective_network_endpoints()
+            .iter()
+            .filter_map(|endpoint| endpoint_gateway(endpoint).map(|gateway| (endpoint, gateway)))
+        {
+            ensure_embedded_dns(runtime_dir, &endpoint.network_name, gateway)?;
+        }
+        let dns_config = if !endpoint_gateways.is_empty() {
+            ferro_net::dns::DnsConfig {
+                servers: endpoint_gateways.into_iter().map(|gateway| gateway.to_string()).collect(),
+                search: Vec::new(),
+            }
+        } else if rootless_netns_enabled()
             && record.ip_address.is_none()
             && record.ipv6_address.is_none()
         {
@@ -12234,6 +12290,144 @@ fn update_container_hosts(
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
     }
     Ok(())
+}
+
+fn container_hosts_entries(
+    target: &ContainerRecord,
+    containers: &[ContainerRecord],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let target_networks = target
+        .effective_network_endpoints()
+        .into_iter()
+        .map(|endpoint| endpoint.network_name)
+        .collect::<BTreeSet<_>>();
+    let mut entries = BTreeMap::<String, BTreeSet<String>>::new();
+    for peer in containers {
+        if !matches!(peer.status.as_str(), "running" | "paused") {
+            continue;
+        }
+        for endpoint in peer.effective_network_endpoints() {
+            if !target_networks.contains(&endpoint.network_name) {
+                continue;
+            }
+            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let names = entries.entry(ip.clone()).or_default();
+                names.insert(peer.id.clone());
+                if let Some(name) = peer.name.as_ref() {
+                    names.insert(name.clone());
+                }
+                names.extend(endpoint.aliases.iter().cloned());
+            }
+        }
+    }
+    entries
+}
+
+static EMBEDDED_DNS_SERVERS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+
+fn endpoint_gateway(endpoint: &NetworkEndpointRecord) -> Option<Ipv4Addr> {
+    let cidr = endpoint.ownership.as_ref()?.source_cidr.as_deref()?;
+    let (address, prefix) = cidr.split_once('/')?;
+    let address = address.parse::<Ipv4Addr>().ok()?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+    let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+    Some(Ipv4Addr::from((u32::from(address) & mask).checked_add(1)?))
+}
+
+fn ensure_embedded_dns(
+    runtime_dir: &Path,
+    network_name: &str,
+    gateway: Ipv4Addr,
+) -> Result<(), RuntimeError> {
+    let key = gateway.to_string();
+    let servers = EMBEDDED_DNS_SERVERS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let mut servers = servers
+        .lock()
+        .map_err(|_| RuntimeError::Network("embedded DNS registry lock poisoned".into()))?;
+    if servers.contains(&key) {
+        return Ok(());
+    }
+    let socket = UdpSocket::bind((gateway, 53)).map_err(|error| {
+        RuntimeError::Network(format!(
+            "embedded DNS could not bind {gateway}:53 for network {network_name}: {error}"
+        ))
+    })?;
+    let hosts_path = runtime_dir.join("dns").join(format!("{network_name}.hosts"));
+    thread::Builder::new()
+        .name(format!("ferro-dns-{network_name}"))
+        .spawn(move || {
+            let mut buffer = [0_u8; 512];
+            while let Ok((length, peer)) = socket.recv_from(&mut buffer) {
+                if let Some(response) = dns_response(&buffer[..length], &hosts_path) {
+                    let _ = socket.send_to(&response, peer);
+                }
+            }
+        })
+        .map_err(|error| RuntimeError::Network(format!("embedded DNS start failed: {error}")))?;
+    servers.insert(key);
+    Ok(())
+}
+
+fn dns_response(query: &[u8], hosts_path: &Path) -> Option<Vec<u8>> {
+    if query.len() < 17 {
+        return None;
+    }
+    let mut cursor = 12;
+    let mut labels = Vec::new();
+    loop {
+        let length = *query.get(cursor)? as usize;
+        cursor += 1;
+        if length == 0 {
+            break;
+        }
+        labels.push(std::str::from_utf8(query.get(cursor..cursor + length)?).ok()?);
+        cursor += length;
+    }
+    let question_end = cursor.checked_add(4)?;
+    let qtype = u16::from_be_bytes(query.get(cursor..cursor + 2)?.try_into().ok()?);
+    let name = labels.join(".");
+    let hosts = fs::read_to_string(hosts_path).ok()?;
+    let mut known_name = false;
+    let address = hosts.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let address = fields.next()?.parse::<Ipv4Addr>().ok()?;
+            if fields.any(|candidate| candidate == name) {
+                known_name = true;
+                (qtype == 1).then_some(address)
+            } else {
+                None
+            }
+        });
+    let mut response = Vec::with_capacity(question_end + 16);
+    response.extend_from_slice(&query[..2]);
+    response.extend_from_slice(
+        &if known_name {
+            0x8180_u16
+        } else {
+            0x8183_u16
+        }
+        .to_be_bytes(),
+    );
+    response.extend_from_slice(&1_u16.to_be_bytes());
+    response.extend_from_slice(&(u16::from(address.is_some())).to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(query.get(12..question_end)?);
+    if let Some(address) = address {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&0_u32.to_be_bytes());
+        response.extend_from_slice(&4_u16.to_be_bytes());
+        response.extend_from_slice(&address.octets());
+    }
+    Some(response)
 }
 
 fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), RuntimeError> {
@@ -12321,6 +12515,10 @@ fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
 }
 
 fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
+    let root = netns::netns_root();
+    if root != Path::new("/var/run/netns") {
+        return netns::build_netns_exec_at_cmd(&root.join(netns_name), args);
+    }
     let mut out = vec![
         "ip".to_string(),
         "netns".to_string(),
@@ -12329,6 +12527,55 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     ];
     out.extend(args.iter().map(|val| (*val).to_string()));
     out
+}
+
+fn create_runtime_netns(netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        return run_cmd(&netns::build_ip_netns_add_cmd(netns_name)?);
+    }
+    netns::build_ip_netns_add_cmd(netns_name)?;
+    fs::create_dir_all(&root)?;
+    let path = root.join(netns_name);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = run_cmd(&netns::build_netns_create_at_cmd(&path)) {
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn delete_runtime_netns(netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        return run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?);
+    }
+    netns::build_ip_netns_del_cmd(netns_name)?;
+    let path = root.join(netns_name);
+    if !path.exists() {
+        return Ok(());
+    }
+    run_cmd_allow_missing(&["umount".to_string(), path.display().to_string()])?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeError::Io(error)),
+    }
+}
+
+fn move_link_to_runtime_netns(link: &str, netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        run_cmd(&netns::build_ip_link_set_netns_cmd(link, netns_name)?)
+    } else {
+        run_cmd(&netns::build_netns_move_link_at_cmd(
+            link,
+            &root.join(netns_name),
+        )?)
+    }
 }
 
 /// eBPF published-port redirects can hand a container-originated skb directly
@@ -14316,6 +14563,24 @@ mod tests {
     use std::sync::{mpsc, Mutex};
 
     #[test]
+    fn embedded_dns_returns_nodata_for_known_name_without_requested_family() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hosts = directory.path().join("network.hosts");
+        std::fs::write(&hosts, "172.30.245.42 conformance-alias\n").expect("write hosts");
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let label = "conformance-alias";
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+        query.push(0);
+        query.extend_from_slice(&28_u16.to_be_bytes());
+        query.extend_from_slice(&1_u16.to_be_bytes());
+
+        let response = super::dns_response(&query, &hosts).expect("DNS response");
+        assert_eq!(&response[2..4], &0x8180_u16.to_be_bytes());
+        assert_eq!(&response[6..8], &0_u16.to_be_bytes());
+    }
+
+    #[test]
     fn archive_targets_are_absolute_and_traversal_safe() {
         assert_eq!(
             validate_archive_target("/").expect("root target"),
@@ -15885,6 +16150,58 @@ mod tests {
     }
 
     #[test]
+    fn network_aliases_are_visible_only_to_peers_on_the_same_network() {
+        let mut target = ContainerRecord::authorization_candidate("target".into(), "image".into());
+        target.status = "running".into();
+        target.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "frontend".into(),
+            endpoint_id: "target-front".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.10.0.2".into()),
+            ipv6_address: None,
+            aliases: vec![],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+        let mut frontend = ContainerRecord::authorization_candidate("front".into(), "image".into());
+        frontend.status = "running".into();
+        frontend.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "frontend".into(),
+            endpoint_id: "front-endpoint".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.10.0.3".into()),
+            ipv6_address: None,
+            aliases: vec!["api".into()],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+        let mut backend = ContainerRecord::authorization_candidate("back".into(), "image".into());
+        backend.status = "running".into();
+        backend.network_endpoints = vec![NetworkEndpointRecord {
+            network_name: "backend".into(),
+            endpoint_id: "back-endpoint".into(),
+            interface_name: "eth0".into(),
+            ipv4_address: Some("10.20.0.3".into()),
+            ipv6_address: None,
+            aliases: vec!["database".into()],
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }];
+
+        let entries = super::container_hosts_entries(&target, &[target.clone(), frontend, backend]);
+        let hosts = super::render_hosts(&entries);
+        assert!(hosts.contains("10.10.0.3 api front"), "{hosts}");
+        assert!(!hosts.contains("database"), "{hosts}");
+        assert!(!hosts.contains("10.20.0.3"), "{hosts}");
+    }
+
+    #[test]
     fn rootless_runtime_host_update_publishes_slirp_resolver_before_launch() {
         let _guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
@@ -16204,6 +16521,7 @@ mod tests {
 
     #[test]
     fn signal_zero_rejects_a_pid_without_matching_start_time() {
+        let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let mut child = std::process::Command::new("sleep")
@@ -16528,14 +16846,77 @@ mod tests {
 
     #[test]
     fn unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement() {
+        const NAMESPACE_MARKER: &str = "FERRO_MOUNT_PLAN_NAMESPACE_CHILD";
+        if !nix::unistd::Uid::effective().is_root()
+            && std::env::var_os(NAMESPACE_MARKER).is_none()
+        {
+            let child = std::process::Command::new("unshare")
+                .args(["--user", "--map-root-user", "--mount", "--fork"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::tests::unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement",
+                    "--nocapture",
+                ])
+                .env(NAMESPACE_MARKER, "1")
+                .output();
+            match child {
+                Ok(output) if output.status.success() => return,
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.contains("running 1 test") {
+                        panic!(
+                            "mount-plan namespace child failed:\n{stdout}\n{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    eprintln!(
+                        "skipping: cannot create a user+mount namespace for mount-plan identity testing: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "skipping: cannot create a user+mount namespace for mount-plan identity testing: {error}"
+                    );
+                    return;
+                }
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
         let rootfs = temp.path().join("container/rootfs");
         let target = rootfs.join("data");
         let source = temp.path().join("source");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::create_dir_all(&source).unwrap();
+        let mount = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "tmpfs"])
+            .arg(&target)
+            .output();
+        match mount {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                eprintln!(
+                    "skipping: cannot create a distinct tmpfs mount for mount-plan identity testing: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!(
+                    "skipping: cannot create a distinct tmpfs mount for mount-plan identity testing: {error}"
+                );
+                return;
+            }
+        }
         let baseline = std::fs::metadata(&target).unwrap();
         let baseline_mount_id = super::mount_id_for_path(&target).unwrap();
+        let Some(baseline_mount_id) = baseline_mount_id else {
+            let _ = std::process::Command::new("umount").arg(&target).status();
+            eprintln!("skipping: distinct tmpfs mount has no visible mount ID");
+            return;
+        };
         let source_identity = std::fs::metadata(&source).unwrap();
         let plan = super::ResourcePlan::BindMount {
             target: "data".into(),
@@ -16544,18 +16925,27 @@ mod tests {
             source_inode: source_identity.ino(),
             baseline_device: baseline.dev(),
             baseline_inode: baseline.ino(),
-            baseline_mount_id,
+            baseline_mount_id: Some(baseline_mount_id),
             operation_id: Some([9; 16]),
         };
         assert!(super::classify_unmarked_mount(
             Some(&rootfs),
             std::path::Path::new("data"),
-            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            (baseline.dev(), baseline.ino(), Some(baseline_mount_id)),
             Some((source_identity.dev(), source_identity.ino(), None)),
             None,
         )
         .unwrap()
         .is_none());
+        let unmount = std::process::Command::new("umount")
+            .arg(&target)
+            .output()
+            .expect("launch umount for mount-plan fixture");
+        assert!(
+            unmount.status.success(),
+            "unmount mount-plan fixture: {}",
+            String::from_utf8_lossy(&unmount.stderr).trim()
+        );
         #[cfg(target_env = "musl")]
         std::fs::rename(&target, rootfs.join("replaced-data")).unwrap();
         #[cfg(not(target_env = "musl"))]
@@ -16567,7 +16957,7 @@ mod tests {
                 super::ResourcePlan::BindMount { target, .. } => target,
                 _ => unreachable!(),
             },
-            (baseline.dev(), baseline.ino(), baseline_mount_id),
+            (baseline.dev(), baseline.ino(), Some(baseline_mount_id)),
             Some((source_identity.dev(), source_identity.ino(), None)),
             None,
         )
@@ -17719,6 +18109,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 interface_name: format!("eth{index}"),
                 ipv4_address: Some(format!("172.{}.0.2", 30 + index)),
                 ipv6_address: None,
+                aliases: Vec::new(),
                 generation: 1,
                 namespace_identity: None,
                 network_backend: None,
@@ -17746,6 +18137,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 interface_name: format!("eth{index}"),
                 ipv4_address: Some(format!("172.30.{index}.2")),
                 ipv6_address: None,
+                aliases: Vec::new(),
                 generation: 1,
                 namespace_identity: None,
                 network_backend: None,
@@ -18482,6 +18874,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn tty_spawn_uses_kernel_pty_and_merges_output_into_logs() {
+        let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let root = tempfile::tempdir().expect("runtime");
         let stdout = root.path().join("stdout.log");
         let stderr = root.path().join("stderr.log");
@@ -18882,6 +19275,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn public_run_and_restart_survive_real_sigkill_at_resource_and_launch_barriers() {
         let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
+        if !nix::unistd::Uid::effective().is_root() && !crate::rootless::bubblewrap_available() {
+            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            return;
+        }
         for action in ["run", "restart"] {
             let phases: &[&str] = if action == "run" {
                 if nix::unistd::Uid::effective().is_root() {

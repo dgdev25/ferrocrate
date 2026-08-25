@@ -5,6 +5,7 @@ param(
   [string]$Channel = 'public',
   [string]$Version = 'latest',
   [string]$Repo = 'dgtise25/ferrocrate',
+  [string]$WslDistro = 'Ubuntu',
   [string]$Prefix = "$env:ProgramFiles\FerroCrate\bin",
   [string]$PaidReleaseBaseUrl = $env:PAID_RELEASE_BASE_URL,
   [string]$PaidReleaseToken = $env:PAID_RELEASE_TOKEN,
@@ -235,6 +236,91 @@ function Install-FromSource {
   }
 }
 
+function Enable-Wsl2Host {
+  foreach ($feature in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
+    $state = (Get-WindowsOptionalFeature -Online -FeatureName $feature).State
+    if ($state -ne 'Enabled') {
+      Write-Host "Enabling Windows feature: $feature"
+      Enable-WindowsOptionalFeature -Online -FeatureName $feature -All -NoRestart | Out-Null
+    }
+  }
+  & wsl.exe --set-default-version 2 | Out-Null
+}
+
+function Ensure-WslUbuntu {
+  param([string]$Distro = 'Ubuntu')
+  $installed = @(& wsl.exe --list --quiet 2>$null) | ForEach-Object { $_.Trim([char]0).Trim() }
+  if ($installed -notcontains $Distro) {
+    Write-Host "Installing WSL2 distro: $Distro"
+    & wsl.exe --install --distribution $Distro --no-launch
+    if ($LASTEXITCODE -ne 0) {
+      throw 'WSL Ubuntu installation failed; reboot Windows if the feature enablement requires it.'
+    }
+  }
+  & wsl.exe --set-version $Distro 2 | Out-Null
+}
+
+function Provision-WslDaemon {
+  param([string]$Distro = 'Ubuntu',[string]$Repo,[string]$Version)
+  $guestScript = @'
+set -euo pipefail
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.local/state/ferrocrate"
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates tar socat
+if ! command -v ferrocrate >/dev/null 2>&1; then
+  arch="$(uname -m)"
+  case "$arch" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) exit 1 ;; esac
+  tag="$FERROCRATE_INSTALL_VERSION"
+  if [ "$tag" = latest ]; then
+    tag="$(curl -fsSL "https://api.github.com/repos/$FERROCRATE_INSTALL_REPO/releases/latest" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  fi
+  tmp="$(mktemp -d)"
+  curl -fL "https://github.com/$FERROCRATE_INSTALL_REPO/releases/download/$tag/ferrocrate-$tag-linux-$arch.tar.gz" -o "$tmp/ferrocrate.tgz"
+  tar -xzf "$tmp/ferrocrate.tgz" -C "$tmp"
+  binary="$(find "$tmp" -type f \( -name ferrocrate -o -name ferro-cli \) | head -1)"
+  sudo install -m 0755 "$binary" /usr/local/bin/ferrocrate
+  rm -rf "$tmp"
+fi
+cat >"$HOME/.config/systemd/user/ferrocrate-daemon.service" <<'UNIT'
+[Unit]
+Description=Ferrocrate rootless daemon
+[Service]
+ExecStart=/usr/local/bin/ferrocrate daemon --socket=%h/.local/state/ferrocrate/ferrocrate.sock --docker-compat
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=default.target
+UNIT
+if systemctl --user daemon-reload >/dev/null 2>&1; then
+  systemctl --user enable --now ferrocrate-daemon.service
+else
+  pidfile="$HOME/.local/state/ferrocrate/ferrocrate-daemon.pid"
+  if ! test -s "$pidfile" || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    nohup ferrocrate daemon --socket "$HOME/.local/state/ferrocrate/ferrocrate.sock" --docker-compat >"$HOME/.local/state/ferrocrate/daemon.log" 2>&1 &
+    echo $! >"$pidfile"
+  fi
+fi
+'@
+  & wsl.exe -d $Distro -- env "FERROCRATE_INSTALL_REPO=$Repo" "FERROCRATE_INSTALL_VERSION=$Version" bash -lc $guestScript
+  if ($LASTEXITCODE -ne 0) { throw "Failed to provision Ferrocrate daemon in $Distro" }
+}
+
+function Start-WslNamedPipeRelay {
+  param([string]$Prefix,[string]$Distro = 'Ubuntu')
+  $desktop = Join-Path $Prefix 'ferro-desktop.exe'
+  if (-not (Test-Path $desktop)) { throw "Desktop relay binary is missing: $desktop" }
+  $stateDir = Join-Path $env:LOCALAPPDATA 'Ferrocrate'
+  New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+  $pidPath = Join-Path $stateDir 'wsl-relay.pid'
+  if (Test-Path $pidPath) {
+    $existingPid = [int](Get-Content -Raw $pidPath)
+    if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) { return }
+  }
+  # The pipe is local to this Windows host; the relay executes every request via wsl.exe.
+  $process = Start-Process -FilePath $desktop -ArgumentList @('daemon','--pipe-name','ferrocrate','--wsl-distro',$Distro) -WindowStyle Hidden -PassThru
+  Set-Content -Path $pidPath -Value $process.Id
+}
+
 if ($FullStack -and $Channel -eq 'public') {
   throw '-FullStack requires -Channel paid (desktop artifacts are paid-channel only).'
 }
@@ -254,6 +340,13 @@ switch ($Method) {
   'binary' { Install-BinaryRelease -Repo $Repo -Version $Version -Prefix $Prefix -Channel $Channel -PaidReleaseBaseUrl $PaidReleaseBaseUrl -PaidReleaseToken $PaidReleaseToken -PaidSessionToken $PaidSessionToken -PaidReleaseTokenEndpoint $PaidReleaseTokenEndpoint -PaidEntitlementFile $PaidEntitlementFile -InstallDesktopBin:$installDesktopBin -Force:$Force }
   'source' { Install-FromSource -Repo $Repo -Version $Version -Prefix $Prefix -InstallDesktopBin:$installDesktopBin -Force:$Force }
   default { throw "Invalid method: $Method" }
+}
+
+if ($installDesktopBin) {
+  Enable-Wsl2Host
+  Ensure-WslUbuntu -Distro $WslDistro
+  Provision-WslDaemon -Distro $WslDistro -Repo $Repo -Version $Version
+  Start-WslNamedPipeRelay -Prefix $Prefix -Distro $WslDistro
 }
 
 Write-Host "Done. Try: ferrocrate --help"

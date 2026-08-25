@@ -22,12 +22,15 @@ use super::ipam::{Allocation, Ipam, IpamError};
 use super::netd_client::{
     endpoint_live_identity_digest, DelegationBridge, NetdResponse, UnixNetdClient,
 };
-use ferro_core::authorization::{
-    helper_grant::GrantAction, AuthorizationMode, AuthorizationServiceMode,
-};
+#[cfg(target_os = "linux")]
+use ferro_core::authorization::AuthorizationMode;
+use ferro_core::authorization::{helper_grant::GrantAction, AuthorizationServiceMode};
 use ferro_core::managed_overlay::{
-    DelegatedManagedOverlayRequest, LegacyManagedOverlayRequest, ManagedCleanupProvenance,
-    ManagedOverlayCompatibilityMode, ManagedOverlayDelegation, MANAGED_OVERLAY_PROTOCOL_VERSION,
+    DelegatedManagedOverlayRequest, ManagedCleanupProvenance, ManagedOverlayDelegation,
+};
+#[cfg(target_os = "linux")]
+use ferro_core::managed_overlay::{
+    LegacyManagedOverlayRequest, ManagedOverlayCompatibilityMode, MANAGED_OVERLAY_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -637,6 +640,7 @@ impl LocalApi {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn matches_delegated_identity(&self, request: &DelegatedManagedOverlayRequest) -> bool {
         let Some((expected, boot)) = &self.authorization_identity else {
             return false;
@@ -743,6 +747,7 @@ fn receive_without_descriptors(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn decode_disabled_legacy(
     body: &[u8],
     expected_identity: Option<&(AuthorizationServiceMode, String)>,
@@ -799,7 +804,7 @@ fn proposed_child(parent: &ParentGrantKey) -> Result<ChildIdentity, LocalApiErro
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn monotonic_millis() -> u64 {
     std::fs::read_to_string("/proc/uptime")
         .ok()
@@ -807,7 +812,7 @@ fn monotonic_millis() -> u64 {
         .map_or(0, |seconds| (seconds * 1000.0) as u64)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod compatibility_tests {
     use super::{decode_disabled_legacy, LocalApiRequest};
     use ferro_core::authorization::{AuthorizationMode, AuthorizationServiceMode};

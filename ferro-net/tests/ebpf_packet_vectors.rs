@@ -32,11 +32,11 @@ fn udp_packet() -> Vec<u8> {
 
 fn rfc1071_checksum(bytes: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut words = bytes.chunks_exact(2);
-    for word in &mut words {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    let (words, remainder) = bytes.as_chunks::<2>();
+    for word in words {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
-    if let Some(byte) = words.remainder().first() {
+    if let Some(byte) = remainder.first() {
         sum += u32::from(*byte) << 8;
     }
     while sum >> 16 != 0 {

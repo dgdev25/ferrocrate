@@ -6,6 +6,10 @@ mod web_bridge;
 mod webkit_rendering;
 
 use base64::Engine as _;
+use ferro_desktop::backend::{
+    select_backend, Backend, BackendState, BackendStatus, DuplexStream, ExecStream,
+    ExecRequest as BackendExecRequest, TerminalRequest,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
@@ -14,10 +18,11 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -45,15 +50,14 @@ const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
-static LOG_FOLLOW_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static LOG_FOLLOW_PROCESS: Mutex<Option<Box<dyn ExecStream>>> = Mutex::new(None);
 static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
 static DESKTOP_DAEMON_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static DESKTOP_DAEMON_STARTING: AtomicBool = AtomicBool::new(false);
 static DESKTOP_DAEMON_FAILURE: Mutex<Option<String>> = Mutex::new(None);
 
 struct TerminalProcess {
-    child: Child,
-    stdin: ChildStdin,
+    stream: Box<dyn DuplexStream>,
     exec_id: String,
 }
 
@@ -192,6 +196,7 @@ struct DesktopSnapshot {
 #[derive(Debug, Serialize)]
 struct DaemonStatus {
     state: String,
+    healthy: bool,
     socket_path: String,
     reason: Option<String>,
     platform: String,
@@ -261,6 +266,7 @@ fn daemon_capabilities(socket: &std::path::Path) -> Result<DaemonCapabilities, S
 fn running_daemon_status(socket_path: &str, capabilities: DaemonCapabilities) -> DaemonStatus {
     DaemonStatus {
         state: "running".to_string(),
+        healthy: true,
         socket_path: socket_path.to_string(),
         reason: None,
         platform: "linux-native".to_string(),
@@ -338,7 +344,8 @@ fn supervisor_process_state() -> (bool, Option<String>) {
     }
 }
 
-fn daemon_status() -> DaemonStatus {
+#[allow(dead_code)]
+fn legacy_daemon_status() -> DaemonStatus {
     #[cfg(target_os = "linux")]
     {
         match desktop_socket_path() {
@@ -358,6 +365,7 @@ fn daemon_status() -> DaemonStatus {
                     );
                     DaemonStatus {
                         state: state.to_string(),
+                        healthy: false,
                         socket_path: socket.display().to_string(),
                         reason: lifecycle_reason.or(Some(reason)),
                         platform: "linux-native".to_string(),
@@ -367,6 +375,7 @@ fn daemon_status() -> DaemonStatus {
             },
             Err(reason) => DaemonStatus {
                 state: "failed".to_string(),
+                healthy: false,
                 socket_path: String::new(),
                 reason: Some(reason),
                 platform: "linux-native".to_string(),
@@ -377,6 +386,7 @@ fn daemon_status() -> DaemonStatus {
     #[cfg(not(target_os = "linux"))]
     DaemonStatus {
         state: "running".to_string(),
+        healthy: true,
         socket_path: "desktop bridge".to_string(),
         reason: None,
         platform: "desktop-vm".to_string(),
@@ -412,7 +422,8 @@ fn desktop_daemon_ready() -> bool {
     )
 }
 
-fn start_desktop_daemon() -> Result<(), String> {
+#[allow(dead_code)]
+fn legacy_start_desktop_daemon() -> Result<(), String> {
     if desktop_daemon_ready() {
         DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
         if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
@@ -481,7 +492,8 @@ fn start_desktop_daemon() -> Result<(), String> {
     Err(reason)
 }
 
-fn stop_desktop_daemon() {
+#[allow(dead_code)]
+fn legacy_stop_desktop_daemon() {
     DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
     if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
         *failure = None;
@@ -491,6 +503,65 @@ fn stop_desktop_daemon() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+static DESKTOP_BACKEND: OnceLock<Result<Box<dyn Backend>, String>> = OnceLock::new();
+
+fn desktop_backend() -> Result<&'static dyn Backend, String> {
+    DESKTOP_BACKEND
+        .get_or_init(|| select_backend().map_err(|error| error.to_string()))
+        .as_ref()
+        .map(|backend| backend.as_ref())
+        .map_err(Clone::clone)
+}
+
+fn daemon_status() -> DaemonStatus {
+    let status = match desktop_backend() {
+        Ok(backend) => backend.status(),
+        Err(reason) => {
+            return DaemonStatus {
+                state: "failed".to_string(),
+                healthy: false,
+                socket_path: String::new(),
+                reason: Some(reason),
+                platform: "unsupported".to_string(),
+                custom_networks: false,
+            };
+        }
+    };
+    daemon_status_from_backend(status)
+}
+
+fn daemon_status_from_backend(status: BackendStatus) -> DaemonStatus {
+    DaemonStatus {
+        state: match status.state {
+            BackendState::Stopped => "stopped",
+            BackendState::Starting => "starting",
+            BackendState::Running => "running",
+            BackendState::Stopping => "stopping",
+            BackendState::Failed => "failed",
+            BackendState::Unavailable => "unavailable",
+        }
+        .to_string(),
+        healthy: status.healthy,
+        socket_path: status.endpoint,
+        reason: status.reason,
+        platform: status.backend,
+        custom_networks: status.capabilities.custom_networks,
+    }
+}
+
+fn start_desktop_daemon() -> Result<(), String> {
+    desktop_backend()?
+        .start()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn stop_desktop_daemon() {
+    if let Ok(backend) = desktop_backend() {
+        let _ = backend.stop();
     }
 }
 
@@ -1489,14 +1560,13 @@ fn registry_login_command(registry: &str, username: &str) -> Result<Vec<String>,
     if registry.is_empty() || username.is_empty() {
         return Err("registry and username are required".to_string());
     }
-    Ok(vec![
-        "registry-proxy".to_string(),
-        "login".to_string(),
-        "--registry".to_string(),
-        registry.to_string(),
-        "--username".to_string(),
-        username.to_string(),
-    ])
+    Ok(ferrocrate_proxy_command(&[
+        "login",
+        registry,
+        "--username",
+        username,
+        "--password-stdin",
+    ]))
 }
 
 fn registry_logout_command(registry: &str) -> Result<Vec<String>, String> {
@@ -1577,39 +1647,25 @@ fn network_summaries(
 }
 
 fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Vec<String>, String> {
-    let mut command = Vec::new();
-    match action {
-        VolumeAction::List => {
-            command = [
-                "exec",
-                "--",
-                "ferrocrate",
-                "volume",
-                "ls",
-                "--format",
-                "json",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        }
-        VolumeAction::Prune => {
-            command.extend(["volume-proxy".to_string(), "prune".to_string()]);
-        }
+    let command = match action {
+        VolumeAction::List => ferrocrate_proxy_command(&["volume", "ls", "--format", "json"]),
+        VolumeAction::Prune => ferrocrate_proxy_command(&["volume", "prune"]),
         VolumeAction::Create | VolumeAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "volume name is required".to_string())?;
-            command.push("volume-proxy".to_string());
-            command.push(match action {
-                VolumeAction::Create => "create".to_string(),
-                VolumeAction::Remove => "remove".to_string(),
-                _ => unreachable!(),
-            });
-            command.push(target.to_string());
+            ferrocrate_proxy_command(&[
+                "volume",
+                match action {
+                    VolumeAction::Create => "create",
+                    VolumeAction::Remove => "rm",
+                    _ => unreachable!(),
+                },
+                target,
+            ])
         }
-    }
+    };
     Ok(command)
 }
 
@@ -1618,61 +1674,34 @@ fn network_proxy_command(
     target: Option<&str>,
     subnet: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut command = Vec::new();
-    match action {
-        NetworkAction::List => {
-            command = [
-                "exec",
-                "--",
-                "ferrocrate",
-                "network",
-                "ls",
-                "--format",
-                "json",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        }
+    let command = match action {
+        NetworkAction::List => ferrocrate_proxy_command(&["network", "ls", "--format", "json"]),
         NetworkAction::Inspect | NetworkAction::Create | NetworkAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "network name is required".to_string())?;
             if matches!(action, NetworkAction::Inspect) {
-                return Ok([
-                    "exec",
-                    "--",
-                    "ferrocrate",
-                    "network",
-                    "inspect",
-                    target,
-                    "--format",
-                    "json",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect());
+                return Ok(ferrocrate_proxy_command(&[
+                    "network", "inspect", target, "--format", "json",
+                ]));
             }
-            command.push("network-proxy".to_string());
-            command.push(
-                match action {
-                    NetworkAction::Inspect => "inspect",
-                    NetworkAction::Create => "create",
-                    NetworkAction::Remove => "remove",
-                    NetworkAction::List => unreachable!(),
-                }
-                .to_string(),
-            );
-            command.push(target.to_string());
+            let operation = match action {
+                NetworkAction::Inspect => "inspect",
+                NetworkAction::Create => "create",
+                NetworkAction::Remove => "rm",
+                NetworkAction::List => unreachable!(),
+            };
+            let mut command = ferrocrate_proxy_command(&["network", operation, target]);
             if matches!(action, NetworkAction::Create) {
                 if let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) {
                     command.push("--subnet".to_string());
                     command.push(subnet.to_string());
                 }
             }
+            command
         }
-    }
+    };
     Ok(command)
 }
 
@@ -1681,11 +1710,7 @@ fn execute_volume_proxy(
     target: Option<&str>,
 ) -> Result<CommandResult, String> {
     let args = volume_proxy_command(action, target)?;
-    let output = Command::new("ferro-desktop")
-        .args(&args)
-        .output()
-        .map_err(|error| format!("failed to run volume proxy: {error}"))?;
-    Ok(command_result_from_output(output))
+    Ok(run_owned_command("ferro-desktop", &args))
 }
 
 fn execute_network_proxy(
@@ -1698,6 +1723,16 @@ fn execute_network_proxy(
 }
 
 fn run_command(binary: &str, args: &[&str]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(
+            binary,
+            &args
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>(),
+            &[],
+        );
+    }
     match Command::new(binary).args(args).output() {
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
@@ -1705,6 +1740,9 @@ fn run_command(binary: &str, args: &[&str]) -> CommandResult {
 }
 
 fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(binary, args, &[]);
+    }
     match Command::new(binary).args(args).output() {
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
@@ -1712,6 +1750,16 @@ fn run_owned_command(binary: &str, args: &[String]) -> CommandResult {
 }
 
 fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> CommandResult {
+    if matches!(binary, "ferro-desktop" | "ferrocrate" | "ferro-cli") {
+        return run_backend_command(
+            binary,
+            &args
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>(),
+            envs,
+        );
+    }
     let mut command = Command::new(binary);
     command.args(args);
     for (k, v) in envs {
@@ -1721,6 +1769,91 @@ fn run_command_env(binary: &str, args: &[&str], envs: &[(&str, String)]) -> Comm
         Ok(output) => command_result_from_output(output),
         Err(err) => command_spawn_failure(binary, err),
     }
+}
+
+fn backend_command_request(
+    binary: &str,
+    args: &[String],
+    envs: &[(&str, String)],
+    stdin: Vec<u8>,
+) -> Result<BackendExecRequest, String> {
+    let (program, routed_args) =
+        if binary == "ferro-desktop" && args.first().is_some_and(|arg| arg == "exec") {
+            let split = args
+                .iter()
+                .position(|arg| arg == "--")
+                .map(|index| index + 1)
+                .unwrap_or(1);
+            match args.get(split) {
+                Some(program) => (program.clone(), args[split + 1..].to_vec()),
+                None => return Err("desktop exec command is required".to_string()),
+            }
+        } else {
+            (binary.to_string(), args.to_vec())
+        };
+    let mut request = BackendExecRequest::new(program).args(routed_args).stdin(stdin);
+    for (name, value) in envs {
+        request = request.env(*name, value.clone());
+    }
+    Ok(request)
+}
+
+fn command_result_from_backend(output: ferro_desktop::backend::ExecResponse) -> CommandResult {
+    CommandResult {
+        ok: output.code == 0,
+        code: output.code,
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        message: actionable_error(&String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
+fn run_backend_command_with(
+    backend: &dyn Backend,
+    binary: &str,
+    args: &[String],
+    envs: &[(&str, String)],
+    stdin: Vec<u8>,
+) -> CommandResult {
+    let request = match backend_command_request(binary, args, envs, stdin) {
+        Ok(request) => request,
+        Err(error) => return command_input_failure(&error),
+    };
+    match backend.exec(request) {
+        Ok(output) => command_result_from_backend(output),
+        Err(error) => command_spawn_failure(binary, error),
+    }
+}
+
+fn run_backend_command(binary: &str, args: &[String], envs: &[(&str, String)]) -> CommandResult {
+    match desktop_backend() {
+        Ok(backend) => run_backend_command_with(backend, binary, args, envs, Vec::new()),
+        Err(error) => command_spawn_failure(binary, error),
+    }
+}
+
+fn backend_stream_with(
+    backend: &dyn Backend,
+    binary: &str,
+    args: &[String],
+) -> Result<Box<dyn ExecStream>, String> {
+    let request = backend_command_request(binary, args, &[], Vec::new())?;
+    backend.exec_stream(request).map_err(|error| error.to_string())
+}
+
+fn start_log_follow_stream_with(
+    backend: &dyn Backend,
+    target: &str,
+) -> Result<Box<dyn ExecStream>, String> {
+    backend_stream_with(backend, "ferro-desktop", &log_follow_command(target))
+}
+
+fn start_image_build_stream_with(
+    backend: &dyn Backend,
+    context: &str,
+    tag: &str,
+) -> Result<Box<dyn ExecStream>, String> {
+    backend_stream_with(backend, "ferro-desktop", &build_bridge_command(context, tag)?)
 }
 
 fn log_follow_command(target: &str) -> Vec<String> {
@@ -1735,6 +1868,7 @@ fn log_follow_command(target: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 fn terminal_exec_command(
     target: &str,
     shell: &str,
@@ -1763,6 +1897,7 @@ fn terminal_exec_command(
     command
 }
 
+#[cfg(test)]
 fn terminal_resize_command(exec_id: &str, columns: u16, rows: u16) -> Vec<String> {
     vec![
         "terminal-resize".to_string(),
@@ -1781,6 +1916,7 @@ struct TerminalOutput {
     stderr: bool,
 }
 
+#[cfg(test)]
 fn parse_terminal_exec_id(line: &str) -> Result<String, String> {
     const PREFIX: &str = "FERROCRATE_EXEC_ID=";
     let trimmed = line.trim();
@@ -1818,6 +1954,24 @@ fn emit_terminal_output<R: Read>(mut reader: R, events: EventSink, stderr: bool)
     }
 }
 
+fn clear_terminal_slot_if_matches(
+    slot: &Mutex<Option<TerminalProcess>>,
+    exec_id: &str,
+) -> bool {
+    let Ok(mut current) = slot.lock() else {
+        return false;
+    };
+    if current
+        .as_ref()
+        .is_some_and(|process| process.exec_id == exec_id)
+    {
+        *current = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn start_terminal_impl(
     events: EventSink,
     target: String,
@@ -1838,94 +1992,34 @@ fn start_terminal_impl(
     let mut current = TERMINAL_PROCESS
         .lock()
         .map_err(|_| "terminal state is unavailable".to_string())?;
-    if let Some(process) = current.as_mut() {
-        if process
-            .child
-            .try_wait()
-            .map_err(|err| format!("failed to inspect terminal process: {err}"))?
-            .is_none()
-        {
-            return Err("an exec terminal is already active".to_string());
-        }
+    if current.is_some() {
+        return Err("an exec terminal is already active".to_string());
     }
-    *current = None;
-
-    let mut child = Command::new("ferro-desktop")
-        .args(terminal_exec_command(
-            target,
-            shell,
-            &env,
-            user.as_deref(),
-            workdir.as_deref(),
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to start exec terminal: {err}"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "exec terminal stdin missing".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "exec terminal stdout missing".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "exec terminal stderr missing".to_string())?;
-    let mut stderr = BufReader::new(stderr);
-    let mut handshake = String::new();
-    stderr
-        .read_line(&mut handshake)
-        .map_err(|err| format!("failed to read terminal proxy handshake: {err}"))?;
-    let exec_id = match parse_terminal_exec_id(&handshake) {
-        Ok(exec_id) => exec_id,
-        Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("failed to start exec terminal: {err}"));
-        }
-    };
-    let stdout_events = events.clone();
-    thread::spawn(move || emit_terminal_output(stdout, stdout_events, false));
-    let stderr_events = events.clone();
-    thread::spawn(move || emit_terminal_output(stderr, stderr_events, true));
+    let session = desktop_backend()?
+        .open_terminal(TerminalRequest {
+            container: target.to_string(),
+            command: vec![shell.to_string()],
+            env,
+            user,
+            workdir,
+        })
+        .map_err(|error| error.to_string())?;
+    let output = session
+        .stream
+        .try_clone_stream()
+        .map_err(|error| error.to_string())?;
+    let output_exec_id = session.exec_id.clone();
     *current = Some(TerminalProcess {
-        child,
-        stdin,
-        exec_id,
+        stream: session.stream,
+        exec_id: session.exec_id,
     });
     drop(current);
-
-    thread::spawn(move || loop {
-        let status = {
-            let mut process = match TERMINAL_PROCESS.lock() {
-                Ok(process) => process,
-                Err(_) => return,
-            };
-            let Some(terminal) = process.as_mut() else {
-                return;
-            };
-            match terminal.child.try_wait() {
-                Ok(Some(status)) => {
-                    *process = None;
-                    Some(status)
-                }
-                Ok(None) => None,
-                Err(err) => {
-                    events.emit("terminal-error", err.to_string());
-                    *process = None;
-                    return;
-                }
-            }
-        };
-        if let Some(status) = status {
-            events.emit("terminal-ended", status.success());
-            return;
+    let output_events = events.clone();
+    thread::spawn(move || {
+        emit_terminal_output(output, output_events.clone(), false);
+        if clear_terminal_slot_if_matches(&TERMINAL_PROCESS, &output_exec_id) {
+            output_events.emit("terminal-ended", true);
         }
-        thread::sleep(Duration::from_millis(50));
     });
     Ok(())
 }
@@ -1954,9 +2048,9 @@ fn write_terminal(data: Vec<u8>) -> Result<(), String> {
         .as_mut()
         .ok_or_else(|| "no exec terminal is active".to_string())?;
     process
-        .stdin
+        .stream
         .write_all(&data)
-        .and_then(|_| process.stdin.flush())
+        .and_then(|_| process.stream.flush())
         .map_err(|err| format!("failed to write terminal input: {err}"))
 }
 
@@ -1971,22 +2065,9 @@ fn resize_terminal(columns: u16, rows: u16) -> Result<(), String> {
         .as_ref()
         .map(|process| process.exec_id.clone())
         .ok_or_else(|| "no exec terminal is active".to_string())?;
-    let output = Command::new("ferro-desktop")
-        .args(terminal_resize_command(&exec_id, columns, rows))
-        .output()
-        .map_err(|err| format!("failed to resize exec terminal: {err}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if message.is_empty() {
-        format!(
-            "failed to resize exec terminal: status {}",
-            output.status.code().unwrap_or(-1)
-        )
-    } else {
-        message
-    })
+    desktop_backend()?
+        .resize_terminal(&exec_id, columns, rows)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1994,15 +2075,11 @@ fn close_terminal() -> Result<(), String> {
     let mut current = TERMINAL_PROCESS
         .lock()
         .map_err(|_| "terminal state is unavailable".to_string())?;
-    if let Some(mut process) = current.take() {
+    if let Some(process) = current.take() {
         process
-            .child
-            .kill()
-            .map_err(|err| format!("failed to detach exec terminal: {err}"))?;
-        process
-            .child
-            .wait()
-            .map_err(|err| format!("failed to reap exec terminal: {err}"))?;
+            .stream
+            .shutdown_write()
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -2162,20 +2239,14 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
     }
     *current = None;
 
-    let mut child = Command::new("ferro-desktop")
-        .args(log_follow_command(target))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = start_log_follow_stream_with(desktop_backend()?, target)
         .map_err(|err| format!("failed to start container log stream: {err}"))?;
     let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "container log stream stdout missing".to_string())?;
+        .take_stdout()
+        .map_err(|err| format!("container log stream stdout missing: {err}"))?;
     let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "container log stream stderr missing".to_string())?;
+        .take_stderr()
+        .map_err(|err| format!("container log stream stderr missing: {err}"))?;
     let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
     let stdout_events = events.clone();
     thread::spawn(move || publish_log_batches(stdout_events, log_receiver));
@@ -2208,7 +2279,7 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
             }
         };
         if let Some(status) = status {
-            events.emit("container-log-ended", status.success());
+            events.emit("container-log-ended", status == 0);
             return;
         }
         thread::sleep(Duration::from_millis(250));
@@ -2581,21 +2652,14 @@ fn build_image_impl(
     if build_id.is_empty() {
         return Err("build identifier is required".to_string());
     }
-    let args = build_bridge_command(&context, &tag)?;
-    let mut child = Command::new("ferro-desktop")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = start_image_build_stream_with(desktop_backend()?, &context, &tag)
         .map_err(|error| format!("failed to start image build: {error}"))?;
     let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "image build stdout unavailable".to_string())?;
+        .take_stdout()
+        .map_err(|error| format!("image build stdout unavailable: {error}"))?;
     let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "image build stderr unavailable".to_string())?;
+        .take_stderr()
+        .map_err(|error| format!("image build stderr unavailable: {error}"))?;
     let (sender, receiver) = mpsc::channel::<BuildProgressFrame>();
     for (stream, reader) in [
         ("stdout", Box::new(stdout) as Box<dyn Read + Send>),
@@ -2637,12 +2701,12 @@ fn build_image_impl(
         destination.push('\n');
         events.emit("image-build-progress", frame);
     }
-    let status = child
+    let code = child
         .wait()
         .map_err(|error| format!("failed to wait for image build: {error}"))?;
     Ok(CommandResult {
-        ok: status.success(),
-        code: status.code().unwrap_or(1),
+        ok: code == 0,
+        code,
         stdout: stdout_text,
         message: actionable_error(&stderr_text),
         stderr: stderr_text,
@@ -2773,26 +2837,9 @@ fn login_registry(
         return Err("registry password is required".to_string());
     }
     let args = registry_login_command(&registry, &username)?;
-    let mut child = Command::new("ferro-desktop")
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start registry login proxy: {error}"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "registry login stdin unavailable".to_string())?;
-    stdin
-        .write_all(password.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .map_err(|error| format!("failed to send registry password: {error}"))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("failed to wait for registry login: {error}"))?;
-    let result = command_result_from_output(output);
+    let mut stdin = password.as_bytes().to_vec();
+    stdin.push(b'\n');
+    let result = run_backend_command_with(desktop_backend()?, "ferro-desktop", &args, &[], stdin);
     if result.ok {
         set_registry_credential(&StoredRegistryCredential {
             registry,
@@ -2964,10 +3011,101 @@ fn run_doctor_action(
             "checks": []
         })
     });
+    let payload = match desktop_backend() {
+        Ok(backend) => doctor_with_backend_status(payload, backend.status()),
+        Err(error) => doctor_with_backend_error(payload, &error),
+    };
     Ok(DoctorSummary {
-        ok: result.ok,
+        ok: result.ok && payload["healthy"].as_bool().unwrap_or(false),
         raw: payload,
     })
+}
+
+fn doctor_with_backend_status(payload: JsonValue, status: BackendStatus) -> JsonValue {
+    let backend = serde_json::to_value(status).unwrap_or_else(|error| {
+        serde_json::json!({
+            "backend": "unavailable",
+            "state": "failed",
+            "healthy": false,
+            "reason": error.to_string(),
+            "capabilities": {},
+        })
+    });
+    doctor_with_backend_payload(payload, backend)
+}
+
+fn doctor_with_backend_error(payload: JsonValue, error: &str) -> JsonValue {
+    doctor_with_backend_payload(
+        payload,
+        serde_json::json!({
+            "backend": "unavailable",
+            "platform": "unsupported",
+            "state": "unavailable",
+            "healthy": false,
+            "endpoint": "",
+            "reason": error,
+            "capabilities": {
+                "terminal": false,
+                "registry": false,
+                "containers": false,
+                "networks": false,
+                "volumes": false,
+                "custom_networks": false,
+                "streaming_exec": false,
+            },
+        }),
+    )
+}
+
+fn doctor_with_backend_payload(mut payload: JsonValue, backend: JsonValue) -> JsonValue {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+
+    let state = backend["state"].as_str().unwrap_or("unavailable");
+    let reported_healthy = backend["healthy"].as_bool().unwrap_or(false);
+    let backend_healthy = reported_healthy
+        && !matches!(state, "failed" | "unavailable");
+    let backend_name = backend["backend"].as_str().unwrap_or("desktop");
+    let reason = backend["reason"]
+        .as_str()
+        .filter(|reason| !reason.trim().is_empty());
+    let message = match reason {
+        Some(reason) => format!("{backend_name} backend is {state}: {reason}"),
+        None => format!("{backend_name} backend is {state}"),
+    };
+    let capabilities = backend["capabilities"].as_object().map_or_else(
+        || "none reported".to_string(),
+        |capabilities| {
+            let enabled = capabilities
+                .iter()
+                .filter_map(|(name, enabled)| enabled.as_bool().filter(|enabled| *enabled).map(|_| name.replace('_', " ")))
+                .collect::<Vec<_>>();
+            if enabled.is_empty() {
+                "none".to_string()
+            } else {
+                enabled.join(", ")
+            }
+        },
+    );
+    let checks = object
+        .entry("checks".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    if let Some(checks) = checks.as_array_mut() {
+        checks.retain(|check| check["id"] != "desktop_backend");
+        checks.push(serde_json::json!({
+            "id": "desktop_backend",
+            "ok": backend_healthy,
+            "message": message,
+            "hint": format!("Capabilities: {capabilities}."),
+            "remediated": false,
+            "action": null,
+        }));
+    }
+    let doctor_healthy = object["healthy"].as_bool().unwrap_or(false);
+    object.insert("healthy".to_string(), JsonValue::Bool(doctor_healthy && backend_healthy));
+    object.insert("desktop_backend".to_string(), backend);
+    payload
 }
 
 fn doctor_command(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool) -> Vec<String> {
@@ -3204,21 +3342,269 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::{Cursor, Read, Write};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use super::{
-        actionable_error, aggregate_container_stats, build_bridge_command, command_failure,
-        compose_bridge_command, compose_service_rows, container_detail_from_json,
-        container_inspect_command, container_update_command, doctor_command,
+        actionable_error, aggregate_container_stats, backend_command_request, build_bridge_command,
+        clear_terminal_slot_if_matches, command_failure, compose_bridge_command,
+        compose_service_rows, container_detail_from_json, container_inspect_command,
+        container_update_command, doctor_command, doctor_with_backend_status,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
-        registry_logout_command, run_container_bridge_command, terminal_exec_command,
-        terminal_resize_command, volume_proxy_command, BuildProgressFrame, CommandResult,
-        ComposeAction, ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
-        JsonValue, LogBuffer, NativeContainerStats, NetworkAction, NetworkInspectRecord,
-        NetworkIpam, NetworkIpamConfig, NetworkListRecord, TimedNativeContainerStats, VolumeAction,
-        VolumeListResponse,
+        registry_logout_command, run_backend_command, run_backend_command_with,
+        run_container_bridge_command, start_image_build_stream_with, start_log_follow_stream_with,
+        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
+        CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
+        ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
+        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, TerminalProcess,
+        TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
+    use ferro_desktop::backend::{
+        Backend, BackendCapabilities, BackendError, BackendState, BackendStatus, DuplexStream,
+        ExecRequest, ExecResponse, ExecStream, Platform, TerminalRequest, TerminalSession,
+        TransportRequest, TransportResponse,
+    };
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        requests: Mutex<Vec<(bool, ExecRequest)>>,
+    }
+
+    impl RecordingBackend {
+        fn requests(&self) -> Vec<(bool, ExecRequest)> {
+            self.requests.lock().expect("requests").clone()
+        }
+    }
+
+    struct TestExecStream {
+        stdout: Option<Cursor<Vec<u8>>>,
+        stderr: Option<Cursor<Vec<u8>>>,
+        stdin: Cursor<Vec<u8>>,
+    }
+
+    impl Default for TestExecStream {
+        fn default() -> Self {
+            Self {
+                stdout: Some(Cursor::new(Vec::new())),
+                stderr: Some(Cursor::new(Vec::new())),
+                stdin: Cursor::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Read for TestExecStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.stdout.as_mut().expect("stdout").read(buffer)
+        }
+    }
+
+    impl Write for TestExecStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.stdin.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ExecStream for TestExecStream {
+        fn take_stdin(&mut self) -> Result<Box<dyn Write + Send>, BackendError> {
+            Ok(Box::new(Cursor::new(Vec::new())))
+        }
+
+        fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+            Ok(Box::new(self.stdout.take().expect("stdout")))
+        }
+
+        fn take_stderr(&mut self) -> Result<Box<dyn Read + Send>, BackendError> {
+            Ok(Box::new(self.stderr.take().expect("stderr")))
+        }
+
+        fn close_stdin(&mut self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn kill(&mut self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<i32>, BackendError> {
+            Ok(Some(0))
+        }
+
+        fn wait(&mut self) -> Result<i32, BackendError> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct TestDuplex(Cursor<Vec<u8>>);
+
+    impl Read for TestDuplex {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buffer)
+        }
+    }
+
+    impl Write for TestDuplex {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    impl DuplexStream for TestDuplex {
+        fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError> {
+            Ok(Box::new(Self::default()))
+        }
+
+        fn shutdown_write(&self) -> Result<(), BackendError> { Ok(()) }
+    }
+
+    impl Backend for RecordingBackend {
+        fn name(&self) -> &'static str { "recording" }
+        fn platform(&self) -> Platform { Platform::Linux }
+        fn capabilities(&self) -> BackendCapabilities { BackendCapabilities::native() }
+        fn start(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
+        fn stop(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
+        fn status(&self) -> BackendStatus { unimplemented!() }
+        fn health(&self) -> Result<bool, BackendError> { Ok(true) }
+        fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError> {
+            self.requests.lock().expect("requests").push((false, request));
+            Ok(ExecResponse { code: 0, stdout: Vec::new(), stderr: Vec::new() })
+        }
+        fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError> {
+            self.requests.lock().expect("requests").push((true, request));
+            Ok(Box::new(TestExecStream::default()))
+        }
+        fn request(&self, _request: TransportRequest) -> Result<TransportResponse, BackendError> { unimplemented!() }
+        fn open_terminal(&self, _request: TerminalRequest) -> Result<TerminalSession, BackendError> { unimplemented!() }
+        fn resize_terminal(&self, _exec_id: &str, _columns: u16, _rows: u16) -> Result<(), BackendError> { unimplemented!() }
+        fn socket_path(&self) -> Option<PathBuf> { None }
+    }
+
+    #[test]
+    fn tauri_cli_consumer_routes_exec_through_backend() {
+        let result = run_backend_command(
+            "ferro-desktop",
+            &[
+                "exec".into(),
+                "--".into(),
+                "sh".into(),
+                "-c".into(),
+                "printf routed".into(),
+            ],
+            &[],
+        );
+        assert!(result.ok, "{}", result.stderr);
+        assert_eq!(result.stdout, "routed");
+    }
+
+    #[test]
+    fn tauri_streaming_and_registry_consumers_route_through_injected_backend() {
+        let backend = RecordingBackend::default();
+        let mut logs = start_log_follow_stream_with(&backend, "container-1").expect("logs");
+        assert_eq!(logs.wait().expect("logs exit"), 0);
+        let mut build = start_image_build_stream_with(&backend, ".", "demo:latest").expect("build");
+        assert_eq!(build.wait().expect("build exit"), 0);
+        let login = run_backend_command_with(
+            &backend,
+            "ferro-desktop",
+            &registry_login_command("registry.example", "alice").expect("login args"),
+            &[],
+            b"secret\n".to_vec(),
+        );
+        assert!(login.ok);
+
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].0);
+        assert_eq!(requests[0].1.program, "ferrocrate");
+        assert_eq!(requests[0].1.args, ["logs", "--follow", "container-1"]);
+        assert!(requests[1].0);
+        assert_eq!(requests[1].1.program, "ferrocrate");
+        assert_eq!(requests[1].1.args.first().map(String::as_str), Some("build"));
+        assert!(!requests[2].0);
+        assert_eq!(requests[2].1.stdin, b"secret\n");
+    }
+
+    #[test]
+    fn guest_proxy_builders_only_invoke_the_installed_ferrocrate_binary() {
+        let commands = [
+            registry_login_command("registry.example", "alice").expect("registry command"),
+            volume_proxy_command(VolumeAction::Create, Some("data")).expect("volume command"),
+            network_proxy_command(NetworkAction::Create, Some("frontend"), None)
+                .expect("network command"),
+        ];
+
+        for args in commands {
+            let request = backend_command_request("ferro-desktop", &args, &[], Vec::new())
+                .expect("backend request");
+            assert_eq!(request.program, "ferrocrate", "args={args:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_eof_clears_only_the_matching_active_slot() {
+        let slot = Mutex::new(Some(TerminalProcess {
+            stream: Box::new(TestDuplex::default()),
+            exec_id: "exec-1".to_string(),
+        }));
+        assert!(!clear_terminal_slot_if_matches(&slot, "different"));
+        assert!(slot.lock().expect("slot").is_some());
+        assert!(clear_terminal_slot_if_matches(&slot, "exec-1"));
+        assert!(slot.lock().expect("slot").is_none());
+    }
+
+    #[test]
+    fn daemon_status_preserves_backend_health_and_state() {
+        let status = super::daemon_status_from_backend(BackendStatus {
+            backend: "wsl2".into(),
+            platform: Platform::Windows,
+            state: BackendState::Failed,
+            healthy: false,
+            endpoint: "http://127.0.0.1:4288".into(),
+            reason: Some("backend health check failed".into()),
+            capabilities: BackendCapabilities::native(),
+        });
+
+        assert_eq!(status.state, "failed");
+        assert!(!status.healthy);
+        assert_eq!(status.platform, "wsl2");
+    }
+
+    #[test]
+    fn doctor_backend_failure_is_a_visible_unhealthy_check() {
+        let payload = doctor_with_backend_status(
+            serde_json::json!({ "healthy": true, "checks": [] }),
+            BackendStatus {
+                backend: "wsl2".into(),
+                platform: Platform::Windows,
+                state: BackendState::Failed,
+                healthy: false,
+                endpoint: "127.0.0.1:4288".into(),
+                reason: Some("relay unavailable".into()),
+                capabilities: BackendCapabilities::native(),
+            },
+        );
+        assert_eq!(payload["healthy"], false);
+        assert_eq!(payload["desktop_backend"]["backend"], "wsl2");
+        assert_eq!(payload["desktop_backend"]["healthy"], false);
+        assert_eq!(payload["desktop_backend"]["reason"], "relay unavailable");
+        assert_eq!(payload["desktop_backend"]["capabilities"]["networks"], true);
+        assert_eq!(payload["checks"].as_array().expect("checks").len(), 1);
+        assert_eq!(payload["checks"][0]["id"], "desktop_backend");
+        assert_eq!(payload["checks"][0]["ok"], false);
+        assert!(payload["checks"][0]["message"]
+            .as_str()
+            .expect("backend message")
+            .contains("relay unavailable"));
+    }
 
     #[test]
     fn container_stats_aggregate_usage_limit_and_unavailable_samples() {
@@ -3639,7 +4025,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_list_uses_json_exec_bridge_and_mutations_stay_typed() {
+    fn volume_operations_use_the_installed_cli_exec_bridge() {
         assert_eq!(
             volume_proxy_command(VolumeAction::List, None).expect("list command"),
             vec![
@@ -3654,15 +4040,15 @@ mod tests {
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Create, Some("data")).expect("create command"),
-            vec!["volume-proxy", "create", "data"]
+            vec!["exec", "--", "ferrocrate", "volume", "create", "data"]
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Remove, Some("data")).expect("remove command"),
-            vec!["volume-proxy", "remove", "data"]
+            vec!["exec", "--", "ferrocrate", "volume", "rm", "data"]
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Prune, None).expect("prune command"),
-            vec!["volume-proxy", "prune"]
+            vec!["exec", "--", "ferrocrate", "volume", "prune"]
         );
         assert!(volume_proxy_command(VolumeAction::Create, Some("  ")).is_err());
     }
@@ -3695,7 +4081,7 @@ mod tests {
     }
 
     #[test]
-    fn network_list_uses_json_exec_bridge_and_mutations_stay_typed() {
+    fn network_operations_use_the_installed_cli_exec_bridge() {
         assert_eq!(
             network_proxy_command(NetworkAction::List, None, None).expect("list command"),
             vec![
@@ -3730,7 +4116,10 @@ mod tests {
             )
             .expect("create command"),
             vec![
-                "network-proxy",
+                "exec",
+                "--",
+                "ferrocrate",
+                "network",
                 "create",
                 "frontend",
                 "--subnet",
@@ -3740,7 +4129,7 @@ mod tests {
         assert_eq!(
             network_proxy_command(NetworkAction::Remove, Some("frontend"), None)
                 .expect("remove command"),
-            vec!["network-proxy", "remove", "frontend"]
+            vec!["exec", "--", "ferrocrate", "network", "rm", "frontend"]
         );
         assert!(network_proxy_command(NetworkAction::Create, Some(" "), None).is_err());
     }
@@ -3969,12 +4358,14 @@ mod tests {
         assert_eq!(
             registry_login_command("registry.example.com", "alice").expect("login command"),
             vec![
-                "registry-proxy",
+                "exec",
+                "--",
+                "ferrocrate",
                 "login",
-                "--registry",
                 "registry.example.com",
                 "--username",
                 "alice",
+                "--password-stdin",
             ]
         );
         assert_eq!(

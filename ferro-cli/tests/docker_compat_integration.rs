@@ -478,6 +478,44 @@ fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
 }
 
 #[test]
+fn daemon_republishes_unlinked_socket_before_next_cli_deadline() {
+    let harness = DaemonHarness::spawn();
+    std::fs::remove_file(&harness.socket_path).expect("unlink live daemon socket");
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .arg("ps")
+        .output()
+        .expect("run ps after unlink");
+    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn killed_daemon_owner_is_recovered_by_next_cli() {
+    let mut harness = DaemonHarness::spawn();
+    harness.stop_daemon();
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .arg("ps")
+        .output()
+        .expect("run ps after kill -9");
+    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
 #[allow(deprecated)]
 fn standalone_cli_waits_for_a_competing_process_owner() {
     use nix::errno::Errno;
@@ -2967,18 +3005,14 @@ fn docker_compat_put_archive_replaces_type_changing_entries() {
     assert_eq!(status, 204, "archive-replace cleanup response={body}");
 }
 
-/// Recognized Docker routes without a local implementation report an explicit
-/// 501 boundary instead of a generic unknown-route 404.
+/// Recognized Docker routes validate or resolve their inputs before execution.
 #[test]
 fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     let harness = DaemonHarness::spawn();
 
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/attach/ws");
-    assert_eq!(status, 501, "attach/ws response={body}");
-    assert!(
-        body.contains("websocket attach is unsupported") && body.contains("TCP hijack attach"),
-        "body={body}"
-    );
+    assert_eq!(status, 404, "attach/ws response={body}");
+    assert!(body.contains("container not found"), "body={body}");
 
     // The synthetic top listing cannot honor a client ps argument set.
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=-ef");
@@ -2990,6 +3024,43 @@ fn docker_compat_unimplemented_routes_report_explicit_boundaries() {
     // An empty ps_args stays a no-op and preserves the missing-container 404.
     let (status, body) = harness.request("GET", "/v1.45/containers/missing/top?ps_args=");
     assert_eq!(status, 404, "empty ps_args response={body}");
+}
+
+#[test]
+fn docker_compat_websocket_attach_upgrades_and_frames_logs() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "websocket-attach:latest");
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=websocket-attach",
+        "application/json",
+        br#"{"Image":"websocket-attach:latest","Cmd":["/bin/busybox","sh","-c","echo websocket-attached"],"HostConfig":{"NetworkMode":"none"}}"#,
+    );
+    assert_eq!(status, 201, "create response={body}");
+    let (status, body) = harness.request("POST", "/v1.45/containers/websocket-attach/start");
+    assert_eq!(status, 204, "start response={body}");
+    for _ in 0..50 {
+        let (status, body) = harness.request("GET", "/v1.45/containers/websocket-attach/json");
+        assert_eq!(status, 200, "inspect response={body}");
+        if body.contains("\"Status\":\"exited\"") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let stream = UnixStream::connect(&harness.socket_path).expect("connect websocket socket");
+    let (mut websocket, response) = tokio_tungstenite::tungstenite::client(
+        "ws://localhost/v1.45/containers/websocket-attach/attach/ws?stdout=1&stderr=1",
+        stream,
+    )
+    .expect("websocket upgrade");
+    assert_eq!(response.status(), 101);
+    let message = websocket.read().expect("websocket attach frame");
+    let bytes = message.into_data();
+    assert!(
+        bytes.windows(b"websocket-attached".len()).any(|window| window == b"websocket-attached"),
+        "frame={bytes:?}"
+    );
 }
 
 #[test]
@@ -3375,6 +3446,97 @@ fn docker_compat_attach_accepts_pre_start_hijack_handshake() {
 }
 
 #[test]
+fn docker_compat_pre_start_hijack_streams_foreground_output_after_start() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful foreground-attach fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/foreground-attach:latest");
+    let body = r#"{"Image":"compat/foreground-attach:latest","Cmd":["/bin/busybox","echo","foreground-output"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=foreground-attach HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+
+    let mut attach = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    attach
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=0&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write attach request");
+    attach
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set attach timeout");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        attach.read_exact(&mut byte).expect("read attach headers");
+        headers.push(byte[0]);
+    }
+    assert!(
+        String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+        "headers={}",
+        String::from_utf8_lossy(&headers)
+    );
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response: {response}");
+    let mut output = Vec::new();
+    attach.read_to_end(&mut output).expect("read attach output");
+    assert!(
+        output
+            .windows(b"foreground-output".len())
+            .any(|window| window == b"foreground-output"),
+        "attach stream omitted foreground output: {output:?}"
+    );
+}
+
+#[test]
+fn docker_compat_auto_remove_preserves_wait_exit_result() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful auto-remove wait fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/auto-remove-wait:latest");
+    let body = r#"{"Image":"compat/auto-remove-wait:latest","Cmd":["/bin/busybox","sh","-c","exit 7"],"HostConfig":{"NetworkMode":"none","AutoRemove":true}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=auto-remove-wait HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response: {response}");
+    let (status, response) = harness.request(
+        "POST",
+        &format!("/v1.45/containers/{id}/wait?condition=next-exit"),
+    );
+    assert_eq!(status, 200, "wait response: {response}");
+    let result = serde_json::from_str::<serde_json::Value>(&response).expect("wait JSON");
+    assert_eq!(result["StatusCode"], 7, "wait response: {response}");
+}
+
+#[test]
 fn docker_compat_attach_logs_zero_does_not_emit_history() {
     let harness = DaemonHarness::spawn();
     let body = r#"{"Image":"busybox","Cmd":["true"]}"#;
@@ -3580,6 +3742,38 @@ fn docker_compat_network_create_list_delete_routes_work() {
 }
 
 #[test]
+fn docker_compat_network_labels_persist_and_filter() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{
+        "Name":"compose-labeled-net",
+        "Driver":"bridge",
+        "Labels":{
+            "com.docker.compose.network":"default",
+            "com.docker.compose.project":"labels-test"
+        }
+    }"#;
+    let create_request = format!(
+        "POST /v1.45/networks/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(), create_body
+    );
+    let (status, body) = harness.request_raw(&create_request);
+    assert_eq!(status, 201, "create body={body}");
+
+    let (status, body) = harness.request("GET", "/v1.45/networks/compose-labeled-net");
+    assert_eq!(status, 200, "inspect body={body}");
+    let inspect: serde_json::Value = serde_json::from_str(&body).expect("inspect JSON");
+    assert_eq!(inspect["Labels"]["com.docker.compose.network"], "default");
+    assert_eq!(inspect["Labels"]["com.docker.compose.project"], "labels-test");
+
+    let filters = "%7B%22label%22%3A%5B%22com.docker.compose.network%3Ddefault%22%2C%22com.docker.compose.project%22%5D%7D";
+    let (status, body) = harness.request("GET", &format!("/v1.45/networks?filters={filters}"));
+    assert_eq!(status, 200, "list body={body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("list JSON");
+    assert_eq!(listed.as_array().expect("network list").len(), 1, "{listed}");
+    assert_eq!(listed[0]["Labels"]["com.docker.compose.network"], "default");
+}
+
+#[test]
 fn docker_compat_dual_stack_network_preserves_ipv6_ipam_on_list_and_inspect() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{
@@ -3746,6 +3940,37 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
     let (status, response) = harness.request("DELETE", "/v1.45/volumes/compat-volume");
     assert_eq!(status, 204, "delete body={response}");
+}
+
+#[test]
+fn docker_compat_volume_labels_persist_and_filter() {
+    let harness = DaemonHarness::spawn();
+    let body = r#"{
+        "Name":"compose-labeled-volume",
+        "Driver":"local",
+        "Labels":{
+            "com.docker.compose.volume":"data",
+            "com.docker.compose.project":"labels-test"
+        }
+    }"#;
+    let request = format!(
+        "POST /v1.45/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&request);
+    assert_eq!(status, 201, "create body={response}");
+
+    let (status, response) = harness.request("GET", "/v1.45/volumes/compose-labeled-volume");
+    assert_eq!(status, 200, "inspect body={response}");
+    let inspect: serde_json::Value = serde_json::from_str(&response).expect("inspect JSON");
+    assert_eq!(inspect["Labels"]["com.docker.compose.volume"], "data");
+
+    let filters = "%7B%22label%22%3A%5B%22com.docker.compose.volume%3Ddata%22%2C%22com.docker.compose.project%22%5D%7D";
+    let (status, response) = harness.request("GET", &format!("/v1.45/volumes?filters={filters}"));
+    assert_eq!(status, 200, "list body={response}");
+    let listed: serde_json::Value = serde_json::from_str(&response).expect("list JSON");
+    assert_eq!(listed["Volumes"].as_array().expect("volumes").len(), 1, "{listed}");
+    assert_eq!(listed["Volumes"][0]["Labels"]["com.docker.compose.volume"], "data");
 }
 
 #[test]

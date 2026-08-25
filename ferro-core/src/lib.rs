@@ -74,6 +74,7 @@ pub mod layer_compression;
 pub mod log_driver;
 #[cfg(target_os = "linux")]
 pub mod layer_mount;
+pub mod lan_mirror;
 pub mod mac_profiles;
 pub mod managed_overlay;
 #[cfg(target_os = "linux")]

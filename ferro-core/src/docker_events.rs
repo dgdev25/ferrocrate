@@ -71,7 +71,7 @@ impl DockerEventJournal {
         attributes: BTreeMap<String, String>,
     ) -> Result<(), String> {
         let lock_path = self.path.with_extension("jsonl.lock");
-        let lock = OpenOptions::new()
+        let _lock = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -80,7 +80,7 @@ impl DockerEventJournal {
             .map_err(|error| error.to_string())?;
         #[cfg(unix)]
         #[allow(deprecated)]
-        nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
+        nix::fcntl::flock(_lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
             .map_err(|error| error.to_string())?;
         let next_id = self
             .read()

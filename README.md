@@ -5,13 +5,13 @@
 Ferrocrate is a container engine you use exactly like Docker — same commands,
 same Dockerfiles, same images — implemented from scratch in Rust as a single
 binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 61 default-BuildKit
-scenarios, and all 61 pass (rootless and rootful). Images are standard OCI, so anything Ferrocrate
+conformance suite drives a real Docker client through 85 default-BuildKit
+scenarios, and all 85 pass. Images are standard OCI, so anything Ferrocrate
 builds runs under Docker, podman, or Kubernetes, and the other way round.
 
 ## ✨ Highlights
 
-- **Docker-compatible, verified** — 61/61 default-BuildKit conformance against
+- **Docker-compatible, verified** — 85/85 default-BuildKit conformance against
   the real `docker` client, including cold base-image pulls, multi-network
   connect/disconnect, and non-readable log-driver behavior.
 - **Fast** — the dated benchmark register records host-local paired results;
@@ -104,8 +104,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows (WSL2) | Container lifecycle and doctor verified inside WSL2 Ubuntu |
-| macOS (Sonoma, Tahoe) | Builds and full test suite green — development platform, not a container host |
+| Windows 11 (WSL2 backend) | Backend implementation and contract tests are complete; native/browser acceptance on a clean Windows 11 VM remains pending |
+| macOS Tahoe (Linux VM backend) | Backend implementation and provisioning contracts are complete; native/browser acceptance on a Tahoe VM remains pending |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is
@@ -129,7 +129,7 @@ need a separate operator gate).
 ```bash
 cargo test --workspace          # full suite
 cargo test -p ferro-core --lib  # runtime core
-bash scripts/docker-client-conformance.sh   # 61-scenario default-BuildKit gate
+bash scripts/docker-client-conformance.sh   # 85-scenario default-BuildKit gate
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and

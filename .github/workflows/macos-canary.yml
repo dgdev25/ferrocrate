@@ -1,25 +1,29 @@
 name: macOS packaging canary
 on:
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
 permissions: { contents: read }
 jobs:
   package:
     runs-on: [self-hosted, macos, ferro-lab]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     env: { CI: 'true' }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain present (self-hosted)
+        shell: bash
+        run: rustup show && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
-      - run: npm run tauri:build -- --bundles app,dmg
+      - run: npm run tauri:build -- --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
         working-directory: apps/ferro-desktop-ui
-        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
       - name: Secret-leak canary
         env: { FERROCRATE_SECRET_CANARY: ferrocrate-secret-canary-4815162342 }
         run: '! grep -R -a -F "$FERROCRATE_SECRET_CANARY" apps/ferro-desktop-ui/src-tauri/target/release/bundle'

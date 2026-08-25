@@ -15,3 +15,4 @@ apps/ferro-desktop-ui/src-tauri/target/
 apps/ferro-desktop-ui/src-tauri/gen/
 ui-verify/
 docs/assets/.claude-flow/
+:memory:

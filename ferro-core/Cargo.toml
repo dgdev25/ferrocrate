@@ -29,6 +29,8 @@ ferro-net = { path = "../ferro-net" }
 ferro-mind = { path = "../ferro-mind" }
 rand = "0.9"
 log = "0.4"
+mdns-sd = "0.13"
+if-addrs = "0.13"
 tracing = { workspace = true }
 dashmap = "6.1"
 uuid = { version = "1.0", features = ["v4"] }

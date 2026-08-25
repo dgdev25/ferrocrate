@@ -8,7 +8,8 @@ export type CommandResult = {
 
 export type DesktopSnapshot = {
   daemon: {
-    state: "starting" | "running" | "stopped" | "failed";
+    state: "starting" | "running" | "stopping" | "stopped" | "failed" | "unavailable";
+    healthy: boolean;
     socket_path: string;
     reason: string | null;
     platform: "linux-native" | "desktop-vm";
@@ -194,6 +195,26 @@ export type DoctorCheck = {
   remediated: boolean;
 };
 
+export type DesktopBackendCapabilities = {
+  terminal: boolean;
+  registry: boolean;
+  containers: boolean;
+  networks: boolean;
+  volumes: boolean;
+  custom_networks: boolean;
+  streaming_exec: boolean;
+};
+
+export type DesktopBackendStatus = {
+  backend: string;
+  platform: string;
+  state: "stopped" | "starting" | "running" | "stopping" | "failed" | "unavailable";
+  healthy: boolean;
+  endpoint: string;
+  reason: string | null;
+  capabilities: DesktopBackendCapabilities;
+};
+
 export type DoctorPayload = {
   healthy: boolean;
   fix: boolean;
@@ -202,6 +223,7 @@ export type DoctorPayload = {
   confirmed: boolean;
   actions: DoctorAction[];
   checks: DoctorCheck[];
+  desktop_backend?: DesktopBackendStatus;
 };
 
 export type DoctorSummary = {

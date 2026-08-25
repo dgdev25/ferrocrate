@@ -6928,6 +6928,7 @@ mod tests {
 
     #[test]
     fn registry_cache_export_import_round_trip_proves_cache_hit() {
+        let _env = crate::test_support::acquire_env_lock();
         let registry = LocalTestRegistry::run();
         let source = tempfile::tempdir().unwrap();
         let context = source.path().join("context");
@@ -7803,10 +7804,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn skip_unavailable_rootless_build_sandbox() -> bool {
+        if !nix::unistd::Uid::effective().is_root() && !crate::rootless::bubblewrap_available() {
+            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            return true;
+        }
+        if host_blocks_rootless_build_sandbox() {
+            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+            return true;
+        }
+        false
+    }
+
+    #[cfg(unix)]
     #[test]
     fn rootless_build_namespace_maps_identity_before_private_mount() {
         if nix::unistd::Uid::effective().is_root() {
             eprintln!("skipping: rootless namespace ordering requires an unprivileged uid");
+            return;
+        }
+        if !crate::rootless::bubblewrap_available() {
+            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
             return;
         }
         let Some(busybox) = static_busybox() else {
@@ -7845,14 +7863,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn secret_mount_run_sees_secret_then_all_artifacts_stay_clean() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         let Some(busybox) = static_busybox() else {
             eprintln!("skipping: no static /usr/bin/busybox on this host");
             return;
         };
-        if host_blocks_rootless_build_sandbox() {
-            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+        if skip_unavailable_rootless_build_sandbox() {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
@@ -7955,14 +7973,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn optional_secret_skips_silently_when_not_provided() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         let Some(busybox) = static_busybox() else {
             eprintln!("skipping: no static /usr/bin/busybox on this host");
             return;
         };
-        if host_blocks_rootless_build_sandbox() {
-            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+        if skip_unavailable_rootless_build_sandbox() {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
@@ -7997,6 +8015,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ssh_mount_binds_socket_and_sets_auth_sock_inside_run() {
+        let _env = crate::test_support::acquire_env_lock();
         use crate::image_store::LocalImageStore;
         use crate::layer_compression::CompressionFormat;
         use std::os::unix::net::UnixListener;
@@ -8004,8 +8023,7 @@ mod tests {
             eprintln!("skipping: no static /usr/bin/busybox on this host");
             return;
         };
-        if host_blocks_rootless_build_sandbox() {
-            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+        if skip_unavailable_rootless_build_sandbox() {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
@@ -8068,8 +8086,7 @@ mod tests {
             eprintln!("skipping: no static /usr/bin/busybox on this host");
             return;
         };
-        if host_blocks_rootless_build_sandbox() {
-            eprintln!("skipping: host policy blocks the rootless RUN sandbox");
+        if skip_unavailable_rootless_build_sandbox() {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");

@@ -513,9 +513,7 @@ mod tests {
     use crate::registry::RegistryAuth;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    static DOCKER_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK as DOCKER_ENV_LOCK;
 
     #[test]
     fn normalizes_registry_keys() {

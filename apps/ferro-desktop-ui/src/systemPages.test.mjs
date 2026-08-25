@@ -51,6 +51,30 @@ test("Doctor is one empty state before a run and one checks table afterward", ()
   assert.doesNotMatch(populated, /<input/);
 });
 
+test("Doctor surfaces a failed desktop backend as a needs-attention row", () => {
+  const markup = renderToStaticMarkup(createElement(systemPages.DoctorPage, {
+    result: {
+      ok: false,
+      raw: {
+        checks: [{
+          id: "desktop_backend",
+          ok: false,
+          message: "WSL2 backend is failed: relay unavailable",
+          hint: "Capabilities: terminal, registry, containers, networks, volumes, custom networks, streaming exec.",
+          remediated: false,
+        }],
+      },
+    },
+    onRun: () => {},
+    onStart: () => {},
+    onStop: () => {},
+  }));
+
+  assert.match(markup, /1 need attention/);
+  assert.match(markup, /WSL2 backend is failed: relay unavailable/);
+  assert.match(markup, /Capabilities: terminal, registry, containers/);
+});
+
 test("Doctor results table accepts a focus ref and is programmatically focusable", () => {
   const resultsTableRef = { current: null };
   const page = systemPages.DoctorPage({

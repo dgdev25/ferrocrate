@@ -689,6 +689,12 @@ pub enum Commands {
         /// Local peer authentication (`pidfd` or opt-in `legacy-peercred`).
         #[arg(long)]
         peer_auth: Option<String>,
+        #[arg(long)]
+        lan_mirror: bool,
+        #[arg(long)]
+        lan_mirror_addr: Option<String>,
+        #[arg(long)]
+        lan_mirror_secret: Option<String>,
     },
     /// Print shell completion scripts.
     Completion {
@@ -1161,6 +1167,8 @@ pub enum NetworkCommands {
         ipv6_subnet: Option<String>,
         #[arg(long = "ipv6-gateway")]
         ipv6_gateway: Option<String>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
     /// List networks.
     Ls {
@@ -1408,6 +1416,14 @@ pub fn main() {
         }
     }
     let cli = Cli::parse();
+    if let Ok(config) = load_cli_config() {
+        if config.lan_mirror {
+            unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR", "1") };
+        }
+        if let Some(secret) = config.lan_mirror_secret {
+            unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR_SECRET", secret) };
+        }
+    }
     if matches!(&cli.command, Commands::Daemon { .. }) {
         if let Err(error) = ferro_core::cgroups::validate_explicit_delegated_daemon() {
             eprintln!("error: delegated cgroup daemon validation failed: {error}");
@@ -1595,6 +1611,7 @@ fn structured_desktop_error(category: &str, message: &str, hint: &str, retryable
 #[cfg(any(test, not(target_os = "linux")))]
 #[cfg_attr(test, allow(dead_code))]
 fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool, String> {
+    #[cfg(not(windows))]
     let addr =
         std::env::var("FERROCRATE_DESKTOP_ADDR").unwrap_or_else(|_| "127.0.0.1:4288".to_string());
     let wsl_distro = std::env::var("FERROCRATE_DESKTOP_WSL_DISTRO").ok();
@@ -1604,9 +1621,14 @@ fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool
 
     let desktop_bin = desktop_binary_path();
     let mut command = std::process::Command::new(&desktop_bin);
-    command.arg("exec").arg("--addr").arg(addr);
+    command.arg("exec");
     #[cfg(windows)]
     {
+        let pipe_name = std::env::var("FERROCRATE_DESKTOP_PIPE_NAME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "ferrocrate".to_string());
+        command.arg("--pipe-name").arg(pipe_name);
         if use_wsl {
             command.arg("--wsl");
         }
@@ -1618,6 +1640,7 @@ fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool
     }
     #[cfg(not(windows))]
     {
+        command.arg("--addr").arg(addr);
         let _ = use_wsl;
         let _ = wsl_distro;
     }
@@ -2146,6 +2169,10 @@ fn doctor_webkit_rendering_mode(appimage: bool, nvidia: bool, safe: bool) -> &'s
     }
 }
 
+fn doctor_netns_root_message(root: &Path) -> String {
+    format!("network namespace root: {}", root.display())
+}
+
 #[cfg(target_os = "linux")]
 fn orphan_bridge_names(link_names: impl IntoIterator<Item = String>, records: &[NetworkRecord]) -> Vec<String> {
     let owned: std::collections::HashSet<&str> = records.iter().map(|record| record.bridge_name.as_str()).collect();
@@ -2187,6 +2214,25 @@ fn handle_doctor(
 
     #[cfg(target_os = "linux")]
     {
+        let packet_filter = packet_filter_backend();
+        checks.push(DoctorCheck {
+            id: "packet_filter_backend".to_string(),
+            ok: packet_filter.is_some(),
+            message: packet_filter.as_ref().map_or_else(
+                || "packet-filter backend unavailable: install the iptables or nftables package"
+                    .to_string(),
+                |(backend, path)| {
+                    format!("packet-filter backend: {backend} ({})", path.display())
+                },
+            ),
+            hint: packet_filter.is_none().then_some(
+                "install the iptables or nftables package before starting containers with published ports"
+                    .to_string(),
+            ),
+            remediated: false,
+            action: None,
+        });
+
         let configured = std::env::var("FERROCRATE_PEER_AUTH").ok();
         let status = peer_authentication_status(configured.as_deref(), kernel_has_peer_pidfd());
         checks.push(DoctorCheck {
@@ -2454,6 +2500,15 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
+            let netns_root = ferro_net::netns::netns_root();
+            checks.push(DoctorCheck {
+                id: "network_namespace_root".to_string(),
+                ok: true,
+                message: doctor_netns_root_message(&netns_root),
+                hint: None,
+                remediated: false,
+                action: None,
+            });
 
             let records = load_networks(&runtime_dir()).unwrap_or_default();
             let links = std::fs::read_dir("/sys/class/net")
@@ -2632,6 +2687,33 @@ fn handle_doctor(
             }
         }
     }
+
+    let lan_config = load_cli_config().unwrap_or_default();
+    let lan_enabled = lan_config.lan_mirror;
+    let lan_peers = if lan_enabled {
+        ferro_core::lan_mirror::discover(Duration::from_millis(300), None)
+            .unwrap_or_default()
+            .len()
+    } else {
+        0
+    };
+    checks.push(DoctorCheck {
+        id: "lan_image_mirror".to_string(),
+        ok: true,
+        message: if lan_enabled {
+            format!(
+                "LAN image mirror enabled (peers={lan_peers}, auth={})",
+                if lan_config.lan_mirror_secret.is_some() { "challenge-response HMAC-SHA256" } else { "none" }
+            )
+        } else {
+            "LAN image mirror disabled (default)".to_string()
+        },
+        hint: lan_enabled.then_some(
+            "listener is restricted to the configured private LAN address; configured secrets are never transmitted".to_string(),
+        ),
+        remediated: false,
+        action: None,
+    });
 
     let healthy = checks.iter().all(|check| check.ok);
     #[cfg(target_os = "macos")]
@@ -2878,7 +2960,7 @@ fn decode_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let chars = value.as_bytes();
-    for pair in chars.chunks_exact(2) {
+    for pair in chars.as_chunks::<2>().0 {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         bytes.push((high << 4) | low);
@@ -4431,9 +4513,6 @@ impl EngineAccess {
                 Ok(endpoint) => return Ok(Self::Delegate(endpoint)),
                 Err(error) => error,
             };
-            if runtime_dir.join(ENGINE_OWNER_FILE).exists() {
-                return Err(last_error);
-            }
             if Instant::now() >= deadline {
                 return Err(format!(
                     "engine: timed out waiting for active owner publication or direct ownership: {last_error}"
@@ -4724,9 +4803,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
             docker_compat,
             ref metrics_addr,
             ref peer_auth,
+            lan_mirror,
+            ref lan_mirror_addr,
+            ref lan_mirror_secret,
         } = command
         {
-            return run_daemon(socket, docker_compat, metrics_addr.as_deref(), peer_auth.as_deref());
+            return run_daemon(
+                socket,
+                docker_compat,
+                metrics_addr.as_deref(),
+                peer_auth.as_deref(),
+                lan_mirror,
+                lan_mirror_addr.as_deref(),
+                lan_mirror_secret.as_deref(),
+            );
         }
 
         let _engine_owner = if CommandOwnership::for_command(&command) == CommandOwnership::Engine {
@@ -4944,7 +5034,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let images = image_store.list_references().map_err(|error| error.to_string())?;
                 println!("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED");
                 for image in docker_image_search_results(&images, &term, 25) {
-                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["StarCount"], image["Official"], image["Automated"]);
+                    println!("{}\t{}\t{}\t{}\t{}", image["Name"].as_str().unwrap_or_default(), image["Description"].as_str().unwrap_or_default(), image["star_count"], image["is_official"], image["is_automated"]);
                 }
                 Ok(())
             }
@@ -6783,9 +6873,14 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
                     }
                     config.ai_backend = Some(normalized);
                 }
+                "lan_mirror.enabled" => {
+                    config.lan_mirror = value.parse::<bool>().map_err(|_| "config set: lan_mirror.enabled must be true or false".to_string())?;
+                }
+                "lan_mirror.address" => config.lan_mirror_addr = Some(value),
+                "lan_mirror.secret" => config.lan_mirror_secret = Some(value),
                 _ => {
                     return Err(format!(
-                        "config set: unsupported key '{}'. supported: ai.backend",
+                        "config set: unsupported key '{}'. supported: ai.backend, lan_mirror.enabled, lan_mirror.address, lan_mirror.secret",
                         key
                     ))
                 }
@@ -6804,8 +6899,11 @@ fn handle_config(command: ConfigCommands) -> Result<(), String> {
                     }
                     Ok(())
                 }
+                "lan_mirror.enabled" => { println!("{}", config.lan_mirror); Ok(()) }
+                "lan_mirror.address" => { println!("{}", config.lan_mirror_addr.as_deref().unwrap_or("<unset>")); Ok(()) }
+                "lan_mirror.secret" => { println!("{}", if config.lan_mirror_secret.is_some() { "<configured>" } else { "<unset>" }); Ok(()) }
                 _ => Err(format!(
-                    "config get: unsupported key '{}'. supported: ai.backend",
+                    "config get: unsupported key '{}'. supported: ai.backend, lan_mirror.enabled, lan_mirror.address, lan_mirror.secret",
                     key
                 )),
             }
@@ -8744,6 +8842,7 @@ fn dispatch_remote_socket(
                     gateway,
                     ipv6_subnet,
                     ipv6_gateway,
+                    labels,
                 },
         } => {
             let mut configs = Vec::new();
@@ -8764,6 +8863,10 @@ fn dispatch_remote_socket(
                 "Driver": "bridge",
                 "EnableIPv6": ipv6_subnet.is_some(),
                 "IPAM": {"Config": configs},
+                "Labels": match parse_key_values("network: label", labels) {
+                    Ok(labels) => labels,
+                    Err(error) => return Some(Err(error)),
+                },
             });
             let body = match serde_json::to_vec(&body) {
                 Ok(body) => body,
@@ -9193,9 +9296,9 @@ fn format_remote_search_text(body: &[u8]) -> Result<String, String> {
             "{}\t{}\t{}\t{}\t{}\n",
             entry["Name"].as_str().unwrap_or_default(),
             entry["Description"].as_str().unwrap_or_default(),
-            entry["StarCount"],
-            entry["Official"],
-            entry["Automated"],
+            entry["star_count"],
+            entry["is_official"],
+            entry["is_automated"],
         ));
     }
     Ok(output)
@@ -9585,6 +9688,12 @@ fn handle_entitlement(command: EntitlementCommands) -> Result<(), String> {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CliConfig {
     ai_backend: Option<String>,
+    #[serde(default)]
+    lan_mirror: bool,
+    #[serde(default)]
+    lan_mirror_addr: Option<String>,
+    #[serde(default)]
+    lan_mirror_secret: Option<String>,
     #[serde(default)]
     contexts: BTreeMap<String, CliContext>,
     #[serde(default)]
@@ -10950,6 +11059,20 @@ fn resolve_command_path(bin: &str) -> Option<PathBuf> {
 
 fn command_exists(bin: &str) -> bool {
     resolve_command_path(bin).is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn packet_filter_backend_with(
+    mut resolve: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<(&'static str, PathBuf)> {
+    resolve("nft")
+        .map(|path| ("nft", path))
+        .or_else(|| resolve("iptables").map(|path| ("iptables", path)))
+}
+
+#[cfg(target_os = "linux")]
+fn packet_filter_backend() -> Option<(&'static str, PathBuf)> {
+    packet_filter_backend_with(resolve_command_path)
 }
 
 fn validate_compression(value: &str) -> Result<String, String> {
@@ -12826,6 +12949,7 @@ fn create_network_record(
         bridge_name: bridge_name_for_network(name),
         bridge_cidr: format!("{gateway_ip}/{prefix}"),
         ipv6_cidr,
+        labels: BTreeMap::new(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -12916,6 +13040,7 @@ fn docker_named_endpoint_config(
             ipv4_subnet: format!("{subnet}/{prefix}"),
             ipv4_gateway: gateway.to_string(),
             ipv6_gateway_cidr: std::env::var("FERROCRATE_BRIDGE_IPV6_CIDR").ok(),
+            aliases: Vec::new(),
         });
     }
     let record = resolve_named_network(runtime_dir, name)?;
@@ -12926,6 +13051,7 @@ fn docker_named_endpoint_config(
         ipv4_subnet: record.subnet,
         ipv4_gateway: record.gateway,
         ipv6_gateway_cidr: record.ipv6_cidr,
+        aliases: Vec::new(),
     })
 }
 
@@ -12973,6 +13099,7 @@ fn handle_network_authorized(
             gateway,
             ipv6_subnet,
             ipv6_gateway,
+            labels,
         } => {
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
@@ -12981,13 +13108,16 @@ fn handle_network_authorized(
             if records.iter().any(|record| record.name == name) {
                 return Err(format!("network: already exists {name}"));
             }
-            let record = create_network_record(
+            let mut record = create_network_record(
                 &name,
                 subnet.as_deref(),
                 gateway.as_deref(),
                 ipv6_subnet.as_deref(),
                 ipv6_gateway.as_deref(),
             )?;
+            record.labels = parse_key_values("network: label", &labels)?
+                .into_iter()
+                .collect();
             if records.iter().any(|existing| {
                 existing.bridge_name == record.bridge_name && existing.name != record.name
             }) {
@@ -13021,6 +13151,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -13030,6 +13161,7 @@ fn handle_network_authorized(
                 &DockerNetworkView {
                     name: "bridge",
                     driver: "bridge",
+                    labels: &BTreeMap::new(),
                 },
                 &filters,
             );
@@ -13154,6 +13286,7 @@ fn handle_network_authorized(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -15849,6 +15982,15 @@ struct DockerCreateRequest {
     tty: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
+    #[serde(rename = "NetworkingConfig", default)]
+    networking_config: DockerNetworkingConfig,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, serde::Deserialize)]
+struct DockerNetworkingConfig {
+    #[serde(rename = "EndpointsConfig", default)]
+    endpoints: HashMap<String, DockerEndpointConfig>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16051,6 +16193,8 @@ struct DockerCreateSpec {
     name: Option<String>,
     network_mode: String,
     #[serde(default)]
+    network_aliases: Vec<String>,
+    #[serde(default)]
     tty: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
@@ -16102,6 +16246,12 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if !spec.network_aliases.is_empty() {
+        annotations.push(format!(
+            "io.ferrocrate.network.aliases={}",
+            spec.network_aliases.join(",")
+        ));
+    }
 
     DockerStartRunInputs {
         path_binds,
@@ -16207,6 +16357,8 @@ struct DockerNetworkCreateSpec {
     enable_ipv6: bool,
     #[serde(rename = "IPAM")]
     ipam: Option<DockerIpamSpec>,
+    #[serde(rename = "Labels", default)]
+    labels: BTreeMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -16268,10 +16420,28 @@ struct DockerNetworkConnectWireRequest {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default, Deserialize)]
 struct DockerEndpointConfig {
-    #[serde(rename = "Aliases", default)]
+    #[serde(rename = "Aliases", default, deserialize_with = "deserialize_null_aliases")]
     aliases: Vec<String>,
-    #[serde(rename = "IPAMConfig", default)]
+    #[serde(rename = "IPAMConfig", default, deserialize_with = "deserialize_null_endpoint_ipam")]
     ipam: DockerEndpointIpamConfig,
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_aliases<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_endpoint_ipam<'de, D>(
+    deserializer: D,
+) -> Result<DockerEndpointIpamConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<DockerEndpointIpamConfig>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[cfg(target_os = "linux")]
@@ -16474,9 +16644,11 @@ async fn receive_buildkit_session_credentials(
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    starting: Mutex<std::collections::HashSet<String>>,
     pending_path: PathBuf,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
+    auto_remove_results: Mutex<HashMap<String, Option<i32>>>,
     events: Mutex<DockerEventStore>,
     buildkit_sessions: Mutex<HashMap<String, BuildkitSessionHandle>>,
     buildkit_builds: Mutex<HashMap<String, Arc<BuildkitBuild>>>,
@@ -16526,9 +16698,11 @@ impl DockerCompatState {
         Ok(Self {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(pending),
+            starting: Mutex::new(std::collections::HashSet::new()),
             pending_path,
             name_store,
             execs: Mutex::new(HashMap::new()),
+            auto_remove_results: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
             buildkit_sessions: Mutex::new(HashMap::new()),
             buildkit_builds: Mutex::new(HashMap::new()),
@@ -17343,6 +17517,9 @@ fn run_daemon(
     docker_compat: bool,
     metrics_addr: Option<&str>,
     peer_auth: Option<&str>,
+    lan_mirror: bool,
+    lan_mirror_addr: Option<&str>,
+    lan_mirror_secret: Option<&str>,
 ) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -17352,6 +17529,11 @@ fn run_daemon(
     let peer_auth_mode = resolve_peer_auth_mode(peer_auth)?;
     if peer_auth_mode == PeerAuthMode::LegacyPeercred {
         eprintln!("WARN peer authentication legacy-peercred active; PID reuse can race identity resolution");
+    }
+    if packet_filter_backend().is_none() {
+        eprintln!(
+            "WARN packet-filter backend unavailable; install the iptables or nftables package before starting containers with published ports"
+        );
     }
     let runtime_dir = runtime_dir();
     let engine_runtime_dir = engine_runtime_dir();
@@ -17386,9 +17568,10 @@ fn run_daemon(
         std::fs::remove_file(socket_path).map_err(|err| err.to_string())?;
     }
 
-    let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
+    let mut listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
+    listener.set_nonblocking(true).map_err(|err| format!("daemon: set socket nonblocking: {err}"))?;
     let runtime_dir = Arc::new(runtime_dir);
     let runtime = Arc::new(
         ContainerRuntime::new(runtime_dir.as_ref())
@@ -17407,11 +17590,25 @@ fn run_daemon(
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime.clone(), store.clone(), addr)?;
     }
+    let mirror_config = load_cli_config().unwrap_or_default();
+    let mirror_enabled = lan_mirror || mirror_config.lan_mirror;
+    let _mirror_registration = if mirror_enabled {
+        Some(start_lan_mirror_server(
+            runtime_dir.as_ref(),
+            store.clone(),
+            lan_mirror_addr.or(mirror_config.lan_mirror_addr.as_deref()),
+            lan_mirror_secret.or(mirror_config.lan_mirror_secret.as_deref()),
+        )?)
+    } else {
+        None
+    };
     engine_owner.publish_daemon_owner(socket_path)?;
+    let mut bound_identity = daemon_socket_identity(socket_path)?;
+    let mut last_socket_check = Instant::now();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
                 let runtime_dir = runtime_dir.clone();
                 let runtime = runtime.clone();
                 let store = store.clone();
@@ -17436,10 +17633,46 @@ fn run_daemon(
                     }
                 });
             }
-            Err(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_socket_check.elapsed() >= Duration::from_secs(1) {
+                    match daemon_socket_identity(socket_path) {
+                        Ok(identity) if identity == bound_identity => {}
+                        Err(error) if error.contains("unavailable") => {
+                            listener = UnixListener::bind(socket_path)
+                                .map_err(|error| format!("daemon: rebind missing socket: {error}"))?;
+                            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+                                .map_err(|error| format!("daemon: restore socket permissions: {error}"))?;
+                            listener.set_nonblocking(true)
+                                .map_err(|error| format!("daemon: restore socket nonblocking: {error}"))?;
+                            bound_identity = daemon_socket_identity(socket_path)?;
+                            engine_owner.publish_daemon_owner(socket_path)?;
+                            tracing::warn!(socket = %socket_path.display(), "rebound unlinked daemon socket");
+                        }
+                        Ok(_) => return Err(format!(
+                            "daemon: socket {} was replaced by another inode; exiting and clearing owner record",
+                            socket_path.display()
+                        )),
+                        Err(error) => return Err(error),
+                    }
+                    last_socket_check = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("daemon: accept failed: {error}")),
         }
     }
-    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_socket_identity(path: &Path) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("daemon: socket {} is unavailable: {error}", path.display()))?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!("daemon: socket {} is no longer a Unix socket", path.display()));
+    }
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(target_os = "linux")]
@@ -17494,6 +17727,159 @@ fn start_metrics_server(
             let _ = stream.write_all(response.as_bytes());
         }
     });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_lan_mirror_server(
+    runtime_dir: &Path,
+    store: Arc<LocalImageStore>,
+    configured_addr: Option<&str>,
+    secret: Option<&str>,
+) -> Result<mdns_sd::ServiceDaemon, String> {
+    use std::net::{IpAddr, SocketAddr};
+    let address = if let Some(value) = configured_addr {
+        value.parse::<SocketAddr>().map_err(|error| format!("lan mirror address: {error}"))?
+    } else {
+        let ip = if_addrs::get_if_addrs()
+            .map_err(|error| format!("lan mirror interfaces: {error}"))?
+            .into_iter()
+            .filter_map(|interface| match interface.ip() {
+                IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+                _ => None,
+            })
+            .next()
+            .ok_or_else(|| "lan mirror: no private LAN IPv4 address found; use --lan-mirror-addr".to_string())?;
+        SocketAddr::new(IpAddr::V4(ip), 7422)
+    };
+    if address.ip().is_loopback() || address.ip().is_unspecified() || address.ip().is_multicast() {
+        return Err("lan mirror: listener must bind a specific non-loopback LAN address".to_string());
+    }
+    if !matches!(address.ip(), IpAddr::V4(ip) if ip.is_private()) {
+        return Err("lan mirror: listener address must be a private LAN IPv4 address".to_string());
+    }
+    let listener = TcpListener::bind(address).map_err(|error| format!("lan mirror bind: {error}"))?;
+    let bound = listener.local_addr().map_err(|error| format!("lan mirror address: {error}"))?;
+    let instance_path = runtime_dir.join("lan-mirror-instance-id");
+    let instance_id = std::fs::read_to_string(&instance_path).ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+        let value = uuid::Uuid::new_v4().simple().to_string();
+        let _ = ferro_core::fs_atomic::write_atomic(&instance_path, value.as_bytes());
+        value
+    });
+    let digests = store.list_references().map_err(|error| error.to_string())?.into_iter().map(|record| {
+        format!("sha256:{:x}", Sha256::digest(record.manifest_json.as_bytes()))
+    }).collect::<Vec<_>>();
+    let registration = ferro_core::lan_mirror::register(&instance_id, bound.ip(), bound.port(), &digests)?;
+    let advertised_digests = digests.iter().take(6).cloned().collect::<Vec<_>>().join(",");
+    let serving_instance_id = instance_id.clone();
+    let runtime_dir = runtime_dir.to_path_buf();
+    let secret = secret.map(str::to_owned);
+    let nonces = Arc::new(std::sync::Mutex::new(ferro_core::lan_mirror::MirrorNonceStore::default()));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let store = store.clone();
+            let runtime_dir = runtime_dir.clone();
+            let secret = secret.clone();
+            let instance_id = serving_instance_id.clone();
+            let advertised_digests = advertised_digests.clone();
+            let nonces = nonces.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = handle_lan_mirror_connection(stream, &runtime_dir, &store, secret.as_deref(), &nonces, &instance_id, &advertised_digests) {
+                    tracing::debug!(%error, "lan mirror request rejected");
+                }
+            });
+        }
+    });
+    tracing::info!(address = %bound, instance = %instance_id, "LAN image mirror enabled");
+    Ok(registration)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_lan_mirror_connection(
+    mut stream: std::net::TcpStream,
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    secret: Option<&str>,
+    nonces: &std::sync::Mutex<ferro_core::lan_mirror::MirrorNonceStore>,
+    instance_id: &str,
+    advertised_digests: &str,
+) -> Result<(), String> {
+    use std::time::Duration;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|error| error.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
+    let mut request = Vec::new();
+    let mut byte = [0u8; 1];
+    while request.len() < 16 * 1024 && !request.ends_with(b"\r\n\r\n") {
+        if stream.read(&mut byte).map_err(|error| error.to_string())? == 0 { break; }
+        request.push(byte[0]);
+    }
+    let request = String::from_utf8(request).map_err(|_| "lan mirror: request is not UTF-8".to_string())?;
+    let mut lines = request.lines();
+    let first = lines.next().ok_or_else(|| "lan mirror: empty request".to_string())?;
+    let mut parts = first.split_whitespace();
+    if parts.next() != Some("GET") {
+        stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let path = parts.next().unwrap_or("/");
+    let headers = lines.filter_map(|line| line.split_once(':')).map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim())).collect::<std::collections::BTreeMap<_, _>>();
+    if path == "/lan/v1/challenge" {
+        let Some(secret) = secret else {
+            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+            return Ok(());
+        };
+        let nonce = nonces.lock().map_err(|_| "lan mirror: nonce store poisoned".to_string())?.issue();
+        let proof = ferro_core::lan_mirror::mirror_peer_proof(secret, &nonce);
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: no-store\r\nX-Ferrocrate-Mirror-Nonce: {nonce}\r\nX-Ferrocrate-Mirror-Proof: {proof}\r\n\r\n");
+        stream.write_all(response.as_bytes()).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if path == "/v2/" {
+        let header = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Ferrocrate-Instance: {instance_id}\r\nX-Ferrocrate-Digests: {advertised_digests}\r\n\r\n");
+        stream.write_all(header.as_bytes()).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if let Some(expected) = secret {
+        let nonce = headers.get("x-ferrocrate-mirror-nonce").copied().unwrap_or("");
+        let supplied = headers.get("x-ferrocrate-mirror-auth").copied().unwrap_or("");
+        let request_digest = path.rsplit('/').next().unwrap_or("");
+        if !nonces.lock().map_err(|_| "lan mirror: nonce store poisoned".to_string())?
+            .verify_and_consume(expected, nonce, request_digest, supplied) {
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    let (body, content_type) = if let Some((name, reference)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/manifests/")) {
+        let record = store.list_references().map_err(|error| error.to_string())?.into_iter().find(|record| {
+            let canonical = record.reference.strip_prefix("registry-1.docker.io/").unwrap_or(&record.reference);
+            canonical == format!("{name}:{reference}") || canonical == format!("{name}@{reference}") || format!("sha256:{:x}", Sha256::digest(record.manifest_json.as_bytes())) == reference
+        }).ok_or_else(|| "lan mirror: manifest not found".to_string())?;
+        (record.manifest_json.into_bytes(), record.manifest_media_type)
+    } else if let Some((_name, digest)) = path.strip_prefix("/v2/").and_then(|rest| rest.split_once("/blobs/")) {
+        if !ferro_core::lan_mirror::valid_sha256_digest(digest) { return Err("lan mirror: invalid digest".to_string()); }
+        let filename = digest.replace(':', "_");
+        let candidates = [runtime_dir.join("images/blobs").join(&filename), runtime_dir.join("images/configs").join(&filename)];
+        let path = candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| "lan mirror: blob not found".to_string())?;
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        if !ferro_core::lan_mirror::verify_bytes(&bytes, digest) { return Err("lan mirror: stored blob digest mismatch".to_string()); }
+        (bytes, "application/octet-stream".to_string())
+    } else {
+        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").map_err(|error| error.to_string())?;
+        return Ok(());
+    };
+    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: private, max-age=60\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes()).map_err(|error| error.to_string())?;
+    // Bound each client to 16 MiB/s. This deliberately simple per-connection
+    // limiter prevents a LAN pull from monopolising daemon disk/network IO.
+    let started = Instant::now();
+    for (index, chunk) in body.chunks(64 * 1024).enumerate() {
+        stream.write_all(chunk).map_err(|error| error.to_string())?;
+        let expected = Duration::from_secs_f64(((index + 1) * 64 * 1024) as f64 / (16.0 * 1024.0 * 1024.0));
+        if let Some(delay) = expected.checked_sub(started.elapsed()) {
+            std::thread::sleep(delay);
+        }
+    }
     Ok(())
 }
 
@@ -17563,6 +17949,7 @@ fn handle_docker_compat_connection(
     let mut stats_follow: Option<String> = None;
     let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
+    let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
     let mut buildkit_session_hijack: Option<BuildkitSessionRegistration> = None;
     let mut buildkit_control_hijack: Option<Arc<BuildkitExecutionContext>> = None;
@@ -18297,16 +18684,42 @@ fn handle_docker_compat_connection(
                     http_response(200, &body, "application/vnd.docker.raw-stream")
                 }
             }
-            ("GET", path)
+            ("GET", path) | ("POST", path)
                 if path.starts_with("/containers/") && path.ends_with("/attach/ws") =>
             {
-                // The websocket attach variant is a recognized Docker route
-                // with no local implementation; report the boundary
-                // explicitly instead of a generic unknown-route 404.
-                docker_error_response(
-                    501,
-                    "websocket attach is unsupported: use the TCP hijack attach endpoint",
-                )
+                let requested_id = path
+                    .trim_start_matches("/containers/")
+                    .trim_end_matches("/attach/ws");
+                let id = resolve_container_id(&runtime, requested_id)?;
+                let key = request
+                    .headers
+                    .get("sec-websocket-key")
+                    .ok_or_else(|| "docker: websocket attach requires Sec-WebSocket-Key".to_string())?;
+                if request
+                    .headers
+                    .get("sec-websocket-version")
+                    .is_none_or(|version| version != "13")
+                {
+                    return Err("docker: websocket attach requires Sec-WebSocket-Version 13".into());
+                }
+                let stdout_requested = query
+                    .get("stdout")
+                    .map(|value| parse_docker_bool_query(Some(value), "stdout"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let stderr_requested = query
+                    .get("stderr")
+                    .map(|value| parse_docker_bool_query(Some(value), "stderr"))
+                    .transpose()?
+                    .unwrap_or(true);
+                let (stdout, stderr) = runtime.logs_split(&id).unwrap_or_default();
+                let tty = runtime.inspect(&id).map_err(|error| error.to_string())?.tty;
+                websocket_attach = Some(docker_attach_output(
+                    tty,
+                    if stdout_requested { &stdout } else { "" },
+                    if stderr_requested { &stderr } else { "" },
+                ));
+                docker_websocket_upgrade_headers(key)
             }
             ("POST", path) if path.starts_with("/containers/") && path.ends_with("/attach") => {
                 let requested_id = path
@@ -18394,18 +18807,19 @@ fn handle_docker_compat_connection(
                     // `docker run` container. Return the 101 handshake
                     // immediately for that pending record so the client can
                     // issue `/start`; running records retain live streaming.
-                    if !pending_attach {
-                        attach_hijack = Some((
-                            id.to_string(),
-                            logs_requested,
-                            stream_requested,
-                            stdin_requested,
-                            stdout_requested,
-                            stderr_requested,
-                            request.body.clone(),
-                            detach_keys,
-                        ));
-                    }
+                    attach_hijack = Some((
+                        id.to_string(),
+                        // A pending attach has no history at registration;
+                        // every byte present after start is live output even
+                        // when the client requested `logs=0`.
+                        logs_requested || pending_attach,
+                        stream_requested,
+                        stdin_requested,
+                        stdout_requested,
+                        stderr_requested,
+                        request.body.clone(),
+                        detach_keys,
+                    ));
                     docker_hijack_headers()
                 } else {
                     http_response(200, &output, "application/vnd.docker.raw-stream")
@@ -19004,7 +19418,7 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/start");
                 let (id, spec) = {
-                    let mut pending = state
+                    let pending = state
                         .pending
                         .lock()
                         .map_err(|e| format!("lock poisoned: {e}"))?;
@@ -19016,14 +19430,22 @@ fn handle_docker_compat_connection(
                             .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
                             .map(|(pending_id, _)| pending_id.clone())
                     };
-                    let spec = pending_id.as_deref().and_then(|id| pending.remove(id));
+                    let spec = pending_id.as_deref().and_then(|id| pending.get(id).cloned());
                     (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
                     runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };
-                state.persist_pending()?;
+                {
+                    let mut starting = state
+                        .starting
+                        .lock()
+                        .map_err(|error| format!("docker: starting lock poisoned: {error}"))?;
+                    if !starting.insert(id.clone()) {
+                        return Err(format!("docker: container start already in progress: {id}"));
+                    }
+                }
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
                     ferro_core::container_store::HealthConfig {
@@ -19042,6 +19464,13 @@ fn handle_docker_compat_connection(
                     spec.tty.then_some("1"),
                 );
                 let run_inputs = docker_start_run_inputs(&spec);
+                if spec.auto_remove {
+                    state
+                        .auto_remove_results
+                        .lock()
+                        .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                        .insert(id.clone(), None);
+                }
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -19073,7 +19502,7 @@ fn handle_docker_compat_connection(
                     false,
                     health_override,
                     &spec.restart_policy,
-                    spec.auto_remove,
+                    false,
                     None,
                     None,
                     None,
@@ -19086,11 +19515,53 @@ fn handle_docker_compat_connection(
                     Some(&id),
                 );
                 if let Err(error) = start_result {
-                    if let Ok(mut pending) = state.pending.lock() {
-                        pending.insert(id, spec);
+                    if let Ok(mut starting) = state.starting.lock() {
+                        starting.remove(&id);
                     }
-                    let _ = state.persist_pending();
+                    if spec.auto_remove {
+                        if let Ok(mut results) = state.auto_remove_results.lock() {
+                            results.remove(&id);
+                        }
+                    }
                     return Err(error);
+                }
+                {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    pending.remove(&id);
+                }
+                state
+                    .starting
+                    .lock()
+                    .map_err(|error| format!("docker: starting lock poisoned: {error}"))?
+                    .remove(&id);
+                state.persist_pending()?;
+                if spec.auto_remove {
+                    let remove_runtime = runtime.request_scoped(origin.clone());
+                    let remove_state = Arc::clone(&state);
+                    let remove_id = id.clone();
+                    std::thread::spawn(move || {
+                        if wait_for_container_exit(&remove_runtime, &remove_id).is_ok() {
+                            let exit_code = remove_runtime
+                                .inspect(&remove_id)
+                                .ok()
+                                .and_then(|record| record.last_exit_code)
+                                .unwrap_or(0);
+                            // Give an attach registered before start one poll
+                            // turn to drain the terminal log before deletion.
+                            std::thread::sleep(Duration::from_millis(50));
+                            if remove_runtime.remove(&remove_id).is_ok() {
+                                // Publish only after removal so `docker run
+                                // --rm` cannot return while network/volume
+                                // associations are still being torn down.
+                                if let Ok(mut results) = remove_state.auto_remove_results.lock() {
+                                    results.insert(remove_id, Some(exit_code));
+                                }
+                            }
+                        }
+                    });
                 }
                 http_response(204, &[], "text/plain")
             }
@@ -19166,13 +19637,27 @@ fn handle_docker_compat_connection(
                     })
                     .transpose()?
                     .flatten();
-                let id = {
+                let auto_remove_id = state
+                    .auto_remove_results
+                    .lock()
+                    .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                    .contains_key(requested_id)
+                    .then(|| requested_id.to_string());
+                let id = if let Some(id) = auto_remove_id {
+                    id
+                } else {
                     let pending = state
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                     docker_resolve_id(&runtime, &pending, requested_id)?
                 };
+                let pending_auto_remove = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .get(&id)
+                    .is_some_and(|spec| spec.auto_remove);
                 // Docker CLI issues `/wait?condition=removed` concurrently
                 // with `/start`, while the create record is still pending.
                 // Reconcile that pre-start window before evaluating exit or
@@ -19205,6 +19690,13 @@ fn handle_docker_compat_connection(
                                 // pre-start window.
                                 return Err(error.to_string());
                             }
+                            if condition != "removed" && pending {
+                                // The durable pending record is Docker's
+                                // created lifecycle state. Send wait headers
+                                // now so the client can issue `/start`; the
+                                // streaming epilogue observes publication.
+                                break;
+                            }
                             if condition == "removed" && !observed && pending {
                                 // Docker CLI sends wait before start. Return
                                 // the provisional removed result so it can
@@ -19226,7 +19718,7 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
-                if condition == "removed" {
+                if condition == "removed" && !pending_auto_remove {
                     let record = runtime.inspect(&id).ok();
                     let body = serde_json::json!({
                         "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
@@ -19335,7 +19827,12 @@ fn handle_docker_compat_connection(
             ("GET", "/images/search") => {
                 let (term, limit) = parse_docker_image_search_query(&query)?;
                 let images = store.list_references().map_err(|err| err.to_string())?;
-                let entries = docker_image_search_results(&images, &term, limit);
+                let local_entries = docker_image_search_results(&images, &term, limit);
+                let entries = if local_entries.is_empty() {
+                    docker_hub_search(&term, limit)?
+                } else {
+                    local_entries
+                };
                 let json = serde_json::to_string(&entries)
                     .map_err(|error| format!("docker: image search response failed: {error}"))?;
                 http_response(200, json.as_bytes(), "application/json")
@@ -19447,6 +19944,7 @@ fn handle_docker_compat_connection(
                     &DockerNetworkView {
                         name: "bridge",
                         driver: "bridge",
+                        labels: &BTreeMap::new(),
                     },
                     &filters,
                 ) {
@@ -19462,6 +19960,7 @@ fn handle_docker_compat_connection(
                         &DockerNetworkView {
                             name: &record.name,
                             driver: &record.driver,
+                            labels: &record.labels,
                         },
                         &filters,
                     )
@@ -19479,6 +19978,7 @@ fn handle_docker_compat_connection(
                             "Id": record.name,
                             "Driver": record.driver,
                             "Scope": "local",
+                            "Labels": record.labels,
                             "IPAM": {
                                 "Config": ipam_config
                             }
@@ -19518,7 +20018,8 @@ fn handle_docker_compat_connection(
                         "Scope": "local",
                         "EnableIPv6": record.ipv6_cidr.is_some(),
                         "IPAM": {"Config": ipam_config},
-                        "Containers": containers
+                        "Containers": containers,
+                        "Labels": record.labels
                     });
                     http_response(200, body.to_string().as_bytes(), "application/json")
                 }
@@ -19562,6 +20063,7 @@ fn handle_docker_compat_connection(
                         gateway,
                         ipv6_subnet,
                         ipv6_gateway,
+                        labels: spec.labels.iter().map(|(key, value)| format!("{key}={value}")).collect(),
                     },
                     &origin,
                     &surface_authorization,
@@ -19580,6 +20082,7 @@ fn handle_docker_compat_connection(
                             &DockerNetworkView {
                                 name: &record.name,
                                 driver: &record.driver,
+                                labels: &record.labels,
                             },
                             &filters,
                         )
@@ -19725,7 +20228,8 @@ fn handle_docker_compat_connection(
                     .trim_end_matches('/');
                 let request = parse_docker_network_connect_request(&request.body)?;
                 let id = resolve_container_id(&runtime, &request.container)?;
-                let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                let mut config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
+                config.aliases = request.aliases;
                 let permit = surface_authorization
                     .authorize_named(
                         &origin,
@@ -19887,11 +20391,32 @@ fn handle_docker_compat_connection(
                     .authorize_volume_create_plan(&origin, &plan)
                     .map_err(|error| error.to_string())?;
                 execute_volume_create(&volume_store, plan, proof)?;
+                let labels = body
+                    .get("Labels")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .map(|(key, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (key.clone(), value.to_string()))
+                                    .ok_or_else(|| {
+                                        "docker: volume Labels values must be strings".to_string()
+                                    })
+                            })
+                            .collect::<Result<BTreeMap<_, _>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                volume_store
+                    .set_labels(name, labels)
+                    .map_err(|error| error.to_string())?;
                 let record = volume_store
                     .get(name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: volume not found after create: {name}"))?;
-                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path});
+                let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path, "Labels": record.labels});
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/volumes/prune") => {
@@ -19955,6 +20480,7 @@ fn handle_docker_compat_connection(
                             "Driver": record.driver,
                             "Mountpoint": record.path,
                             "CreatedAt": record.created_at_unix.to_string(),
+                            "Labels": record.labels,
                             "Status": serde_json::Value::Null,
                             "UsageData": {"RefCount": mounts.len(), "Size": 0},
                             "FerrocrateMounts": mounts,
@@ -19975,6 +20501,7 @@ fn handle_docker_compat_connection(
                     "Driver": record.driver,
                     "Mountpoint": record.path,
                     "CreatedAt": record.created_at_unix.to_string(),
+                    "Labels": record.labels,
                     "Status": serde_json::Value::Null,
                     "UsageData": serde_json::Value::Null,
                 });
@@ -20006,6 +20533,19 @@ fn handle_docker_compat_connection(
             registration,
             Duration::from_secs(30 * 60),
         );
+    }
+    if let Some(output) = websocket_attach {
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message, WebSocket};
+        let mut websocket = WebSocket::from_raw_socket(stream, Role::Server, None);
+        if !output.is_empty() {
+            websocket
+                .send(Message::Binary(output.into()))
+                .map_err(|error| format!("docker: websocket attach send failed: {error}"))?;
+        }
+        websocket
+            .close(None)
+            .map_err(|error| format!("docker: websocket attach close failed: {error}"))?;
+        return Ok(());
     }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
@@ -20091,17 +20631,55 @@ fn handle_docker_compat_connection(
     }
     if let Some((id, condition, timeout)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
-        if condition == "next-exit" {
-            // A created container has not produced its next exit yet: block
-            // through the pre-start window before waiting for the exit.
+        let auto_remove_result = || -> Result<Option<i32>, String> {
+            let started = Instant::now();
+            loop {
+                let result = state
+                    .auto_remove_results
+                    .lock()
+                    .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                    .get(&id)
+                    .copied();
+                match result {
+                    Some(Some(exit_code)) => return Ok(Some(exit_code)),
+                    Some(None) if timeout.is_none_or(|limit| started.elapsed() < limit) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Some(None) => return Err(format!("wait: timed out waiting for container {id}")),
+                    None if condition == "removed" => {
+                        // `docker run --rm` opens this wait before `/start`;
+                        // the start handler registers its auto-remove result
+                        // after receiving the already-sent response headers.
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None => return Ok(None),
+                }
+            }
+        };
+        if let Some(exit_code) = auto_remove_result()? {
+            let body = serde_json::json!({
+                "StatusCode": exit_code,
+                "Error": serde_json::Value::Null
+            })
+            .to_string();
+            let chunk = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+            stream
+                .write_all(chunk.as_bytes())
+                .map_err(|error| format!("docker: wait stream write failed: {error}"))?;
+            return Ok(());
+        }
+        if matches!(condition.as_str(), "next-exit" | "not-running") {
+            // A created container has not produced its next exit yet. Wait
+            // for `/start` to publish the runtime record after headers have
+            // already been sent to the client.
             let start_deadline = timeout
                 .map(|value| Instant::now() + value)
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-            while follow_runtime
-                .inspect(&id)
-                .map(|record| record.status == "created")
-                .unwrap_or(false)
-            {
+            loop {
+                match follow_runtime.inspect(&id) {
+                    Ok(record) if record.status != "created" => break,
+                    Ok(_) | Err(_) => {}
+                }
                 if Instant::now() >= start_deadline {
                     break;
                 }
@@ -20232,6 +20810,9 @@ fn docker_status_for_error(err: &str) -> u16 {
     // stable service-unavailable response so clients and readiness probes can
     // distinguish it from ordinary API validation failures.
     if lowered.contains("so_peerpidfd") {
+        return 503;
+    }
+    if lowered.contains("docker hub search unavailable") {
         return 503;
     }
     if lowered.contains("still running") {
@@ -20810,15 +21391,77 @@ fn docker_image_search_results(
                 "Index": "local",
                 "Name": record.reference,
                 "Description": "Locally available Ferrocrate image",
-                "Official": false,
-                "Automated": false,
-                "StarCount": 0,
+                "is_official": false,
+                "is_automated": false,
+                "star_count": 0,
             })
         })
         .collect::<Vec<_>>();
     results.sort_by(|left, right| left["Name"].as_str().cmp(&right["Name"].as_str()));
     results.truncate(limit);
     results
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search(term: &str, limit: usize) -> Result<Vec<serde_json::Value>, String> {
+    let endpoint = std::env::var("FERROCRATE_DOCKER_HUB_SEARCH_URL")
+        .unwrap_or_else(|_| "https://hub.docker.com/v2/search/repositories/".to_string());
+    docker_hub_search_with_endpoint(&endpoint, term, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_with_endpoint(
+    endpoint: &str,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("ferrocrate/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    let response = client
+        .get(endpoint)
+        .query(&[("query", term), ("page_size", &limit.to_string())])
+        .send()
+        .map_err(|error| format!("docker: Docker Hub search unavailable: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "docker: Docker Hub search unavailable: upstream returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let payload = response
+        .json::<serde_json::Value>()
+        .map_err(|error| format!("docker: Docker Hub search returned invalid JSON: {error}"))?;
+    docker_hub_search_results_from_value(payload, limit)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_hub_search_results_from_value(
+    payload: serde_json::Value,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let results = payload
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "docker: Docker Hub search response omitted results".to_string())?;
+    Ok(results
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("repo_name")?.as_str()?;
+            Some(serde_json::json!({
+                "Index": "docker.io",
+                "Name": name,
+                "Description": entry.get("short_description").and_then(serde_json::Value::as_str).unwrap_or(""),
+                "is_official": entry.get("is_official").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "is_automated": entry.get("is_automated").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                "star_count": entry.get("star_count").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            }))
+        })
+        .take(limit)
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -20944,11 +21587,11 @@ fn docker_volume_matches_filters(
             return false;
         }
     }
-    // Volume records do not persist labels; a label selector matches only
-    // when it selects nothing (compose probes for its project volumes this
-    // way and creates them on an empty result).
     if let Some(labels) = filters.get("label") {
-        if !labels.is_empty() {
+        if !labels.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        }) {
             return false;
         }
     }
@@ -20969,6 +21612,7 @@ fn validate_docker_volume_filters(filters: &HashMap<String, Vec<String>>) -> Res
 struct DockerNetworkView<'a> {
     name: &'a str,
     driver: &'a str,
+    labels: &'a BTreeMap<String, String>,
 }
 
 fn docker_network_matches_filters(
@@ -20991,12 +21635,12 @@ fn docker_network_matches_filters(
                     || (value == "custom" && record.name != "bridge")
             })
     });
-    // Network records do not persist labels; a label selector can therefore
-    // only match when it selects nothing. Compose uses this filter to find
-    // its own project networks and treats an empty result as "create it".
-    let label_matches = filters
-        .get("label")
-        .is_none_or(|values| values.is_empty());
+    let label_matches = filters.get("label").is_none_or(|values| {
+        values.iter().all(|selector| match selector.split_once('=') {
+            Some((key, value)) => record.labels.get(key).is_some_and(|actual| actual == value),
+            None => record.labels.contains_key(selector),
+        })
+    });
     name_matches && driver_matches && scope_matches && type_matches && label_matches
 }
 
@@ -21187,6 +21831,13 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
             other.to_string()
         }
     };
+    let network_aliases = request
+        .networking_config
+        .endpoints
+        .get(&network_mode)
+        .or_else(|| request.networking_config.endpoints.values().next())
+        .map(|endpoint| endpoint.aliases.clone())
+        .unwrap_or_default();
     let health = parse_docker_healthcheck(request.healthcheck)?;
     let memory_max = normalize_docker_limit(host_config.memory, "Memory")?;
     let cpu_quota = normalize_docker_limit(host_config.cpu_quota, "CpuQuota")?;
@@ -21220,6 +21871,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        network_aliases,
         tty: request.tty,
         log_options,
         log_driver,
@@ -21698,6 +22350,10 @@ fn docker_network_settings(
     let ipv6 = record.ipv6_address.clone().unwrap_or_default();
     let mut networks = serde_json::Map::new();
     for endpoint in record.effective_network_endpoints() {
+        let mut dns_names = record.name.clone().into_iter().collect::<Vec<_>>();
+        dns_names.extend(endpoint.aliases.iter().cloned());
+        dns_names.sort();
+        dns_names.dedup();
         let ipv4_prefix = endpoint
             .ownership
             .as_ref()
@@ -21717,7 +22373,7 @@ fn docker_network_settings(
                 "GlobalIPv6Address": endpoint.ipv6_address.clone().unwrap_or_default(),
                 "GlobalIPv6PrefixLen": if endpoint.ipv6_address.is_some() { 64 } else { 0 },
                 "MacAddress": "",
-                "DNSNames": record.name.clone().into_iter().collect::<Vec<_>>(),
+                "DNSNames": dns_names,
             }),
         );
     }
@@ -23613,6 +24269,15 @@ async fn receive_buildkit_local(
 }
 
 #[cfg(target_os = "linux")]
+fn docker_websocket_upgrade_headers(key: &str) -> Vec<u8> {
+    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
 fn docker_raw_stream(stdout: &str, stderr: &str) -> Vec<u8> {
     let mut output = Vec::with_capacity(stdout.len() + stderr.len() + 16);
     for (stream, payload) in [(1u8, stdout.as_bytes()), (2u8, stderr.as_bytes())] {
@@ -24006,7 +24671,7 @@ fn stream_docker_attach(
     // A non-interactive local run has no producer for the socket's input
     // half. Do not pay the daemon-compatible 250 ms read timeout before each
     // lifecycle observation on that path.
-    let mut input_closed = fast_local_exit && !stdin_requested;
+    let mut input_closed = !stdin_requested;
     let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
     let local_stream_started = Instant::now();
     let mut terminal_log_lengths = None;
@@ -24472,7 +25137,7 @@ mod tests {
     }
 
     #[test]
-    fn held_lock_with_missing_published_socket_fails_without_owner_timeout() {
+    fn held_lock_with_missing_published_socket_waits_for_republication() {
         let runtime = tempfile::tempdir().expect("runtime directory");
         let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
         let _owner = EngineLockGuard::try_acquire(runtime.path())
@@ -24498,8 +25163,8 @@ mod tests {
             "unexpected stale-owner diagnostic: {error}"
         );
         assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "stale published owner consumed the owner timeout: {:?}",
+            started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(3),
+            "stale published owner did not use the bounded republication window: {:?}",
             started.elapsed()
         );
     }
@@ -24834,7 +25499,7 @@ mod tests {
             "A /tmp/new\n"
         );
         assert!(super::format_remote_search_text(
-            br#"[{"Name":"demo","Description":"fixture","StarCount":2,"Official":false,"Automated":true}]"#
+            br#"[{"Name":"demo","Description":"fixture","star_count":2,"is_official":false,"is_automated":true}]"#
         )
         .expect("search text")
         .starts_with("NAME\tDESCRIPTION\tSTARS\tOFFICIAL\tAUTOMATED\n"));
@@ -27331,6 +27996,16 @@ volumes:
         );
     }
 
+    #[test]
+    fn doctor_reports_selected_network_namespace_root() {
+        assert_eq!(
+            super::doctor_netns_root_message(std::path::Path::new(
+                "/runtime/ferrocrate/netns",
+            )),
+            "network namespace root: /runtime/ferrocrate/netns"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn doctor_rejects_restricted_userns_without_ferrocrate_profile() {
@@ -27975,6 +28650,16 @@ volumes:
     }
 
     #[test]
+    fn container_create_preserves_network_aliases() {
+        let spec = super::parse_docker_create_spec(
+            br#"{"Image":"alpine:3.20","HostConfig":{"NetworkMode":"app"},"NetworkingConfig":{"EndpointsConfig":{"app":{"Aliases":["api","api.internal"]}}}}"#,
+            None,
+        )
+        .expect("network aliases");
+        assert_eq!(spec.network_aliases, vec!["api", "api.internal"]);
+    }
+
+    #[test]
     fn parses_docker_network_connect_and_disconnect_payloads() {
         let connect = super::parse_docker_network_connect_request(
             br#"{"Container":"api","EndpointConfig":{"Aliases":["api-alias"]}}"#,
@@ -28129,6 +28814,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28393,6 +29079,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28454,6 +29141,7 @@ volumes:
                 gateway: Some("172.31.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         );
@@ -28509,6 +29197,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28561,6 +29250,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28604,6 +29294,7 @@ volumes:
                 gateway: Some("172.34.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28666,6 +29357,7 @@ volumes:
             bridge_name: first.clone(),
             bridge_cidr: "172.32.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -28686,6 +29378,7 @@ volumes:
                 gateway: Some("172.30.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28713,6 +29406,7 @@ volumes:
                 gateway: Some("172.33.0.1".to_string()),
                 ipv6_subnet: None,
                 ipv6_gateway: None,
+                labels: Vec::new(),
             },
             &authorization,
         )
@@ -28788,6 +29482,7 @@ volumes:
             bridge_name: super::canonical_bridge_name("orphan-net"),
             bridge_cidr: "172.35.0.1/16".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1,
             generation: 1,
         };
@@ -29900,6 +30595,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -30128,6 +30824,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                network_aliases: Vec::new(),
                 tty: false,
                 log_options: HashMap::new(),
                 log_driver: "json-file".to_string(),
@@ -30206,6 +30903,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -30345,6 +31043,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
@@ -30640,12 +31339,42 @@ volumes:
     }
 
     #[test]
+    fn docker_hub_search_projects_engine_wire_fields_and_limit() {
+        let payload = serde_json::json!({
+            "results": [
+                {"repo_name":"library/alpine","short_description":"small","star_count":99,"is_official":true,"is_automated":false},
+                {"repo_name":"example/extra","short_description":null,"star_count":3,"is_official":false,"is_automated":true}
+            ]
+        });
+        let results = super::docker_hub_search_results_from_value(payload, 1)
+            .expect("Docker Hub response");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["Name"], "library/alpine");
+        assert_eq!(results[0]["Index"], "docker.io");
+        assert_eq!(results[0]["star_count"], 99);
+        assert_eq!(results[0]["is_official"], true);
+    }
+
+    #[test]
+    fn docker_hub_search_reports_clean_offline_error() {
+        let error = super::docker_hub_search_with_endpoint(
+            "http://127.0.0.1:1/v2/search/repositories/",
+            "busybox",
+            5,
+        )
+        .expect_err("closed endpoint");
+        assert!(error.starts_with("docker: Docker Hub search unavailable:"), "{error}");
+        assert_eq!(super::docker_status_for_error(&error), 503);
+    }
+
+    #[test]
     fn docker_volume_filters_match_name_and_driver() {
         let record = ferro_core::volume_store::VolumeRecord {
             name: "database".to_string(),
             path: "/var/lib/ferrocrate/volumes/database".to_string(),
             driver: "local".to_string(),
             driver_opts: Default::default(),
+            labels: BTreeMap::from([("tier".to_string(), "frontend".to_string())]),
             created_at_unix: 1,
         };
         let filters = serde_json::from_value(serde_json::json!({
@@ -30674,9 +31403,11 @@ volumes:
 
     #[test]
     fn docker_network_filters_match_name_driver_and_type() {
+        let labels = BTreeMap::from([("x".to_string(), "y".to_string())]);
         let custom = super::DockerNetworkView {
             name: "app-net",
             driver: "bridge",
+            labels: &labels,
         };
         let filters = serde_json::from_value(serde_json::json!({
             "name": ["app-net"],
@@ -30694,14 +31425,13 @@ volumes:
         let builtin = super::DockerNetworkView {
             name: "bridge",
             driver: "bridge",
+            labels: &BTreeMap::new(),
         };
         assert!(!docker_network_matches_filters(&builtin, &filters));
-        // Labels are accepted (compose probes with them) but never stored,
-        // so a valued selector matches no network.
         let labeled =
             serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
         assert!(validate_docker_network_filters(&labeled).is_ok());
-        assert!(!docker_network_matches_filters(&custom, &labeled));
+        assert!(docker_network_matches_filters(&custom, &labeled));
         let unsupported =
             serde_json::from_value(serde_json::json!({"dangling": ["true"]})).expect("filters");
         assert!(validate_docker_network_filters(&unsupported).is_err());
@@ -31449,6 +32179,16 @@ volumes:
         server_result.expect("server thread");
         worker_result.expect("worker thread");
         assert_eq!(std::fs::read(destination.join("hello.txt")).expect("file"), b"hello");
+    }
+
+    #[test]
+    fn websocket_attach_handshake_uses_rfc6455_accept_key() {
+        let response = super::docker_websocket_upgrade_headers(
+            "dGhlIHNhbXBsZSBub25jZQ==",
+        );
+        let text = String::from_utf8(response).expect("HTTP response");
+        assert!(text.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(text.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
     }
 
     #[test]
@@ -32453,6 +33193,18 @@ volumes:
         assert!(err.contains("network-backend"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packet_filter_detection_prefers_nft_and_reports_binary_path() {
+        let detected = super::packet_filter_backend_with(|name| match name {
+            "nft" => Some(PathBuf::from("/usr/sbin/nft")),
+            "iptables" => Some(PathBuf::from("/usr/sbin/iptables")),
+            _ => None,
+        });
+        assert_eq!(detected, Some(("nft", PathBuf::from("/usr/sbin/nft"))));
+        assert_eq!(super::packet_filter_backend_with(|_| None), None);
+    }
+
     #[test]
     fn network_mode_validation() {
         validate_network_mode("bridge").expect("ok");
@@ -32599,7 +33351,7 @@ volumes:
         let owned = super::network_lifecycle::NetworkRecord {
             name: "blue".into(), driver: "bridge".into(), subnet: "10.0.0.0/24".into(),
             gateway: "10.0.0.1".into(), bridge_name: "fc-owned000001".into(),
-            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, created_at_unix: 0, generation: 1,
+            bridge_cidr: "10.0.0.1/24".into(), ipv6_cidr: None, labels: BTreeMap::new(), created_at_unix: 0, generation: 1,
         };
         assert_eq!(
             super::orphan_bridge_names(

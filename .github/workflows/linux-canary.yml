@@ -1,25 +1,31 @@
 name: Linux packaging canary
 on:
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
 permissions: { contents: read }
 jobs:
   package:
-    runs-on: [self-hosted, linux, ferro-lab]
+    runs-on: [self-hosted, linux, x64, ferro-lab]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain present (self-hosted)
+        shell: bash
+        run: rustup show && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Linux build deps present (self-hosted)
+        shell: bash
+        run: pkg-config --exists webkit2gtk-4.1 gtk+-3.0 && echo ok
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
-      - run: npm run tauri:build -- --bundles deb,appimage
+      - run: npm run tauri:build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
         working-directory: apps/ferro-desktop-ui
-        env: { TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}' }
       - run: bash scripts/inject-deb-maintainer-scripts.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/deb/*.deb
       - run: bash scripts/fix-appimage.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/appimage/*.AppImage
       - name: Secret-leak canary

@@ -193,6 +193,7 @@ pub(crate) fn create_network_record_with_bridge(
         bridge_name: config.name.clone(),
         bridge_cidr: config.cidr.clone(),
         ipv6_cidr: config.ipv6_cidr.clone(),
+        labels: BTreeMap::new(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -268,6 +269,8 @@ pub(crate) struct NetworkRecord {
     pub bridge_cidr: String,
     #[serde(default)]
     pub ipv6_cidr: Option<String>,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     pub created_at_unix: u64,
     #[serde(default = "default_resource_generation")]
     pub generation: u64,
@@ -1462,6 +1465,7 @@ fn network_record_from_identity(logical_name: &str, identity: &BridgeIdentity) -
         bridge_name: identity.name.clone(),
         bridge_cidr: identity.cidr.clone().unwrap_or_default(),
         ipv6_cidr: identity.ipv6_cidr.clone(),
+        labels: BTreeMap::new(),
         created_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2700,6 +2704,7 @@ mod tests {
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 0,
             generation: 1,
         };
@@ -2747,6 +2752,7 @@ mod tests {
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 0,
             generation: 1,
         };
@@ -3216,6 +3222,7 @@ mod tests {
             bridge_name: "net0".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 0,
             generation: 1,
         };
@@ -3278,6 +3285,7 @@ mod tests {
             bridge_name: "fc-blue-012345".to_string(),
             bridge_cidr: "10.0.0.1/24".to_string(),
             ipv6_cidr: None,
+            labels: BTreeMap::new(),
             created_at_unix: 1_700_000_000,
             generation: 1,
         }

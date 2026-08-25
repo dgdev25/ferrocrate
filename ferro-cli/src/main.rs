@@ -1573,6 +1573,7 @@ fn structured_desktop_error(category: &str, message: &str, hint: &str, retryable
 #[cfg(any(test, not(target_os = "linux")))]
 #[cfg_attr(test, allow(dead_code))]
 fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool, String> {
+    #[cfg(not(windows))]
     let addr =
         std::env::var("FERROCRATE_DESKTOP_ADDR").unwrap_or_else(|_| "127.0.0.1:4288".to_string());
     let wsl_distro = std::env::var("FERROCRATE_DESKTOP_WSL_DISTRO").ok();
@@ -1582,9 +1583,14 @@ fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool
 
     let desktop_bin = desktop_binary_path();
     let mut command = std::process::Command::new(&desktop_bin);
-    command.arg("exec").arg("--addr").arg(addr);
+    command.arg("exec");
     #[cfg(windows)]
     {
+        let pipe_name = std::env::var("FERROCRATE_DESKTOP_PIPE_NAME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "ferrocrate".to_string());
+        command.arg("--pipe-name").arg(pipe_name);
         if use_wsl {
             command.arg("--wsl");
         }
@@ -1596,6 +1602,7 @@ fn forward_to_desktop(raw_args: &[String], use_wsl_default: bool) -> Result<bool
     }
     #[cfg(not(windows))]
     {
+        command.arg("--addr").arg(addr);
         let _ = use_wsl;
         let _ = wsl_distro;
     }

@@ -66,23 +66,22 @@ pub fn netns_root() -> PathBuf {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        return PathBuf::from(SYSTEM_NETNS_ROOT);
+        PathBuf::from(SYSTEM_NETNS_ROOT)
     }
     #[cfg(target_os = "linux")]
-    let rootless = !nix::unistd::Uid::effective().is_root() || root_mapped_user_namespace();
-    #[cfg(target_os = "linux")]
-    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .or_else(|| std::env::var_os("FERROCRATE_RUNTIME_DIR"))
-        .map(PathBuf::from);
-    #[cfg(target_os = "linux")]
-    let system_root = Path::new(SYSTEM_NETNS_ROOT);
-    #[cfg(target_os = "linux")]
-    select_netns_root(
-        rootless,
-        runtime_dir.as_deref(),
-        system_root,
-        system_netns_root_usable(system_root),
-    )
+    {
+        let rootless = !nix::unistd::Uid::effective().is_root() || root_mapped_user_namespace();
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .or_else(|| std::env::var_os("FERROCRATE_RUNTIME_DIR"))
+            .map(PathBuf::from);
+        let system_root = Path::new(SYSTEM_NETNS_ROOT);
+        select_netns_root(
+            rootless,
+            runtime_dir.as_deref(),
+            system_root,
+            system_netns_root_usable(system_root),
+        )
+    }
 }
 
 pub fn netns_path(name: &str) -> PathBuf {

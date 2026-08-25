@@ -95,7 +95,23 @@ command -v slirp4netns >/dev/null 2>&1 || harness_error "slirp4netns is required
 command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
-[[ -x /bin/busybox ]] || harness_error "/bin/busybox is required for the offline image fixture"
+command -v ldd >/dev/null 2>&1 || harness_error "ldd is required to verify the offline image fixture"
+busybox_bin=""
+if [[ -n "${FERROCRATE_CONFORMANCE_BUSYBOX:-}" ]]; then
+  busybox_candidates=("$FERROCRATE_CONFORMANCE_BUSYBOX")
+else
+  busybox_candidates=(/bin/busybox.static /usr/bin/busybox-static /bin/busybox)
+fi
+for candidate in "${busybox_candidates[@]}"; do
+  [[ -x "$candidate" ]] || continue
+  ldd_output="$(ldd "$candidate" 2>&1 || true)"
+  if grep -Fq 'not a dynamic executable' <<<"$ldd_output"; then
+    busybox_bin="$candidate"
+    break
+  fi
+done
+[[ -n "$busybox_bin" ]] ||
+  harness_error "a statically linked BusyBox is required for the FROM-scratch fixture; install busybox-static"
 [[ -f "$fixture" ]] || harness_error "missing Compose fixture: $fixture"
 [[ -f "$repo_root/tests/fixtures/real-app/webroot/index.html" ]] || harness_error "incomplete Compose fixture: webroot/index.html"
 [[ -f "$repo_root/tests/fixtures/real-app/apiroot/index.json" ]] || harness_error "incomplete Compose fixture: apiroot/index.json"
@@ -442,20 +458,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cp /bin/busybox "$context_dir/busybox" || harness_error "cannot copy /bin/busybox into build fixture"
+cp "$busybox_bin" "$context_dir/busybox" || harness_error "cannot copy $busybox_bin into build fixture"
 chmod 0755 "$context_dir/busybox" || harness_error "cannot make build fixture executable"
 printf 'offline conformance fixture\n' >"$context_dir/marker.txt" || harness_error "cannot write build fixture"
-busybox_loader="/lib/ld-musl-$(uname -m).so.1"
-if [[ -f "$busybox_loader" ]]; then
-  mkdir -p "$context_dir/lib" || harness_error "cannot create loader fixture directory"
-  cp -L -- "$busybox_loader" "$context_dir/lib/$(basename "$busybox_loader")" ||
-    harness_error "cannot copy the musl loader into the offline image fixture"
-  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY lib/ /lib/\nCOPY marker.txt /marker.txt\n' \
-    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
-else
-  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
-    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
-fi
+printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
+  "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 

@@ -2082,7 +2082,7 @@ fn doctor_state_store_check() -> Option<DoctorCheck> {
     }
 
     let container_records = ferro_core::sqlite_container_store::SqliteContainerStore::open(
-        runtime.join("containers"),
+        runtime.join("containers.db"),
     )
     .and_then(|store| store.list());
     match container_records {
@@ -33574,6 +33574,37 @@ volumes:
             PathBuf::from("/home/user/.ferrocrate")
         );
         assert_eq!(super::persistent_root(None, None), PathBuf::from(".ferrocrate"));
+    }
+
+    #[test]
+    fn doctor_state_store_accepts_a_running_daemon_container() {
+        let runtime = TestRuntimeDir::new();
+        let container_id = "running-from-daemon";
+        let daemon_store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            runtime._dir.path().join("containers.db"),
+        )
+        .expect("daemon store");
+        let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(
+            serde_json::json!({
+                "id": container_id,
+                "pid": 0,
+                "image": "example.invalid/test:latest",
+                "command": ["sleep", "60"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running"
+            }),
+        )
+        .expect("running container record");
+        daemon_store.put(&record).expect("record daemon container");
+        std::fs::create_dir_all(runtime._dir.path().join("containers").join(container_id))
+            .expect("container directory");
+
+        let check = super::doctor_state_store_check().expect("state check");
+
+        assert!(check.ok, "{}", check.message);
+        assert!(!check.message.contains("container directory"));
     }
 
     #[test]

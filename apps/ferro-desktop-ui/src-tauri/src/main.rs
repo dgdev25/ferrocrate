@@ -3050,10 +3050,36 @@ fn run_doctor_action(
             "checks": []
         })
     });
+    let payload = match desktop_backend() {
+        Ok(backend) => doctor_with_backend_status(payload, backend.status()),
+        Err(error) => doctor_with_backend_error(payload, &error),
+    };
     Ok(DoctorSummary {
         ok: result.ok,
         raw: payload,
     })
+}
+
+fn doctor_with_backend_status(mut payload: JsonValue, status: BackendStatus) -> JsonValue {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "desktop_backend".to_string(),
+            serde_json::to_value(status).unwrap_or_else(|error| {
+                serde_json::json!({ "state": "failed", "reason": error.to_string() })
+            }),
+        );
+    }
+    payload
+}
+
+fn doctor_with_backend_error(mut payload: JsonValue, error: &str) -> JsonValue {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "desktop_backend".to_string(),
+            serde_json::json!({ "state": "failed", "healthy": false, "reason": error }),
+        );
+    }
+    payload
 }
 
 fn doctor_command(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool) -> Vec<String> {
@@ -3305,7 +3331,8 @@ mod tests {
         registry_logout_command, run_backend_command, run_backend_command_with,
         run_container_bridge_command, start_image_build_stream_with,
         start_log_follow_stream_with,
-        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
+        terminal_exec_command, terminal_resize_command, volume_proxy_command,
+        doctor_with_backend_status, BuildProgressFrame,
         CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
         ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
         NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
@@ -3509,6 +3536,25 @@ mod tests {
         assert_eq!(status.state, "failed");
         assert!(!status.healthy);
         assert_eq!(status.platform, "wsl2");
+    }
+
+    #[test]
+    fn doctor_reports_selected_backend_state_and_health() {
+        let payload = doctor_with_backend_status(
+            serde_json::json!({ "healthy": true, "checks": [] }),
+            BackendStatus {
+                backend: "wsl2".into(),
+                platform: Platform::Windows,
+                state: BackendState::Failed,
+                healthy: false,
+                endpoint: "127.0.0.1:4288".into(),
+                reason: Some("relay unavailable".into()),
+                capabilities: BackendCapabilities::native(),
+            },
+        );
+        assert_eq!(payload["desktop_backend"]["backend"], "wsl2");
+        assert_eq!(payload["desktop_backend"]["healthy"], false);
+        assert_eq!(payload["desktop_backend"]["reason"], "relay unavailable");
     }
 
     #[test]

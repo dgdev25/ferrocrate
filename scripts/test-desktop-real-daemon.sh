@@ -16,6 +16,11 @@ export FERROCRATE_ROOTLESS_SOCKET="$socket"
 export FERROCRATE_NETWORK_KERNEL_STATE="$test_root/network-kernel-state.json"
 export FERROCRATE_BIN="${FERROCRATE_BIN:-$root/target/release/ferro-cli}"
 desktop_bin="${FERRO_DESKTOP_BIN:-$root/target/debug/ferro-desktop}"
+backend="${FERROCRATE_DESKTOP_BACKEND:-linux-native}"
+case "$backend" in
+  linux-native|wsl2|macos-vm) ;;
+  *) echo "unsupported desktop backend row: $backend" >&2; exit 2 ;;
+esac
 daemon_pid=""
 container_id=""
 
@@ -55,4 +60,12 @@ container_id="$(printf '%s' "$create_json" | jq -er '.Id')"
 curl -fsS --unix-socket "$socket" -X POST "http://localhost/containers/$container_id/start" >/dev/null
 "$desktop_bin" container-proxy --socket "$socket" inspect "$container_id" | grep -q "$container_id"
 curl -fsS --unix-socket "$socket" "http://localhost/containers/$container_id/stats?stream=false" | jq -e 'type == "object"' >/dev/null
-printf 'desktop real-daemon paths passed via %s\n' "$socket"
+printf 'backend\tresult\tendpoint\n'
+for row in linux-native wsl2 macos-vm; do
+  if [[ "$row" == "$backend" ]]; then
+    printf '%s\tPASS\t%s\n' "$row" "$socket"
+  else
+    printf '%s\tNOT-RUN\trequires %s host\n' "$row" "$row"
+  fi
+done
+printf 'desktop real-daemon paths passed via %s backend=%s\n' "$socket" "$backend"

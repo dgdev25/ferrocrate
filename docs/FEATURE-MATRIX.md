@@ -28,7 +28,7 @@ Snapshot: 2026-08-25, BuildKit fresh-store and Round 10 desktop-backend qualific
 | Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
 | Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Qualified 60/60 with opt-in `legacy-peercred`; default remains unavailable without `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md) |
 | Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed by default; `legacy-peercred` is an explicit downgrade with a PID-reuse race | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; old-kernel boundaries are recorded above |
-| Windows 11 via WSL2 backend | Acceptance in progress; no Windows-host browser/runtime claim | [`VM-ACCEPTANCE-2026-08-25.md`](desktop/VM-ACCEPTANCE-2026-08-25.md): native supervisor and Tauri binaries built, but the WSL engine build had not completed at evidence cut-off |
+| Windows 11 via WSL2 backend | Build-completion boundary: native supervisor and web frontend built, but Tauri/WSL-engine/browser acceptance is not claimed | [`VM-ACCEPTANCE-2026-08-25.md`](desktop/VM-ACCEPTANCE-2026-08-25.md): no daemon, Doctor, token, or browser/runtime claim |
 | macOS Tahoe via Linux VM backend | Host-blocked boundary: nested HV unavailable and neither vfkit/QEMU nor Node/npm is installed | [`VM-ACCEPTANCE-2026-08-25.md`](desktop/VM-ACCEPTANCE-2026-08-25.md): exact `kern.hv_support: 0` and Node/npm errors; no VM/runtime claim |
 
 ## Product areas

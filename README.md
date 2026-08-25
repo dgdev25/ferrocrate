@@ -117,8 +117,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows 11 (WSL2 backend) | Backend implementation and contract tests are complete; native/browser acceptance on a clean Windows 11 VM remains pending |
-| macOS Tahoe (Linux VM backend) | Backend implementation and provisioning contracts are complete; native/browser acceptance on a Tahoe VM remains pending |
+| Windows 11 (WSL2 backend) | Build-completion boundary: native supervisor and web frontend built on the VM; Tauri, WSL-engine, and browser acceptance are not claimed |
+| macOS Tahoe (Linux VM backend) | Host-blocked boundary: nested virtualization is unavailable and vfkit/QEMU plus Node/npm are absent; no VM/browser acceptance claim |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is

@@ -187,9 +187,10 @@ runtime_dir="$work_root/runtime"
 state_dir="$work_root/state"
 docker_config="$work_root/docker-config"
 context_dir="$work_root/context"
+failure_context_dir="$work_root/failure-context"
 outputs_dir="$work_root/outputs"
 cgroup_root="$work_root/cgroup"
-mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$outputs_dir" "$cgroup_root" ||
+mkdir -p "$runtime_dir" "$state_dir" "$docker_config" "$context_dir" "$failure_context_dir" "$outputs_dir" "$cgroup_root" ||
   harness_error "cannot initialize temporary work directory"
 printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers" ||
   harness_error "cannot initialize isolated cgroup controller fixture"
@@ -622,6 +623,21 @@ recorded_digest="$(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER
   docker image inspect --format '{{.Id}}' "$image")" || harness_error "cannot inspect recorded build image"
 [[ "$recorded_digest" == "$parity_digest" ]] ||
   harness_error "classic/BuildKit digest mismatch: $parity_digest != $recorded_digest"
+printf 'FROM %s\nRUN ["/bin/busybox", "sh", "-c", "echo buildkit-expected-failure >&2; exit 23"]\n' \
+  "$image" >"$failure_context_dir/Dockerfile" || harness_error "cannot write failing build fixture"
+failure_token="$process_token_base-builder-failure"
+failure_stderr="$work_root/failing-build.stderr"
+if [[ "$builder_mode" == buildkit ]]; then
+  failure_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config")
+else
+  failure_env=(env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0)
+fi
+if run_bounded_owned "$command_timeout" 5 "$failure_token" \
+    "${failure_env[@]}" docker build "$failure_context_dir" >/dev/null 2>"$failure_stderr"; then
+  harness_error "failing Dockerfile unexpectedly succeeded"
+fi
+grep -Fq "RUN failed with status" "$failure_stderr" ||
+  harness_error "failing Dockerfile did not preserve the RUN step error"
 record_command image-inspect image image inspect "$image"
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120

@@ -16285,6 +16285,7 @@ struct BuildkitBuild {
         Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::SolveRequest>>,
     returned: Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest>>,
     result: Mutex<Option<BuildkitBuildResult>>,
+    error: Mutex<Option<String>>,
     is_completed: AtomicBool,
     completed: tokio::sync::Notify,
 }
@@ -16444,6 +16445,7 @@ impl DockerCompatState {
             gateway_solve: Mutex::new(None),
             returned: Mutex::new(None),
             result: Mutex::new(None),
+            error: Mutex::new(None),
             is_completed: AtomicBool::new(false),
             completed: tokio::sync::Notify::new(),
         });
@@ -22344,20 +22346,39 @@ async fn handle_buildkit_control_request(
                 build.as_ref(),
                 &frontend,
             )
-            .await?;
-            *build
-                .result
-                .lock()
-                .map_err(|error| format!("buildkit solve result poisoned: {error}"))? = Some(result);
+            .await;
+            match result {
+                Ok(result) => {
+                    *build
+                        .result
+                        .lock()
+                        .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
+                        Some(result);
+                }
+                Err(error) => {
+                    *build
+                        .error
+                        .lock()
+                        .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                        Some(error);
+                }
+            }
             build.is_completed.store(true, Ordering::Release);
             build.completed.notify_waiters();
         }
         wait_for_buildkit_completion(&build, lifetime).await?;
+        let solve_response = match buildkit_outer_solve_response(&build) {
+            Ok(response) => response,
+            Err(error) => {
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    13,
+                    Some(&buildkit_grpc_message(&error)),
+                )
+            }
+        };
         response_stream
-            .send_data(
-                grpc_message(&buildkit_outer_solve_response(&build)?),
-                false,
-            )
+            .send_data(grpc_message(&solve_response), false)
             .map_err(|error| format!("buildkit solve: response failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
@@ -22435,7 +22456,22 @@ async fn handle_buildkit_control_request(
             build.as_ref(),
             &solve,
         )
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                *build
+                    .error
+                    .lock()
+                    .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                    Some(error.clone());
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    13,
+                    Some(&buildkit_grpc_message(&error)),
+                );
+            }
+        };
         *build
             .result
             .lock()
@@ -22580,6 +22616,15 @@ fn buildkit_outer_solve_response(
     build: &BuildkitBuild,
 ) -> Result<buildkit_proto::moby::buildkit::v1::SolveResponse, String> {
     use buildkit_proto::moby::buildkit::v1::SolveResponse;
+
+    if let Some(error) = build
+        .error
+        .lock()
+        .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))?
+        .clone()
+    {
+        return Err(error);
+    }
 
     let returned = build
         .returned
@@ -22830,6 +22875,20 @@ fn send_buildkit_grpc_status(
     response
         .send_trailers(trailers)
         .map_err(|error| format!("buildkit control: response trailers failed: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_grpc_message(message: &str) -> String {
+    let mut encoded = String::with_capacity(message.len());
+    for byte in message.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 #[cfg(target_os = "linux")]
@@ -30790,6 +30849,14 @@ volumes:
             .llb_caps
             .iter()
             .any(|cap| cap.enabled && cap.id == "source.local.sessionid"));
+    }
+
+    #[test]
+    fn buildkit_grpc_message_encodes_step_errors() {
+        assert_eq!(
+            super::buildkit_grpc_message("RUN exited with status 23: bad % step"),
+            "RUN%20exited%20with%20status%2023%3A%20bad%20%25%20step"
+        );
     }
 
     #[test]

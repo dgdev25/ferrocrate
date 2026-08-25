@@ -16395,6 +16395,7 @@ fn validate_docker_exec_create(tty: bool) -> Result<(), String> {
 struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
+    starting: Mutex<std::collections::HashSet<String>>,
     pending_path: PathBuf,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
@@ -16445,6 +16446,7 @@ impl DockerCompatState {
         Ok(Self {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(pending),
+            starting: Mutex::new(std::collections::HashSet::new()),
             pending_path,
             name_store,
             execs: Mutex::new(HashMap::new()),
@@ -19056,7 +19058,7 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/containers/")
                     .trim_end_matches("/start");
                 let (id, spec) = {
-                    let mut pending = state
+                    let pending = state
                         .pending
                         .lock()
                         .map_err(|e| format!("lock poisoned: {e}"))?;
@@ -19068,14 +19070,22 @@ fn handle_docker_compat_connection(
                             .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
                             .map(|(pending_id, _)| pending_id.clone())
                     };
-                    let spec = pending_id.as_deref().and_then(|id| pending.remove(id));
+                    let spec = pending_id.as_deref().and_then(|id| pending.get(id).cloned());
                     (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
                     runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };
-                state.persist_pending()?;
+                {
+                    let mut starting = state
+                        .starting
+                        .lock()
+                        .map_err(|error| format!("docker: starting lock poisoned: {error}"))?;
+                    if !starting.insert(id.clone()) {
+                        return Err(format!("docker: container start already in progress: {id}"));
+                    }
+                }
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
                     ferro_core::container_store::HealthConfig {
@@ -19145,17 +19155,29 @@ fn handle_docker_compat_connection(
                     Some(&id),
                 );
                 if let Err(error) = start_result {
+                    if let Ok(mut starting) = state.starting.lock() {
+                        starting.remove(&id);
+                    }
                     if spec.auto_remove {
                         if let Ok(mut results) = state.auto_remove_results.lock() {
                             results.remove(&id);
                         }
                     }
-                    if let Ok(mut pending) = state.pending.lock() {
-                        pending.insert(id, spec);
-                    }
-                    let _ = state.persist_pending();
                     return Err(error);
                 }
+                {
+                    let mut pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    pending.remove(&id);
+                }
+                state
+                    .starting
+                    .lock()
+                    .map_err(|error| format!("docker: starting lock poisoned: {error}"))?
+                    .remove(&id);
+                state.persist_pending()?;
                 if spec.auto_remove {
                     let remove_runtime = runtime.request_scoped(origin.clone());
                     let remove_state = Arc::clone(&state);
@@ -19307,6 +19329,13 @@ fn handle_docker_compat_connection(
                                 // of polling for the default 30-second
                                 // pre-start window.
                                 return Err(error.to_string());
+                            }
+                            if condition != "removed" && pending {
+                                // The durable pending record is Docker's
+                                // created lifecycle state. Send wait headers
+                                // now so the client can issue `/start`; the
+                                // streaming epilogue observes publication.
+                                break;
                             }
                             if condition == "removed" && !observed && pending {
                                 // Docker CLI sends wait before start. Return
@@ -20254,17 +20283,18 @@ fn handle_docker_compat_connection(
                 .map_err(|error| format!("docker: wait stream write failed: {error}"))?;
             return Ok(());
         }
-        if condition == "next-exit" {
-            // A created container has not produced its next exit yet: block
-            // through the pre-start window before waiting for the exit.
+        if matches!(condition.as_str(), "next-exit" | "not-running") {
+            // A created container has not produced its next exit yet. Wait
+            // for `/start` to publish the runtime record after headers have
+            // already been sent to the client.
             let start_deadline = timeout
                 .map(|value| Instant::now() + value)
                 .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-            while follow_runtime
-                .inspect(&id)
-                .map(|record| record.status == "created")
-                .unwrap_or(false)
-            {
+            loop {
+                match follow_runtime.inspect(&id) {
+                    Ok(record) if record.status != "created" => break,
+                    Ok(_) | Err(_) => {}
+                }
                 if Instant::now() >= start_deadline {
                     break;
                 }

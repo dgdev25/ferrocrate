@@ -11,10 +11,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain present (self-hosted)
+        run: rustup show active-toolchain && cargo clippy --version
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Linux build deps present (self-hosted)
+        run: pkg-config --exists webkit2gtk-4.1 gtk+-3.0 && echo ok
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh

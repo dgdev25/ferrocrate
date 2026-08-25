@@ -615,6 +615,9 @@ fi
 record_command image-inspect image image inspect "$image"
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120
+expected_daemon_error_message="Conflict. The container name \"/$container\" is already in use by container \""
+record_expected_daemon_error container-create-duplicate-name container create --name "$container" \
+  "$image" /bin/busybox true
 record_command container-start container start "$container"
 record_command container-inspect container inspect "$container"
 record_command container-list container ps --all

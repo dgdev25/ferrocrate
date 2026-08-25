@@ -7,12 +7,18 @@ permissions:
   contents: read
 jobs:
   build-unit-warnings:
-    name: ${{ matrix.os }} build, unit, warnings
+    name: ${{ matrix.name }} build, unit, warnings
     strategy:
       fail-fast: false
       matrix:
-        os: [[self-hosted, linux, ferro-lab], [self-hosted, macos, ferro-lab], [self-hosted, windows, ferro-lab]]
-    runs-on: ${{ matrix.os }}
+        include:
+          - name: linux
+            runner: [self-hosted, linux, ferro-lab]
+          - name: macos
+            runner: [self-hosted, macos, ferro-lab]
+          - name: windows
+            runner: [self-hosted, windows, ferro-lab]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

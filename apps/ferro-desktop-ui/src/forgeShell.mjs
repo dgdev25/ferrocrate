@@ -212,6 +212,16 @@ export function shellKeyboardCommand(event) {
   return null;
 }
 
+export function tabKeyboardTarget(tabs, current, key) {
+  const index = tabs.indexOf(current);
+  if (index < 0 || !tabs.length) return null;
+  if (key === "Home") return tabs[0];
+  if (key === "End") return tabs[tabs.length - 1];
+  if (key === "ArrowRight") return tabs[(index + 1) % tabs.length];
+  if (key === "ArrowLeft") return tabs[(index - 1 + tabs.length) % tabs.length];
+  return null;
+}
+
 export function daemonIsAvailable(snapshot) {
   if (snapshot?.daemon) return snapshot.daemon.state === "running";
   return snapshot?.containers?.ok === true && snapshot?.images?.ok === true;

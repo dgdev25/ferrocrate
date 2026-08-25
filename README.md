@@ -38,6 +38,18 @@ Build a project the way you always have — a Dockerfile and one command:
 ./target/release/ferro-cli run myapp:1.0
 ```
 
+Launch the same Forge interface used by the desktop app in an ordinary browser:
+
+```bash
+./target/release/ferro-cli dashboard --listen 127.0.0.1:43190
+```
+
+The command starts its local daemon and prints a per-launch bearer-token URL.
+Use `--token-file PATH` when another process should read the token without
+capturing stdout. The listener exists only while `dashboard` is running.
+Non-loopback binds fail closed unless `--tls-cert`, `--tls-key`, and
+`--operator-gate` are supplied together.
+
 Or point the real Docker CLI at Ferrocrate's daemon. The classic build protocol
 is supported; BuildKit session builds fail cleanly with an actionable
 `DOCKER_BUILDKIT=0` message while the protocol work remains unimplemented:

@@ -1,4 +1,4 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{future::Future, path::Path, process::Stdio, time::Duration};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -10,6 +10,15 @@ const MAX_ARGUMENT_BYTES: usize = 4 * 1024;
 const MAX_COMMAND_ARGUMENTS: usize = 128;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[allow(dead_code)] // Used by the standalone ferro-agent binary.
+pub async fn serialize_runtime_command<T>(
+    lock: &tokio::sync::Mutex<()>,
+    command: impl Future<Output = T>,
+) -> T {
+    let _guard = lock.lock().await;
+    command.await
+}
 
 pub fn build_agent_cli_args(action: &str, arguments: &Value) -> Result<Vec<String>, String> {
     let object = arguments
@@ -224,11 +233,18 @@ fn reported_client_version(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use std::os::unix::fs::PermissionsExt;
 
     use serde_json::json;
 
-    use super::{execute_agent_command, reported_client_version, FleetCommand};
+    use super::{
+        execute_agent_command, reported_client_version, serialize_runtime_command, FleetCommand,
+    };
 
     #[test]
     fn observation_extracts_the_client_version_from_docker_style_output() {
@@ -264,5 +280,31 @@ mod tests {
         assert_eq!(result.exit_code, 125);
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "registry denied\n");
+    }
+
+    #[tokio::test]
+    async fn runtime_command_lock_prevents_overlapping_cli_invocations() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let lock = lock.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            tasks.push(tokio::spawn(async move {
+                serialize_runtime_command(&lock, async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 }

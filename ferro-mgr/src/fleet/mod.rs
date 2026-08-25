@@ -11,5 +11,6 @@ pub use session::{certificate_principal, BrowserIdentity, FleetRole, SessionStor
 pub use ui::{FleetUi, FleetUiBackend, FleetUiServer};
 pub use web_backend::{FleetAssets, TonicFleetBackend};
 pub use agent_command::{
-    build_agent_cli_args, collect_agent_observation, execute_agent_command, AgentObservation,
+    build_agent_cli_args, collect_agent_observation, execute_agent_command,
+    serialize_runtime_command, AgentObservation,
 };

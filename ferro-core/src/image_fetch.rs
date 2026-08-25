@@ -536,7 +536,15 @@ fn peer_get(image: &str, kind: &str, value: &str, wanted: Option<&str>) -> Optio
         let url = format!("{}/v2/{}/{kind}/{value}", peer.base_url(), reference.repository);
         let mut request = http.get(url);
         if let Ok(secret) = std::env::var("FERROCRATE_LAN_MIRROR_SECRET") {
-            request = request.header("X-Ferrocrate-Mirror-Secret", secret);
+            let Ok(challenge) = http.get(format!("{}/lan/v1/challenge", peer.base_url())).send() else { continue };
+            if !challenge.status().is_success() { continue; }
+            let nonce = challenge.headers().get("x-ferrocrate-mirror-nonce").and_then(|value| value.to_str().ok());
+            let proof = challenge.headers().get("x-ferrocrate-mirror-proof").and_then(|value| value.to_str().ok());
+            let Some(nonce) = nonce.filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())) else { continue };
+            if !crate::lan_mirror::verify_peer_proof(&secret, nonce, proof) { continue; }
+            request = request
+                .header("X-Ferrocrate-Mirror-Nonce", nonce)
+                .header("X-Ferrocrate-Mirror-Auth", crate::lan_mirror::mirror_request_auth(&secret, nonce, value));
         }
         let Ok(response) = request.send() else { continue };
         if !response.status().is_success() { continue; }

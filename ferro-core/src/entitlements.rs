@@ -208,7 +208,6 @@ mod tests {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     struct ScopedEnv {
@@ -217,8 +216,7 @@ mod tests {
     }
 
     fn entitlement_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::test_support::acquire_env_lock()
     }
 
     impl ScopedEnv {

@@ -491,12 +491,6 @@ mod tests {
         ResourceLimits,
     };
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
-
-    fn ai_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn rootless_permission_errors_include_delegation_remediation() {
@@ -769,7 +763,7 @@ mod tests {
 
     #[test]
     fn ai_enablement_matches_runtime_default_and_opt_out() {
-        let _guard = ai_env_lock().lock().expect("AI env lock");
+        let _guard = crate::test_support::acquire_env_lock();
         let previous = std::env::var("FERROCRATE_AI").ok();
         unsafe {
             std::env::remove_var("FERROCRATE_AI");

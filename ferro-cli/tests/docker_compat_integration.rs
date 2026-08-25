@@ -478,6 +478,44 @@ fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
 }
 
 #[test]
+fn daemon_republishes_unlinked_socket_before_next_cli_deadline() {
+    let harness = DaemonHarness::spawn();
+    std::fs::remove_file(&harness.socket_path).expect("unlink live daemon socket");
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .arg("ps")
+        .output()
+        .expect("run ps after unlink");
+    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn killed_daemon_owner_is_recovered_by_next_cli() {
+    let mut harness = DaemonHarness::spawn();
+    harness.stop_daemon();
+
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .arg("ps")
+        .output()
+        .expect("run ps after kill -9");
+    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
 #[allow(deprecated)]
 fn standalone_cli_waits_for_a_competing_process_owner() {
     use nix::errno::Errno;

@@ -16204,6 +16204,7 @@ mod tests {
 
     #[test]
     fn signal_zero_rejects_a_pid_without_matching_start_time() {
+        let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
         let mut child = std::process::Command::new("sleep")
@@ -18482,6 +18483,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
 
     #[test]
     fn tty_spawn_uses_kernel_pty_and_merges_output_into_logs() {
+        let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let root = tempfile::tempdir().expect("runtime");
         let stdout = root.path().join("stdout.log");
         let stderr = root.path().join("stderr.log");

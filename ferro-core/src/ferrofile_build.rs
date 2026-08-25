@@ -161,6 +161,7 @@ mod tests {
 
     #[test]
     fn builds_from_ferrofile() {
+        let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(
             temp.path().join("ferrofile.toml"),

@@ -423,9 +423,8 @@ fn captured_macos_remote_command(request: ExecRequest) -> (CommandSpec, ExecRequ
 
 #[test]
 fn macos_exec_quotes_semicolons_in_remote_programs() {
-    let (ssh, request) = captured_macos_remote_command(ExecRequest::new(
-        "x; touch /home/ferro/pwned #",
-    ));
+    let (ssh, request) =
+        captured_macos_remote_command(ExecRequest::new("x; touch /home/ferro/pwned #"));
 
     assert_eq!(ssh.args.last().unwrap(), "ferro@127.0.0.1");
     assert_eq!(
@@ -465,10 +464,7 @@ fn macos_exec_escapes_single_quotes_in_remote_arguments() {
     let (_, request) =
         captured_macos_remote_command(ExecRequest::new("printf").args(["it's literal"]));
 
-    assert_eq!(
-        request.program,
-        "exec env -- 'printf' 'it'\"'\"'s literal'"
-    );
+    assert_eq!(request.program, "exec env -- 'printf' 'it'\"'\"'s literal'");
 }
 
 #[test]
@@ -561,6 +557,34 @@ fn exec_request_names_the_real_program_without_linux_argv_duplication() {
     assert_eq!(
         host.execs.lock().unwrap().as_slice(),
         &[(CommandSpec::launcher(), request)]
+    );
+}
+
+#[test]
+fn wsl_exec_forwards_environment_inside_the_guest() {
+    let host = FakeHost::healthy(true);
+    let backend = Wsl2Backend::with_host(
+        Wsl2Config {
+            distro: "FerrocrateDesktop".into(),
+            ..wsl_config()
+        },
+        host.clone(),
+    );
+    let request = ExecRequest::new("sh")
+        .args(["-c", "printf '%s' \"$NO_COLOR\""])
+        .env("NO_COLOR", "1")
+        .stdin(b"input".to_vec());
+
+    backend.exec(request).unwrap();
+
+    assert_eq!(
+        host.execs.lock().unwrap().as_slice(),
+        &[(
+            CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--"]),
+            ExecRequest::new("env")
+                .args(["--", "NO_COLOR=1", "sh", "-c", "printf '%s' \"$NO_COLOR\"",])
+                .stdin(b"input".to_vec()),
+        )]
     );
 }
 

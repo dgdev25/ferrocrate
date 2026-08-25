@@ -6,6 +6,7 @@ mod web_bridge;
 mod webkit_rendering;
 
 use base64::Engine as _;
+use ferro_desktop::backend::{select_backend, Backend, BackendState};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
@@ -18,6 +19,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -338,7 +340,8 @@ fn supervisor_process_state() -> (bool, Option<String>) {
     }
 }
 
-fn daemon_status() -> DaemonStatus {
+#[allow(dead_code)]
+fn legacy_daemon_status() -> DaemonStatus {
     #[cfg(target_os = "linux")]
     {
         match desktop_socket_path() {
@@ -412,7 +415,8 @@ fn desktop_daemon_ready() -> bool {
     )
 }
 
-fn start_desktop_daemon() -> Result<(), String> {
+#[allow(dead_code)]
+fn legacy_start_desktop_daemon() -> Result<(), String> {
     if desktop_daemon_ready() {
         DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
         if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
@@ -481,7 +485,8 @@ fn start_desktop_daemon() -> Result<(), String> {
     Err(reason)
 }
 
-fn stop_desktop_daemon() {
+#[allow(dead_code)]
+fn legacy_stop_desktop_daemon() {
     DESKTOP_DAEMON_STARTING.store(false, Ordering::SeqCst);
     if let Ok(mut failure) = DESKTOP_DAEMON_FAILURE.lock() {
         *failure = None;
@@ -491,6 +496,59 @@ fn stop_desktop_daemon() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+static DESKTOP_BACKEND: OnceLock<Result<Box<dyn Backend>, String>> = OnceLock::new();
+
+fn desktop_backend() -> Result<&'static dyn Backend, String> {
+    DESKTOP_BACKEND
+        .get_or_init(|| select_backend().map_err(|error| error.to_string()))
+        .as_ref()
+        .map(|backend| backend.as_ref())
+        .map_err(Clone::clone)
+}
+
+fn daemon_status() -> DaemonStatus {
+    let status = match desktop_backend() {
+        Ok(backend) => backend.status(),
+        Err(reason) => {
+            return DaemonStatus {
+                state: "failed".to_string(),
+                socket_path: String::new(),
+                reason: Some(reason),
+                platform: "unsupported".to_string(),
+                custom_networks: false,
+            };
+        }
+    };
+    DaemonStatus {
+        state: match status.state {
+            BackendState::Stopped => "stopped",
+            BackendState::Starting => "starting",
+            BackendState::Running => "running",
+            BackendState::Stopping => "stopping",
+            BackendState::Failed => "failed",
+            BackendState::Unavailable => "unavailable",
+        }
+        .to_string(),
+        socket_path: status.endpoint,
+        reason: status.reason,
+        platform: status.backend,
+        custom_networks: status.capabilities.custom_networks,
+    }
+}
+
+fn start_desktop_daemon() -> Result<(), String> {
+    desktop_backend()?
+        .start()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn stop_desktop_daemon() {
+    if let Ok(backend) = desktop_backend() {
+        let _ = backend.stop();
     }
 }
 

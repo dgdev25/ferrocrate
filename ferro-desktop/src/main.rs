@@ -2,6 +2,9 @@
 
 use clap::{Parser, Subcommand};
 use ferro_core::entitlements::{self, Feature};
+use ferro_desktop::backend::{
+    select_backend, Backend, LinuxNativeBackend, LinuxNativeConfig, Platform, TransportRequest,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -870,22 +873,12 @@ fn volume_proxy_request(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_volume_proxy(
     socket: Option<&str>,
     command: VolumeProxyCommands,
 ) -> Result<(), DesktopError> {
-    let socket = select_terminal_socket(socket)?;
     let (method, path, body) = volume_proxy_request(&command)?;
-    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
-    if !(200..300).contains(&status) {
-        return Err(terminal_daemon_error(status, &response));
-    }
-    std::io::stdout().write_all(&response)?;
-    if !response.ends_with(b"\n") {
-        println!();
-    }
-    Ok(())
+    run_backend_request(socket, method, path, body)
 }
 
 fn required_network_name(name: &str) -> Result<&str, DesktopError> {
@@ -938,22 +931,12 @@ fn network_proxy_request(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_network_proxy(
     socket: Option<&str>,
     command: NetworkProxyCommands,
 ) -> Result<(), DesktopError> {
-    let socket = select_terminal_socket(socket)?;
     let (method, path, body) = network_proxy_request(&command)?;
-    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
-    if !(200..300).contains(&status) {
-        return Err(terminal_daemon_error(status, &response));
-    }
-    std::io::stdout().write_all(&response)?;
-    if !response.is_empty() && !response.ends_with(b"\n") {
-        println!();
-    }
-    Ok(())
+    run_backend_request(socket, method, path, body)
 }
 
 fn container_proxy_request(
@@ -1007,22 +990,12 @@ fn container_proxy_request(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_container_proxy(
     socket: Option<&str>,
     command: ContainerProxyCommands,
 ) -> Result<(), DesktopError> {
-    let socket = select_terminal_socket(socket)?;
     let (method, path, body) = container_proxy_request(&command)?;
-    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
-    if !(200..300).contains(&status) {
-        return Err(terminal_daemon_error(status, &response));
-    }
-    std::io::stdout().write_all(&response)?;
-    if !response.is_empty() && !response.ends_with(b"\n") {
-        println!();
-    }
-    Ok(())
+    run_backend_request(socket, method, path, body)
 }
 
 fn registry_login_request(
@@ -1051,7 +1024,6 @@ fn registry_login_request(
     ))
 }
 
-#[cfg(target_os = "linux")]
 fn run_registry_proxy(
     socket: Option<&str>,
     command: RegistryProxyCommands,
@@ -1067,57 +1039,43 @@ fn run_registry_proxy(
         ));
     }
     let password = password.trim_end_matches(['\r', '\n']);
-    let socket = select_terminal_socket(socket)?;
     let (method, path, body) = registry_login_request(&registry, &username, password)?;
-    let (status, response) = terminal_http_request(&socket, method, &path, &body)?;
-    if !(200..300).contains(&status) {
-        return Err(terminal_daemon_error(status, &response));
+    run_backend_request(socket, method, path, body)
+}
+
+fn selected_proxy_backend(socket: Option<&str>) -> Result<Box<dyn Backend>, DesktopError> {
+    if Platform::current() == Platform::Linux {
+        if let Some(socket) = socket {
+            let mut config = LinuxNativeConfig::default();
+            config.socket_path = PathBuf::from(socket);
+            return Ok(Box::new(LinuxNativeBackend::new(config)));
+        }
     }
-    std::io::stdout().write_all(&response)?;
-    if !response.ends_with(b"\n") {
+    select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))
+}
+
+fn run_backend_request(
+    socket: Option<&str>,
+    method: &str,
+    path: String,
+    body: Vec<u8>,
+) -> Result<(), DesktopError> {
+    let backend = selected_proxy_backend(socket)?;
+    let mut request = TransportRequest::new(method, path).body(body);
+    if !request.body.is_empty() {
+        request = request.header("content-type", "application/json");
+    }
+    let response = backend
+        .request(request)
+        .map_err(|error| DesktopError::Invalid(error.to_string()))?;
+    if !(200..300).contains(&response.status) {
+        return Err(terminal_daemon_error(response.status, &response.body));
+    }
+    std::io::stdout().write_all(&response.body)?;
+    if !response.body.is_empty() && !response.body.ends_with(b"\n") {
         println!();
     }
     Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_registry_proxy(
-    _socket: Option<&str>,
-    _command: RegistryProxyCommands,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "registry daemon proxy is supported only on Linux".to_string(),
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_container_proxy(
-    _socket: Option<&str>,
-    _command: ContainerProxyCommands,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "container daemon proxy is supported only on Linux".to_string(),
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_network_proxy(
-    _socket: Option<&str>,
-    _command: NetworkProxyCommands,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "network daemon proxy is supported only on Linux".to_string(),
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_volume_proxy(
-    _socket: Option<&str>,
-    _command: VolumeProxyCommands,
-) -> Result<(), DesktopError> {
-    Err(DesktopError::Invalid(
-        "volume daemon proxy is supported only on Linux".to_string(),
-    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

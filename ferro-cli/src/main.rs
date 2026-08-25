@@ -4617,7 +4617,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             if let Some(result) = dispatch_remote_context(&command) {
                 return result;
             }
-            match EngineAccess::select(&runtime_dir)? {
+            match EngineAccess::select(&engine_runtime_dir())? {
                 EngineAccess::Direct(owner) => Some(owner),
                 EngineAccess::Delegate(endpoint) => {
                     return dispatch_remote_endpoint(&command, &endpoint).unwrap_or_else(|| {
@@ -16916,7 +16916,8 @@ fn run_daemon(
         return Err("daemon: --docker-compat is required".to_string());
     }
     let runtime_dir = runtime_dir();
-    let mut engine_owner = EngineLockGuard::try_acquire(&runtime_dir)?
+    let engine_runtime_dir = engine_runtime_dir();
+    let mut engine_owner = EngineLockGuard::try_acquire(&engine_runtime_dir)?
         .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
     authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
     reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
@@ -30293,6 +30294,13 @@ fn runtime_dir() -> PathBuf {
         std::env::var_os("FERROCRATE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
     )
+}
+
+fn engine_runtime_dir() -> PathBuf {
+    std::env::var_os("FERROCRATE_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(runtime_dir)
 }
 
 }

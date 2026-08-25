@@ -49,7 +49,7 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://github.com/ferrocrate/ferrocrate/releases/latest/download/latest.json"],
+      "endpoints": ["https://github.com/dgdev25/ferrocrate/releases/latest/download/latest.json"],
       "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY"
     }
   }

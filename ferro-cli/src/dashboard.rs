@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -22,6 +22,7 @@ const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
+const LOG_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 #[derive(RustEmbed)]
 #[folder = "../apps/ferro-desktop-ui/dist"]
@@ -160,29 +161,35 @@ fn ensure_daemon() -> Result<OwnedDaemon, String> {
 }
 
 fn write_token(path: &Path, token: &str) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ferrocrate-dashboard-token-")
+        .tempfile_in(parent)
         .map_err(|error| format!("failed to create token file {}: {error}", path.display()))?;
-    if !file
-        .metadata()
-        .map_err(|error| format!("failed to inspect token file {}: {error}", path.display()))?
-        .is_file()
-    {
-        return Err(format!(
-            "token file must be a regular file: {}",
-            path.display()
-        ));
-    }
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .and_then(|()| file.set_len(0))
-        .map_err(|error| format!("failed to secure token file {}: {error}", path.display()))?;
-    writeln!(file, "{token}")
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("failed to persist token file {}: {error}", path.display()))
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| writeln!(temporary, "{token}"))
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("failed to persist token file {}: {error}", path.display()))?;
+    temporary.persist(path).map_err(|error| {
+        format!(
+            "failed to install token file {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to sync token directory {}: {error}",
+                parent.display()
+            )
+        })
 }
 
 struct LogBuffer {
@@ -241,17 +248,18 @@ fn log_channel(capacity: usize) -> (SyncSender<String>, Receiver<String>) {
     mpsc::sync_channel(capacity)
 }
 
-fn queue_log_lines<R: Read>(reader: R, sender: SyncSender<String>) {
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
+fn queue_log_chunks<R: Read>(mut reader: R, sender: SyncSender<String>) {
+    let mut chunk = [0_u8; LOG_READ_CHUNK_BYTES];
     loop {
-        match reader.read_line(&mut line) {
+        match reader.read(&mut chunk) {
             Ok(0) => break,
-            Ok(_) => {
-                if sender.send(line.clone()).is_err() {
+            Ok(bytes) => {
+                if sender
+                    .send(String::from_utf8_lossy(&chunk[..bytes]).into_owned())
+                    .is_err()
+                {
                     break;
                 }
-                line.clear();
             }
             Err(_) => break,
         }
@@ -504,7 +512,7 @@ impl ProcessDispatcher {
         let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
         let publish_events = events.clone();
         thread::spawn(move || publish_log_batches(publish_events, log_receiver));
-        thread::spawn(move || queue_log_lines(stdout, log_sender));
+        thread::spawn(move || queue_log_chunks(stdout, log_sender));
         *slot = Some(child);
         Ok(Value::Null)
     }
@@ -1035,17 +1043,36 @@ mod tests {
     }
 
     #[test]
-    fn token_file_rejects_symlinks_without_overwriting_target() {
+    fn token_file_replaces_symlink_without_overwriting_target() {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("target");
         let link = directory.path().join("dashboard.token");
         std::fs::write(&target, "preserve-me\n").unwrap();
         symlink(&target, &link).unwrap();
 
-        let error = write_token(&link, "new-token").expect_err("symlink must be rejected");
+        write_token(&link, "new-token").unwrap();
 
-        assert!(error.contains("token file"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "preserve-me\n");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new-token\n");
+        assert!(!std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn token_file_atomic_replace_does_not_update_existing_open_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dashboard.token");
+        std::fs::write(&path, "old-token\n").unwrap();
+        let mut existing_reader = File::open(&path).unwrap();
+
+        write_token(&path, "new-token").unwrap();
+
+        let mut old_contents = String::new();
+        existing_reader.read_to_string(&mut old_contents).unwrap();
+        assert_eq!(old_contents, "old-token\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new-token\n");
     }
 
     #[test]
@@ -1059,5 +1086,18 @@ mod tests {
         assert!(buffer.bytes <= 8);
         assert!(buffer.entries.len() <= 2);
         assert!(buffer.text().starts_with(LOG_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn log_reader_splits_streams_without_newlines_into_bounded_chunks() {
+        let input = vec![b'x'; LOG_READ_CHUNK_BYTES * 3 + 7];
+        let (sender, receiver) = log_channel(8);
+        queue_log_chunks(input.as_slice(), sender);
+        let chunks = receiver.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(chunks.iter().map(String::len).sum::<usize>(), input.len());
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= LOG_READ_CHUNK_BYTES));
     }
 }

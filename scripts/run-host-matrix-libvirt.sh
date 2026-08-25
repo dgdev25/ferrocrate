@@ -23,6 +23,11 @@ guest_port="${FERROCRATE_MATRIX_GUEST_PORT:-22}"
 ssh_key="${FERROCRATE_MATRIX_SSH_KEY:-}"
 remote_root="${FERROCRATE_MATRIX_REMOTE_ROOT:-/tmp/ferrocrate-host-matrix-${row_id}}"
 evidence_root="${FERROCRATE_MATRIX_EVIDENCE_ROOT:-$repo_root/docs/evidence/host-matrix}"
+peer_auth_mode="${FERROCRATE_PEER_AUTH:-pidfd}"
+[[ "$peer_auth_mode" == pidfd || "$peer_auth_mode" == legacy-peercred ]] || {
+  echo "FERROCRATE_PEER_AUTH must be pidfd or legacy-peercred" >&2
+  exit 2
+}
 [[ "$remote_root" == /* && "$remote_root" != *[!a-zA-Z0-9._/-]* ]] || {
   echo "FERROCRATE_MATRIX_REMOTE_ROOT must be an absolute safe path" >&2
   exit 2
@@ -96,7 +101,7 @@ done
 git -C "$repo_root" bundle create - "$source_ref" | \
   ssh "${ssh_args[@]}" "$remote" "set -eu; sudo -n rm -rf -- '$remote_root'; cat > '${remote_root}.bundle'; git clone -q '${remote_root}.bundle' '$remote_root'; git -C '$remote_root' checkout -q '$commit'; rm -f '${remote_root}.bundle'"
 
-ssh "${ssh_args[@]}" "$remote" "set -eu; export PATH=\"\$HOME/.cargo/bin:\$PATH:/usr/sbin:/sbin\"; export CARGO_HOME=\"\$HOME/.cargo\" RUSTUP_HOME=\"\$HOME/.rustup\"; cd '$remote_root'; cargo build --locked --workspace; sudo -n env PATH=\"\$PATH\" CARGO_HOME=\"\$CARGO_HOME\" RUSTUP_HOME=\"\$RUSTUP_HOME\" FERROCRATE_REPO_ROOT='$remote_root' bash scripts/run-host-matrix-row.sh '$row_id'"
+ssh "${ssh_args[@]}" "$remote" "set -eu; export PATH=\"\$HOME/.cargo/bin:\$PATH:/usr/sbin:/sbin\"; export CARGO_HOME=\"\$HOME/.cargo\" RUSTUP_HOME=\"\$HOME/.rustup\"; cd '$remote_root'; cargo build --locked --workspace; sudo -n env PATH=\"\$PATH\" CARGO_HOME=\"\$CARGO_HOME\" RUSTUP_HOME=\"\$RUSTUP_HOME\" FERROCRATE_REPO_ROOT='$remote_root' FERROCRATE_PEER_AUTH='$peer_auth_mode' bash scripts/run-host-matrix-row.sh '$row_id'"
 
 mkdir -p "$evidence_root"
 ssh "${ssh_args[@]}" "$remote" "sudo -n chown -R \"\$(id -un)\" '$remote_root/docs/evidence/host-matrix/$row_id' 2>/dev/null || true; tar -C '$remote_root/docs/evidence/host-matrix' -cf - '$row_id'" | \

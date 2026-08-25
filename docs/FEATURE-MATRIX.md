@@ -23,11 +23,11 @@ Snapshot: 2026-08-24, Round 9 closure at `c59f6e2a`.
 |---|---|---|
 | Rootful Ubuntu 26.04 x86_64 (qualified baseline) | Supported | [`host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md`](evidence/host-matrix/2026-08-21-four-distro-privileged-rerun-current-head-5cd9d154.md) |
 | Debian 12 / Debian 13 / Fedora 42 rootful rows | Supported | four-distro rerun witness above; 2026-08-25 re-run [`host-matrix/rows.tsv`](evidence/host-matrix/rows.tsv) |
-| Rocky 9, Linux 5.14 (RHEL kernel) | Native lifecycle gates supported; Docker socket host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/rocky-9-kernel-5.14/BLOCKED.md`](evidence/host-matrix/rocky-9-kernel-5.14/BLOCKED.md) |
+| Rocky 9, Linux 5.14 (RHEL kernel) | Qualified 60/60 with opt-in `legacy-peercred`; default remains unavailable without `SO_PEERPIDFD` | [`host-matrix/rocky-9-kernel-5.14/BOUNDARY.md`](evidence/host-matrix/rocky-9-kernel-5.14/BOUNDARY.md) |
 | Alpine 3.22, Linux 6.12, x86_64 (musl) | Supported | [`host-matrix/alpine-3.22-kernel-6.12/README.md`](evidence/host-matrix/alpine-3.22-kernel-6.12/README.md) |
 | Ubuntu 24.04, Linux 6.17, aarch64 (Oracle A1) | Supported | [`host-matrix/aarch64-linux-kernel-6.17/README.md`](evidence/host-matrix/aarch64-linux-kernel-6.17/README.md) |
-| Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Host-blocked: kernel lacks `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BLOCKED.md) |
-| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed; the packaged Ubuntu 24.04+ AppArmor mechanism passes with `kernel.apparmor_restrict_unprivileged_userns=1` | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; the Ubuntu 20.04 boundary is recorded above |
+| Ubuntu 20.04 HWE, Linux 5.15, x86_64 | Qualified 60/60 with opt-in `legacy-peercred`; default remains unavailable without `SO_PEERPIDFD` | [`host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md`](evidence/host-matrix/ubuntu-20.04-kernel-5.15/BOUNDARY.md) |
+| Rootless per-distribution (doctor, PTY, published IPv4) | Partial: hosts without `SO_PEERPIDFD` fail closed by default; `legacy-peercred` is an explicit downgrade with a PID-reuse race | The [packaged-profile qualification](evidence/host-matrix/2026-08-24-ubuntu-rootless-apparmor-profile.md) supersedes the historical host-wide sysctl relaxation for Ubuntu; old-kernel boundaries are recorded above |
 | Native Windows/macOS runtimes | Unsupported (deferred) | [`verification/2026-08-21-cross-target-current-head-0d0bdf3f.md`](evidence/verification/2026-08-21-cross-target-current-head-0d0bdf3f.md) |
 
 ## Product areas

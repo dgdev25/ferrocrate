@@ -126,7 +126,13 @@ fn resolve_for_channel(
     credentials: KernelPeerCredentials,
     channel: InvocationChannel,
 ) -> Result<TransportPrincipal, PrincipalResolutionError> {
-    PrincipalResolver::resolve_with_reader(reader, credentials, Some(PIDFD), channel)
+    PrincipalResolver::resolve_with_reader(
+        reader,
+        credentials,
+        Some(PIDFD),
+        channel,
+        PeerAuthMode::Pidfd,
+    )
 }
 
 #[test]
@@ -161,7 +167,7 @@ fn executable_replacement_is_rejected_before_execution() {
     reader.inodes.insert(format!("/proc/{PID}/exe"), 9002);
 
     let error = principal
-        .revalidate_with_reader(&reader, PIDFD)
+        .revalidate_with_reader(&reader, Some(PIDFD))
         .expect_err("changed executable rejected");
 
     assert!(matches!(error, PrincipalResolutionError::ProcessChanged));
@@ -190,6 +196,7 @@ fn missing_peer_pidfd_fails_closed_without_a_start_time_fallback() {
         credentials(1001, 2001),
         None,
         InvocationChannel::DockerUnix,
+        PeerAuthMode::Pidfd,
     )
     .expect_err("missing pidfd rejected");
 
@@ -208,6 +215,7 @@ fn unsupported_kernel_peer_pidfd_error_fails_at_the_socket_boundary() {
         &FakeProcReader::fixture(),
         &peer,
         InvocationChannel::DockerUnix,
+        PeerAuthMode::Pidfd,
     )
     .expect_err("unsupported kernel rejected");
 
@@ -218,11 +226,49 @@ fn unsupported_kernel_peer_pidfd_error_fails_at_the_socket_boundary() {
 }
 
 #[test]
+fn unsupported_kernel_peer_pidfd_uses_explicit_legacy_peercred_policy() {
+    let (peer, _other_end) = UnixStream::pair().expect("socket pair");
+
+    let principal = PrincipalResolver::resolve_from_sources(
+        &UnsupportedPidfdKernel,
+        &FakeProcReader::fixture(),
+        &peer,
+        InvocationChannel::DockerUnix,
+        PeerAuthMode::LegacyPeercred,
+    )
+    .expect("explicit legacy fallback resolves peer credentials");
+
+    assert_eq!(principal.identity().effective_uid(), 1001);
+    assert_eq!(principal.identity().effective_gid(), 2001);
+    assert_eq!(principal.peer_auth_mode(), PeerAuthMode::LegacyPeercred);
+}
+
+#[test]
+fn legacy_peercred_revalidation_rejects_process_replacement() {
+    let mut reader = FakeProcReader::fixture();
+    let principal = PrincipalResolver::resolve_with_reader(
+        &reader,
+        credentials(1001, 2001),
+        None,
+        InvocationChannel::DockerUnix,
+        PeerAuthMode::LegacyPeercred,
+    )
+    .expect("legacy identity");
+    reader.inodes.insert(format!("/proc/{PID}/exe"), 9002);
+
+    let error = principal
+        .revalidate_with_reader(&reader, None)
+        .expect_err("changed executable rejected");
+    assert!(matches!(error, PrincipalResolutionError::ProcessChanged));
+}
+
+#[test]
 fn unsupported_peer_pidfd_explains_secure_kernel_requirement() {
     let message = PrincipalResolutionError::PeerPidfdUnsupported.to_string();
     assert!(message.contains("SO_PEERPIDFD"));
     assert!(message.contains("secure CRI peer identity"));
     assert!(message.contains("upgrade the kernel"));
+    assert!(message.contains("--peer-auth legacy-peercred"));
 }
 
 #[test]

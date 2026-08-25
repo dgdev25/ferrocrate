@@ -1,5 +1,5 @@
 use ferro_core::authorization::{
-    PrincipalResolutionError, PrincipalResolver, RequestOrigin, TransportPrincipal,
+    PeerAuthMode, PrincipalResolutionError, PrincipalResolver, RequestOrigin, TransportPrincipal,
 };
 use std::{collections::BTreeMap, os::unix::net::UnixStream};
 
@@ -62,5 +62,18 @@ pub fn authenticate_docker_peer(
     PrincipalResolver::from_peer_credentials(stream).map(|transport| DockerPeerIdentity {
         transport,
         telemetry,
+    })
+}
+
+pub fn authenticate_docker_peer_with_mode(
+    stream: &UnixStream,
+    telemetry: DockerTelemetry,
+    mode: PeerAuthMode,
+) -> Result<DockerPeerIdentity, PrincipalResolutionError> {
+    PrincipalResolver::from_peer_credentials_with_mode(stream, mode).map(|transport| {
+        DockerPeerIdentity {
+            transport,
+            telemetry,
+        }
     })
 }

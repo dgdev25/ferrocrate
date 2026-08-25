@@ -95,10 +95,12 @@ impl ProcReader for SystemProcReader {
 pub(super) fn collect_process_identity<R: ProcReader>(
     reader: &R,
     peer: KernelPeerCredentials,
-    pidfd: RawFd,
+    pidfd: Option<RawFd>,
     channel: InvocationChannel,
 ) -> Result<LinuxProcessIdentity, PrincipalResolutionError> {
-    verify_pidfd(reader, pidfd, peer.pid)?;
+    if let Some(pidfd) = pidfd {
+        verify_pidfd(reader, pidfd, peer.pid)?;
+    }
     let proc_dir = PathBuf::from(format!("/proc/{}", peer.pid));
     let first_stat = read_fact(reader, &proc_dir.join("stat"), "stat")?;
     let (stat_pid, start_time_ticks) = parse_stat(&first_stat)?;
@@ -146,7 +148,9 @@ pub(super) fn collect_process_identity<R: ProcReader>(
     if second_pid != peer.pid || second_start != start_time_ticks {
         return Err(PrincipalResolutionError::ProcessChanged);
     }
-    verify_pidfd(reader, pidfd, peer.pid)?;
+    if let Some(pidfd) = pidfd {
+        verify_pidfd(reader, pidfd, peer.pid)?;
+    }
     Ok(LinuxProcessIdentity {
         pid: peer.pid,
         uids,
@@ -160,6 +164,23 @@ pub(super) fn collect_process_identity<R: ProcReader>(
         gid_map,
         executable_inode,
     })
+}
+
+pub(super) fn verify_legacy_process_identity<R: ProcReader>(
+    reader: &R,
+    identity: &LinuxProcessIdentity,
+) -> Result<(), PrincipalResolutionError> {
+    let proc_dir = PathBuf::from(format!("/proc/{}", identity.pid()));
+    let stat = read_fact(reader, &proc_dir.join("stat"), "stat")?;
+    let (pid, start) = parse_stat(&stat)?;
+    let executable_inode = inode_fact(reader, &proc_dir.join("exe"), "executable identity")?;
+    if pid != identity.pid()
+        || start != identity.start_time_ticks()
+        || executable_inode != identity.executable_inode()
+    {
+        return Err(PrincipalResolutionError::ProcessChanged);
+    }
+    Ok(())
 }
 
 pub(super) fn verify_process_identity<R: ProcReader>(

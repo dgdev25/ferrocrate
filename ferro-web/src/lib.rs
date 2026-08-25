@@ -139,6 +139,7 @@ struct BridgeState {
 struct RequestGuard {
     token: String,
     allowed_hosts: Vec<String>,
+    allow_ip_literals: bool,
 }
 
 impl RequestGuard {
@@ -150,7 +151,23 @@ impl RequestGuard {
         Self {
             token,
             allowed_hosts,
+            allow_ip_literals: addr.ip().is_unspecified(),
         }
+    }
+
+    fn allows_host(&self, host: &str) -> bool {
+        self.allowed_hosts.iter().any(|item| item == host)
+            || (self.allow_ip_literals
+                && host
+                    .parse::<SocketAddr>()
+                    .is_ok_and(|address| address.port() == self.port()))
+    }
+
+    fn port(&self) -> u16 {
+        self.allowed_hosts
+            .first()
+            .and_then(|host| host.parse::<SocketAddr>().ok())
+            .map_or(0, |address| address.port())
     }
 }
 
@@ -242,6 +259,7 @@ pub async fn serve_tls(
     assets: Arc<dyn StaticAssets>,
     dispatcher: Arc<dyn CommandDispatcher>,
 ) -> Result<(), String> {
+    install_tls_crypto_provider();
     let config = RustlsConfig::from_pem_file(cert, key)
         .await
         .map_err(|error| format!("failed to load dashboard TLS identity: {error}"))?;
@@ -259,6 +277,13 @@ pub async fn serve_tls(
         .serve(app.into_make_service())
         .await
         .map_err(|error| format!("TLS web server failed: {error}"))
+}
+
+fn install_tls_crypto_provider() {
+    // The workspace also uses crates that enable rustls' ring backend. Select
+    // one provider explicitly so TLS startup does not depend on feature
+    // unification across the final binary.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 fn router(
@@ -286,12 +311,8 @@ async fn validate_request(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok());
-    let Some(host) = host.filter(|host| guard.allowed_hosts.iter().any(|item| item == *host))
-    else {
+    let host = request_host(&request);
+    let Some(host) = host.filter(|host| guard.allows_host(host)) else {
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     };
     if let Some(origin) = request
@@ -326,6 +347,19 @@ async fn validate_request(
         }
     }
     next.run(request).await
+}
+
+fn request_host(request: &Request<Body>) -> Option<&str> {
+    request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str())
+        })
 }
 
 fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
@@ -654,7 +688,10 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::{CommandDispatcher, CommandRequest, EventHub, Server, StaticAssets};
+    use super::{
+        install_tls_crypto_provider, request_host, CommandDispatcher, CommandRequest, EventHub,
+        RequestGuard, Server, StaticAssets,
+    };
 
     #[derive(Clone)]
     struct TestAssets;
@@ -820,5 +857,29 @@ mod tests {
         };
         assert!(args.pull_if_missing);
         assert_eq!(args.cpu_quota, Some(50_000));
+    }
+
+    #[test]
+    fn tls_crypto_provider_is_installed_explicitly() {
+        install_tls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn wildcard_bind_accepts_ip_hosts_but_not_dns_rebinding_hosts() {
+        let guard = RequestGuard::new("0.0.0.0:8443".parse().unwrap(), "token".to_string());
+        assert!(guard.allows_host("127.0.0.1:8443"));
+        assert!(guard.allows_host("192.0.2.10:8443"));
+        assert!(!guard.allows_host("192.0.2.10:8000"));
+        assert!(!guard.allows_host("attacker.example:8443"));
+    }
+
+    #[test]
+    fn host_guard_reads_http2_uri_authority() {
+        let request = axum::http::Request::builder()
+            .uri("https://127.0.0.1:8443/__tauri/get_desktop_snapshot")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(request_host(&request), Some("127.0.0.1:8443"));
     }
 }

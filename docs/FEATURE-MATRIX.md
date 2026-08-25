@@ -71,6 +71,7 @@ Snapshot: 2026-08-25, Round 10 desktop-backend implementation branch.
 | RVF image launcher/QEMU | Experimental (dry-run default) | [`rvf/2026-08-22-launcher-interop.md`](evidence/rvf/2026-08-22-launcher-interop.md) |
 | Node/reconciliation supervisor | Experimental (single-node, no live cluster claim) | [`manager/2026-08-22-node-reconciliation-lifecycle.md`](evidence/manager/2026-08-22-node-reconciliation-lifecycle.md) |
 | Desktop backend seam, loopback web bridge, and daemon-owned UX/API lifecycle | Implemented for `linux-native`, `wsl2`, and `macos-vm`; native acceptance remains bounded by the host-tier rows above | [`desktop/WEB-CONTROL-PLANE.md`](desktop/WEB-CONTROL-PLANE.md), backend contract tests, and `scripts/test-desktop-real-daemon.sh`, which passes only the host-selected backend and explicitly skips unavailable host backends |
+| Embedded local dashboard (`ferrocrate dashboard`) | Supported on the qualified Linux tier: the release CLI embeds the Forge frontend, starts no listener unless invoked, uses a per-launch bearer token, and requires TLS plus an explicit operator gate for non-loopback binds | [`desktop/DASHBOARD-TEST-REPORT-2026-08-25.md`](desktop/DASHBOARD-TEST-REPORT-2026-08-25.md) |
 
 ## Explicitly unsupported (fail-closed)
 

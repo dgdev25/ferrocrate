@@ -23,7 +23,12 @@ pub fn build_agent_cli_args(action: &str, arguments: &Value) -> Result<Vec<Strin
             .and_then(validate_argument)
     };
     Ok(match action {
-        "list_containers" => vec!["ps".into(), "--all".into(), "--format".into(), "json".into()],
+        "list_containers" => vec![
+            "ps".into(),
+            "--all".into(),
+            "--format".into(),
+            "json".into(),
+        ],
         "container_logs" => vec![
             "logs".into(),
             required("container")?,
@@ -51,6 +56,8 @@ pub fn build_agent_cli_args(action: &str, arguments: &Value) -> Result<Vec<Strin
                 "--detach".into(),
                 "--name".into(),
                 required("name")?,
+                "--network".into(),
+                "none".into(),
                 required("image")?,
             ];
             for value in command {
@@ -65,10 +72,7 @@ pub fn build_agent_cli_args(action: &str, arguments: &Value) -> Result<Vec<Strin
 }
 
 fn validate_argument(value: &str) -> Result<String, String> {
-    if value.is_empty()
-        || value.len() > MAX_ARGUMENT_BYTES
-        || value.chars().any(char::is_control)
-    {
+    if value.is_empty() || value.len() > MAX_ARGUMENT_BYTES || value.chars().any(char::is_control) {
         return Err("fleet command argument is invalid".into());
     }
     Ok(value.into())
@@ -121,11 +125,23 @@ pub async fn collect_agent_observation(
 ) -> AgentObservation {
     let version = run_bounded(runtime_executable, &["version".into()])
         .await
-        .map(|(_, stdout, _)| stdout.lines().next().unwrap_or("unknown").trim().to_string())
+        .map(|(_, stdout, _)| {
+            stdout
+                .lines()
+                .next()
+                .unwrap_or("unknown")
+                .trim()
+                .to_string()
+        })
         .unwrap_or_else(|_| "unknown".into());
     let containers = run_bounded(
         runtime_executable,
-        &["ps".into(), "--all".into(), "--format".into(), "json".into()],
+        &[
+            "ps".into(),
+            "--all".into(),
+            "--format".into(),
+            "json".into(),
+        ],
     )
     .await
     .ok()
@@ -152,10 +168,7 @@ pub async fn collect_agent_observation(
     }
 }
 
-async fn run_bounded(
-    executable: &Path,
-    args: &[String],
-) -> Result<(i32, String, String), String> {
+async fn run_bounded(executable: &Path, args: &[String]) -> Result<(i32, String, String), String> {
     let mut child = tokio::process::Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
@@ -174,7 +187,9 @@ async fn run_bounded(
     let stdout_reader = tokio::spawn(read_bounded(stdout));
     let stderr_reader = tokio::spawn(read_bounded(stderr));
     let status = match tokio::time::timeout(COMMAND_TIMEOUT, child.wait()).await {
-        Ok(result) => result.map_err(|error| format!("failed to wait for fleet command: {error}"))?,
+        Ok(result) => {
+            result.map_err(|error| format!("failed to wait for fleet command: {error}"))?
+        }
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;

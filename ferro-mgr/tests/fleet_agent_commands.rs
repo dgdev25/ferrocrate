@@ -24,6 +24,8 @@ fn agent_builds_allowlisted_container_commands_without_a_shell() {
             "--detach",
             "--name",
             "fleet-lab",
+            "--network",
+            "none",
             "alpine:latest",
             "sh",
             "-c",
@@ -43,11 +45,7 @@ fn agent_builds_allowlisted_container_commands_without_a_shell() {
 #[test]
 fn agent_rejects_unknown_actions_and_unsafe_or_oversized_values() {
     assert!(build_agent_cli_args("shell", &json!({"command":"id"})).is_err());
-    assert!(build_agent_cli_args(
-        "container_logs",
-        &json!({"container":"bad\nname"})
-    )
-    .is_err());
+    assert!(build_agent_cli_args("container_logs", &json!({"container":"bad\nname"})).is_err());
     assert!(build_agent_cli_args(
         "run_container",
         &json!({"image":"alpine", "name":"x", "command":["x".repeat(5000)]})

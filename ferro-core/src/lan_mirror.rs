@@ -88,7 +88,7 @@ pub fn discover_report(
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(7422);
     let mut probe_peers = probe_local_slash24(probe_port);
-    let probed = !probe_peers.is_empty();
+    let probed = true;
     peers.append(&mut probe_peers);
     peers.sort_by_key(|peer| {
         let preferred = wanted_digest.is_some_and(|digest| peer.digests.contains(digest));

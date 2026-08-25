@@ -1910,6 +1910,7 @@ fn log_follow_command(target: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 fn terminal_exec_command(
     target: &str,
     shell: &str,
@@ -1938,6 +1939,7 @@ fn terminal_exec_command(
     command
 }
 
+#[cfg(test)]
 fn terminal_resize_command(exec_id: &str, columns: u16, rows: u16) -> Vec<String> {
     vec![
         "terminal-resize".to_string(),
@@ -1956,6 +1958,7 @@ struct TerminalOutput {
     stderr: bool,
 }
 
+#[cfg(test)]
 fn parse_terminal_exec_id(line: &str) -> Result<String, String> {
     const PREFIX: &str = "FERROCRATE_EXEC_ID=";
     let trimmed = line.trim();

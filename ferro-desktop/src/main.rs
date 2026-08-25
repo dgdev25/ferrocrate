@@ -883,8 +883,10 @@ fn run_registry_proxy(
 fn selected_proxy_backend(socket: Option<&str>) -> Result<Box<dyn Backend>, DesktopError> {
     if Platform::current() == Platform::Linux {
         if let Some(socket) = socket {
-            let mut config = LinuxNativeConfig::default();
-            config.socket_path = PathBuf::from(socket);
+            let config = LinuxNativeConfig {
+                socket_path: PathBuf::from(socket),
+                ..LinuxNativeConfig::default()
+            };
             return Ok(Box::new(LinuxNativeBackend::new(config)));
         }
     }
@@ -1288,10 +1290,7 @@ fn run_daemon(
         .map_err(|error| DesktopError::Invalid(error.to_string()))?;
     let listener = TcpListener::bind(addr)?;
     loop {
-        let (mut stream, _) = match listener.accept() {
-            Ok(connection) => connection,
-            Err(error) => return Err(error.into()),
-        };
+        let (mut stream, _) = listener.accept()?;
         let default_wsl_distro = default_wsl_distro.clone();
         thread::spawn(move || {
             let _ = handle_client(&mut stream, default_wsl_distro.as_deref());

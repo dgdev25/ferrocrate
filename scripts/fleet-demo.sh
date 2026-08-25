@@ -53,7 +53,13 @@ ensure_layout() {
 generate_bytes() { openssl rand "$1" >"$2"; chmod 600 "$2"; }
 
 create_pki() {
-  [[ -f "$state_root/pki/node-ca.pem" ]] && return
+  if [[ -f "$state_root/pki/node-ca.pem" && -f "$state_root/pki/manager.pem" && -f "$state_root/pki/operator.pem" && -f "$state_root/pki/controller-grant.key" ]]; then
+    return
+  fi
+  if [[ -f "$state_root/pki/node-ca.pem" && -f "$state_root/manager.sqlite" ]]; then
+    die "persisted CA state is incomplete; refusing to replace credentials for an existing manager database"
+  fi
+  rm -f "$state_root/pki"/*
   note "creating persisted node and administrator CAs under $state_root/pki"
   openssl req -x509 -newkey rsa:2048 -nodes -days 30 -sha256 \
     -subj "/CN=ferrocrate-fleet-demo-node-ca" \
@@ -65,13 +71,14 @@ create_pki() {
     -keyout "$state_root/pki/manager.key" -out "$state_root/pki/manager.csr" >/dev/null 2>&1
   openssl x509 -req -days 30 -sha256 -in "$state_root/pki/manager.csr" \
     -CA "$state_root/pki/node-ca.pem" -CAkey "$state_root/pki/node-ca.key" -CAcreateserial \
-    -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -out "$state_root/pki/manager.pem" >/dev/null 2>&1
+    -extfile <(printf '%s\n' 'subjectAltName=DNS:localhost,IP:127.0.0.1' 'extendedKeyUsage=serverAuth') \
+    -out "$state_root/pki/manager.pem" >/dev/null 2>&1
   openssl req -newkey rsa:2048 -nodes -sha256 \
     -subj "/CN=ferrocrate/${cluster_id}/administrator" \
     -keyout "$state_root/pki/operator.key" -out "$state_root/pki/operator.csr" >/dev/null 2>&1
   openssl x509 -req -days 30 -sha256 -in "$state_root/pki/operator.csr" \
     -CA "$state_root/pki/admin-ca.pem" -CAkey "$state_root/pki/admin-ca.key" -CAcreateserial \
-    -addext 'extendedKeyUsage=clientAuth' -out "$state_root/pki/operator.pem" >/dev/null 2>&1
+    -extfile <(printf '%s\n' 'extendedKeyUsage=clientAuth') -out "$state_root/pki/operator.pem" >/dev/null 2>&1
   generate_bytes 32 "$state_root/pki/controller-grant.key"
   generate_bytes 32 "$state_root/pki/controller-envelope.key"
   generate_bytes 32 "$state_root/pki/manager-signing.key"

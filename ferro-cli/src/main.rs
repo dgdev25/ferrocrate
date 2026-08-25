@@ -16381,6 +16381,7 @@ struct DockerCompatState {
     pending_path: PathBuf,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
+    auto_remove_results: Mutex<HashMap<String, Option<i32>>>,
     events: Mutex<DockerEventStore>,
 }
 
@@ -16430,6 +16431,7 @@ impl DockerCompatState {
             pending_path,
             name_store,
             execs: Mutex::new(HashMap::new()),
+            auto_remove_results: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
         })
     }
@@ -18426,18 +18428,19 @@ fn handle_docker_compat_connection(
                     // `docker run` container. Return the 101 handshake
                     // immediately for that pending record so the client can
                     // issue `/start`; running records retain live streaming.
-                    if !pending_attach {
-                        attach_hijack = Some((
-                            id.to_string(),
-                            logs_requested,
-                            stream_requested,
-                            stdin_requested,
-                            stdout_requested,
-                            stderr_requested,
-                            request.body.clone(),
-                            detach_keys,
-                        ));
-                    }
+                    attach_hijack = Some((
+                        id.to_string(),
+                        // A pending attach has no history at registration;
+                        // every byte present after start is live output even
+                        // when the client requested `logs=0`.
+                        logs_requested || pending_attach,
+                        stream_requested,
+                        stdin_requested,
+                        stdout_requested,
+                        stderr_requested,
+                        request.body.clone(),
+                        detach_keys,
+                    ));
                     docker_hijack_headers()
                 } else {
                     http_response(200, &output, "application/vnd.docker.raw-stream")
@@ -19074,6 +19077,13 @@ fn handle_docker_compat_connection(
                     spec.tty.then_some("1"),
                 );
                 let run_inputs = docker_start_run_inputs(&spec);
+                if spec.auto_remove {
+                    state
+                        .auto_remove_results
+                        .lock()
+                        .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                        .insert(id.clone(), None);
+                }
                 let start_result = handle_run(
                     runtime_dir.as_ref(),
                     &runtime,
@@ -19105,7 +19115,7 @@ fn handle_docker_compat_connection(
                     false,
                     health_override,
                     &spec.restart_policy,
-                    spec.auto_remove,
+                    false,
                     None,
                     None,
                     None,
@@ -19118,11 +19128,41 @@ fn handle_docker_compat_connection(
                     Some(&id),
                 );
                 if let Err(error) = start_result {
+                    if spec.auto_remove {
+                        if let Ok(mut results) = state.auto_remove_results.lock() {
+                            results.remove(&id);
+                        }
+                    }
                     if let Ok(mut pending) = state.pending.lock() {
                         pending.insert(id, spec);
                     }
                     let _ = state.persist_pending();
                     return Err(error);
+                }
+                if spec.auto_remove {
+                    let remove_runtime = runtime.request_scoped(origin.clone());
+                    let remove_state = Arc::clone(&state);
+                    let remove_id = id.clone();
+                    std::thread::spawn(move || {
+                        if wait_for_container_exit(&remove_runtime, &remove_id).is_ok() {
+                            let exit_code = remove_runtime
+                                .inspect(&remove_id)
+                                .ok()
+                                .and_then(|record| record.last_exit_code)
+                                .unwrap_or(0);
+                            // Give an attach registered before start one poll
+                            // turn to drain the terminal log before deletion.
+                            std::thread::sleep(Duration::from_millis(50));
+                            if remove_runtime.remove(&remove_id).is_ok() {
+                                // Publish only after removal so `docker run
+                                // --rm` cannot return while network/volume
+                                // associations are still being torn down.
+                                if let Ok(mut results) = remove_state.auto_remove_results.lock() {
+                                    results.insert(remove_id, Some(exit_code));
+                                }
+                            }
+                        }
+                    });
                 }
                 http_response(204, &[], "text/plain")
             }
@@ -19198,13 +19238,27 @@ fn handle_docker_compat_connection(
                     })
                     .transpose()?
                     .flatten();
-                let id = {
+                let auto_remove_id = state
+                    .auto_remove_results
+                    .lock()
+                    .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                    .contains_key(requested_id)
+                    .then(|| requested_id.to_string());
+                let id = if let Some(id) = auto_remove_id {
+                    id
+                } else {
                     let pending = state
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
                     docker_resolve_id(&runtime, &pending, requested_id)?
                 };
+                let pending_auto_remove = state
+                    .pending
+                    .lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?
+                    .get(&id)
+                    .is_some_and(|spec| spec.auto_remove);
                 // Docker CLI issues `/wait?condition=removed` concurrently
                 // with `/start`, while the create record is still pending.
                 // Reconcile that pre-start window before evaluating exit or
@@ -19258,7 +19312,7 @@ fn handle_docker_compat_connection(
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
-                if condition == "removed" {
+                if condition == "removed" && !pending_auto_remove {
                     let record = runtime.inspect(&id).ok();
                     let body = serde_json::json!({
                         "StatusCode": record.and_then(|value| value.last_exit_code).unwrap_or(0),
@@ -20117,6 +20171,43 @@ fn handle_docker_compat_connection(
     }
     if let Some((id, condition, timeout)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
+        let auto_remove_result = || -> Result<Option<i32>, String> {
+            let started = Instant::now();
+            loop {
+                let result = state
+                    .auto_remove_results
+                    .lock()
+                    .map_err(|error| format!("docker: auto-remove lock poisoned: {error}"))?
+                    .get(&id)
+                    .copied();
+                match result {
+                    Some(Some(exit_code)) => return Ok(Some(exit_code)),
+                    Some(None) if timeout.is_none_or(|limit| started.elapsed() < limit) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Some(None) => return Err(format!("wait: timed out waiting for container {id}")),
+                    None if condition == "removed" => {
+                        // `docker run --rm` opens this wait before `/start`;
+                        // the start handler registers its auto-remove result
+                        // after receiving the already-sent response headers.
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None => return Ok(None),
+                }
+            }
+        };
+        if let Some(exit_code) = auto_remove_result()? {
+            let body = serde_json::json!({
+                "StatusCode": exit_code,
+                "Error": serde_json::Value::Null
+            })
+            .to_string();
+            let chunk = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+            stream
+                .write_all(chunk.as_bytes())
+                .map_err(|error| format!("docker: wait stream write failed: {error}"))?;
+            return Ok(());
+        }
         if condition == "next-exit" {
             // A created container has not produced its next exit yet: block
             // through the pre-start window before waiting for the exit.
@@ -22813,7 +22904,7 @@ fn stream_docker_attach(
     // A non-interactive local run has no producer for the socket's input
     // half. Do not pay the daemon-compatible 250 ms read timeout before each
     // lifecycle observation on that path.
-    let mut input_closed = fast_local_exit && !stdin_requested;
+    let mut input_closed = !stdin_requested;
     let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
     let local_stream_started = Instant::now();
     let mut terminal_log_lengths = None;

@@ -12369,16 +12369,28 @@ fn dns_response(query: &[u8], hosts_path: &Path) -> Option<Vec<u8>> {
     let question_end = cursor.checked_add(4)?;
     let qtype = u16::from_be_bytes(query.get(cursor..cursor + 2)?.try_into().ok()?);
     let name = labels.join(".");
-    let address = (qtype == 1).then(|| {
-        fs::read_to_string(hosts_path).ok()?.lines().find_map(|line| {
+    let hosts = fs::read_to_string(hosts_path).ok()?;
+    let mut known_name = false;
+    let address = hosts.lines().find_map(|line| {
             let mut fields = line.split_whitespace();
             let address = fields.next()?.parse::<Ipv4Addr>().ok()?;
-            fields.any(|candidate| candidate == name).then_some(address)
-        })
-    }).flatten();
+            if fields.any(|candidate| candidate == name) {
+                known_name = true;
+                (qtype == 1).then_some(address)
+            } else {
+                None
+            }
+        });
     let mut response = Vec::with_capacity(question_end + 16);
     response.extend_from_slice(&query[..2]);
-    response.extend_from_slice(&if address.is_some() { 0x8180_u16 } else { 0x8183_u16 }.to_be_bytes());
+    response.extend_from_slice(
+        &if known_name {
+            0x8180_u16
+        } else {
+            0x8183_u16
+        }
+        .to_be_bytes(),
+    );
     response.extend_from_slice(&1_u16.to_be_bytes());
     response.extend_from_slice(&(u16::from(address.is_some())).to_be_bytes());
     response.extend_from_slice(&0_u16.to_be_bytes());
@@ -14526,6 +14538,24 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+
+    #[test]
+    fn embedded_dns_returns_nodata_for_known_name_without_requested_family() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hosts = directory.path().join("network.hosts");
+        std::fs::write(&hosts, "172.30.245.42 conformance-alias\n").expect("write hosts");
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let label = "conformance-alias";
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+        query.push(0);
+        query.extend_from_slice(&28_u16.to_be_bytes());
+        query.extend_from_slice(&1_u16.to_be_bytes());
+
+        let response = super::dns_response(&query, &hosts).expect("DNS response");
+        assert_eq!(&response[2..4], &0x8180_u16.to_be_bytes());
+        assert_eq!(&response[6..8], &0_u16.to_be_bytes());
+    }
 
     #[test]
     fn archive_targets_are_absolute_and_traversal_safe() {

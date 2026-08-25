@@ -729,6 +729,73 @@ record_websocket_attach() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
 }
 
+record_foreground_output() {
+  local id="run-foreground-output" area="container"
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token tty_output
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="docker run --rm alpine:3.20 echo hi && docker run --rm -t alpine:3.20 echo hi [stdout exact]"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  exit_code=0
+  run_bounded_owned "$command_timeout" 5 "$command_token" \
+    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      docker run --rm alpine:3.20 echo hi \
+    >"$stdout_file" 2>"$stderr_file" || exit_code=$?
+  if [[ "$exit_code" == 0 && "$(tr -d '\r' <"$stdout_file")" == hi && ! -s "$stderr_file" ]]; then
+    tty_output="$work_root/foreground-tty.stdout"
+    run_bounded_owned "$command_timeout" 5 "$command_token-tty" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        docker run --rm -t alpine:3.20 echo hi \
+      >"$tty_output" 2>>"$stderr_file" || exit_code=$?
+    [[ "$exit_code" == 0 && "$(tr -d '\r' <"$tty_output")" == hi && ! -s "$stderr_file" ]] || exit_code=1
+    printf '\nTTY invocation:\n' >>"$stdout_file"
+    cat "$tty_output" >>"$stdout_file"
+  else
+    exit_code=1
+  fi
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$exit_code" == 0 ]]; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+}
+
+record_foreground_stderr() {
+  local id="run-foreground-stderr" area="container"
+  local command_text started ended duration exit_code status stdout_file stderr_file command_token
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' [stderr exact]"
+  started="$(date +%s%N)"
+  command_token="$process_token_base-client-$sequence"
+  exit_code=0
+  run_bounded_owned "$command_timeout" 5 "$command_token" \
+    env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+      docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
+    >"$stdout_file" 2>"$stderr_file" || exit_code=$?
+  [[ "$exit_code" == 0 && ! -s "$stdout_file" && "$(tr -d '\r' <"$stderr_file")" == foreground-error ]] || exit_code=1
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$exit_code" == 0 ]]; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+}
+
 # Client identity and engine prerequisites.
 record_command cli-version client version
 record_command compose-version compose compose version
@@ -753,6 +820,9 @@ else
   record_command image-build image build --tag "$image" "$context_dir"
 fi
 record_command image-inspect image image inspect "$image"
+record_command foreground-image-pull image pull alpine:3.20
+record_foreground_output
+record_foreground_stderr
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120
 expected_daemon_error_message="Conflict. The container name \"/$container\" is already in use by container \""

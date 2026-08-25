@@ -1,10 +1,8 @@
 name: macOS packaging canary
 on:
-  pull_request:
-    paths-ignore: ['docs/**', '**/*.md']
-  push:
-    branches: [main]
-    paths-ignore: ['docs/**', '**/*.md']
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'
 permissions: { contents: read }
 jobs:
   package:

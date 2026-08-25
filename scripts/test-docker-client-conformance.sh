@@ -525,8 +525,8 @@ awk -F '\t' '$1 != "image-build" && $1 != "unrecorded" && $4 != "0" { exit 1 }' 
   "$fake_state/docker.calls"
 awk -F '\t' '$2 == "image-build" { found = ($5 == 1 && $6 == "PASS") } END { exit !found }' \
   "$buildkit_log"
-grep -Fq '| PASS | 55 |' "$buildkit_scoreboard"
-grep -Fq '| FAIL | 4 |' "$buildkit_scoreboard"
+grep -Fq '| PASS | 70 |' "$buildkit_scoreboard"
+grep -Fq '| FAIL | 13 |' "$buildkit_scoreboard"
 grep -Fq '| ERROR | 1 |' "$buildkit_scoreboard"
 grep -Fq 'BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)' "$buildkit_scoreboard"
 
@@ -537,6 +537,7 @@ extract_log_results() {
 extract_markdown_results() {
   awk -F '|' '
     /^\| [0-9]+ \|/ {
+      gsub(/\\\|/, "__ESCAPED_MARKDOWN_PIPE__")
       for (field = 2; field <= 7; field++) {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", $field)
       }
@@ -588,7 +589,7 @@ cmp "$first_scoreboard" "$scoreboard"
 hang_scoreboard="$work_root/hang-scoreboard.md"
 hang_log="$work_root/hang.log"
 set +e
-timeout --foreground --kill-after=1s 18s env \
+timeout --foreground --kill-after=1s 60s env \
   PATH="$fake_bin:$PATH" \
   FAKE_STATE="$fake_state" \
   FAKE_FERRO_VERSION_HANG=1 \

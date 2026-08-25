@@ -128,7 +128,7 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1591,6 +1591,7 @@ pub struct ContainerRuntime {
     store: SqliteContainerStore,
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
+    active_supervisors: Arc<DashMap<String, u32>>,
     health_cancel: DashMap<String, Arc<AtomicBool>>,
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
@@ -1805,6 +1806,7 @@ impl ContainerRuntime {
             store: self.store.clone(),
             runtime_dir: self.runtime_dir.clone(),
             cgroup_root: self.cgroup_root.clone(),
+            active_supervisors: Arc::clone(&self.active_supervisors),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization: self.authorization.with_origin(origin),
@@ -1861,6 +1863,7 @@ impl ContainerRuntime {
             store,
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
+            active_supervisors: Arc::new(DashMap::new()),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization,
@@ -2038,6 +2041,10 @@ impl ContainerRuntime {
         for record in self.store.list()? {
             if !matches!(record.status.as_str(), "running" | "paused")
                 || pid_identity_matches(&record)
+                || self
+                    .active_supervisors
+                    .get(&record.id)
+                    .is_some_and(|pid| *pid == record.pid)
             {
                 continue;
             }
@@ -3305,6 +3312,7 @@ impl ContainerRuntime {
             false,
             tty,
             self.store.clone_db(),
+            Arc::clone(&self.active_supervisors),
             container_id.clone(),
             Some(rootfs_dir.clone()),
             no_new_privs,
@@ -5134,6 +5142,7 @@ impl ContainerRuntime {
             true,
             record.tty,
             self.store.clone_db(),
+            Arc::clone(&self.active_supervisors),
             record.id.clone(),
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
@@ -6931,6 +6940,7 @@ fn spawn_process_with_logs(
     append: bool,
     tty: bool,
     store: SqliteContainerStore,
+    active_supervisors: Arc<DashMap<String, u32>>,
     container_id: String,
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
@@ -6964,7 +6974,7 @@ fn spawn_process_with_logs(
         &tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let (child_id, child, pidfd) = spawn_child_with_logs(
+    let (child_id, child, pidfd, log_relays) = spawn_child_with_logs(
         command,
         stdout_path,
         stderr_path,
@@ -6987,11 +6997,14 @@ fn spawn_process_with_logs(
     let netns_name = netns_name.map(|val| val.to_string());
     let seccomp_for_restart = seccomp_profile.cloned();
     let oom_kills = oom_kill_count(&container_id);
+    active_supervisors.insert(container_id.clone(), child_id);
     thread::spawn(move || {
         supervise_child(
             child,
             pidfd,
+            log_relays,
             store,
+            active_supervisors,
             container_id,
             cmd_owned,
             env_owned,
@@ -7679,6 +7692,20 @@ fn resolve_rootfs_command(rootfs: &Path, cmd: &str) -> String {
 }
 
 // Process, terminal, and log-driver settings form one atomic spawn operation.
+struct ChildLogRelays(Vec<thread::JoinHandle<()>>);
+
+impl ChildLogRelays {
+    fn new(handles: Vec<thread::JoinHandle<()>>) -> Self {
+        Self(handles)
+    }
+
+    fn drain(&mut self) {
+        for relay in self.0.drain(..) {
+            let _ = relay.join();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_child_with_logs(
     mut command: Command,
@@ -7690,7 +7717,26 @@ fn spawn_child_with_logs(
     runtime_dir: &Path,
     container_id: &str,
     log_driver: &str,
-) -> Result<(u32, Child, OwnedFd), RuntimeError> {
+) -> Result<(u32, Child, OwnedFd, ChildLogRelays), RuntimeError> {
+    // Rootless launchers such as bubblewrap may retain helper descendants
+    // after their recorded leader is killed. Give non-TTY workloads an
+    // isolated process group so the supervisor can close every inherited log
+    // writer before waiting for the capture relays to reach EOF. TTY setup
+    // owns its session/process-group arrangement separately.
+    if !tty {
+        unsafe {
+            command.pre_exec(|| {
+                if nix::libc::setpgid(0, 0) != 0 {
+                    let error = io::Error::last_os_error();
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("create workload process group: {error}"),
+                    ));
+                }
+                Ok(())
+            });
+        }
+    }
     let rotation = rotation.or_else(log_rotation_from_env);
     let driver = load_log_driver(
         log_driver,
@@ -7717,6 +7763,7 @@ fn spawn_child_with_logs(
         .read(true)
         .write(true)
         .open(&stdin_path)?;
+    let mut log_relays = Vec::new();
     let child = if tty {
         let pair = PtyPair::new(24, 80).map_err(RuntimeError::Io)?;
         let tty_device = pair.slave_name().map_err(RuntimeError::Io)?;
@@ -7729,9 +7776,9 @@ fn spawn_child_with_logs(
         let mut master_writer = master_reader.try_clone()?;
         let slave = std::fs::File::from(slave);
         let capture = LogCapture::new(driver.open(&context)?, 1);
-        thread::spawn(move || {
+        log_relays.push(thread::spawn(move || {
             let _ = capture_stream(&mut master_reader, capture, LogStream::Stdout);
-        });
+        }));
         drop(stdin_file);
         let mut input = OpenOptions::new()
             .read(true)
@@ -7781,14 +7828,14 @@ fn spawn_child_with_logs(
             .spawn()?;
         if let Some(mut pipe) = child.stdout.take() {
             let stdout_capture = capture.clone();
-            thread::spawn(move || {
+            log_relays.push(thread::spawn(move || {
                 let _ = capture_stream(&mut pipe, stdout_capture, LogStream::Stdout);
-            });
+            }));
         }
         if let Some(mut pipe) = child.stderr.take() {
-            thread::spawn(move || {
+            log_relays.push(thread::spawn(move || {
                 let _ = capture_stream(&mut pipe, capture, LogStream::Stderr);
-            });
+            }));
         }
         child
     } else {
@@ -7829,7 +7876,7 @@ fn spawn_child_with_logs(
     }
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
-    Ok((child_id, child, pidfd))
+    Ok((child_id, child, pidfd, ChildLogRelays::new(log_relays)))
 }
 
 /// stdout/stderr with optional per-line timestamp resolution.
@@ -8216,7 +8263,9 @@ fn release_prepared_child(pid: u32) -> Result<(), RuntimeError> {
 fn supervise_child(
     mut child: Child,
     mut _pidfd: OwnedFd,
+    mut log_relays: ChildLogRelays,
     store: SqliteContainerStore,
+    active_supervisors: Arc<DashMap<String, u32>>,
     container_id: String,
     cmd: Vec<String>,
     env: Vec<String>,
@@ -8301,6 +8350,16 @@ fn supervise_child(
 
     loop {
         let status = child.wait();
+        if !tty {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-(child.id() as i32)),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        // EOF on the child pipes follows process exit. Join every capture
+        // thread before publishing terminal status so attach clients can use
+        // that status as a definitive log-relay drain barrier.
+        log_relays.drain();
         let exit_code = status
             .ok()
             .and_then(|status| {
@@ -8467,7 +8526,7 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd) = match spawn_child_with_logs(
+        let (pid, new_child, new_pidfd, new_log_relays) = match spawn_child_with_logs(
             command,
             &stdout_path,
             &stderr_path,
@@ -8478,27 +8537,27 @@ fn supervise_child(
             &container_id,
             &log_driver,
         ) {
-                Ok(tuple) => tuple,
-                Err(error) => {
-                    warn!(
-                        container = %container_id,
-                        error = %error,
-                        "restart supervisor stopping: respawn spawn failed"
+            Ok(tuple) => tuple,
+            Err(error) => {
+                warn!(
+                    container = %container_id,
+                    error = %error,
+                    "restart supervisor stopping: respawn spawn failed"
+                );
+                if ai_enabled {
+                    log_ai_restart_lifecycle(
+                        &container_id,
+                        "ai_restart_failed",
+                        exit_code,
+                        restart_count,
+                        delay_secs,
+                        "spawn-child",
+                        None,
                     );
-                    if ai_enabled {
-                        log_ai_restart_lifecycle(
-                            &container_id,
-                            "ai_restart_failed",
-                            exit_code,
-                            restart_count,
-                            delay_secs,
-                            "spawn-child",
-                            None,
-                        );
-                    }
-                    break;
                 }
-            };
+                break;
+            }
+        };
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
             if ai_enabled {
@@ -8533,6 +8592,8 @@ fn supervise_child(
         }
         child = new_child;
         _pidfd = new_pidfd;
+        log_relays = new_log_relays;
+        active_supervisors.insert(container_id.clone(), pid);
         container_start_time = std::time::Instant::now();
         if ai_enabled {
             log_ai_restart_lifecycle(
@@ -8565,6 +8626,12 @@ fn supervise_child(
                 .unwrap_or_default(),
             std::iter::empty::<(&str, String)>(),
         );
+    }
+    let owns_registration = active_supervisors
+        .get(&container_id)
+        .is_some_and(|pid| *pid == child.id());
+    if owns_registration {
+        active_supervisors.remove(&container_id);
     }
 }
 
@@ -12202,7 +12269,7 @@ fn update_container_hosts(
     containers: &[ContainerRecord],
 ) -> Result<(), RuntimeError> {
     let dns_dir = runtime_dir.join("dns");
-    fs::create_dir_all(&dns_dir)?;
+    fs::create_dir_all(&dns_dir).map_err(path_io("create runtime DNS directory", &dns_dir))?;
     let mut network_entries = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
     for peer in containers {
         if !matches!(peer.status.as_str(), "running" | "paused") {
@@ -12244,7 +12311,8 @@ fn update_container_hosts(
             let hosts_body = render_hosts(&entries);
             let hosts_path = etc_dir.join("hosts");
             if let Some(parent) = hosts_path.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)
+                    .map_err(path_io("create container hosts directory", parent))?;
             }
             write_runtime_file_atomically(&hosts_path, hosts_body.as_bytes())?;
         }
@@ -12255,7 +12323,8 @@ fn update_container_hosts(
         // it to the privileged bridge IPAM path.
         let resolv_path = etc_dir.join("resolv.conf");
         if let Some(parent) = resolv_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(path_io("create container resolver directory", parent))?;
         }
         let endpoint_gateways = record
             .effective_network_endpoints()
@@ -12286,8 +12355,12 @@ fn update_container_hosts(
         } else {
             runtime_dns_config()
         };
-        ferro_net::dns::write_resolv_conf(&resolv_path, &dns_config)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        ferro_net::dns::write_resolv_conf(&resolv_path, &dns_config).map_err(|error| {
+            RuntimeError::Network(format!(
+                "write container resolver configuration {}: {error}",
+                resolv_path.display()
+            ))
+        })?;
     }
     Ok(())
 }
@@ -12444,33 +12517,38 @@ fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Run
     let parent = path.parent().ok_or_else(|| {
         RuntimeError::Network(format!("runtime file has no parent: {}", path.display()))
     })?;
+    static RUNTIME_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let temporary = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().unwrap().to_string_lossy()
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id(),
+        RUNTIME_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ));
-    let result = (|| {
+    let result = (|| -> Result<(), RuntimeError> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o644)
-            .open(&temporary)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        OpenOptions::new().read(true).open(parent)?.sync_all()?;
-        let read_back = fs::read(path)?;
-        if read_back != contents {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "runtime file read-back mismatch",
-            ));
-        }
-        Ok::<(), io::Error>(())
+            .open(&temporary)
+            .map_err(path_io("create runtime file staging file", &temporary))?;
+        file.write_all(contents)
+            .map_err(path_io("write runtime file staging file", &temporary))?;
+        file.sync_all()
+            .map_err(path_io("sync runtime file staging file", &temporary))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(path_io("publish runtime file", path))?;
+        OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(path_io("sync runtime file parent directory", parent))?;
+        Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && temporary.exists() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map_err(RuntimeError::Io)
+    result
 }
 
 fn runtime_dns_config() -> ferro_net::dns::DnsConfig {
@@ -14560,7 +14638,62 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
+
+    #[test]
+    fn eight_concurrent_runtime_file_creates_are_idempotent() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("shared.hosts");
+        let barrier = Arc::new(Barrier::new(8));
+        let mut writers = Vec::new();
+        for writer in 0..8_u8 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            writers.push(std::thread::spawn(move || {
+                let contents = vec![b'a' + writer; 1024 * 1024];
+                barrier.wait();
+                super::write_runtime_file_atomically(&path, &contents)
+            }));
+        }
+        for writer in writers {
+            writer
+                .join()
+                .expect("writer thread")
+                .expect("concurrent atomic publication");
+        }
+        let published = std::fs::read(&path).expect("published file");
+        assert_eq!(published.len(), 1024 * 1024);
+        assert!(published.iter().all(|byte| *byte == published[0]));
+    }
+
+    #[test]
+    fn runtime_file_io_error_names_operation_and_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("missing-parent/network.hosts");
+        let error = super::write_runtime_file_atomically(&path, b"hosts")
+            .expect_err("missing parent must fail");
+        let message = error.to_string();
+        assert!(message.contains("create runtime file staging file"), "{message}");
+        assert!(message.contains("missing-parent"), "{message}");
+        assert!(message.contains("network.hosts"), "{message}");
+    }
+
+    #[test]
+    fn terminal_status_waits_for_every_log_relay_to_drain() {
+        let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles = (0..2)
+            .map(|_| {
+                let drained = Arc::clone(&drained);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    drained.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .collect();
+        let mut relays = super::ChildLogRelays::new(handles);
+        relays.drain();
+        assert_eq!(drained.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn embedded_dns_returns_nodata_for_known_name_without_requested_family() {
@@ -18850,7 +18983,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -18869,6 +19002,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         );
         super::release_prepared_child(pid).unwrap();
         assert!(child.wait().unwrap().success());
+        log_relays.drain();
         assert!(marker.exists());
     }
 
@@ -18894,7 +19028,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -18908,6 +19042,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
+        log_relays.drain();
         for _ in 0..50 {
             if std::fs::read_to_string(&stdout)
                 .map(|value| value.contains("tty-ready"))
@@ -19070,7 +19205,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, _child, _pidfd) = super::spawn_child_with_logs(
+        let (pid, _child, _pidfd, _log_relays) = super::spawn_child_with_logs(
             command,
             &root.path().join("stdout.log"),
             &root.path().join("stderr.log"),

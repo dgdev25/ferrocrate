@@ -38,6 +38,7 @@ Optional environment:
   FERROCRATE_COMPOSE_BIN                          alternate standalone Compose executable
   FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS          per-client timeout (default: 240)
   FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS   daemon readiness timeout (default: 20)
+  FERROCRATE_CONFORMANCE_STRESS                    1 adds a CPU-loaded 10x foreground/scale row
   FERROCRATE_PEER_AUTH                            pidfd (default) or legacy-peercred
 USAGE
 }
@@ -88,6 +89,9 @@ fi
 peer_auth_mode="${FERROCRATE_PEER_AUTH:-pidfd}"
 [[ "$peer_auth_mode" == pidfd || "$peer_auth_mode" == legacy-peercred ]] ||
   harness_error "FERROCRATE_PEER_AUTH must be pidfd or legacy-peercred"
+stress_mode="${FERROCRATE_CONFORMANCE_STRESS:-0}"
+[[ "$stress_mode" == 0 || "$stress_mode" == 1 ]] ||
+  harness_error "FERROCRATE_CONFORMANCE_STRESS must be 0 or 1"
 [[ "$(uname -s)" == Linux ]] || harness_error "the Docker-compatible daemon is Linux-only"
 [[ -x "$ferro_bin" ]] || harness_error "missing executable ferro-cli: $ferro_bin"
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
@@ -296,6 +300,8 @@ compose_backend_network="${compose_project}_backend"
 host_port=18093
 process_token_base="ferrocrate-conformance-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 daemon_process_token="$process_token_base-daemon"
+stress_burner_pid=""
+stress_burner_token="$process_token_base-stress-burner"
 cleanup_sequence=0
 
 process_has_token() {
@@ -434,6 +440,12 @@ publish_evidence_pair() {
 
 cleanup() {
   local fixture_pids cleanup_token
+  if [[ -n "$stress_burner_pid" ]] \
+      && process_has_token "$stress_burner_pid" FERROCRATE_CONFORMANCE_PROCESS_TOKEN "$stress_burner_token"; then
+    kill -TERM "$stress_burner_pid" 2>/dev/null || true
+    wait "$stress_burner_pid" 2>/dev/null || true
+    stress_burner_pid=""
+  fi
   if [[ "$daemon_ready" == 1 ]]; then
     cleanup_token="$(next_cleanup_token)"
     run_bounded_owned 15 3 "$cleanup_token" \
@@ -895,6 +907,96 @@ record_foreground_stderr() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
 }
 
+record_concurrency_stress() {
+  local id="concurrency-stress-10x" area="stress"
+  local command_text started ended duration exit_code status stdout_file stderr_file
+  local iteration probe project probe_stdout probe_stderr command_token
+  local -a affinity=()
+  sequence=$((sequence + 1))
+  printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
+  printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
+  command_text="CPU burner; 50 foreground runs and compose --scale worker=3 repeated 10x"
+  if command -v taskset >/dev/null 2>&1 && taskset -c 0 true >/dev/null 2>&1; then
+    affinity=(taskset -c 0)
+  fi
+  env FERROCRATE_CONFORMANCE_PROCESS_TOKEN="$stress_burner_token" \
+    "${affinity[@]}" sh -c 'while :; do :; done' &
+  stress_burner_pid=$!
+  started="$(date +%s%N)"
+  exit_code=0
+  for iteration in $(seq 1 10); do
+    command_token="$process_token_base-stress-$iteration"
+    probe_stdout="$work_root/stress-$iteration.stdout"
+    probe_stderr="$work_root/stress-$iteration.stderr"
+    for probe in 1 2 3; do
+      if ! run_bounded_owned "$command_timeout" 5 "$command_token-output-$probe" \
+          env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+            "${affinity[@]}" docker run --rm alpine:3.20 echo hi \
+          >"$probe_stdout" 2>"$probe_stderr" \
+          || [[ "$(tr -d '\r' <"$probe_stdout")" != hi ]] || [[ -s "$probe_stderr" ]]; then
+        printf 'iteration %s foreground stdout probe %s failed\n' \
+          "$iteration" "$probe" >>"$stderr_file"
+        cat "$probe_stdout" "$probe_stderr" >>"$stderr_file"
+        exit_code=1
+        break
+      fi
+    done
+    [[ "$exit_code" == 0 ]] || break
+    if ! run_bounded_owned "$command_timeout" 5 "$command_token-tty" \
+        env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+          "${affinity[@]}" docker run --rm -t alpine:3.20 echo hi \
+        >"$probe_stdout" 2>"$probe_stderr" \
+        || [[ "$(tr -d '\r' <"$probe_stdout")" != hi ]] || [[ -s "$probe_stderr" ]]; then
+      printf 'iteration %s foreground TTY stdout failed\n' "$iteration" >>"$stderr_file"
+      cat "$probe_stdout" "$probe_stderr" >>"$stderr_file"
+      exit_code=1
+      break
+    fi
+    if ! run_bounded_owned "$command_timeout" 5 "$command_token-stderr" \
+        env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+          "${affinity[@]}" docker run --rm alpine:3.20 sh -c 'echo foreground-error >&2' \
+        >"$probe_stdout" 2>"$probe_stderr" \
+        || [[ -s "$probe_stdout" ]] \
+        || [[ "$(tr -d '\r' <"$probe_stderr")" != foreground-error ]]; then
+      printf 'iteration %s foreground stderr failed\n' "$iteration" >>"$stderr_file"
+      cat "$probe_stdout" "$probe_stderr" >>"$stderr_file"
+      exit_code=1
+      break
+    fi
+    project="${compose_parity_project}-stress-$iteration"
+    if ! run_bounded_owned "$command_timeout" 5 "$command_token-scale" \
+        env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+          "${affinity[@]}" "${compose_client[@]}" --ansi never --project-name "$project" \
+            --file "$compose_parity_dir/compose.yml" --profile optional up --detach --scale worker=3 \
+        >>"$stdout_file" 2>>"$stderr_file"; then
+      exit_code=1
+    fi
+    run_bounded_owned "$command_timeout" 5 "$command_token-down" \
+      env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+        "${affinity[@]}" "${compose_client[@]}" --ansi never --project-name "$project" \
+          --file "$compose_parity_dir/compose.yml" --profile optional down --timeout 2 \
+      >>"$stdout_file" 2>>"$stderr_file" || exit_code=1
+    [[ "$exit_code" == 0 ]] || break
+    printf 'iteration %s passed\n' "$iteration" >>"$stdout_file"
+  done
+  if process_has_token "$stress_burner_pid" FERROCRATE_CONFORMANCE_PROCESS_TOKEN "$stress_burner_token"; then
+    kill -TERM "$stress_burner_pid" 2>/dev/null || true
+    wait "$stress_burner_pid" 2>/dev/null || true
+  fi
+  stress_burner_pid=""
+  ended="$(date +%s%N)"
+  duration=$(((ended - started) / 1000000))
+  if [[ "$exit_code" == 0 ]]; then
+    status=PASS
+    pass_count=$((pass_count + 1))
+  else
+    status=FAIL
+    fail_count=$((fail_count + 1))
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
+}
+
 # Client identity and engine prerequisites.
 record_command cli-version client version
 record_command compose-version compose compose version
@@ -1088,6 +1190,9 @@ record_command compose-down compose compose --ansi never --project-name "$compos
   --file "$fixture" down --timeout 10
 record_command compose-network-remove-frontend compose network rm "$compose_frontend_network"
 record_command compose-network-remove-backend compose network rm "$compose_backend_network"
+if [[ "$stress_mode" == 1 ]]; then
+  record_concurrency_stress
+fi
 record_command system-prune cleanup system prune --force
 
 generated_at="$(date -u +%Y-%m-%d)"

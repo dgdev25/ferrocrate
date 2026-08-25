@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
@@ -17,10 +17,26 @@ pub struct DnsConfig {
 
 #[derive(Debug, Error)]
 pub enum DnsError {
-    #[error("DNS resolver I/O failed: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("DNS resolver I/O failed during {operation} on {path}: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("DNS resolver read-back mismatch at {0}")]
     Readback(String),
+}
+
+fn path_io<'a>(
+    operation: &'static str,
+    path: &'a Path,
+) -> impl FnOnce(std::io::Error) -> DnsError + 'a {
+    move |source| DnsError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 pub fn render_resolv_conf(config: &DnsConfig) -> String {
@@ -42,7 +58,7 @@ pub fn write_resolv_conf(path: &Path, config: &DnsConfig) -> Result<(), DnsError
         return Err(DnsError::Readback(path.display().to_string()));
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
+    fs::create_dir_all(parent).map_err(path_io("create resolver parent directory", parent))?;
     let contents = render_resolv_conf(config);
     let (temp, mut file) = loop {
         let sequence = RESOLVER_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -60,16 +76,25 @@ pub fn write_resolv_conf(path: &Path, config: &DnsConfig) -> Result<(), DnsError
         match options.open(&candidate) {
             Ok(file) => break (candidate, file),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(path_io("create resolver staging file", &candidate)(error)),
         }
     };
-    let result = (|| {
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        let directory = OpenOptions::new().read(true).open(parent)?;
-        directory.sync_all()?;
-        let visible = fs::read_to_string(path)?;
+    let result = (|| -> Result<(), DnsError> {
+        file.write_all(contents.as_bytes())
+            .map_err(path_io("write resolver staging file", &temp))?;
+        file.sync_all()
+            .map_err(path_io("sync resolver staging file", &temp))?;
+        drop(file);
+        fs::rename(&temp, path).map_err(path_io("publish resolver file", path))?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .map_err(path_io("open resolver parent directory", parent))?;
+        directory
+            .sync_all()
+            .map_err(path_io("sync resolver parent directory", parent))?;
+        let visible =
+            fs::read_to_string(path).map_err(path_io("read published resolver file", path))?;
         if visible != contents {
             return Err(DnsError::Readback(path.display().to_string()));
         }
@@ -153,6 +178,25 @@ mod tests {
                 .expect("resolver directory entry")
                 .file_name()
                 .to_string_lossy()
-                .ends_with(".tmp")));
+            .ends_with(".tmp")));
+    }
+
+    #[test]
+    fn resolver_io_error_names_operation_and_path() {
+        let directory = tempfile::tempdir().expect("resolver directory");
+        let parent = directory.path().join("not-a-directory");
+        std::fs::write(&parent, b"file").expect("blocking file");
+        let path = parent.join("resolv.conf");
+        let error = write_resolv_conf(
+            &path,
+            &DnsConfig {
+                servers: vec!["1.1.1.1".into()],
+                search: Vec::new(),
+            },
+        )
+        .expect_err("file parent must fail");
+        let message = error.to_string();
+        assert!(message.contains("create resolver parent directory"), "{message}");
+        assert!(message.contains("not-a-directory"), "{message}");
     }
 }

@@ -251,35 +251,33 @@ fn linux_native_restarts_its_owned_daemon_after_an_unexpected_exit() {
 fn wsl2_uses_a_real_subprocess_lifecycle() {
     let host = FakeHost::ready_after_start();
     let config = Wsl2Config {
-        distro: "FerrocrateDesktop".into(),
+        distro: "Ubuntu".into(),
         relay_addr: "127.0.0.1:4288".parse().unwrap(),
-        relay_token: "bridge-secret".into(),
+        relay_token: String::new(),
     };
     let backend = Wsl2Backend::with_host(config, host.clone());
 
     assert_eq!(backend.start().unwrap().state, BackendState::Running);
     assert_eq!(
         host.starts.lock().unwrap().as_slice(),
-        &[
-            CommandSpec::new("wsl.exe").args([
-                "-d",
-                "FerrocrateDesktop",
-                "--",
-                "ferrocrate",
-                "daemon",
-                "--docker-compat",
-            ]),
-            CommandSpec::new("wsl.exe")
-                .args([
-                    "-d",
-                    "FerrocrateDesktop",
-                    "--",
-                    "ferrocrate-desktop-relay",
-                    "--listen",
-                    "127.0.0.1:4288",
-                ])
-                .env("FERROCRATE_WEB_BRIDGE_TOKEN", "bridge-secret"),
-        ]
+        &[CommandSpec::new("wsl.exe").args([
+            "-d",
+            "Ubuntu",
+            "--",
+            "sh",
+            "-lc",
+            "exec ferrocrate daemon --socket \"$HOME/$1\" --docker-compat",
+            "ferrocrate-wsl",
+            ".local/state/ferrocrate/ferrocrate.sock",
+        ])]
+    );
+    assert_eq!(
+        backend.status().endpoint,
+        "wsl://Ubuntu/$HOME/.local/state/ferrocrate/ferrocrate.sock"
+    );
+    assert_eq!(
+        backend.socket_path(),
+        Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
     );
     assert_eq!(backend.stop().unwrap().state, BackendState::Stopped);
 }
@@ -340,7 +338,7 @@ fn linux_native_adopts_an_already_healthy_daemon_without_spawning() {
 }
 
 #[test]
-fn wsl2_selection_rejects_an_empty_relay_token() {
+fn wsl2_selection_does_not_require_an_installer_impossible_relay_token() {
     let result = select_backend_for(
         Platform::Windows,
         FakeHost::healthy(true),
@@ -352,7 +350,7 @@ fn wsl2_selection_rejects_an_empty_relay_token() {
         MacosVmConfig::default(),
     );
 
-    assert!(matches!(result, Err(BackendError::Unavailable(reason)) if reason.contains("token")));
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -373,16 +371,13 @@ fn proxy_requests_route_through_the_selected_backend_transport() {
     let response = backend.request(request.clone()).unwrap();
 
     assert_eq!(response.status, 201);
+    let requests = host.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        host.requests.lock().unwrap().as_slice(),
-        &[(
-            Transport::AuthenticatedLoopback {
-                addr: "127.0.0.1:4288".parse().unwrap(),
-                bearer_token: "bridge-secret".into(),
-            },
-            request,
-        )]
+        requests[0].0.to_string(),
+        "wsl://FerrocrateDesktop/$HOME/.local/state/ferrocrate/ferrocrate.sock"
     );
+    assert_eq!(requests[0].1, request);
 }
 
 #[test]

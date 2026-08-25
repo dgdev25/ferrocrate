@@ -142,6 +142,10 @@ impl CommandSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     UnixSocket(PathBuf),
+    WslUnixSocket {
+        distro: String,
+        path: PathBuf,
+    },
     Loopback(SocketAddr),
     AuthenticatedLoopback {
         addr: SocketAddr,
@@ -153,6 +157,9 @@ impl fmt::Display for Transport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnixSocket(path) => write!(formatter, "{}", path.display()),
+            Self::WslUnixSocket { distro, path } => {
+                write!(formatter, "wsl://{distro}/$HOME/{}", path.display())
+            }
             Self::Loopback(addr) | Self::AuthenticatedLoopback { addr, .. } => {
                 write!(formatter, "http://{addr}")
             }
@@ -695,6 +702,7 @@ impl BackendHost for SystemBackendHost {
     ) -> Result<TransportResponse, BackendError> {
         match transport {
             Transport::UnixSocket(path) => request_unix(path, request),
+            Transport::WslUnixSocket { .. } => request_duplex(transport, request),
             Transport::Loopback(addr) => request_tcp(*addr, None, request),
             Transport::AuthenticatedLoopback { addr, bearer_token } => {
                 request_tcp(*addr, Some(bearer_token), request)
@@ -852,6 +860,83 @@ enum TransportStream {
     Unix(std::os::unix::net::UnixStream),
 }
 
+struct WslDuplexStream {
+    inner: Arc<WslDuplexInner>,
+}
+
+struct WslDuplexInner {
+    child: Mutex<Child>,
+    stdin: Mutex<Option<ChildStdin>>,
+    stdout: Mutex<ChildStdout>,
+}
+
+impl Drop for WslDuplexInner {
+    fn drop(&mut self) {
+        if let Ok(stdin) = self.stdin.get_mut() {
+            stdin.take();
+        }
+        if let Ok(child) = self.child.get_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+impl Read for WslDuplexStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.inner
+            .stdout
+            .lock()
+            .map_err(|_| std::io::Error::other("WSL stdout state is unavailable"))?
+            .read(buffer)
+    }
+}
+
+impl Write for WslDuplexStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.inner
+            .stdin
+            .lock()
+            .map_err(|_| std::io::Error::other("WSL stdin state is unavailable"))?
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "WSL stdin is closed")
+            })?
+            .write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner
+            .stdin
+            .lock()
+            .map_err(|_| std::io::Error::other("WSL stdin state is unavailable"))?
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "WSL stdin is closed")
+            })?
+            .flush()
+    }
+}
+
+impl DuplexStream for WslDuplexStream {
+    fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError> {
+        Ok(Box::new(Self {
+            inner: self.inner.clone(),
+        }))
+    }
+
+    fn shutdown_write(&self) -> Result<(), BackendError> {
+        self.inner
+            .stdin
+            .lock()
+            .map_err(|_| BackendError::State)?
+            .take();
+        Ok(())
+    }
+}
+
 impl Read for TransportStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -915,6 +1000,36 @@ fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, Bac
                 ))
             }
         }
+        Transport::WslUnixSocket { distro, path } => {
+            if path.is_absolute() {
+                return Err(BackendError::Transport(
+                    "WSL socket path must be relative to the guest home".into(),
+                ));
+            }
+            let mut child = Command::new("wsl.exe")
+                .args(["-d", distro, "--", "sh", "-lc"])
+                .arg("exec socat STDIO \"UNIX-CONNECT:$HOME/$1\"")
+                .arg("ferrocrate-wsl")
+                .arg(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| BackendError::Transport("WSL socket stdin is unavailable".into()))?;
+            let stdout = child.stdout.take().ok_or_else(|| {
+                BackendError::Transport("WSL socket stdout is unavailable".into())
+            })?;
+            Ok(Box::new(WslDuplexStream {
+                inner: Arc::new(WslDuplexInner {
+                    child: Mutex::new(child),
+                    stdin: Mutex::new(Some(stdin)),
+                    stdout: Mutex::new(stdout),
+                }),
+            }))
+        }
         Transport::Loopback(addr) | Transport::AuthenticatedLoopback { addr, .. } => {
             if !addr.ip().is_loopback() {
                 return Err(BackendError::Transport(
@@ -927,6 +1042,16 @@ fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, Bac
             )?)))
         }
     }
+}
+
+fn request_duplex(
+    transport: &Transport,
+    request: &TransportRequest,
+) -> Result<TransportResponse, BackendError> {
+    let mut stream = connect_transport(transport)?;
+    stream.write_all(&serialize_request(request, None))?;
+    stream.shutdown_write()?;
+    parse_response(stream)
 }
 
 fn read_http_status(stream: &mut dyn DuplexStream) -> Result<u16, BackendError> {
@@ -1064,9 +1189,6 @@ pub fn select_backend_for(
 ) -> Result<Box<dyn Backend>, BackendError> {
     match platform {
         Platform::Linux => Ok(Box::new(LinuxNativeBackend::with_host(linux, host))),
-        Platform::Windows if wsl2.relay_token.trim().is_empty() => Err(BackendError::Unavailable(
-            "WSL2 relay token is required".into(),
-        )),
         Platform::Windows => Ok(Box::new(Wsl2Backend::with_host(wsl2, host))),
         Platform::Macos => Ok(Box::new(MacosVmBackend::with_host(macos, host))),
         Platform::Unsupported => Err(BackendError::Unavailable(

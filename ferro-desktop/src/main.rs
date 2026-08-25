@@ -1518,8 +1518,15 @@ fn process_exec_request(
     if request.cmd.is_empty() {
         return Err(DesktopError::Invalid("command is required".to_string()));
     }
-    if request.wsl_distro.is_none() {
-        request.wsl_distro = default_wsl_distro.map(ToOwned::to_owned);
+    if let Some(distro) = default_wsl_distro {
+        request.use_wsl = true;
+        request.wsl_distro = Some(distro.to_owned());
+        let output = run_direct_wsl_request(&request, distro)?;
+        return Ok(ExecResponse {
+            status: output.code,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
     }
 
     let output = run_request(&request)?;
@@ -1528,6 +1535,41 @@ fn process_exec_request(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+#[cfg(windows)]
+fn run_direct_wsl_request(
+    request: &ExecRequest,
+    distro: &str,
+) -> Result<ferro_desktop::backend::ExecResponse, DesktopError> {
+    let mut command = Command::new("wsl.exe");
+    command.args([
+        "-d",
+        distro,
+        "--",
+        "env",
+        "FERROCRATE_DESKTOP_FORWARD=0",
+        "RUST_LOG=error",
+        "FERROCRATE_LOG=error",
+        "NO_COLOR=1",
+    ]);
+    command.args(&request.cmd);
+    let output = command.output()?;
+    Ok(ferro_desktop::backend::ExecResponse {
+        code: output.status.code().unwrap_or(1),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+#[cfg(not(windows))]
+fn run_direct_wsl_request(
+    _request: &ExecRequest,
+    _distro: &str,
+) -> Result<ferro_desktop::backend::ExecResponse, DesktopError> {
+    Err(DesktopError::Invalid(
+        "WSL execution is only available on Windows hosts".to_string(),
+    ))
 }
 
 fn read_exec_request<R: Read>(stream: &mut R) -> Result<ExecRequest, DesktopError> {
@@ -3210,13 +3252,13 @@ mod tests {
         copy_interactive_input, desktop_addr_default_from, exec_mode_from_env, gather_phase0_check,
         is_interactive_exec_command, is_log_follow_command, load_channel_manifest,
         load_forward_entries, load_vm_state, network_proxy_request, parse_exec_mode,
-        read_exec_request, registry_login_request, render_macos_launch_agent_plist,
-        render_windows_service_script, replay_follow_frames, run_request, save_forward_entries,
-        save_vm_state, should_route_to_macos_guest, terminal_exec_create_path,
-        terminal_exec_create_payload, terminal_resize_path, upsert_forward_entry,
-        validate_daemon_addr, vm_state_running, volume_proxy_request, write_follow_frame, Cli,
-        Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame, ForwardCommands, ForwardEntry,
-        VmCommands, VmConfig, VmState,
+        process_exec_request, read_exec_request, registry_login_request,
+        render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
+        run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
+        terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
+        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
+        write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
+        ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -3596,6 +3638,25 @@ mod tests {
         };
         let out = run_request(&req).expect("run command");
         assert_eq!(out.code, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_default_wsl_distro_forces_direct_guest_execution() {
+        let request = ExecRequest {
+            cmd: vec!["printf".to_string(), "must-not-run-on-host".to_string()],
+            use_wsl: false,
+            wsl_distro: None,
+            follow: false,
+            interactive: false,
+        };
+
+        let error = process_exec_request(request, Some("Ubuntu"))
+            .expect_err("a named-pipe request must route directly to WSL");
+
+        assert!(error
+            .to_string()
+            .contains("WSL execution is only available on Windows hosts"));
     }
 
     #[test]

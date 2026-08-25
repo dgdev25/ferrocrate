@@ -15,10 +15,13 @@ require_text() {
 
 require_text "$windows" 'Microsoft-Windows-Subsystem-Linux' 'WSL optional feature'
 require_text "$windows" 'VirtualMachinePlatform' 'virtual machine platform feature'
-require_text "$windows" 'wsl(\.exe)? --install.*Ubuntu' 'Ubuntu distro installation'
+require_text "$windows" '\[string\]\$WslDistro = .Ubuntu.' 'shared Ubuntu distro default'
+require_text "$windows" 'wsl(\.exe)? --install.*\$Distro' 'selected distro installation'
 require_text "$windows" 'systemctl --user|ferrocrate-daemon\.pid' 'guest daemon supervisor fallback'
+require_text "$windows" 'apt-get install -y[^\n]*socat' 'guest socket transport dependency'
+require_text "$windows" 'ferrocrate daemon --socket' 'guest daemon socket'
 require_text "$windows" '--pipe-name' 'named pipe relay'
-require_text "$windows" '127\.0\.0\.1' 'loopback-only relay'
+require_text "$windows" '--wsl-distro[^\n]*\$Distro' 'direct named-pipe WSL routing'
 
 require_text "$macos" 'vfkit' 'vfkit-first launcher'
 require_text "$macos" 'qemu-system-' 'QEMU fallback'

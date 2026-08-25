@@ -5,6 +5,7 @@ param(
   [string]$Channel = 'public',
   [string]$Version = 'latest',
   [string]$Repo = 'dgtise25/ferrocrate',
+  [string]$WslDistro = 'Ubuntu',
   [string]$Prefix = "$env:ProgramFiles\FerroCrate\bin",
   [string]$PaidReleaseBaseUrl = $env:PAID_RELEASE_BASE_URL,
   [string]$PaidReleaseToken = $env:PAID_RELEASE_TOKEN,
@@ -251,7 +252,7 @@ function Ensure-WslUbuntu {
   $installed = @(& wsl.exe --list --quiet 2>$null) | ForEach-Object { $_.Trim([char]0).Trim() }
   if ($installed -notcontains $Distro) {
     Write-Host "Installing WSL2 distro: $Distro"
-    & wsl.exe --install --distribution Ubuntu --no-launch
+    & wsl.exe --install --distribution $Distro --no-launch
     if ($LASTEXITCODE -ne 0) {
       throw 'WSL Ubuntu installation failed; reboot Windows if the feature enablement requires it.'
     }
@@ -263,11 +264,10 @@ function Provision-WslDaemon {
   param([string]$Distro = 'Ubuntu',[string]$Repo,[string]$Version)
   $guestScript = @'
 set -euo pipefail
-runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-mkdir -p "$runtime" "$HOME/.config/systemd/user" "$HOME/.local/state/ferrocrate"
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.local/state/ferrocrate"
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates tar socat
 if ! command -v ferrocrate >/dev/null 2>&1; then
-  sudo apt-get update
-  sudo apt-get install -y curl ca-certificates tar
   arch="$(uname -m)"
   case "$arch" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) exit 1 ;; esac
   tag="$FERROCRATE_INSTALL_VERSION"
@@ -285,7 +285,7 @@ cat >"$HOME/.config/systemd/user/ferrocrate-daemon.service" <<'UNIT'
 [Unit]
 Description=Ferrocrate rootless daemon
 [Service]
-ExecStart=/usr/local/bin/ferrocrate daemon --docker-compat
+ExecStart=/usr/local/bin/ferrocrate daemon --socket=%h/.local/state/ferrocrate/ferrocrate.sock --docker-compat
 Restart=on-failure
 RestartSec=2
 [Install]
@@ -296,7 +296,7 @@ if systemctl --user daemon-reload >/dev/null 2>&1; then
 else
   pidfile="$HOME/.local/state/ferrocrate/ferrocrate-daemon.pid"
   if ! test -s "$pidfile" || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    nohup ferrocrate daemon --docker-compat >"$HOME/.local/state/ferrocrate/daemon.log" 2>&1 &
+    nohup ferrocrate daemon --socket "$HOME/.local/state/ferrocrate/ferrocrate.sock" --docker-compat >"$HOME/.local/state/ferrocrate/daemon.log" 2>&1 &
     echo $! >"$pidfile"
   fi
 fi
@@ -317,7 +317,7 @@ function Start-WslNamedPipeRelay {
     if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) { return }
   }
   # The pipe is local to this Windows host; the relay executes every request via wsl.exe.
-  $process = Start-Process -FilePath $desktop -ArgumentList @('daemon','--pipe-name','ferrocrate','--wsl-distro',$Distro,'--addr','127.0.0.1:4288') -WindowStyle Hidden -PassThru
+  $process = Start-Process -FilePath $desktop -ArgumentList @('daemon','--pipe-name','ferrocrate','--wsl-distro',$Distro) -WindowStyle Hidden -PassThru
   Set-Content -Path $pidPath -Value $process.Id
 }
 
@@ -344,9 +344,9 @@ switch ($Method) {
 
 if ($installDesktopBin) {
   Enable-Wsl2Host
-  Ensure-WslUbuntu -Distro 'Ubuntu'
-  Provision-WslDaemon -Distro 'Ubuntu' -Repo $Repo -Version $Version
-  Start-WslNamedPipeRelay -Prefix $Prefix -Distro 'Ubuntu'
+  Ensure-WslUbuntu -Distro $WslDistro
+  Provision-WslDaemon -Distro $WslDistro -Repo $Repo -Version $Version
+  Start-WslNamedPipeRelay -Prefix $Prefix -Distro $WslDistro
 }
 
 Write-Host "Done. Try: ferrocrate --help"

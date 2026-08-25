@@ -10,8 +10,7 @@ pub struct Wsl2Config {
 impl Default for Wsl2Config {
     fn default() -> Self {
         Self {
-            distro: std::env::var("FERROCRATE_WSL_DISTRO")
-                .unwrap_or_else(|_| "FerrocrateDesktop".into()),
+            distro: std::env::var("FERROCRATE_WSL_DISTRO").unwrap_or_else(|_| "Ubuntu".into()),
             relay_addr: "127.0.0.1:4288".parse().expect("constant loopback address"),
             relay_token: std::env::var("FERROCRATE_WEB_BRIDGE_TOKEN").unwrap_or_default(),
         }
@@ -27,34 +26,28 @@ impl Wsl2Backend {
         Self::with_host(config, SystemBackendHost::shared())
     }
     pub fn with_host(config: Wsl2Config, host: Arc<dyn BackendHost>) -> Self {
+        let socket_path = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
         let prefix = ["-d", config.distro.as_str(), "--"];
         let start = CommandSpec::new("wsl.exe").args(prefix).args([
-            "ferrocrate",
-            "daemon",
-            "--docker-compat",
+            "sh",
+            "-lc",
+            "exec ferrocrate daemon --socket \"$HOME/$1\" --docker-compat",
+            "ferrocrate-wsl",
+            socket_path.to_string_lossy().as_ref(),
         ]);
         let exec = CommandSpec::new("wsl.exe").args(prefix);
-        let relay = CommandSpec::new("wsl.exe")
-            .args(prefix)
-            .args([
-                "ferrocrate-desktop-relay".to_string(),
-                "--listen".into(),
-                config.relay_addr.to_string(),
-            ])
-            .env("FERROCRATE_WEB_BRIDGE_TOKEN", config.relay_token.clone());
         Self {
             core: BackendCore::new(
                 "wsl2",
                 Platform::Windows,
                 start,
                 exec,
-                Transport::AuthenticatedLoopback {
-                    addr: config.relay_addr,
-                    bearer_token: config.relay_token,
+                Transport::WslUnixSocket {
+                    distro: config.distro,
+                    path: socket_path,
                 },
                 host,
-            )
-            .with_auxiliary_start(relay),
+            ),
         }
     }
 }
@@ -99,6 +92,9 @@ impl Backend for Wsl2Backend {
         self.core.resize_terminal(exec_id, columns, rows)
     }
     fn socket_path(&self) -> Option<PathBuf> {
-        None
+        match &self.core.transport {
+            Transport::WslUnixSocket { path, .. } => Some(path.clone()),
+            _ => None,
+        }
     }
 }

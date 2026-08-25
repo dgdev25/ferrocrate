@@ -254,6 +254,7 @@ engine-info
 image-build
 image-inspect
 container-create
+container-create-duplicate-name
 container-start
 container-inspect
 container-list
@@ -308,6 +309,25 @@ compose-network-remove-frontend
 compose-network-remove-backend
 system-prune
 EXPECTED
+
+# A dynamically linked BusyBox cannot execute in the harness's FROM-scratch
+# fixture. Reject it during preflight with the package-level remediation,
+# rather than allowing container-start and its dependent rows to fail later.
+set +e
+PATH="$fake_bin:$PATH" \
+  FAKE_STATE="$fake_state" \
+  FERROCRATE_BIN="$spaced_ferro" \
+  FERROCRATE_CONFORMANCE_BUSYBOX=/bin/ls \
+  DOCKER_BUILDKIT=0 \
+  "$harness" --output "$work_root/dynamic-busybox.md" --log "$work_root/dynamic-busybox.tsv" \
+  >"$work_root/dynamic-busybox.stdout" 2>"$work_root/dynamic-busybox.stderr"
+dynamic_busybox_status=$?
+set -e
+[[ "$dynamic_busybox_status" == 2 ]] || {
+  echo "expected dynamic BusyBox preflight error exit 2, got $dynamic_busybox_status" >&2
+  exit 1
+}
+grep -Fq 'install busybox-static' "$work_root/dynamic-busybox.stderr"
 
 scoreboard="$work_root/parity-scoreboard.md"
 execution_log="$work_root/docker-client-conformance.log"
@@ -405,7 +425,7 @@ awk -F '\t' '$2 == "compose-down" { found = ($5 == 0 && $6 == "PASS") } END { ex
 grep -Eq '^\| [0-9]+ \| registry-search \|.*\| 37 \| FAIL \|$' "$scoreboard"
 grep -Eq '^\| [0-9]+ \| container-attach \|.*\| 124 \| ERROR \|$' "$scoreboard"
 grep -Fq '| PASS | 55 |' "$scoreboard"
-grep -Fq '| FAIL | 3 |' "$scoreboard"
+grep -Fq '| FAIL | 4 |' "$scoreboard"
 grep -Fq '| ERROR | 1 |' "$scoreboard"
 grep -Fq 'DOCKER_BUILDKIT=0' "$scoreboard"
 grep -Fq 'tests/fixtures/real-app/compose.yml' "$scoreboard"
@@ -479,7 +499,7 @@ awk -F '\t' '$1 != "image-build" && $1 != "unrecorded" && $4 != "0" { exit 1 }' 
 awk -F '\t' '$2 == "image-build" { found = ($5 == 1 && $6 == "PASS") } END { exit !found }' \
   "$buildkit_log"
 grep -Fq '| PASS | 55 |' "$buildkit_scoreboard"
-grep -Fq '| FAIL | 3 |' "$buildkit_scoreboard"
+grep -Fq '| FAIL | 4 |' "$buildkit_scoreboard"
 grep -Fq '| ERROR | 1 |' "$buildkit_scoreboard"
 grep -Fq 'BuildKit fallback (`DOCKER_BUILDKIT=1` build probe)' "$buildkit_scoreboard"
 

@@ -95,7 +95,23 @@ command -v slirp4netns >/dev/null 2>&1 || harness_error "slirp4netns is required
 command -v awk >/dev/null 2>&1 || harness_error "awk is required"
 command -v ps >/dev/null 2>&1 || harness_error "ps is required for descendant cleanup"
 command -v sha256sum >/dev/null 2>&1 || harness_error "sha256sum is required"
-[[ -x /bin/busybox ]] || harness_error "/bin/busybox is required for the offline image fixture"
+command -v ldd >/dev/null 2>&1 || harness_error "ldd is required to verify the offline image fixture"
+busybox_bin=""
+if [[ -n "${FERROCRATE_CONFORMANCE_BUSYBOX:-}" ]]; then
+  busybox_candidates=("$FERROCRATE_CONFORMANCE_BUSYBOX")
+else
+  busybox_candidates=(/bin/busybox.static /usr/bin/busybox-static /bin/busybox)
+fi
+for candidate in "${busybox_candidates[@]}"; do
+  [[ -x "$candidate" ]] || continue
+  ldd_output="$(ldd "$candidate" 2>&1 || true)"
+  if grep -Fq 'not a dynamic executable' <<<"$ldd_output"; then
+    busybox_bin="$candidate"
+    break
+  fi
+done
+[[ -n "$busybox_bin" ]] ||
+  harness_error "a statically linked BusyBox is required for the FROM-scratch fixture; install busybox-static"
 [[ -f "$fixture" ]] || harness_error "missing Compose fixture: $fixture"
 [[ -f "$repo_root/tests/fixtures/real-app/webroot/index.html" ]] || harness_error "incomplete Compose fixture: webroot/index.html"
 [[ -f "$repo_root/tests/fixtures/real-app/apiroot/index.json" ]] || harness_error "incomplete Compose fixture: apiroot/index.json"
@@ -113,13 +129,22 @@ if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
   exec 8<>"$namespace_sync/go"
   exec 9<>"$namespace_sync/ready"
   unshare --user --map-root-user --mount --net bash -c '
-    mount -t tmpfs tmpfs /run/netns
+    mkdir -p "$5/read-only-run" "$5/xdg"
+    resolv_link="$(readlink /etc/resolv.conf 2>/dev/null || true)"
+    if [[ "$resolv_link" == ../run/* ]]; then
+      resolv_relative="${resolv_link#../run/}"
+      mkdir -p "$5/read-only-run/$(dirname "$resolv_relative")"
+      printf "nameserver 10.0.2.3\n" >"$5/read-only-run/$resolv_relative"
+    else
+      printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
+      mount --bind "$5/resolv.conf" /etc/resolv.conf
+    fi
+    mount --bind "$5/read-only-run" /run
+    mount -o remount,bind,ro /run
     ip link set lo up
-    printf "nameserver 10.0.2.3\n" >"$5/resolv.conf"
-    mount --bind "$5/resolv.conf" /etc/resolv.conf
     printf r >"$6"
     IFS= read -r -n1 <"$1"
-    exec env FERROCRATE_CONFORMANCE_USERNS=1 FERROCRATE_PEER_AUTH="$7" bash "$2" --output "$3" --log "$4"
+    exec env XDG_RUNTIME_DIR="$5/xdg" FERROCRATE_CONFORMANCE_USERNS=1 FERROCRATE_PEER_AUTH="$7" bash "$2" --output "$3" --log "$4"
   ' bash "$namespace_sync/go" "$0" "$output" "$execution_log" "$namespace_sync" \
     "$namespace_sync/child-ready" "$peer_auth_mode" &
   namespace_pid=$!
@@ -147,7 +172,11 @@ if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
   exec 7>&-
   exec 8>&-
   exec 9>&-
-  rm -rf -- "$namespace_sync"
+  if [[ "${FERROCRATE_CONFORMANCE_KEEP_WORKDIR:-0}" != 1 ]]; then
+    rm -rf -- "$namespace_sync"
+  else
+    printf 'conformance work directory retained under %s\n' "$namespace_sync" >&2
+  fi
   exit "$namespace_status"
 fi
 if [[ "${FERROCRATE_CONFORMANCE_USERNS:-0}" == 1 ]]; then
@@ -442,20 +471,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cp /bin/busybox "$context_dir/busybox" || harness_error "cannot copy /bin/busybox into build fixture"
+cp "$busybox_bin" "$context_dir/busybox" || harness_error "cannot copy $busybox_bin into build fixture"
 chmod 0755 "$context_dir/busybox" || harness_error "cannot make build fixture executable"
 printf 'offline conformance fixture\n' >"$context_dir/marker.txt" || harness_error "cannot write build fixture"
-busybox_loader="/lib/ld-musl-$(uname -m).so.1"
-if [[ -f "$busybox_loader" ]]; then
-  mkdir -p "$context_dir/lib" || harness_error "cannot create loader fixture directory"
-  cp -L -- "$busybox_loader" "$context_dir/lib/$(basename "$busybox_loader")" ||
-    harness_error "cannot copy the musl loader into the offline image fixture"
-  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY lib/ /lib/\nCOPY marker.txt /marker.txt\n' \
-    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
-else
-  printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
-    "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
-fi
+printf 'FROM scratch\nLABEL io.ferrocrate.conformance-run="%s"\nCOPY busybox /bin/busybox\nCOPY marker.txt /marker.txt\n' \
+  "$run_id" >"$context_dir/Dockerfile" || harness_error "cannot write Dockerfile fixture"
 printf 'conformance-copy-marker\n' >"$work_root/copy-marker.txt" || harness_error "cannot write copy fixture"
 printf 'contract-password\n' >"$work_root/login-password.txt" || harness_error "cannot write login fixture"
 

@@ -890,7 +890,7 @@ impl CreationRollback {
             (Some(_), false) => None,
             (Some(name), true) if self.network_ownership.is_none() => {
                 match netns_deletion_decision(
-                    Path::new("/var/run/netns"),
+                    &netns::netns_root(),
                     name,
                     self.namespace_identity,
                 ) {
@@ -4585,10 +4585,7 @@ impl ContainerRuntime {
                 &config.bridge_name,
             )?)?;
             run_cmd(&veth::build_ip_link_set_up_cmd(&host_interface)?)?;
-            run_cmd(&netns::build_ip_link_set_netns_cmd(
-                &peer_interface,
-                netns_name,
-            )?)?;
+            move_link_to_runtime_netns(&peer_interface, netns_name)?;
             run_cmd(&ip_netns_exec(
                 netns_name,
                 &["ip", "link", "set", &peer_interface, "name", &interface_name],
@@ -8896,7 +8893,7 @@ fn setup_network(
                 return Ok(NetworkSetup::isolated(None, None, None));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+            create_runtime_netns(&netns_name)?;
             rollback.track_namespace_created(netns_name.clone())?;
             let identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
             rollback.identify_namespace(identity)?;
@@ -8919,7 +8916,7 @@ fn setup_network(
                 ));
             }
             let netns_name = format!("ferro-{container_id}");
-            run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+            create_runtime_netns(&netns_name)?;
             rollback.track_namespace_created(netns_name.clone())?;
             let identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
             rollback.identify_namespace(identity)?;
@@ -8993,7 +8990,7 @@ fn setup_network(
     let subnet = network_cidr_v4(&bridge_config.gateway, bridge_config.prefix)
         .map_err(RuntimeError::Network)?;
     let netns_name = format!("ferro-{container_id}");
-    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+    create_runtime_netns(&netns_name)?;
     rollback.track_namespace_created(netns_name.clone())?;
     let namespace_identity = kernel_path_identity(&netns::netns_path(&netns_name))?;
     rollback.identify_namespace(namespace_identity)?;
@@ -9030,10 +9027,7 @@ fn setup_network(
         &bridge_config.name,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(
-        &cont_veth,
-        &netns_name,
-    )?)?;
+    move_link_to_runtime_netns(&cont_veth, &netns_name)?;
     // Rename the moved interface to eth0 inside the netns (while still down).
     run_cmd(&ip_netns_exec(
         &netns_name,
@@ -9280,7 +9274,7 @@ fn setup_managed_network(
         ));
     };
     let netns_name = attachment.netns.clone();
-    run_cmd(&netns::build_ip_netns_add_cmd(&netns_name)?)?;
+    create_runtime_netns(&netns_name)?;
     rollback.track_namespace_created(netns_name.clone())?;
     rollback.identify_namespace(kernel_path_identity(&netns::netns_path(&netns_name))?)?;
     let host_veth = format!("veth{}", short_id(container_id, 8));
@@ -9306,10 +9300,7 @@ fn setup_managed_network(
         &attachment.bridge,
     )?)?;
     run_cmd(&veth::build_ip_link_set_up_cmd(&host_veth)?)?;
-    run_cmd(&netns::build_ip_link_set_netns_cmd(
-        &cont_veth,
-        &netns_name,
-    )?)?;
+    move_link_to_runtime_netns(&cont_veth, &netns_name)?;
     run_cmd(&ip_netns_exec(
         &netns_name,
         &["ip", "link", "set", &cont_veth, "name", "eth0"],
@@ -10743,7 +10734,7 @@ fn verify_container_kernel_ownership(
     let netns_name = netns_name.ok_or_else(|| {
         RuntimeError::Network("network ownership has no namespace name".to_string())
     })?;
-    let netns_path = Path::new("/var/run/netns").join(netns_name);
+    let netns_path = netns::netns_path(netns_name);
     let namespace_verified = match fs::symlink_metadata(&netns_path) {
         Ok(metadata) => match verify_kernel_identity(
             KernelIdentity {
@@ -11128,7 +11119,7 @@ fn cleanup_network(
             ])?;
         }
         if let Some(netns_name) = record.netns.as_deref() {
-            run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+            delete_runtime_netns(netns_name)?;
         }
         return Ok(());
     }
@@ -11157,7 +11148,7 @@ fn cleanup_network(
                     (record.netns.as_deref(), record.namespace_identity)
                 {
                     verify_endpoint_namespace_identity(netns_name, expected)?;
-                    run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                    delete_runtime_netns(netns_name)?;
                 }
             }
             return Ok(());
@@ -11192,7 +11183,7 @@ fn cleanup_network(
                             observed,
                         )? {
                             OwnedResourceState::Present => {
-                                run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?)?;
+                                delete_runtime_netns(netns_name)?;
                             }
                             OwnedResourceState::Missing => {}
                         }
@@ -11333,8 +11324,7 @@ fn cleanup_network_resources(
     }
 
     if let Some(netns_name) = netns_name {
-        let command = netns::build_ip_netns_del_cmd(netns_name)?;
-        run_cmd_allow_missing(&command)?;
+        delete_runtime_netns(netns_name)?;
     }
     if let Some(ownership) = ownership {
         run_cmd_allow_missing(&[
@@ -12321,6 +12311,10 @@ fn render_hosts(entries: &BTreeMap<String, BTreeSet<String>>) -> String {
 }
 
 fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
+    let root = netns::netns_root();
+    if root != Path::new("/var/run/netns") {
+        return netns::build_netns_exec_at_cmd(&root.join(netns_name), args);
+    }
     let mut out = vec![
         "ip".to_string(),
         "netns".to_string(),
@@ -12329,6 +12323,55 @@ fn ip_netns_exec(netns_name: &str, args: &[&str]) -> Vec<String> {
     ];
     out.extend(args.iter().map(|val| (*val).to_string()));
     out
+}
+
+fn create_runtime_netns(netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        return run_cmd(&netns::build_ip_netns_add_cmd(netns_name)?);
+    }
+    netns::build_ip_netns_add_cmd(netns_name)?;
+    fs::create_dir_all(&root)?;
+    let path = root.join(netns_name);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = run_cmd(&netns::build_netns_create_at_cmd(&path)) {
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn delete_runtime_netns(netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        return run_cmd_allow_missing(&netns::build_ip_netns_del_cmd(netns_name)?);
+    }
+    netns::build_ip_netns_del_cmd(netns_name)?;
+    let path = root.join(netns_name);
+    if !path.exists() {
+        return Ok(());
+    }
+    run_cmd_allow_missing(&["umount".to_string(), path.display().to_string()])?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeError::Io(error)),
+    }
+}
+
+fn move_link_to_runtime_netns(link: &str, netns_name: &str) -> Result<(), RuntimeError> {
+    let root = netns::netns_root();
+    if root == Path::new("/var/run/netns") {
+        run_cmd(&netns::build_ip_link_set_netns_cmd(link, netns_name)?)
+    } else {
+        run_cmd(&netns::build_netns_move_link_at_cmd(
+            link,
+            &root.join(netns_name),
+        )?)
+    }
 }
 
 /// eBPF published-port redirects can hand a container-originated skb directly

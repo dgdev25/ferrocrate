@@ -2124,6 +2124,10 @@ fn doctor_webkit_rendering_mode(appimage: bool, nvidia: bool, safe: bool) -> &'s
     }
 }
 
+fn doctor_netns_root_message(root: &Path) -> String {
+    format!("network namespace root: {}", root.display())
+}
+
 #[cfg(target_os = "linux")]
 fn orphan_bridge_names(link_names: impl IntoIterator<Item = String>, records: &[NetworkRecord]) -> Vec<String> {
     let owned: std::collections::HashSet<&str> = records.iter().map(|record| record.bridge_name.as_str()).collect();
@@ -2429,6 +2433,15 @@ fn handle_doctor(
                     "desktop-only preflight; use --safe-rendering if WebKitGTK cannot start"
                         .to_string(),
                 ),
+                remediated: false,
+                action: None,
+            });
+            let netns_root = ferro_net::netns::netns_root();
+            checks.push(DoctorCheck {
+                id: "network_namespace_root".to_string(),
+                ok: true,
+                message: doctor_netns_root_message(&netns_root),
+                hint: None,
                 remediated: false,
                 action: None,
             });
@@ -25915,6 +25928,16 @@ volumes:
         assert_eq!(
             super::doctor_webkit_rendering_mode(true, false, false),
             "shared-memory (AppImage preflight)"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_selected_network_namespace_root() {
+        assert_eq!(
+            super::doctor_netns_root_message(std::path::Path::new(
+                "/runtime/ferrocrate/netns",
+            )),
+            "network namespace root: /runtime/ferrocrate/netns"
         );
     }
 

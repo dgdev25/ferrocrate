@@ -9,7 +9,7 @@ members = [
   "ferro-security-ebpf",
   "ferro-mind",
   "ferro-compose",
-  "ferro-cli", "ferro-desktop",
+  "ferro-cli", "ferro-desktop", "ferro-web",
 ]
 resolver = "2"
 

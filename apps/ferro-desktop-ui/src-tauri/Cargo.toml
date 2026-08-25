@@ -12,6 +12,8 @@ async-stream = "0.3"
 axum = "0.8"
 base64 = "0.22"
 ferro-desktop = { path = "../../../ferro-desktop" }
+ferro-web = { path = "../../../ferro-web" }
+mime_guess = "2"
 futures-core = "0.3"
 getrandom = "0.3"
 keyring = "3"

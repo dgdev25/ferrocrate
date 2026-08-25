@@ -6,7 +6,7 @@ on:
 permissions: { contents: read }
 jobs:
   package:
-    runs-on: macos-15
+    runs-on: [self-hosted, macos, ferro-lab]
     timeout-minutes: 60
     env: { CI: 'true' }
     steps:

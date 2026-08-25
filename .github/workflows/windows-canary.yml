@@ -6,7 +6,7 @@ on:
 permissions: { contents: read }
 jobs:
   package:
-    runs-on: windows-2025
+    runs-on: [self-hosted, windows, ferro-lab]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

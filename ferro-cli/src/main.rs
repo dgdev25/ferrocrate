@@ -2915,7 +2915,7 @@ fn decode_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let chars = value.as_bytes();
-    for pair in chars.chunks_exact(2) {
+    for pair in chars.as_chunks::<2>().0 {
         let high = hex_digit(pair[0])?;
         let low = hex_digit(pair[1])?;
         bytes.push((high << 4) | low);

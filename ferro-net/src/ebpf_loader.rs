@@ -1059,7 +1059,7 @@ impl<'a> ElfFile<'a> {
         let names = checked_slice(self.bytes, strings.offset as usize, strings.size as usize)?;
         let table_bytes = checked_slice(self.bytes, table.offset as usize, table.size as usize)?;
         let mut symbols = Vec::new();
-        for entry in table_bytes.chunks_exact(24).skip(1) {
+        for entry in table_bytes.as_chunks::<24>().0.iter().skip(1) {
             let name_offset = read_u32(entry, 0)? as usize;
             let info = entry[4];
             let section_index = read_u16(entry, 6)? as usize;
@@ -2073,7 +2073,7 @@ pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
     let mut state = INITIAL;
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0_u32; 64];
         for (index, word) in words.iter_mut().take(16).enumerate() {
             let offset = index * 4;

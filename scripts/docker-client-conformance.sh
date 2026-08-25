@@ -496,6 +496,7 @@ fail_count=0
 error_count=0
 record_stdin="/dev/null"
 expected_daemon_error_message=""
+expected_daemon_error_exit_code=""
 record_docker_buildkit=0
 
 shell_command() {
@@ -573,6 +574,8 @@ record_expected_daemon_error() {
   ended="$(date +%s%N)"
   duration=$(((ended - started) / 1000000))
   if [[ "$exit_code" != 0 ]] && [[ "$exit_code" != 124 && "$exit_code" != 137 ]] \
+      && { [[ -z "$expected_daemon_error_exit_code" ]] \
+        || [[ "$exit_code" == "$expected_daemon_error_exit_code" ]]; } \
       && grep -q "Error response from daemon" "$stderr_file" \
       && { [[ -z "$expected_daemon_error_message" ]] \
         || grep -Fq "$expected_daemon_error_message" "$stderr_file"; }; then
@@ -586,6 +589,7 @@ record_expected_daemon_error() {
     "$sequence" "$id" "$area" "$command_text" "$exit_code" "$status" "$duration" >>"$log_tmp"
   record_stdin="/dev/null"
   expected_daemon_error_message=""
+  expected_daemon_error_exit_code=""
   record_docker_buildkit=0
 }
 
@@ -615,6 +619,10 @@ fi
 record_command image-inspect image image inspect "$image"
 record_command container-create container create --label "$owner_label" --name "$container" \
   --publish "127.0.0.1:${host_port}:8080" "$image" /bin/busybox sleep 120
+expected_daemon_error_exit_code=125
+expected_daemon_error_message="Conflict. The container name \"/$container\" is already in use by container \""
+record_expected_daemon_error container-create-duplicate-name container create --name "$container" \
+  "$image" /bin/busybox true
 record_command container-start container start "$container"
 record_command container-inspect container inspect "$container"
 record_command container-list container ps --all

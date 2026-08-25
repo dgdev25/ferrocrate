@@ -11568,8 +11568,18 @@ fn docker_put_container_archive(
 fn docker_create_pending(state: &DockerCompatState, body: &[u8], name: Option<String>) -> Result<String, String> {
     let spec = parse_docker_create_spec(body, name)?;
     let id = docker_compat_id("d", &state.next_id);
+    if let Some(name) = spec.name.as_deref() {
+        state
+            .name_store
+            .reserve_name(name, &id)
+            .map_err(|error| error.to_string())?;
+    }
     state.pending.lock().map_err(|_| "failed to acquire lock".to_string())?.insert(id.clone(), spec);
-    if let Err(error) = state.persist_pending() { state.pending.lock().map_err(|_| "failed to acquire lock".to_string())?.remove(&id); return Err(error); }
+    if let Err(error) = state.persist_pending() {
+        state.pending.lock().map_err(|_| "failed to acquire lock".to_string())?.remove(&id);
+        let _ = state.name_store.release_reserved_name(&id);
+        return Err(error);
+    }
     Ok(id)
 }
 
@@ -16059,6 +16069,7 @@ struct DockerCompatState {
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
     pending_path: PathBuf,
+    name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     events: Mutex<DockerEventStore>,
 }
@@ -16085,17 +16096,29 @@ struct DockerEventStore {
 impl DockerCompatState {
     fn new(runtime_dir: &Path) -> Result<Self, String> {
         let pending_path = runtime_dir.join("docker-pending.json");
-        let pending = if pending_path.exists() {
+        let pending: HashMap<String, DockerCreateSpec> = if pending_path.exists() {
             let bytes = std::fs::read(&pending_path).map_err(|error| error.to_string())?;
             serde_json::from_slice(&bytes)
                 .map_err(|error| format!("docker: invalid pending state: {error}"))?
         } else {
             HashMap::new()
         };
+        let name_store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            runtime_dir.join("containers.db"),
+        )
+        .map_err(|error| error.to_string())?;
+        for (id, spec) in &pending {
+            if let Some(name) = spec.name.as_deref() {
+                name_store
+                    .reserve_name(name, id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         Ok(Self {
             next_id: AtomicU64::new(0),
             pending: Mutex::new(pending),
             pending_path,
+            name_store,
             execs: Mutex::new(HashMap::new()),
             events: Mutex::new(DockerEventStore::open(runtime_dir.join("events.jsonl"))?),
         })
@@ -18052,6 +18075,12 @@ fn handle_docker_compat_connection(
                 };
                 if !pending_deleted.is_empty() {
                     state.persist_pending()?;
+                    for id in &pending_deleted {
+                        state
+                            .name_store
+                            .release_reserved_name(id)
+                            .map_err(|error| error.to_string())?;
+                    }
                     deleted.extend(pending_deleted);
                 }
                 let body = serde_json::json!({
@@ -18391,28 +18420,30 @@ fn handle_docker_compat_connection(
                     }
                 };
                 if let Some(pending_id) = pending_id {
-                    let runtime_name_in_use = runtime
-                        .list()
-                        .map_err(|error| error.to_string())?
-                        .into_iter()
-                        .any(|record| record.name.as_deref() == Some(name));
                     let mut pending = state
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    if pending
-                        .iter()
-                        .any(|(id, spec)| id != &pending_id && spec.name.as_deref() == Some(name))
-                        || runtime_name_in_use
-                    {
-                        return Err(format!("docker: container name is already in use: {name}"));
-                    }
                     let spec = pending
                         .get_mut(&pending_id)
                         .ok_or_else(|| "docker: pending container disappeared".to_string())?;
+                    let previous_name = spec.name.clone();
+                    state
+                        .name_store
+                        .rename_reserved_name(&pending_id, name)
+                        .map_err(|error| error.to_string())?;
                     spec.name = Some(name.to_string());
                     drop(pending);
-                    state.persist_pending()?;
+                    if let Err(error) = state.persist_pending() {
+                        if let Some(previous_name) = previous_name.as_deref() {
+                            let _ = state
+                                .name_store
+                                .rename_reserved_name(&pending_id, previous_name);
+                        } else {
+                            let _ = state.name_store.release_reserved_name(&pending_id);
+                        }
+                        return Err(error);
+                    }
                     return Ok(http_response(204, &[], "text/plain"));
                 }
                 let id = resolve_container_id(&runtime, requested_id)?;
@@ -18705,6 +18736,10 @@ fn handle_docker_compat_connection(
                     .unwrap_or(false);
                 if removed_pending {
                     state.persist_pending()?;
+                    state
+                        .name_store
+                        .release_reserved_name(pending_id.as_deref().expect("removed pending id"))
+                        .map_err(|error| error.to_string())?;
                     http_response(204, &[], "text/plain")
                 } else {
                     let resolved_id =
@@ -19628,6 +19663,9 @@ fn docker_status_for_error(err: &str) -> u16 {
         return 503;
     }
     if lowered.contains("still running") {
+        return 409;
+    }
+    if lowered.contains("container name") && lowered.contains("already in use") {
         return 409;
     }
     if lowered.contains("not found")
@@ -22405,6 +22443,7 @@ mod tests {
         docker_chunked_headers, docker_container_apply_time_bounds,
         docker_container_matches_filters, docker_container_prune_matches_filters,
         docker_directory_usage, docker_event_kind, docker_event_payload, docker_event_resource,
+        docker_create_pending, docker_error_response, docker_status_for_error,
         docker_event_response_attributes, docker_hijack_headers, docker_image_apply_time_bounds,
         parse_docker_log_time_bound, rfc3339_nanos,
         docker_image_is_dangling, docker_image_matches_filters, docker_image_prune_matches_filters,
@@ -28113,6 +28152,37 @@ volumes:
             .lock()
             .expect("reopened pending lock")
             .contains_key("dfixture"));
+    }
+
+    #[test]
+    fn docker_create_duplicate_name_returns_conflict_with_docker_wording() {
+        let temp = tempfile::tempdir().expect("runtime");
+        let state = DockerCompatState::new(temp.path()).expect("state");
+        let request = br#"{"Image":"alpine:latest","Cmd":["true"]}"#;
+        let winner = docker_create_pending(&state, request, Some("api-duplicate".to_string()))
+            .expect("first create");
+        let error = docker_create_pending(&state, request, Some("api-duplicate".to_string()))
+            .expect_err("second create must conflict");
+        let expected = format!(
+            "Conflict. The container name \"/api-duplicate\" is already in use by container \"{winner}\". You have to remove (or rename) that container to be able to reuse that name."
+        );
+        assert_eq!(error, expected);
+        assert_eq!(docker_status_for_error(&error), 409);
+        let response = String::from_utf8(docker_error_response(409, &error)).expect("response");
+        assert!(response.starts_with("HTTP/1.1 409 Conflict\r\n"));
+        assert!(response.contains(&serde_json::json!({"message": expected}).to_string()));
+    }
+
+    #[test]
+    fn native_cli_name_conflict_uses_docker_wording() {
+        let error = ferro_core::container_store::ContainerStoreError::NameConflict {
+            name: "cli-duplicate".to_string(),
+            container_id: "abc123".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Conflict. The container name \"/cli-duplicate\" is already in use by container \"abc123\". You have to remove (or rename) that container to be able to reuse that name."
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ jobs:
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - shell: bash
-        run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+        run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles nsis,msi --config '{"bundle":{"createUpdaterArtifacts":false}}'
         working-directory: apps/ferro-desktop-ui
       - name: Secret-leak canary

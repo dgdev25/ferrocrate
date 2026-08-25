@@ -23,6 +23,11 @@ jobs:
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && rustup target add ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Frontend for the embedded dashboard
+        shell: bash
+        run: cd apps/ferro-desktop-ui && npm ci && npm run build
       - name: Build archive, checksum, provenance, and Linux deb
         shell: bash
         run: bash scripts/build-release-artifacts.sh --version "$GITHUB_REF_NAME" --target-os '${{ matrix.target_os }}' --target-arch '${{ matrix.arch }}'
@@ -54,7 +59,7 @@ jobs:
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - run: node scripts/configure-updater-key.mjs
-      - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+      - run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles deb,appimage
         working-directory: apps/ferro-desktop-ui
       - run: bash scripts/inject-deb-maintainer-scripts.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/deb/*.deb
@@ -95,7 +100,7 @@ jobs:
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
       - run: node scripts/configure-updater-key.mjs
-      - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+      - run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - name: Build unsigned app and DMG
         run: npm run tauri:build -- --bundles app,dmg
         working-directory: apps/ferro-desktop-ui
@@ -152,7 +157,7 @@ jobs:
       - run: node scripts/configure-updater-key.mjs
         env: { TAURI_UPDATER_PUBLIC_KEY: '${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}' }
       - shell: bash
-        run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+        run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles nsis,msi
         working-directory: apps/ferro-desktop-ui
         env:

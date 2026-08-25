@@ -23,7 +23,7 @@ jobs:
         run: pkg-config --exists webkit2gtk-4.1 gtk+-3.0 && echo ok
       - run: npm ci
         working-directory: apps/ferro-desktop-ui
-      - run: cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
+      - run: npm run --prefix apps/ferro-desktop-ui build && cargo build --release -p ferro-cli -p ferro-desktop && bash scripts/bundle-sidecars.sh
       - run: npm run tauri:build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
         working-directory: apps/ferro-desktop-ui
       - run: bash scripts/inject-deb-maintainer-scripts.sh apps/ferro-desktop-ui/src-tauri/target/release/bundle/deb/*.deb

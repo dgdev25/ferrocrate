@@ -42,6 +42,7 @@ jobs:
       - name: Stage sidecars for Tauri validation
         shell: bash
         run: |
+          npm run --prefix apps/ferro-desktop-ui build
           cargo build --release -p ferro-cli -p ferro-desktop
           bash scripts/bundle-sidecars.sh
       - name: Unit gates

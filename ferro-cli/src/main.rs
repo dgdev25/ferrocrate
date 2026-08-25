@@ -30136,6 +30136,21 @@ volumes:
             }
         }
     }
+
+    #[test]
+    fn persistent_root_uses_only_explicit_home_or_home_dot_ferrocrate() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            super::persistent_root(Some(OsStr::new("/state")), Some(OsStr::new("/home/user"))),
+            PathBuf::from("/state")
+        );
+        assert_eq!(
+            super::persistent_root(None, Some(OsStr::new("/home/user"))),
+            PathBuf::from("/home/user/.ferrocrate")
+        );
+        assert_eq!(super::persistent_root(None, None), PathBuf::from(".ferrocrate"));
+    }
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
@@ -30193,14 +30208,23 @@ mod tests_non_linux {
     }
 }
 
-fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("FERROCRATE_HOME") {
+fn persistent_root(ferrocrate_home: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    // This is the persistent state root, despite the legacy function name.
+    // Runtime/socket variables must never redirect durable state.
+    if let Some(dir) = ferrocrate_home {
         return PathBuf::from(dir);
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = home {
         return PathBuf::from(home).join(".ferrocrate");
     }
     PathBuf::from(".ferrocrate")
+}
+
+fn runtime_dir() -> PathBuf {
+    persistent_root(
+        std::env::var_os("FERROCRATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 }

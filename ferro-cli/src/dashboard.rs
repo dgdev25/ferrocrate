@@ -23,10 +23,24 @@ const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
 const LOG_READ_CHUNK_BYTES: usize = 8 * 1024;
+const PLACEHOLDER_MARKER: &str = "<!-- ferrocrate-dashboard-placeholder -->";
+const PLACEHOLDER_MESSAGE: &str = "The dashboard UI was not bundled in this build. Run `npm ci && npm run build` in apps/ferro-desktop-ui, then rebuild ferro-cli.";
 
 #[derive(RustEmbed)]
-#[folder = "../apps/ferro-desktop-ui/dist"]
+#[folder = "$OUT_DIR/ferrocrate-dashboard-dist"]
 struct DashboardAssets;
+
+fn dashboard_placeholder_message(index: Option<&[u8]>) -> Option<String> {
+    std::str::from_utf8(index?)
+        .ok()?
+        .contains(PLACEHOLDER_MARKER)
+        .then(|| PLACEHOLDER_MESSAGE.to_string())
+}
+
+pub(crate) fn unavailable_message() -> Option<String> {
+    <DashboardAssets as RustEmbed>::get("index.html")
+        .and_then(|asset| dashboard_placeholder_message(Some(asset.data.as_ref())))
+}
 
 impl StaticAssets for DashboardAssets {
     fn get(&self, path: &str) -> Option<(Vec<u8>, &'static str)> {
@@ -954,6 +968,9 @@ impl CommandDispatcher for ProcessDispatcher {
 }
 
 pub(crate) fn run(options: Options) -> Result<(), String> {
+    if let Some(message) = unavailable_message() {
+        return Err(message);
+    }
     options.validate()?;
     let _daemon = ensure_daemon()?;
     let token = ferro_web::generate_session_token()?;
@@ -987,6 +1004,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    struct TestDispatcher;
+
+    impl CommandDispatcher for TestDispatcher {
+        fn dispatch(&self, _request: CommandRequest, _events: EventHub) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+    }
+
     #[test]
     fn non_loopback_requires_tls_and_operator_gate() {
         let options = Options {
@@ -1007,6 +1032,36 @@ mod tests {
         assert!(mime.starts_with("text/html"));
         assert!(<DashboardAssets as RustEmbed>::iter()
             .any(|path| path.starts_with("assets/index-") && path.ends_with(".js")));
+    }
+
+    #[test]
+    fn placeholder_dashboard_assets_are_refused_before_starting_a_daemon() {
+        let placeholder = format!("{PLACEHOLDER_MARKER}{PLACEHOLDER_MESSAGE}");
+        let message = dashboard_placeholder_message(Some(placeholder.as_bytes()))
+            .expect("placeholder marker");
+
+        assert!(message.contains("dashboard UI was not bundled"));
+        assert!(message.contains("npm ci && npm run build"));
+    }
+
+    #[tokio::test]
+    async fn built_dashboard_assets_are_served() {
+        assert!(unavailable_message().is_none(), "test requires built dashboard assets");
+        let server = Server::spawn_loopback(
+            "127.0.0.1:0".parse().unwrap(),
+            "test-token".to_string(),
+            Arc::new(DashboardAssets),
+            Arc::new(TestDispatcher),
+        )
+        .await
+        .expect("start dashboard server");
+        let response = reqwest::get(format!("http://{}/", server.addr()))
+            .await
+            .expect("request dashboard");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(response.text().await.expect("dashboard body").contains("<html"));
+        server.shutdown().await;
     }
 
     #[test]

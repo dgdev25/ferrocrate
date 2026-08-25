@@ -4436,9 +4436,6 @@ impl EngineAccess {
                 Ok(endpoint) => return Ok(Self::Delegate(endpoint)),
                 Err(error) => error,
             };
-            if runtime_dir.join(ENGINE_OWNER_FILE).exists() {
-                return Err(last_error);
-            }
             if Instant::now() >= deadline {
                 return Err(format!(
                     "engine: timed out waiting for active owner publication or direct ownership: {last_error}"
@@ -17104,9 +17101,10 @@ fn run_daemon(
         std::fs::remove_file(socket_path).map_err(|err| err.to_string())?;
     }
 
-    let listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
+    let mut listener = UnixListener::bind(socket_path).map_err(|err| err.to_string())?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
+    listener.set_nonblocking(true).map_err(|err| format!("daemon: set socket nonblocking: {err}"))?;
     let runtime_dir = Arc::new(runtime_dir);
     let runtime = Arc::new(
         ContainerRuntime::new(runtime_dir.as_ref())
@@ -17138,10 +17136,12 @@ fn run_daemon(
         None
     };
     engine_owner.publish_daemon_owner(socket_path)?;
+    let mut bound_identity = daemon_socket_identity(socket_path)?;
+    let mut last_socket_check = Instant::now();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
                 let runtime_dir = runtime_dir.clone();
                 let runtime = runtime.clone();
                 let store = store.clone();
@@ -17166,10 +17166,46 @@ fn run_daemon(
                     }
                 });
             }
-            Err(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_socket_check.elapsed() >= Duration::from_secs(1) {
+                    match daemon_socket_identity(socket_path) {
+                        Ok(identity) if identity == bound_identity => {}
+                        Err(error) if error.contains("unavailable") => {
+                            listener = UnixListener::bind(socket_path)
+                                .map_err(|error| format!("daemon: rebind missing socket: {error}"))?;
+                            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+                                .map_err(|error| format!("daemon: restore socket permissions: {error}"))?;
+                            listener.set_nonblocking(true)
+                                .map_err(|error| format!("daemon: restore socket nonblocking: {error}"))?;
+                            bound_identity = daemon_socket_identity(socket_path)?;
+                            engine_owner.publish_daemon_owner(socket_path)?;
+                            tracing::warn!(socket = %socket_path.display(), "rebound unlinked daemon socket");
+                        }
+                        Ok(_) => return Err(format!(
+                            "daemon: socket {} was replaced by another inode; exiting and clearing owner record",
+                            socket_path.display()
+                        )),
+                        Err(error) => return Err(error),
+                    }
+                    last_socket_check = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("daemon: accept failed: {error}")),
         }
     }
-    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_socket_identity(path: &Path) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("daemon: socket {} is unavailable: {error}", path.display()))?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!("daemon: socket {} is no longer a Unix socket", path.display()));
+    }
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(target_os = "linux")]
@@ -23023,7 +23059,7 @@ mod tests {
     }
 
     #[test]
-    fn held_lock_with_missing_published_socket_fails_without_owner_timeout() {
+    fn held_lock_with_missing_published_socket_waits_for_republication() {
         let runtime = tempfile::tempdir().expect("runtime directory");
         let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");
         let _owner = EngineLockGuard::try_acquire(runtime.path())
@@ -23049,8 +23085,8 @@ mod tests {
             "unexpected stale-owner diagnostic: {error}"
         );
         assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "stale published owner consumed the owner timeout: {:?}",
+            started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(3),
+            "stale published owner did not use the bounded republication window: {:?}",
             started.elapsed()
         );
     }

@@ -35,7 +35,18 @@ pub fn discover(timeout: Duration, wanted_digest: Option<&str>) -> Result<Vec<Mi
     let daemon = ServiceDaemon::new().map_err(|error| error.to_string())?;
     let receiver = daemon.browse(SERVICE_TYPE).map_err(|error| error.to_string())?;
     let deadline = Instant::now() + timeout;
-    let mut peers = Vec::new();
+    let mut peers = std::env::var("FERROCRATE_LAN_MIRROR_PEERS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|value| value.parse::<std::net::SocketAddr>().ok())
+        .map(|address| MirrorPeer {
+            instance_id: format!("static-{}", address.ip()),
+            address: address.ip(),
+            port: address.port(),
+            digests: BTreeSet::new(),
+        })
+        .collect::<Vec<_>>();
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         let Ok(event) = receiver.recv_timeout(remaining.min(Duration::from_millis(100))) else {
             continue;

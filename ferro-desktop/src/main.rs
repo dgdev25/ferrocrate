@@ -3336,6 +3336,13 @@ fn backend_exec_request(cmd: &[String]) -> Result<BackendExecRequest, DesktopErr
 }
 
 fn select_exec_backend(_cmd: &[String]) -> Result<Box<dyn Backend>, DesktopError> {
+    #[cfg(windows)]
+    {
+        return Ok(Box::new(LinuxNativeBackend::new(
+            LinuxNativeConfig::default(),
+        )));
+    }
+
     #[cfg(target_os = "macos")]
     if !should_route_to_macos_guest(_cmd, exec_mode_from_env()) {
         return Ok(Box::new(LinuxNativeBackend::new(
@@ -3343,7 +3350,10 @@ fn select_exec_backend(_cmd: &[String]) -> Result<Box<dyn Backend>, DesktopError
         )));
     }
 
-    select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))
+    #[cfg(not(windows))]
+    {
+        select_backend().map_err(|error| DesktopError::Invalid(error.to_string()))
+    }
 }
 
 fn run_request(
@@ -3467,6 +3477,8 @@ mod tests {
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
         ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
+    #[cfg(windows)]
+    use super::select_exec_backend;
     #[cfg(target_os = "linux")]
     use super::{
         create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
@@ -3847,8 +3859,12 @@ mod tests {
 
     #[test]
     fn executes_local_command() {
+        #[cfg(windows)]
+        let cmd = vec!["cmd.exe".to_string(), "/C".to_string(), "echo ok".to_string()];
+        #[cfg(not(windows))]
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()];
         let req = ExecRequest {
-            cmd: vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()],
+            cmd,
             use_wsl: false,
             wsl_distro: None,
             follow: false,
@@ -3856,6 +3872,16 @@ mod tests {
         };
         let out = run_request(&req).expect("run command");
         assert_eq!(out.code, 0);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("ok"));
+
+        #[cfg(windows)]
+        {
+            let failed = ExecRequest {
+                cmd: vec!["cmd.exe".to_string(), "/C".to_string(), "exit 23".to_string()],
+                ..req
+            };
+            assert_eq!(run_request(&failed).expect("run command").code, 23);
+        }
     }
 
     #[cfg(not(windows))]
@@ -3879,19 +3905,40 @@ mod tests {
 
     #[test]
     fn proxied_commands_disable_color_and_warning_noise() {
+        #[cfg(windows)]
+        let cmd = vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output ($env:RUST_LOG + '|' + $env:FERROCRATE_LOG + '|' + $env:NO_COLOR)"
+                .to_string(),
+        ];
+        #[cfg(not(windows))]
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s|%s|%s' \"$RUST_LOG\" \"$FERROCRATE_LOG\" \"$NO_COLOR\"".to_string(),
+        ];
         let req = ExecRequest {
-            cmd: vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf '%s|%s|%s' \"$RUST_LOG\" \"$FERROCRATE_LOG\" \"$NO_COLOR\"".to_string(),
-            ],
+            cmd,
             use_wsl: false,
             wsl_distro: None,
             follow: false,
             interactive: false,
         };
         let out = run_request(&req).expect("run command");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "error|error|1");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "error|error|1");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_windows_commands_bypass_the_wsl_backend() {
+        assert_eq!(
+            select_exec_backend(&["cmd.exe".to_string()])
+                .expect("local backend")
+                .name(),
+            "linux-native"
+        );
     }
 
     #[test]

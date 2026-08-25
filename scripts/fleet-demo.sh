@@ -119,7 +119,13 @@ start_manager() {
 }
 
 start_ui() {
-  if pid_alive "$state_root/pids/ui"; then return; fi
+  if pid_alive "$state_root/pids/ui"; then
+    if operate_session >/dev/null 2>&1; then
+      return
+    fi
+    note "Fleet UI login expired; restarting it"
+    stop_pid "$state_root/pids/ui" 'Fleet UI'
+  fi
   note "starting Fleet browser UI"
   env FERROCRATE_CLUSTER_ID="$cluster_id" \
     nohup "$repo_root/target/release/ferro-mgr" fleet-ui --listen "$ui_addr" --insecure-loopback \

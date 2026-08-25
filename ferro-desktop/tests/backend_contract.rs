@@ -290,7 +290,7 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
         &[CommandSpec::new("wsl.exe").args([
             "-d",
             "Ubuntu",
-            "--",
+            "--exec",
             "sh",
             "-lc",
             "exec ferrocrate daemon --socket \"$HOME/$1\" --docker-compat",
@@ -580,7 +580,7 @@ fn wsl_exec_forwards_environment_inside_the_guest() {
     assert_eq!(
         host.execs.lock().unwrap().as_slice(),
         &[(
-            CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--"]),
+            CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec"]),
             ExecRequest::new("env")
                 .args(["NO_COLOR=1", "sh", "-c", "printf '%s' \"$NO_COLOR\"",])
                 .stdin(b"input".to_vec()),

@@ -44,7 +44,7 @@ impl Wsl2Backend {
     }
     pub fn with_host(config: Wsl2Config, host: Arc<dyn BackendHost>) -> Self {
         let socket_path = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
-        let prefix = ["-d", config.distro.as_str(), "--"];
+        let prefix = ["-d", config.distro.as_str(), "--exec"];
         let start = CommandSpec::new("wsl.exe").args(prefix).args([
             "sh",
             "-lc",

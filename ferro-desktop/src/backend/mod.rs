@@ -260,6 +260,9 @@ pub struct TerminalRequest {
 pub trait DuplexStream: Read + Write + Send {
     fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError>;
     fn shutdown_write(&self) -> Result<(), BackendError>;
+    fn cancel(&self) -> Result<(), BackendError> {
+        self.shutdown_write()
+    }
 }
 
 pub struct TerminalSession {
@@ -935,6 +938,15 @@ impl DuplexStream for WslDuplexStream {
             .take();
         Ok(())
     }
+
+    fn cancel(&self) -> Result<(), BackendError> {
+        self.shutdown_write()?;
+        let mut child = self.inner.child.lock().map_err(|_| BackendError::State)?;
+        if matches!(child.try_wait(), Ok(None)) {
+            child.kill()?;
+        }
+        Ok(())
+    }
 }
 
 impl Read for TransportStream {
@@ -1051,7 +1063,7 @@ fn request_duplex(
     let mut stream = connect_transport(transport)?;
     stream.write_all(&serialize_request(request, None))?;
     stream.shutdown_write()?;
-    parse_response(stream)
+    parse_response_with_timeout(stream, Duration::from_secs(5))
 }
 
 fn read_http_status(stream: &mut dyn DuplexStream) -> Result<u16, BackendError> {
@@ -1132,6 +1144,30 @@ fn parse_response(stream: impl Read) -> Result<TransportResponse, BackendError> 
     })
 }
 
+fn parse_response_with_timeout(
+    stream: Box<dyn DuplexStream>,
+    timeout: Duration,
+) -> Result<TransportResponse, BackendError> {
+    let controller = stream.try_clone_stream()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(parse_response(stream));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(response) => response,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            controller.cancel()?;
+            Err(BackendError::Transport(format!(
+                "backend response timed out after {} ms",
+                timeout.as_millis()
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(BackendError::Transport(
+            "backend response worker disconnected".into(),
+        )),
+    }
+}
+
 fn request_tcp(
     addr: SocketAddr,
     token: Option<&str>,
@@ -1194,5 +1230,72 @@ pub fn select_backend_for(
         Platform::Unsupported => Err(BackendError::Unavailable(
             "unsupported desktop platform".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::sync::Condvar;
+
+    struct DelayedDuplex {
+        canceled: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Read for DelayedDuplex {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            let (lock, condition) = &*self.canceled;
+            let canceled = lock.lock().expect("cancel state");
+            let _ = condition
+                .wait_timeout(canceled, Duration::from_millis(200))
+                .expect("delayed read");
+            Ok(0)
+        }
+    }
+
+    impl Write for DelayedDuplex {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl DuplexStream for DelayedDuplex {
+        fn try_clone_stream(&self) -> Result<Box<dyn DuplexStream>, BackendError> {
+            Ok(Box::new(Self {
+                canceled: self.canceled.clone(),
+            }))
+        }
+
+        fn shutdown_write(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn cancel(&self) -> Result<(), BackendError> {
+            let (lock, condition) = &*self.canceled;
+            *lock.lock().map_err(|_| BackendError::State)? = true;
+            condition.notify_all();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn transport_response_timeout_returns_before_a_blocking_read_finishes() {
+        let canceled = Arc::new((Mutex::new(false), Condvar::new()));
+        let started = std::time::Instant::now();
+        let error = parse_response_with_timeout(
+            Box::new(DelayedDuplex {
+                canceled: canceled.clone(),
+            }),
+            Duration::from_millis(20),
+        )
+        .expect_err("blocking response must time out");
+
+        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(error.to_string().contains("timed out"));
+        assert!(*canceled.0.lock().expect("cancel state"));
     }
 }

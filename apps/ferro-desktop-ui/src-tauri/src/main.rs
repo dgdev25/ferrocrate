@@ -1560,14 +1560,13 @@ fn registry_login_command(registry: &str, username: &str) -> Result<Vec<String>,
     if registry.is_empty() || username.is_empty() {
         return Err("registry and username are required".to_string());
     }
-    Ok(vec![
-        "registry-proxy".to_string(),
-        "login".to_string(),
-        "--registry".to_string(),
-        registry.to_string(),
-        "--username".to_string(),
-        username.to_string(),
-    ])
+    Ok(ferrocrate_proxy_command(&[
+        "login",
+        registry,
+        "--username",
+        username,
+        "--password-stdin",
+    ]))
 }
 
 fn registry_logout_command(registry: &str) -> Result<Vec<String>, String> {
@@ -1648,39 +1647,25 @@ fn network_summaries(
 }
 
 fn volume_proxy_command(action: VolumeAction, target: Option<&str>) -> Result<Vec<String>, String> {
-    let mut command = Vec::new();
-    match action {
-        VolumeAction::List => {
-            command = [
-                "exec",
-                "--",
-                "ferrocrate",
-                "volume",
-                "ls",
-                "--format",
-                "json",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        }
-        VolumeAction::Prune => {
-            command.extend(["volume-proxy".to_string(), "prune".to_string()]);
-        }
+    let command = match action {
+        VolumeAction::List => ferrocrate_proxy_command(&["volume", "ls", "--format", "json"]),
+        VolumeAction::Prune => ferrocrate_proxy_command(&["volume", "prune"]),
         VolumeAction::Create | VolumeAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "volume name is required".to_string())?;
-            command.push("volume-proxy".to_string());
-            command.push(match action {
-                VolumeAction::Create => "create".to_string(),
-                VolumeAction::Remove => "remove".to_string(),
-                _ => unreachable!(),
-            });
-            command.push(target.to_string());
+            ferrocrate_proxy_command(&[
+                "volume",
+                match action {
+                    VolumeAction::Create => "create",
+                    VolumeAction::Remove => "rm",
+                    _ => unreachable!(),
+                },
+                target,
+            ])
         }
-    }
+    };
     Ok(command)
 }
 
@@ -1689,61 +1674,34 @@ fn network_proxy_command(
     target: Option<&str>,
     subnet: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut command = Vec::new();
-    match action {
-        NetworkAction::List => {
-            command = [
-                "exec",
-                "--",
-                "ferrocrate",
-                "network",
-                "ls",
-                "--format",
-                "json",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        }
+    let command = match action {
+        NetworkAction::List => ferrocrate_proxy_command(&["network", "ls", "--format", "json"]),
         NetworkAction::Inspect | NetworkAction::Create | NetworkAction::Remove => {
             let target = target
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "network name is required".to_string())?;
             if matches!(action, NetworkAction::Inspect) {
-                return Ok([
-                    "exec",
-                    "--",
-                    "ferrocrate",
-                    "network",
-                    "inspect",
-                    target,
-                    "--format",
-                    "json",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect());
+                return Ok(ferrocrate_proxy_command(&[
+                    "network", "inspect", target, "--format", "json",
+                ]));
             }
-            command.push("network-proxy".to_string());
-            command.push(
-                match action {
-                    NetworkAction::Inspect => "inspect",
-                    NetworkAction::Create => "create",
-                    NetworkAction::Remove => "remove",
-                    NetworkAction::List => unreachable!(),
-                }
-                .to_string(),
-            );
-            command.push(target.to_string());
+            let operation = match action {
+                NetworkAction::Inspect => "inspect",
+                NetworkAction::Create => "create",
+                NetworkAction::Remove => "rm",
+                NetworkAction::List => unreachable!(),
+            };
+            let mut command = ferrocrate_proxy_command(&["network", operation, target]);
             if matches!(action, NetworkAction::Create) {
                 if let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) {
                     command.push("--subnet".to_string());
                     command.push(subnet.to_string());
                 }
             }
+            command
         }
-    }
+    };
     Ok(command)
 }
 
@@ -3324,22 +3282,20 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        actionable_error, aggregate_container_stats, build_bridge_command,
-        clear_terminal_slot_if_matches, command_failure,
-        compose_bridge_command, compose_service_rows, container_detail_from_json,
-        container_inspect_command, container_update_command, doctor_command,
+        actionable_error, aggregate_container_stats, backend_command_request, build_bridge_command,
+        clear_terminal_slot_if_matches, command_failure, compose_bridge_command,
+        compose_service_rows, container_detail_from_json, container_inspect_command,
+        container_update_command, doctor_command, doctor_with_backend_status,
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
         registry_logout_command, run_backend_command, run_backend_command_with,
-        run_container_bridge_command, start_image_build_stream_with,
-        start_log_follow_stream_with,
-        terminal_exec_command, terminal_resize_command, volume_proxy_command,
-        doctor_with_backend_status, BuildProgressFrame,
+        run_container_bridge_command, start_image_build_stream_with, start_log_follow_stream_with,
+        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
         CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
         ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
-        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord,
-        TerminalProcess, TimedNativeContainerStats, VolumeAction, VolumeListResponse,
+        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, TerminalProcess,
+        TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
     use ferro_desktop::backend::{
         Backend, BackendCapabilities, BackendError, BackendState, BackendStatus, DuplexStream,
@@ -3510,6 +3466,22 @@ mod tests {
         assert_eq!(requests[1].1.args.first().map(String::as_str), Some("build"));
         assert!(!requests[2].0);
         assert_eq!(requests[2].1.stdin, b"secret\n");
+    }
+
+    #[test]
+    fn guest_proxy_builders_only_invoke_the_installed_ferrocrate_binary() {
+        let commands = [
+            registry_login_command("registry.example", "alice").expect("registry command"),
+            volume_proxy_command(VolumeAction::Create, Some("data")).expect("volume command"),
+            network_proxy_command(NetworkAction::Create, Some("frontend"), None)
+                .expect("network command"),
+        ];
+
+        for args in commands {
+            let request = backend_command_request("ferro-desktop", &args, &[], Vec::new())
+                .expect("backend request");
+            assert_eq!(request.program, "ferrocrate", "args={args:?}");
+        }
     }
 
     #[test]
@@ -3979,7 +3951,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_list_uses_json_exec_bridge_and_mutations_stay_typed() {
+    fn volume_operations_use_the_installed_cli_exec_bridge() {
         assert_eq!(
             volume_proxy_command(VolumeAction::List, None).expect("list command"),
             vec![
@@ -3994,15 +3966,15 @@ mod tests {
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Create, Some("data")).expect("create command"),
-            vec!["volume-proxy", "create", "data"]
+            vec!["exec", "--", "ferrocrate", "volume", "create", "data"]
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Remove, Some("data")).expect("remove command"),
-            vec!["volume-proxy", "remove", "data"]
+            vec!["exec", "--", "ferrocrate", "volume", "rm", "data"]
         );
         assert_eq!(
             volume_proxy_command(VolumeAction::Prune, None).expect("prune command"),
-            vec!["volume-proxy", "prune"]
+            vec!["exec", "--", "ferrocrate", "volume", "prune"]
         );
         assert!(volume_proxy_command(VolumeAction::Create, Some("  ")).is_err());
     }
@@ -4035,7 +4007,7 @@ mod tests {
     }
 
     #[test]
-    fn network_list_uses_json_exec_bridge_and_mutations_stay_typed() {
+    fn network_operations_use_the_installed_cli_exec_bridge() {
         assert_eq!(
             network_proxy_command(NetworkAction::List, None, None).expect("list command"),
             vec![
@@ -4070,7 +4042,10 @@ mod tests {
             )
             .expect("create command"),
             vec![
-                "network-proxy",
+                "exec",
+                "--",
+                "ferrocrate",
+                "network",
                 "create",
                 "frontend",
                 "--subnet",
@@ -4080,7 +4055,7 @@ mod tests {
         assert_eq!(
             network_proxy_command(NetworkAction::Remove, Some("frontend"), None)
                 .expect("remove command"),
-            vec!["network-proxy", "remove", "frontend"]
+            vec!["exec", "--", "ferrocrate", "network", "rm", "frontend"]
         );
         assert!(network_proxy_command(NetworkAction::Create, Some(" "), None).is_err());
     }
@@ -4309,12 +4284,14 @@ mod tests {
         assert_eq!(
             registry_login_command("registry.example.com", "alice").expect("login command"),
             vec![
-                "registry-proxy",
+                "exec",
+                "--",
+                "ferrocrate",
                 "login",
-                "--registry",
                 "registry.example.com",
                 "--username",
                 "alice",
+                "--password-stdin",
             ]
         );
         assert_eq!(

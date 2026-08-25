@@ -25,8 +25,6 @@ jobs:
         run: rustup show && rustup target add ${{ matrix.target }}
       - name: Build archive, checksum, provenance, and Linux deb
         shell: bash
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: bash scripts/build-release-artifacts.sh --version "$GITHUB_REF_NAME" --target-os '${{ matrix.target_os }}' --target-arch '${{ matrix.arch }}'
       - uses: actions/upload-artifact@v4
         with:

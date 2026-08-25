@@ -238,6 +238,10 @@ impl DaemonHarness {
         self._runtime_dir.path()
     }
 
+    fn socket_dir(&self) -> &Path {
+        self._socket_dir.path()
+    }
+
     fn kernel_state(&self) -> KernelStateFile {
         load_kernel_state(&self.kernel_state_path)
     }
@@ -414,7 +418,7 @@ fn native_cli_automatically_delegates_to_active_daemon_owner() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .env_remove("FERROCRATE_ENTITLEMENT_FILE")
         .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
@@ -597,7 +601,7 @@ fn native_cli_routes_representative_reads_writes_and_list_flags() {
     let harness = DaemonHarness::spawn();
     let create = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .args(["create", "--name", "delegated-create", "busybox", "true"])
         .output()
@@ -611,7 +615,7 @@ fn native_cli_routes_representative_reads_writes_and_list_flags() {
     for command in ["info", "version"] {
         let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_HOME", harness.runtime_dir())
-            .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+            .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
             .env("FERROCRATE_DESKTOP_FORWARD", "0")
             .arg(command)
             .output()
@@ -639,7 +643,7 @@ fn native_cli_routes_representative_reads_writes_and_list_flags() {
 
     let text = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .args(["containers", "--all"])
         .output()
@@ -654,7 +658,7 @@ fn native_cli_routes_representative_reads_writes_and_list_flags() {
 
     let quiet = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .args(["containers", "--all", "--quiet", "--no-trunc"])
         .output()
@@ -673,7 +677,7 @@ fn native_cli_routes_representative_reads_writes_and_list_flags() {
         .expect("write delegated compose file");
     let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERROCRATE_RUNTIME_DIR", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
         .env("FERROCRATE_DESKTOP_FORWARD", "0")
         .args([
             "compose",

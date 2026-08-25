@@ -15,6 +15,9 @@ use std::{
 fn bin() -> (Command, tempfile::TempDir) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferro-cli"));
     let temp = tempfile::tempdir().expect("tempdir");
+    cmd.env("HOME", temp.path());
+    cmd.env("XDG_RUNTIME_DIR", temp.path());
+    cmd.env("FERROCRATE_HOME", temp.path());
     cmd.env("FERROCRATE_RUNTIME_DIR", temp.path());
     cmd.env("FERROCRATE_IMAGE_STORE", temp.path().join("images"));
     cmd.env("FERROCRATE_DESKTOP_FORWARD", "0");

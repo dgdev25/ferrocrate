@@ -38,6 +38,7 @@ Optional environment:
   FERROCRATE_BIN                                  ferro-cli executable
   FERROCRATE_CONFORMANCE_TIMEOUT_SECONDS          per-client timeout (default: 240)
   FERROCRATE_CONFORMANCE_DAEMON_TIMEOUT_SECONDS   daemon readiness timeout (default: 20)
+  FERROCRATE_PEER_AUTH                            pidfd (default) or legacy-peercred
 USAGE
 }
 
@@ -80,6 +81,9 @@ done
 builder_mode="${DOCKER_BUILDKIT:-}"
 [[ "$builder_mode" == 0 || "$builder_mode" == 1 ]] ||
   harness_error "DOCKER_BUILDKIT must be 0 (classic) or 1 (BuildKit fallback qualification)"
+peer_auth_mode="${FERROCRATE_PEER_AUTH:-pidfd}"
+[[ "$peer_auth_mode" == pidfd || "$peer_auth_mode" == legacy-peercred ]] ||
+  harness_error "FERROCRATE_PEER_AUTH must be pidfd or legacy-peercred"
 [[ "$(uname -s)" == Linux ]] || harness_error "the Docker-compatible daemon is Linux-only"
 [[ -x "$ferro_bin" ]] || harness_error "missing executable ferro-cli: $ferro_bin"
 command -v docker >/dev/null 2>&1 || harness_error "docker CLI is unavailable"
@@ -115,9 +119,9 @@ if [[ "${EUID}" -ne 0 && "${FERROCRATE_CONFORMANCE_USERNS:-0}" != 1 ]]; then
     mount --bind "$5/resolv.conf" /etc/resolv.conf
     printf r >"$6"
     IFS= read -r -n1 <"$1"
-    exec env FERROCRATE_CONFORMANCE_USERNS=1 bash "$2" --output "$3" --log "$4"
+    exec env FERROCRATE_CONFORMANCE_USERNS=1 FERROCRATE_PEER_AUTH="$7" bash "$2" --output "$3" --log "$4"
   ' bash "$namespace_sync/go" "$0" "$output" "$execution_log" "$namespace_sync" \
-    "$namespace_sync/child-ready" &
+    "$namespace_sync/child-ready" "$peer_auth_mode" &
   namespace_pid=$!
   if ! IFS= read -r -n1 -t 10 <&7; then
     kill "$namespace_pid" 2>/dev/null || true
@@ -467,7 +471,7 @@ setsid env \
   FERROCRATE_ROOTLESS_NETNS="$rootless_netns" \
   FERROCRATE_CGROUP_ROOT="$cgroup_root" \
   FERROCRATE_NETWORK_BACKEND="$network_backend" \
-  "$ferro_snapshot" daemon --docker-compat --socket "$socket" \
+  "$ferro_snapshot" daemon --docker-compat --peer-auth "$peer_auth_mode" --socket "$socket" \
   >"$work_root/daemon.stdout" 2>"$work_root/daemon.stderr" &
 daemon_pid=$!
 ferrocrate_start_process_tracker "$daemon_pid" "$daemon_process_registry" daemon_tracker_pid ||
@@ -758,6 +762,7 @@ stop later invocations.
 - Compose client: $compose_version
 - Endpoint: isolated \`DOCKER_HOST=unix://<temporary-runtime>/docker.sock\`
 - Builder: $builder_label
+- Peer authentication: \`$peer_auth_mode\`
 - Per-command timeout: ${command_timeout}s
 - Compose fixture: \`tests/fixtures/real-app/compose.yml\`
 - Execution log: \`$display_execution_log\`

@@ -49,6 +49,7 @@ ferrocrate_bin="$repo_root/target/release/ferro-cli"
 ferrocrate_commit="$(git -C "$repo_root" rev-parse HEAD)"
 printf 'binary=%s\ncommit=%s\n' "$ferrocrate_bin" "$ferrocrate_commit" \
   >>"$evidence_dir/row.txt"
+printf 'peer_authentication=%s\n' "${FERROCRATE_PEER_AUTH:-pidfd}" >>"$evidence_dir/row.txt"
 printf 'host matrix binary: %s (commit %s)\n' "$ferrocrate_bin" "$ferrocrate_commit"
 
 bash "$repo_root/scripts/host-matrix-preflight.sh" "$evidence_dir/preflight.txt"
@@ -169,6 +170,7 @@ fi
 set +e
 timeout --signal=TERM --kill-after=5s "${conformance_timeout}s" \
   env FERROCRATE_CONFORMANCE_WRAPPER_TOKEN="$conformance_process_token" \
+  FERROCRATE_PEER_AUTH="${FERROCRATE_PEER_AUTH:-pidfd}" \
   DOCKER_BUILDKIT=0 FERROCRATE_BIN="$ferrocrate_bin" \
   bash "$repo_root/scripts/docker-client-conformance.sh" \
   --output "$parity_scoreboard_tmp" \

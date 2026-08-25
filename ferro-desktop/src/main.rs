@@ -3303,7 +3303,7 @@ fn gather_phase0_check(wsl_distro: Option<String>) -> Result<Phase0CheckResult, 
                 .push("no WSL distro available; install/import distro first".to_string());
         }
 
-        return Ok(check);
+        Ok(check)
     }
 
     #[cfg(not(windows))]

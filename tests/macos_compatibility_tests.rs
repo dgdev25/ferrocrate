@@ -1,7 +1,7 @@
-/// macOS compatibility tests for FerroCrate desktop and CLI
-/// Tests installer, desktop daemon, VM lifecycle, and platform-specific functionality
-///
-/// Run with: cargo test --test macos_compatibility_tests -- --nocapture
+// macOS compatibility tests for FerroCrate desktop and CLI
+// Tests installer, desktop daemon, VM lifecycle, and platform-specific functionality
+//
+// Run with: cargo test --test macos_compatibility_tests -- --nocapture
 
 #[cfg(target_os = "macos")]
 mod macos_tests {
@@ -66,7 +66,6 @@ mod macos_tests {
     #[test]
     fn detect_macos_platform() {
         assert_eq!(std::env::consts::OS, "macos", "Expected macOS platform");
-        assert!(cfg!(target_os = "macos"), "Target OS should be macos");
     }
 
     #[test]
@@ -89,7 +88,7 @@ mod macos_tests {
         let version_str = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = version_str.trim().split('.').collect();
 
-        if let Some(major) = parts.get(0).and_then(|v| v.parse::<u32>().ok()) {
+        if let Some(major) = parts.first().and_then(|v| v.parse::<u32>().ok()) {
             assert!(
                 major >= 12,
                 "FerroCrate requires macOS 12 or later, found: {}",
@@ -354,8 +353,8 @@ mod macos_tests {
 
     #[test]
     fn qemu_hvf_backend_is_macos_only() {
-        // qemu-hvf requires hypervisor framework on macOS
-        assert!(cfg!(target_os = "macos"), "qemu-hvf backend only on macOS");
+        // qemu-hvf requires hypervisor framework on macOS; this test file only compiles there.
+        assert_eq!(std::env::consts::OS, "macos", "qemu-hvf backend only on macOS");
     }
 
     #[test]
@@ -446,7 +445,7 @@ mod macos_tests {
     #[test]
     fn unix_signal_constants_available() {
         // Should have signal support on macOS
-        assert!(cfg!(unix), "macOS should have Unix signal support");
+        assert_eq!(std::env::consts::FAMILY, "unix", "macOS should have Unix signal support");
     }
 
     #[test]

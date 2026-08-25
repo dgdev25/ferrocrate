@@ -1019,8 +1019,10 @@ fn default_vm_name() -> String {
 fn command_exists(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
-        .status()
-        .map(|status| status.success())
+        .output()
+        // Some required tools (notably macOS ssh-keygen and hdiutil) do not
+        // implement `--version`; being executable is the availability test.
+        .map(|_| true)
         .unwrap_or(false)
 }
 
@@ -1109,12 +1111,7 @@ fn ensure_vm_disk(disk_path: &Path, vm_dir: &Path) -> Result<(), DesktopError> {
 }
 
 fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
-    // Apple's ssh-keygen has no `--version` flag, so the generic version-based
-    // probe rejects an installed executable before this provisioning path runs.
-    Command::new("ssh-keygen")
-        .arg("-h")
-        .output()
-        .map_err(|_| DesktopError::Invalid("missing required command: ssh-keygen".to_string()))?;
+    require_command("ssh-keygen")?;
     let key_path = vm_dir.join("vm_ssh_key");
     let pub_path = vm_dir.join("vm_ssh_key.pub");
     if key_path.exists() && pub_path.exists() {
@@ -3464,7 +3461,7 @@ mod tests {
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
         copy_interactive_input, decode_wsl_output, desktop_addr_default_from, exec_mode_from_env,
-        ensure_ssh_key, gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
+        gather_phase0_check, is_interactive_exec_command, is_log_follow_command,
         load_channel_manifest, load_forward_entries, load_vm_state, network_proxy_request,
         parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
@@ -3474,6 +3471,8 @@ mod tests {
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
         ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
+    #[cfg(target_os = "macos")]
+    use super::ensure_ssh_key;
     #[cfg(target_os = "linux")]
     use super::{
         create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
@@ -3838,6 +3837,8 @@ mod tests {
     #[test]
     fn command_exists_treats_binary_name_as_literal_argv() {
         assert!(command_exists("rustc"));
+        assert!(command_exists("sh"));
+        assert!(command_exists("ssh-keygen"));
         assert!(!command_exists("rustc; printf injected"));
     }
 

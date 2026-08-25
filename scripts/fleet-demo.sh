@@ -201,7 +201,7 @@ enroll_guest() {
     scp -q "$state_root/pki/node-ca.pem" "${guest_user}@${guest_host}:/var/tmp/fleet-node-ca.pem"
     guest_ssh "/var/tmp/ferro-agent enroll --node-id lab-x86 --endpoint $guest_host --token '$enrollment' --manager-endpoint https://$guest_manager_host:55051 --server-ca /var/tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$remote_state/agent.pem --key-out \$HOME/$remote_state/agent.key --node-ca-out \$HOME/$remote_state/node-ca.pem"
   fi
-  guest_ssh "pkill -f '/var/tmp/[f]erro-agent fleet --node-id lab-x86' || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_manager_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 &"
+  guest_ssh "pkill -x ferro-agent || true; nohup /var/tmp/ferro-agent fleet --node-id lab-x86 --control-endpoint https://$guest_manager_host:55053 --server-ca \$HOME/$remote_state/node-ca.pem --cert \$HOME/$remote_state/agent.pem --key \$HOME/$remote_state/agent.key --tls-domain localhost --runtime-exe /var/tmp/ferro-cli >\$HOME/$remote_state/agent.log 2>&1 </dev/null &"
 }
 
 enroll_arm() {
@@ -211,7 +211,7 @@ enroll_arm() {
     scp -q "$state_root/pki/node-ca.pem" "${arm_user}@${arm_host}:/tmp/fleet-node-ca.pem"
     arm_ssh "mkdir -p \$HOME/$arm_state; chmod 700 \$HOME/$arm_state; $arm_repo/target/release/ferro-agent enroll --node-id oracle-arm --endpoint $arm_host --token '$enrollment' --manager-endpoint https://127.0.0.1:55051 --server-ca /tmp/fleet-node-ca.pem --tls-domain localhost --cert-out \$HOME/$arm_state/agent.pem --key-out \$HOME/$arm_state/agent.key --node-ca-out \$HOME/$arm_state/node-ca.pem"
   fi
-  arm_ssh "pkill -f '$arm_repo/target/release/[f]erro-agent fleet --node-id oracle-arm' || true; nohup $arm_repo/target/release/ferro-agent fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 &"
+  arm_ssh "pkill -x ferro-agent || true; nohup $arm_repo/target/release/ferro-agent fleet --node-id oracle-arm --control-endpoint https://127.0.0.1:55053 --server-ca \$HOME/$arm_state/node-ca.pem --cert \$HOME/$arm_state/agent.pem --key \$HOME/$arm_state/agent.key --tls-domain localhost --runtime-exe $arm_repo/target/release/ferro-cli >\$HOME/$arm_state/agent.log 2>&1 </dev/null &"
 }
 
 snapshot() { invoke "$(operate_session)" get_fleet_snapshot '{}'; }
@@ -248,8 +248,8 @@ stop_pid() {
 
 down() {
   [[ -d "$state_root" ]] || exit 0
-  guest_ssh "pkill -f '/var/tmp/[f]erro-agent fleet --node-id lab-x86' || true" >/dev/null 2>&1 || true
-  arm_ssh "pkill -f '[f]erro-agent fleet --node-id oracle-arm' || true" >/dev/null 2>&1 || true
+  guest_ssh 'pkill -x ferro-agent || true' >/dev/null 2>&1 || true
+  arm_ssh 'pkill -x ferro-agent || true' >/dev/null 2>&1 || true
   stop_pid "$state_root/pids/arm-forward" 'Oracle reverse forwards'
   stop_pid "$state_root/pids/ui" 'Fleet UI'
   stop_pid "$state_root/pids/manager" 'manager'

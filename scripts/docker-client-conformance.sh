@@ -878,12 +878,12 @@ record_foreground_stderr() {
 record_concurrency_stress() {
   local id="concurrency-stress-10x" area="stress"
   local command_text started ended duration exit_code status stdout_file stderr_file
-  local iteration project probe_stdout probe_stderr command_token
+  local iteration probe project probe_stdout probe_stderr command_token
   local -a affinity=()
   sequence=$((sequence + 1))
   printf -v stdout_file '%s/%03d.stdout' "$outputs_dir" "$sequence"
   printf -v stderr_file '%s/%03d.stderr' "$outputs_dir" "$sequence"
-  command_text="CPU burner; foreground stdout/stderr and compose --scale worker=3 repeated 10x"
+  command_text="CPU burner; 50 foreground runs and compose --scale worker=3 repeated 10x"
   if command -v taskset >/dev/null 2>&1 && taskset -c 0 true >/dev/null 2>&1; then
     affinity=(taskset -c 0)
   fi
@@ -896,16 +896,20 @@ record_concurrency_stress() {
     command_token="$process_token_base-stress-$iteration"
     probe_stdout="$work_root/stress-$iteration.stdout"
     probe_stderr="$work_root/stress-$iteration.stderr"
-    if ! run_bounded_owned "$command_timeout" 5 "$command_token-output" \
-        env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
-          "${affinity[@]}" docker run --rm alpine:3.20 echo hi \
-        >"$probe_stdout" 2>"$probe_stderr" \
-        || [[ "$(tr -d '\r' <"$probe_stdout")" != hi ]] || [[ -s "$probe_stderr" ]]; then
-      printf 'iteration %s foreground stdout failed\n' "$iteration" >>"$stderr_file"
-      cat "$probe_stdout" "$probe_stderr" >>"$stderr_file"
-      exit_code=1
-      break
-    fi
+    for probe in 1 2 3; do
+      if ! run_bounded_owned "$command_timeout" 5 "$command_token-output-$probe" \
+          env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
+            "${affinity[@]}" docker run --rm alpine:3.20 echo hi \
+          >"$probe_stdout" 2>"$probe_stderr" \
+          || [[ "$(tr -d '\r' <"$probe_stdout")" != hi ]] || [[ -s "$probe_stderr" ]]; then
+        printf 'iteration %s foreground stdout probe %s failed\n' \
+          "$iteration" "$probe" >>"$stderr_file"
+        cat "$probe_stdout" "$probe_stderr" >>"$stderr_file"
+        exit_code=1
+        break
+      fi
+    done
+    [[ "$exit_code" == 0 ]] || break
     if ! run_bounded_owned "$command_timeout" 5 "$command_token-tty" \
         env DOCKER_HOST="$host" DOCKER_CONFIG="$docker_config" DOCKER_BUILDKIT=0 \
           "${affinity[@]}" docker run --rm -t alpine:3.20 echo hi \

@@ -537,6 +537,7 @@ extract_log_results() {
 extract_markdown_results() {
   awk -F '|' '
     /^\| [0-9]+ \|/ {
+      gsub(/\\\|/, "__ESCAPED_MARKDOWN_PIPE__")
       for (field = 2; field <= 7; field++) {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", $field)
       }
@@ -588,7 +589,7 @@ cmp "$first_scoreboard" "$scoreboard"
 hang_scoreboard="$work_root/hang-scoreboard.md"
 hang_log="$work_root/hang.log"
 set +e
-timeout --foreground --kill-after=1s 18s env \
+timeout --foreground --kill-after=1s 60s env \
   PATH="$fake_bin:$PATH" \
   FAKE_STATE="$fake_state" \
   FAKE_FERRO_VERSION_HANG=1 \

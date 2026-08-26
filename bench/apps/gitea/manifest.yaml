@@ -1,0 +1,14 @@
+name: gitea
+repo: https://github.com/go-gitea/gitea
+pin: main
+license: MIT
+class: provided
+stack: go
+base_image: golang:1.23-alpine
+start: n/a (Dockerfile)
+port: 3000
+health: /api/healthz
+data_paths: [data]
+env: {}
+skip: []
+note: large (345 MB clone, ~10 min build); run last; volumes, non-root user, several ports

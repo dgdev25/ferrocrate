@@ -1,0 +1,14 @@
+name: docker-flask
+repo: https://github.com/nickjj/docker-flask-example
+pin: main
+license: MIT
+class: provided
+stack: python
+base_image: python:3.13-slim
+start: n/a (Dockerfile)
+port: 8000
+health: /up
+data_paths: []
+env: {}
+skip: []
+note: production-style Flask with compose (postgres, redis, worker); tests build args and healthchecks

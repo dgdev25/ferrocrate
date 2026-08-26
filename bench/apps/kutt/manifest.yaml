@@ -1,0 +1,14 @@
+name: kutt
+repo: https://github.com/thedevs-network/kutt
+pin: main
+license: MIT
+class: provided
+stack: node
+base_image: node:22-slim
+start: n/a (Dockerfile)
+port: 3000
+health: /
+data_paths: []
+env: {}
+skip: []
+note: URL shortener; compose brings postgres and redis; tests env-file handling and depends_on

@@ -1,0 +1,14 @@
+name: battleships
+repo: /data/dev/battleships
+pin: main
+license: MIT
+class: greenfield
+stack: node
+base_image: node:22-slim
+start: node src/server.mjs
+port: 3000
+health: /
+data_paths: [data]
+env: {}
+skip: []
+note: seed app; native .node addons (ruvector); on-disk episodes under data/

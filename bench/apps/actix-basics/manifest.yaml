@@ -1,0 +1,15 @@
+name: actix-basics
+repo: https://github.com/actix/examples
+pin: main
+subdir: basics/basics
+license: Apache-2.0
+class: greenfield
+stack: rust
+base_image: rust:1.97-slim
+start: /opt/app/basics
+port: 8080
+health: /
+data_paths: []
+env: {}
+skip: []
+note: long build; measures build-cache reuse across runs

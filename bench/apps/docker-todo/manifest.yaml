@@ -1,0 +1,14 @@
+name: docker-todo
+repo: https://github.com/docker/getting-started-todo-app
+pin: main
+license: Apache-2.0
+class: provided
+stack: node
+base_image: node:22-slim
+start: n/a (Dockerfile)
+port: 3000
+health: /
+data_paths: []
+env: {}
+skip: []
+note: Docker's own tutorial app; Dockerfile plus compose.yaml with a MySQL service

@@ -1,0 +1,15 @@
+name: express-hello
+repo: https://github.com/expressjs/express
+pin: master
+subdir: examples/hello-world
+license: MIT
+class: greenfield
+stack: node
+base_image: node:22-slim
+start: node index.js
+port: 3000
+health: /
+data_paths: []
+env: {}
+skip: []
+note: smallest possible web app; the example has no package.json, the template's npm step is a no-op

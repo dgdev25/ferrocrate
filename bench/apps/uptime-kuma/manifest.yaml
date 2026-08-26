@@ -1,0 +1,15 @@
+name: uptime-kuma
+repo: https://github.com/louislam/uptime-kuma
+pin: master
+license: MIT
+class: provided
+stack: node
+base_image: node:22-bookworm-slim
+start: n/a (Dockerfile at docker/dockerfile)
+port: 3001
+health: /
+data_paths: [data]
+env: {}
+skip: []
+dockerfile: docker/dockerfile
+note: sqlite on a volume, websockets, multi-stage Dockerfile in docker/

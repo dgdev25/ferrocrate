@@ -1,0 +1,1 @@
+Verify the bench works end to end: bash -n on bench/*.sh, then bench/run-app.sh battleships both, then python3 bench/scoreboard.py. Fix bench scripts (not product code) until both engines produce a JSONL file and the scoreboard renders. Commit. Print exactly BENCH-BOOTSTRAP-COMPLETE on its own line.

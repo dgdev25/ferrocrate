@@ -1,0 +1,14 @@
+name: spring-petclinic
+repo: https://github.com/spring-projects/spring-petclinic
+pin: main
+license: Apache-2.0
+class: greenfield
+stack: java
+base_image: eclipse-temurin:21-jdk
+start: java -jar /app.jar
+port: 8080
+health: /actuator/health
+data_paths: []
+env: {}
+skip: []
+note: repo ships docker-compose.yml for databases only; the app image is generated; slow JVM start, health waits up to 60 s

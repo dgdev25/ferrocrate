@@ -2551,6 +2551,21 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
+            let rootful_networks = nix::unistd::Uid::effective().is_root();
+            checks.push(DoctorCheck {
+                id: "custom_networks".to_string(),
+                ok: rootful_networks,
+                message: if rootful_networks {
+                    "custom networks available".to_string()
+                } else {
+                    "custom networks need rootful mode".to_string()
+                },
+                hint: (!rootful_networks).then_some(
+                    "run the daemon in rootful mode to create custom bridge networks".to_string(),
+                ),
+                remediated: false,
+                action: None,
+            });
 
             let records = load_networks(&runtime_dir()).unwrap_or_default();
             let links = std::fs::read_dir("/sys/class/net")
@@ -13261,6 +13276,13 @@ fn handle_network_authorized(
             ipv6_gateway,
             labels,
         } => {
+            // Unit tests exercise the lifecycle with its in-memory bridge
+            // kernel, and API harnesses explicitly select a file-backed one.
+            // The rootful boundary applies to the real CLI kernel only.
+            #[cfg(not(test))]
+            if self::network_lifecycle::FileBackedNetworkKernel::from_env().is_none() {
+                custom_networks_need_rootful_mode(nix::unistd::Uid::effective().is_root())?;
+            }
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
             }
@@ -13473,6 +13495,13 @@ fn handle_network_authorized(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn custom_networks_need_rootful_mode(is_root: bool) -> Result<(), String> {
+    is_root
+        .then_some(())
+        .ok_or_else(|| "custom networks need rootful mode".to_string())
 }
 
 fn cli_network_kernel() -> Box<dyn self::network_lifecycle::NetworkKernel> {
@@ -27084,6 +27113,15 @@ volumes:
                 .map(|_| "unsupported".to_string())
                 .map_err(|err| err.to_string())
         );
+    }
+
+    #[test]
+    fn rootless_custom_networks_have_a_plain_boundary_message() {
+        assert_eq!(
+            super::custom_networks_need_rootful_mode(false).unwrap_err(),
+            "custom networks need rootful mode"
+        );
+        assert!(super::custom_networks_need_rootful_mode(true).is_ok());
     }
 
     #[test]

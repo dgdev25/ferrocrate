@@ -137,7 +137,14 @@ run_wsl2_backend_smoke() {
 run_macos_backend_smoke() {
   local config_root="${FERROCRATE_CONFIG_DIR:-$host_home/.ferrocrate}"
   local state_file="${FERROCRATE_DESKTOP_VM_STATE:-$config_root/desktop-vm.json}"
-  local ssh_key="${FERROCRATE_VM_SSH_KEY:-$config_root/vm/desktop_vm_ed25519}"
+  local ssh_key="${FERROCRATE_VM_SSH_KEY:-}"
+  if [[ -z "$ssh_key" ]]; then
+    ssh_key="$(python3 - "$state_file" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["config"]["ssh_private_key_path"])
+PY
+)"
+  fi
   if ! command -v ssh >/dev/null 2>&1; then
     skip_selected_backend "ssh is unavailable"
   fi

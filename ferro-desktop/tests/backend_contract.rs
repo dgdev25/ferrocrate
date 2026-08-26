@@ -359,6 +359,8 @@ fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
+                "UserKnownHostsFile=/Users/test/.ferrocrate/known_hosts",
+                "-o",
                 "StrictHostKeyChecking=accept-new",
                 "-N",
                 "-L",

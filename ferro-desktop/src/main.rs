@@ -1130,6 +1130,15 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
     Ok((key_path, pub_path))
 }
 
+fn reset_vm_known_hosts(vm_dir: &Path) -> Result<(), DesktopError> {
+    let path = vm_dir.join("known_hosts");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn ssh_keygen_generate_args(key_path: &Path) -> Vec<String> {
     vec![
         "-t".to_string(),
@@ -1347,6 +1356,11 @@ fn run_daemon(
 }
 
 fn validate_daemon_addr(addr: &str, allow_remote: bool) -> Result<(), DesktopError> {
+    if addr == "127.0.0.1:4190" || addr == "localhost:4190" || addr == "[::1]:4190" {
+        return Err(DesktopError::Invalid(
+            "127.0.0.1:4190 is reserved for the web bridge; run the desktop daemon on its API port (default 127.0.0.1:4288)".to_string(),
+        ));
+    }
     if allow_remote {
         return Ok(());
     }
@@ -2159,6 +2173,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .to_string()
             });
             let vm_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+            reset_vm_known_hosts(vm_dir)?;
             let fs_backend = fs_backend.to_ascii_lowercase();
             if fs_backend != "virtiofs" && fs_backend != "9p" {
                 return Err(DesktopError::Invalid(format!(
@@ -3480,6 +3495,8 @@ fn vm_state_running(state: &VmState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::ensure_ssh_key;
     use super::{
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
@@ -3489,15 +3506,11 @@ mod tests {
         parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        ssh_keygen_generate_args,
-        terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
-        write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
-        ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        ssh_keygen_generate_args, terminal_exec_create_path, terminal_exec_create_payload,
+        terminal_resize_path, upsert_forward_entry, validate_daemon_addr, vm_state_running,
+        volume_proxy_request, write_follow_frame, Cli, Commands, ExecMode, ExecRequest,
+        FollowChannel, FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
-    #[cfg(target_os = "macos")]
-    use super::ensure_ssh_key;
-    use std::path::Path;
     #[cfg(target_os = "linux")]
     use super::{
         create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
@@ -3506,6 +3519,7 @@ mod tests {
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
+    use std::path::Path;
 
     #[test]
     fn cli_exec_consumer_builds_one_backend_program_request() {
@@ -4570,6 +4584,13 @@ mod tests {
         assert!(script.contains("$serviceName = \"FerroDesktop\""));
         assert!(script.contains("daemon --addr 127.0.0.1:4288"));
         assert!(script.contains("sc.exe create $serviceName"));
+    }
+
+    #[test]
+    fn daemon_refuses_the_port_reserved_for_the_web_bridge() {
+        let error = validate_daemon_addr("127.0.0.1:4190", false)
+            .expect_err("the web bridge exclusively owns port 4190");
+        assert!(error.to_string().contains("reserved for the web bridge"));
     }
 
     #[test]

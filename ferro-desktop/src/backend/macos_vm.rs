@@ -1,4 +1,21 @@
 use super::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct ProvisionedVmState {
+    config: ProvisionedVmRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProvisionedVmRecord {
+    #[serde(default)]
+    ssh_port: Option<u16>,
+    #[serde(default)]
+    api_port: Option<u16>,
+    #[serde(default)]
+    guest_user: Option<String>,
+    ssh_private_key_path: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone)]
 pub struct MacosVmConfig {
@@ -23,7 +40,7 @@ impl Default for MacosVmConfig {
         let vm_root = std::env::var_os("FERROCRATE_VM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("vm"));
-        Self {
+        let fallback = Self {
             launcher: std::env::var_os("FERROCRATE_VM_LAUNCHER")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("ferro-desktop")),
@@ -43,7 +60,42 @@ impl Default for MacosVmConfig {
             ssh_key: std::env::var_os("FERROCRATE_VM_SSH_KEY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| vm_root.join("desktop_vm_ed25519")),
-        }
+        };
+        Self::from_vm_state(&fallback.vm_config).unwrap_or(fallback)
+    }
+}
+
+impl MacosVmConfig {
+    /// Loads connection settings from the state that VM provisioning wrote.
+    /// The state record, rather than an independently-derived default, is the
+    /// authority for the guest identity and its forwarded ports.
+    pub fn from_vm_state(vm_config: &Path) -> Result<Self, BackendError> {
+        let state: ProvisionedVmState = serde_json::from_slice(&std::fs::read(vm_config)?)
+            .map_err(|error| {
+                BackendError::Unavailable(format!(
+                    "invalid provisioned VM state {}: {error}",
+                    vm_config.display()
+                ))
+            })?;
+        let record = state.config;
+        let ssh_key = record.ssh_private_key_path.ok_or_else(|| {
+            BackendError::Unavailable(format!(
+                "provisioned VM state {} does not record ssh_private_key_path",
+                vm_config.display()
+            ))
+        })?;
+        Ok(Self {
+            launcher: std::env::var_os("FERROCRATE_VM_LAUNCHER")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("ferro-desktop")),
+            vm_config: vm_config.to_path_buf(),
+            relay_addr: format!("127.0.0.1:{}", record.api_port.unwrap_or(4288))
+                .parse()
+                .expect("recorded VM API port is valid"),
+            ssh_port: record.ssh_port.unwrap_or(2222),
+            guest_user: record.guest_user.unwrap_or_else(|| "ubuntu".into()),
+            ssh_key,
+        })
     }
 }
 
@@ -58,6 +110,11 @@ impl MacosVmBackend {
         Self::with_host(config, SystemBackendHost::shared())
     }
     pub fn with_host(config: MacosVmConfig, host: Arc<dyn BackendHost>) -> Self {
+        let known_hosts = config
+            .vm_config
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("known_hosts");
         let start = CommandSpec::new(config.launcher).args([
             "vm",
             "--state-file",
@@ -84,6 +141,8 @@ impl MacosVmBackend {
             "-o".into(),
             "IdentityAgent=none".into(),
             "-o".into(),
+            format!("UserKnownHostsFile={}", known_hosts.display()),
+            "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
             format!("{}@127.0.0.1", config.guest_user),
         ]);
@@ -100,6 +159,8 @@ impl MacosVmBackend {
             "IdentityAgent=none".into(),
             "-o".into(),
             "ExitOnForwardFailure=yes".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={}", known_hosts.display()),
             "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
             "-N".into(),
@@ -216,6 +277,97 @@ impl Drop for MacosVmBackend {
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             let _ = self.core.host.control(&self.stop_command);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioned_vm_record_drives_ssh_identity_and_isolated_known_hosts() {
+        let temp = tempfile::tempdir().expect("temp state directory");
+        let state_file = temp.path().join("desktop-vm.json");
+        std::fs::write(
+            &state_file,
+            r#"{
+                "config": {
+                    "ssh_port": 2207,
+                    "api_port": 4299,
+                    "guest_user": "ferro",
+                    "ssh_private_key_path": "/state/vm_ssh_key"
+                }
+            }"#,
+        )
+        .expect("write provisioned state");
+
+        let config = MacosVmConfig::from_vm_state(&state_file).expect("read provisioned state");
+        let backend = MacosVmBackend::with_host(config, Arc::new(TestHost));
+        let commands = &backend.core.start_commands;
+        let known_hosts = format!(
+            "UserKnownHostsFile={}",
+            temp.path().join("known_hosts").display()
+        );
+
+        for command in commands
+            .iter()
+            .filter(|command| command.program == PathBuf::from("ssh"))
+        {
+            assert!(command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-i", "/state/vm_ssh_key"]));
+            assert!(command.args.windows(2).any(|pair| pair == ["-p", "2207"]));
+            assert!(command
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "-o" && pair[1] == known_hosts));
+            assert!(command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-o", "StrictHostKeyChecking=accept-new"]));
+        }
+    }
+
+    struct TestHost;
+
+    impl BackendHost for TestHost {
+        fn start(&self, _: &CommandSpec) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn stop(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn is_running(&self) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+        fn health(&self, _: &Transport) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+        fn request(
+            &self,
+            _: &Transport,
+            _: &TransportRequest,
+        ) -> Result<TransportResponse, BackendError> {
+            unreachable!()
+        }
+        fn exec(&self, _: &CommandSpec, _: &ExecRequest) -> Result<ExecResponse, BackendError> {
+            unreachable!()
+        }
+        fn exec_stream(
+            &self,
+            _: &CommandSpec,
+            _: &ExecRequest,
+        ) -> Result<Box<dyn ExecStream>, BackendError> {
+            unreachable!()
+        }
+        fn open_terminal(
+            &self,
+            _: &Transport,
+            _: &TerminalRequest,
+        ) -> Result<TerminalSession, BackendError> {
+            unreachable!()
         }
     }
 }

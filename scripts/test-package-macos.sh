@@ -9,9 +9,16 @@ trap 'hdiutil detach "$mount" -quiet 2>/dev/null || true; rm -rf "$mount"' EXIT
 hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -quiet
 app="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
 [[ -n "$app" ]] || { echo "DMG contains no app" >&2; exit 1; }
+if [[ "${FERROCRATE_ALLOW_ADHOC_SIGN:-0}" == 1 ]]; then
+  # Local builds carry no Developer ID signature; verify an ad-hoc-signed copy instead.
+  staged="$(mktemp -d /tmp/ferrocrate-app.XXXXXX)"
+  cp -R "$app" "$staged/"
+  app="$staged/$(basename "$app")"
+  codesign --force --deep -s - "$app"
+fi
 codesign --verify --deep --strict "$app"
 FERROCRATE_SMOKE_PLATFORM=desktop \
-  FERROCRATE_DESKTOP_BIN="$app/Contents/MacOS/ferro-desktop" \
+  FERROCRATE_DESKTOP_BIN="$app/Contents/MacOS/ferro-desktop-sidecar" \
   FERROCRATE_BIN="$app/Contents/MacOS/ferrocrate" \
   FERROCRATE_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)" \
   bash scripts/local-smoke-gate.sh

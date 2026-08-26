@@ -404,7 +404,12 @@ pub enum Commands {
     Load { #[arg(short = 'i', long)] input: String },
     /// Export a container filesystem as a tar archive.
     #[cfg(target_os = "linux")]
-    Export { #[arg(short = 'o', long)] output: String, container: String },
+    Export {
+        /// Write the archive to a file; omit to stream it to stdout.
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+        container: String,
+    },
     /// Show filesystem changes in a container.
     #[cfg(target_os = "linux")]
     Diff { container: String },
@@ -5404,7 +5409,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Export { output, container } => {
                 let archive = docker_export_container_archive(&runtime_dir, &runtime, &container)?;
-                std::fs::write(output, archive).map_err(|error| format!("docker: export write failed: {error}"))
+                if let Some(output) = output {
+                    std::fs::write(output, archive)
+                        .map_err(|error| format!("docker: export write failed: {error}"))
+                } else {
+                    std::io::stdout()
+                        .write_all(&archive)
+                        .map_err(|error| format!("docker: export stdout failed: {error}"))
+                }
             }
             #[cfg(target_os = "linux")]
             Commands::Cp { source, destination } => {
@@ -8421,7 +8433,13 @@ fn dispatch_remote_socket(
             ),
         )
         .and_then(|body| {
-            std::fs::write(output, body).map_err(|error| format!("export: {error}"))
+            if let Some(output) = output {
+                std::fs::write(output, body).map_err(|error| format!("export: {error}"))
+            } else {
+                std::io::stdout()
+                    .write_all(&body)
+                    .map_err(|error| format!("export: {error}"))
+            }
         }),
         Commands::Diff { container } => request(
             "GET",
@@ -28101,6 +28119,7 @@ volumes:
             vec!["ferrocrate", "save", "-o", "/tmp/image.tar", "alpine:latest"],
             vec!["ferrocrate", "load", "-i", "/tmp/image.tar"],
             vec!["ferrocrate", "export", "-o", "/tmp/rootfs.tar", "box"],
+            vec!["ferrocrate", "export", "box"],
             vec!["ferrocrate", "diff", "box"],
             vec!["ferrocrate", "search", "alpine"],
             vec!["ferrocrate", "create", "alpine", "echo", "ok"],

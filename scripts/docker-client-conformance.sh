@@ -1044,7 +1044,9 @@ if run_bounded_owned "$command_timeout" 5 "$failure_token" \
     "${failure_env[@]}" docker build "$failure_context_dir" >/dev/null 2>"$failure_stderr"; then
   harness_error "failing Dockerfile unexpectedly succeeded"
 fi
-grep -Fq "RUN failed with status" "$failure_stderr" ||
+# The message names the failing step ("RUN <cmd> failed with status ...") since
+# the S3 fix; the older form had no command. Accept both.
+grep -Eq "RUN( .*)? failed with status" "$failure_stderr" ||
   harness_error "failing Dockerfile did not preserve the RUN step error"
 record_command image-inspect image image inspect "$image"
 record_command foreground-image-pull image pull alpine:3.20

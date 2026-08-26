@@ -1415,6 +1415,25 @@ pub enum EntitlementCommands {
     },
 }
 
+/// Translate the Docker CLI's grouped image/container spellings to the
+/// established native commands before clap parses the command line. Keeping
+/// the native spellings preserves backwards compatibility while this small
+/// adapter lets both surfaces share the same dispatch paths.
+fn normalize_docker_grouped_verbs(mut args: Vec<String>) -> Vec<String> {
+    let replacement = match args.as_slice() {
+        [group, verb, ..] if group == "image" && verb == "inspect" => Some("image-inspect"),
+        [group, verb, ..] if group == "image" && verb == "ls" => Some("images"),
+        [group, verb, ..] if group == "image" && verb == "rm" => Some("rmi"),
+        [group, verb, ..] if group == "container" && verb == "ls" => Some("containers"),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        args[0] = replacement.to_string();
+        args.remove(1);
+    }
+    args
+}
+
 pub fn main() {
     // Initialize tracing subscriber for structured logging (CQ-03)
     tracing_subscriber::fmt()
@@ -1453,7 +1472,10 @@ pub fn main() {
             process::exit(1);
         }
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(
+        std::iter::once("ferro-cli".to_string())
+            .chain(normalize_docker_grouped_verbs(raw_args.clone())),
+    );
     if let Ok(config) = load_cli_config() {
         if config.lan_mirror {
             unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR", "1") };
@@ -27734,6 +27756,20 @@ volumes:
                 assert_eq!(format, "text");
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_grouped_image_and_container_verbs_normalize_to_native_commands() {
+        for (args, expected) in [
+            (vec!["image", "inspect", "alpine:latest"], vec!["image-inspect", "alpine:latest"]),
+            (vec!["image", "ls"], vec!["images"]),
+            (vec!["image", "rm", "alpine:latest"], vec!["rmi", "alpine:latest"]),
+            (vec!["container", "ls"], vec!["containers"]),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(super::normalize_docker_grouped_verbs(args), expected);
         }
     }
 

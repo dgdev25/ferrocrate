@@ -18029,10 +18029,6 @@ fn run_daemon(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     listener.set_nonblocking(true).map_err(|err| format!("daemon: set socket nonblocking: {err}"))?;
-    // Publish atomically in the same startup step as lock acquisition, before
-    // opening engine stores. This bounds the lock-held/no-owner window to the
-    // socket bind itself and lets native clients immediately delegate.
-    engine_owner.publish_daemon_owner(socket_path)?;
     reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     let runtime_dir = Arc::new(runtime_dir);
     let runtime = Arc::new(
@@ -18049,6 +18045,11 @@ fn run_daemon(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
     );
     let state = Arc::new(DockerCompatState::new(runtime_dir.as_ref())?);
+    // Do not advertise delegation until reconciliation and every request
+    // store are ready.  A client that observes ownership between socket bind
+    // and initialization could otherwise fall back to a second direct runtime
+    // and race the daemon's startup reapers/record reconciliation.
+    engine_owner.publish_daemon_owner(socket_path)?;
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime.clone(), store.clone(), addr)?;
     }

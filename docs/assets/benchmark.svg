@@ -1,60 +1,82 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" role="img" aria-labelledby="fc-bench-t">
-  <title id="fc-bench-t">Benchmark — median seconds per operation, ferrocrate versus Docker</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="t">
+  <title id="t">Median seconds per operation, Docker versus Ferrocrate, same host, 2026-08-23. Ferrocrate is faster on nine of ten operations; Docker is faster on attached run-to-exit.</title>
   <defs>
     <style>
-      :root{ --bg:#ffffff; --surface:#f6f8fa; --border:#d0d7de; --ink:#1f2328; --muted:#656d76;
-             --accent:#c2410c; --accent2:#f59e0b; --docker:#8b949e; }
-      @media (prefers-color-scheme: dark){
-        :root{ --bg:#0d1117; --surface:#161b22; --border:#30363d; --ink:#e6edf3; --muted:#8b949e;
-               --accent:#ea580c; --accent2:#fbbf24; --docker:#6e7681; } }
+      :root{ --bg:#ffffff; --ink:#26221f; --muted:#6e655e; --grid:#e3dbd3; --docker:#8c8781; --ferro:#c2410c; --win:#15803d; --loss:#dc2626; }
+      @media (prefers-color-scheme: dark){ :root{ --bg:#0d1117; --ink:#f1ebe6; --muted:#b4a89e; --grid:#332b26; --docker:#6b6660; --ferro:#e2571e; --win:#3fb574; --loss:#f87171; } }
       text{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
-      .t{ fill:var(--ink); font-weight:700; } .lbl{ fill:var(--ink); font-weight:600; }
-      .val{ fill:var(--muted); } .cap{ fill:var(--muted); }
-      .win{ fill:var(--accent); font-weight:700; }
+      .ink{ fill:var(--ink); } .muted{ fill:var(--muted); } .lbl{ fill:var(--ink); font-weight:600; }
+      .d{ fill:var(--docker); } .f{ fill:var(--ferro); } .win{ fill:var(--win); font-weight:700; } .loss{ fill:var(--loss); font-weight:700; }
+      .v{ fill:var(--muted); font-size:12px; }
     </style>
-    <linearGradient id="fc-bar" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/>
-    </linearGradient>
   </defs>
-  <rect width="1200" height="500" fill="var(--bg)"/>
-  <text class="t" x="60" y="56" font-size="26">Median seconds per operation — lower is better</text>
-  <text class="cap" x="60" y="82" font-size="14">Release build, alpine:3.20 fixture, three rounds, same host. Full method in docs/benchmarks/.</text>
+  <rect width="1200" height="640" fill="var(--bg)"/>
+  <text class="lbl" x="48" y="52" font-size="24">Median seconds per operation — lower is better</text>
+  <text class="muted" x="48" y="76" font-size="13">Same host, both engines unprivileged, alpine:latest, --network none, 10 iterations (5 for build). Source: docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md</text>
+  <rect x="930" y="40" width="12" height="12" rx="2" class="d"/><text class="muted" x="948" y="51" font-size="13">Docker 29.7</text>
+  <rect x="1040" y="40" width="12" height="12" rx="2" class="f"/><text class="muted" x="1058" y="51" font-size="13">Ferrocrate</text>
 
-  <!-- legend -->
-  <rect x="880" y="44" width="14" height="14" rx="3" fill="var(--docker)"/><text class="val" x="902" y="56" font-size="14">Docker</text>
-  <rect x="990" y="44" width="14" height="14" rx="3" fill="url(#fc-bar)"/><text class="val" x="1012" y="56" font-size="14">ferrocrate</text>
+  <!-- rows: label x=48, bars from x=300 to max width 560, values at bar end, delta at x=1090 -->
+  <!-- start detached: 0.114 vs 0.008 -->
+  <text class="lbl" x="48" y="118" font-size="15">start (detached)</text>
+  <rect class="d" x="300" y="104" width="560" height="10" rx="3"/><text class="v" x="868" y="114">0.114 s</text>
+  <rect class="f" x="300" y="118" width="39" height="10" rx="3"/><text class="v" x="347" y="128">0.008 s</text>
+  <text class="win" x="1090" y="121" font-size="14">−93%</text>
 
-  <!-- rows: label x=60 (width 220); bars start x=300, max 560 -->
-  <!-- row 1: start detached -->
-  <text class="lbl" x="60" y="132" font-size="16">start (detached)</text>
-  <rect x="300" y="112" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="125" font-size="13">0.114 s</text>
-  <rect x="300" y="134" width="40"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="352" y="147" font-size="13">0.008 s</text>
-  <text class="win" x="1080" y="132" font-size="15">−93%</text>
+  <!-- stop -t 1: 1.115 vs 0.032 -->
+  <text class="lbl" x="48" y="168" font-size="15">stop (t=1)</text>
+  <rect class="d" x="300" y="154" width="560" height="10" rx="3"/><text class="v" x="868" y="164">1.115 s</text>
+  <rect class="f" x="300" y="168" width="16" height="10" rx="3"/><text class="v" x="324" y="178">0.032 s</text>
+  <text class="win" x="1090" y="171" font-size="14">−97%</text>
 
-  <!-- row 2: stop -->
-  <text class="lbl" x="60" y="204" font-size="16">stop (t=1)</text>
-  <rect x="300" y="184" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="197" font-size="13">1.115 s</text>
-  <rect x="300" y="206" width="16"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="328" y="219" font-size="13">0.032 s</text>
-  <text class="win" x="1080" y="204" font-size="15">−97%</text>
+  <!-- exec: 0.064 vs 0.016 -->
+  <text class="lbl" x="48" y="218" font-size="15">exec</text>
+  <rect class="d" x="300" y="204" width="560" height="10" rx="3"/><text class="v" x="868" y="214">0.064 s</text>
+  <rect class="f" x="300" y="218" width="140" height="10" rx="3"/><text class="v" x="448" y="228">0.016 s</text>
+  <text class="win" x="1090" y="221" font-size="14">−75%</text>
 
-  <!-- row 3: exec -->
-  <text class="lbl" x="60" y="276" font-size="16">exec</text>
-  <rect x="300" y="256" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="269" font-size="13">0.064 s</text>
-  <rect x="300" y="278" width="140" height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="452" y="291" font-size="13">0.016 s</text>
-  <text class="win" x="1080" y="276" font-size="15">−75%</text>
+  <!-- logs 1000 lines: 0.016 vs 0.007 -->
+  <text class="lbl" x="48" y="268" font-size="15">logs (1,000 lines)</text>
+  <rect class="d" x="300" y="254" width="560" height="10" rx="3"/><text class="v" x="868" y="264">0.016 s</text>
+  <rect class="f" x="300" y="268" width="245" height="10" rx="3"/><text class="v" x="553" y="278">0.007 s</text>
+  <text class="win" x="1090" y="271" font-size="14">−52%</text>
 
-  <!-- row 4: ps -a -->
-  <text class="lbl" x="60" y="348" font-size="16">ps -a</text>
-  <rect x="300" y="328" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="341" font-size="13">0.032 s</text>
-  <rect x="300" y="350" width="122" height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="434" y="363" font-size="13">0.007 s</text>
-  <text class="win" x="1080" y="348" font-size="15">−76%</text>
+  <!-- ps -a: 0.032 vs 0.007 -->
+  <text class="lbl" x="48" y="318" font-size="15">ps -a</text>
+  <rect class="d" x="300" y="304" width="560" height="10" rx="3"/><text class="v" x="868" y="314">0.032 s</text>
+  <rect class="f" x="300" y="318" width="123" height="10" rx="3"/><text class="v" x="431" y="328">0.007 s</text>
+  <text class="win" x="1090" y="321" font-size="14">−76%</text>
 
-  <!-- row 5: cached build -->
-  <text class="lbl" x="60" y="420" font-size="16">build (cached)</text>
-  <rect x="300" y="400" width="560" height="16" rx="4" fill="var(--docker)"/><text class="val" x="872" y="413" font-size="13">0.765 s</text>
-  <rect x="300" y="422" width="12"  height="16" rx="4" fill="url(#fc-bar)"/><text class="val" x="324" y="435" font-size="13">0.007 s</text>
-  <text class="win" x="1080" y="420" font-size="15">−99%</text>
+  <!-- images list: 0.114 vs 0.008 -->
+  <text class="lbl" x="48" y="368" font-size="15">images (list)</text>
+  <rect class="d" x="300" y="354" width="560" height="10" rx="3"/><text class="v" x="868" y="364">0.114 s</text>
+  <rect class="f" x="300" y="368" width="39" height="10" rx="3"/><text class="v" x="347" y="378">0.008 s</text>
+  <text class="win" x="1090" y="371" font-size="14">−93%</text>
 
-  <line x1="60" y1="456" x2="1140" y2="456" stroke="var(--border)" stroke-width="1"/>
-  <text class="cap" x="60" y="482" font-size="14">Honest loss: attached run-to-exit is 0.364 s vs Docker's 0.164 s — the one operation Docker still wins.</text>
+  <!-- volume create: 0.016 vs 0.008 -->
+  <text class="lbl" x="48" y="418" font-size="15">volume create</text>
+  <rect class="d" x="300" y="404" width="560" height="10" rx="3"/><text class="v" x="868" y="414">0.016 s</text>
+  <rect class="f" x="300" y="418" width="280" height="10" rx="3"/><text class="v" x="588" y="428">0.008 s</text>
+  <text class="win" x="1090" y="421" font-size="14">−52%</text>
+
+  <!-- build no-cache: 0.264 vs 0.008 -->
+  <text class="lbl" x="48" y="468" font-size="15">build (no cache, COPY-only)</text>
+  <rect class="d" x="300" y="454" width="560" height="10" rx="3"/><text class="v" x="868" y="464">0.264 s</text>
+  <rect class="f" x="300" y="468" width="17" height="10" rx="3"/><text class="v" x="325" y="478">0.008 s</text>
+  <text class="win" x="1090" y="471" font-size="14">−97%</text>
+
+  <!-- build cached: 0.765 vs 0.007 -->
+  <text class="lbl" x="48" y="518" font-size="15">build (cached, COPY-only)</text>
+  <rect class="d" x="300" y="504" width="560" height="10" rx="3"/><text class="v" x="868" y="514">0.765 s</text>
+  <rect class="f" x="300" y="518" width="8" height="10" rx="3"/><text class="v" x="316" y="528">0.007 s</text>
+  <text class="win" x="1090" y="521" font-size="14">−99%</text>
+
+  <!-- run to exit attached: 0.164 vs 0.364 (Docker wins) -->
+  <text class="lbl" x="48" y="568" font-size="15">run to exit (attached)</text>
+  <rect class="d" x="300" y="554" width="252" height="10" rx="3"/><text class="v" x="560" y="564">0.164 s</text>
+  <rect class="f" x="300" y="568" width="560" height="10" rx="3"/><text class="v" x="868" y="578">0.364 s</text>
+  <text class="loss" x="1090" y="571" font-size="14">+122%</text>
+
+  <line x1="48" y1="596" x2="1152" y2="596" stroke="var(--grid)" stroke-width="1"/>
+  <text class="muted" x="48" y="620" font-size="12.5">Docker won attached run-to-exit in this harness. A later paired run on the qualification host (2026-08-24, 20 rounds) measured 0.033 s vs 0.169 s after a Ferrocrate fix; both results are kept.</text>
 </svg>

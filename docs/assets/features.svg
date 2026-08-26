@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 370" width="1200" height="370" role="img" aria-labelledby="t">
+  <title id="t">What Ferrocrate does: Docker-compatible, native Rust engine, one binary, desktop app, fleet control, evidence-backed</title>
+  <defs>
+    <style>
+      :root{ --bg:#ffffff; --surface:#f8f5f2; --border:#e3dbd3; --ink:#26221f; --muted:#6e655e; --accent:#c2410c; --accent2:#e2571e; --on:#ffffff; }
+      @media (prefers-color-scheme: dark){ :root{ --bg:#0d1117; --surface:#1b1714; --border:#332b26; --ink:#f1ebe6; --muted:#b4a89e; --accent:#e2571e; --accent2:#f59e5b; } }
+      text{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+      .card{ fill:var(--surface); stroke:var(--border); stroke-width:1.5; }
+      .t{ fill:var(--ink); font-weight:600; } .d{ fill:var(--muted); }
+      .ico{ stroke:var(--on); fill:none; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/></linearGradient>
+  </defs>
+  <rect width="1200" height="370" fill="var(--bg)"/>
+
+  <!-- row 1 -->
+  <g>
+    <rect class="card" x="40" y="40" width="360" height="130" rx="14"/>
+    <rect x="66" y="66" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(78,78)"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 7V4h12v3M9 12h6"/></g>
+    <text class="t" x="134" y="88" font-size="19">Docker-compatible</text>
+    <text class="d" x="134" y="114" font-size="14">Your docker CLI, Dockerfiles, Compose</text>
+    <text class="d" x="134" y="134" font-size="14">files and images work unchanged.</text>
+  </g>
+  <g>
+    <rect class="card" x="420" y="40" width="360" height="130" rx="14"/>
+    <rect x="446" y="66" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(458,78)"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></g>
+    <text class="t" x="514" y="88" font-size="19">Native Rust engine</text>
+    <text class="d" x="514" y="114" font-size="14">Containers are plain Linux processes:</text>
+    <text class="d" x="514" y="134" font-size="14">namespaces, cgroups, no VM on Linux.</text>
+  </g>
+  <g>
+    <rect class="card" x="800" y="40" width="360" height="130" rx="14"/>
+    <rect x="826" y="66" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(838,78)"><path d="M12 2 3 7l9 5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></g>
+    <text class="t" x="894" y="88" font-size="19">Builds, both ways</text>
+    <text class="d" x="894" y="114" font-size="14">BuildKit (Buildx) by default, classic path</text>
+    <text class="d" x="894" y="134" font-size="14">kept; both give the same image digest.</text>
+  </g>
+
+  <!-- row 2 -->
+  <g>
+    <rect class="card" x="40" y="200" width="360" height="130" rx="14"/>
+    <rect x="66" y="226" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(78,238)"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></g>
+    <text class="t" x="134" y="248" font-size="19">Desktop app, three OSes</text>
+    <text class="d" x="134" y="274" font-size="14">Linux native; Windows through WSL2;</text>
+    <text class="d" x="134" y="294" font-size="14">macOS through a lightweight Linux VM.</text>
+  </g>
+  <g>
+    <rect class="card" x="420" y="200" width="360" height="130" rx="14"/>
+    <rect x="446" y="226" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(458,238)"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7 7.5l3.5 8M17 7.5l-3.5 8M7.5 6h9"/></g>
+    <text class="t" x="514" y="248" font-size="19">Fleet control plane</text>
+    <text class="d" x="514" y="274" font-size="14">Enrol hosts, deploy, roll back and watch</text>
+    <text class="d" x="514" y="294" font-size="14">health from one certificate-bound UI.</text>
+  </g>
+  <g>
+    <rect class="card" x="800" y="200" width="360" height="130" rx="14"/>
+    <rect x="826" y="226" width="48" height="48" rx="12" fill="url(#g)"/>
+    <g class="ico" transform="translate(838,238)"><path d="M9 11l3 3 7-7"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></g>
+    <text class="t" x="894" y="248" font-size="19">Every claim has evidence</text>
+    <text class="d" x="894" y="274" font-size="14">The feature matrix links every row to a</text>
+    <text class="d" x="894" y="294" font-size="14">dated test report. No unproven claims.</text>
+  </g>
+</svg>

@@ -644,6 +644,7 @@ fn macos_backend_provisions_the_configured_guest_engine_before_tunnelling() {
         .expect("guest provisioning command");
     assert_eq!(provisioner.args[0], "-lc");
     assert!(provisioner.args[1].contains("scp"));
+    assert!(provisioner.args[1].contains("'-P' '2222'"));
     assert!(provisioner.args[1].contains("/Users/test/ferrocrate-guest-engine-x86_64"));
     assert!(provisioner.args[1].contains("systemctl enable --now ferrocrate.service"));
     assert!(provisioner.args[1].contains("/home/ferro/.local/state/ferrocrate/ferrocrate.sock"));

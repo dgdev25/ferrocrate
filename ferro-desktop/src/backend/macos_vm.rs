@@ -248,9 +248,11 @@ fn guest_provisioner_command(
             .collect::<Vec<_>>()
             .join(" ")
     };
+    let mut scp_options = ssh_options.to_vec();
+    scp_options[2] = "-P".to_string();
     let scp = format!(
         "scp {} {} {}",
-        quote_words(&ssh_options),
+        quote_words(&scp_options),
         posix_shell_quote(&config.guest_engine_path.display().to_string()),
         posix_shell_quote(&guest_tmp),
     );

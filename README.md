@@ -119,8 +119,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows 11 (WSL2 backend) | Blocked: the healthy guest engine is contended by the requested supervisor-plus-web sequence |
-| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF starts the guest, but macOS OpenSSH cannot authenticate the accepted cloud-init key |
+| Windows 11 (WSL2 backend) | Engine start qualified; its tokenized web bridge did not survive non-interactive VM handoff, so action acceptance remains pending |
+| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF starts a clean guest, but its forwarded SSH connection closes during key exchange |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is

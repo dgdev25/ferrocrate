@@ -102,10 +102,14 @@ export function FleetApp(): JSX.Element {
       }
     } catch (nextError) {
       if (isFleetSessionExpired(nextError)) {
+        // A first visit has no stored token, so "expired" would be wrong: there
+        // was never a session. Only say expired when one is actually being
+        // discarded; otherwise the sign-in form speaks for itself.
+        const hadSession = sessionStorage.getItem(TOKEN_KEY) !== null;
         sessionStorage.removeItem(TOKEN_KEY);
         sessionStorage.removeItem(ROLE_KEY);
         setRole(null);
-        setError("Session expired — sign in again");
+        setError(hadSession ? "Session expired — sign in again" : "");
       } else if (shouldShowFleetRefreshError(role)) {
         setError(String(nextError));
       }

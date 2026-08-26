@@ -191,7 +191,13 @@ async fn refresh_login(State(state): State<UiState>, headers: axum::http::Header
     let Some(identity) = state.sessions.authenticate(token, unix_now()) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match state.logins.mint(identity, unix_now(), 300) {
+    // Match the session ceiling rather than a shorter hard-coded window: a
+    // credential that lapses sooner than the session that can refresh it leaves
+    // the operator locked out (the five-minute default did exactly that).
+    match state
+        .logins
+        .mint(identity, unix_now(), state.session_ttl_seconds)
+    {
         Ok(credential) => Json(json!({"credential": credential})).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,

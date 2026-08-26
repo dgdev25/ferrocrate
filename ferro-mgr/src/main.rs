@@ -206,6 +206,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct FleetUiOptions {
     listen: SocketAddr,
     insecure_loopback: bool,
+    /// Lifetime of the browser login credential written to disk. The default of
+    /// five minutes was too short to be usable: once it lapsed the operator was
+    /// locked out, because refreshing one needs a live browser session and there
+    /// was none yet. Bounded by the session ceiling.
+    login_ttl_seconds: i64,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     admin_endpoint: String,
@@ -221,6 +226,7 @@ impl FleetUiOptions {
     fn parse() -> Result<Self, String> {
         let mut listen: SocketAddr = "127.0.0.1:8443".parse().expect("static address");
         let mut insecure_loopback = false;
+        let mut login_ttl_seconds: i64 = 900;
         let mut tls_cert = std::env::var_os("FERROCRATE_MANAGER_TLS_CERT").map(PathBuf::from);
         let mut tls_key = std::env::var_os("FERROCRATE_MANAGER_TLS_KEY").map(PathBuf::from);
         let mut admin_endpoint = std::env::var("FERROCRATE_ADMIN_ENDPOINT")
@@ -250,6 +256,15 @@ impl FleetUiOptions {
                         .map_err(|error| format!("invalid --listen address: {error}"))?;
                 }
                 "--insecure-loopback" => insecure_loopback = true,
+                "--login-ttl-seconds" => {
+                    let raw = value(&mut arguments, "--login-ttl-seconds")?;
+                    login_ttl_seconds = raw
+                        .parse()
+                        .map_err(|_| format!("invalid --login-ttl-seconds: {raw}"))?;
+                    if login_ttl_seconds <= 0 || login_ttl_seconds > 3600 {
+                        return Err("--login-ttl-seconds must be between 1 and 3600".to_string());
+                    }
+                }
                 "--tls-cert" => tls_cert = Some(value(&mut arguments, "--tls-cert")?.into()),
                 "--tls-key" => tls_key = Some(value(&mut arguments, "--tls-key")?.into()),
                 "--admin-endpoint" => admin_endpoint = value(&mut arguments, "--admin-endpoint")?,
@@ -276,6 +291,7 @@ impl FleetUiOptions {
         Ok(Self {
             listen,
             insecure_loopback,
+            login_ttl_seconds,
             tls_cert,
             tls_key,
             admin_endpoint,
@@ -317,14 +333,14 @@ async fn run_fleet_ui() -> Result<(), Box<dyn std::error::Error>> {
             principal: principal.clone(),
             role: FleetRole::Operate,
         },
-        300,
+        options.login_ttl_seconds,
     )?;
     let view_login = ui.mint_login(
         BrowserIdentity {
             principal,
             role: FleetRole::View,
         },
-        300,
+        options.login_ttl_seconds,
     )?;
     let operate_path = options.state_dir.join("operate.login");
     let view_path = options.state_dir.join("view.login");

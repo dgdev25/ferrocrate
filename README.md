@@ -2,29 +2,21 @@
   <img src="docs/assets/banner.svg" alt="Ferrocrate — the Docker-compatible container engine, written in Rust" width="100%">
 </p>
 
-Ferrocrate is a container engine you use exactly like Docker — same commands,
-same Dockerfiles, same images — implemented from scratch in Rust as a single
-binary. The genuine `docker` CLI works against its daemon unmodified: the
-conformance suite drives a real Docker client through 85 default-BuildKit
-scenarios, and all 85 pass. Images are standard OCI, so anything Ferrocrate
-builds runs under Docker, podman, or Kubernetes, and the other way round.
+Ferrocrate is a Rust container engine with a native CLI and a Docker-compatible
+API. The real `docker` CLI conformance suite has 85 passing scenarios in both
+the default BuildKit and classic build modes. See the
+[feature matrix](docs/FEATURE-MATRIX.md) for the support contract and evidence.
 
-## ✨ Highlights
+## Scope
 
-- **Docker-compatible, verified** — 85/85 default-BuildKit conformance against
-  the real `docker` client, including cold base-image pulls, multi-network
-  connect/disconnect, and non-readable log-driver behavior.
-- **Fast** — the dated benchmark register records host-local paired results;
-  Round 9 closes the previously recorded attached-run loss.
-- **One binary** — daemon, native CLI, Compose, and a Kubernetes CRI endpoint
-  in a single Rust executable. No shim stack.
-- **Safety engineering** — destructive operations verify process identity by
-  PID start-time before signaling, so a recycled PID is never killed by
-  mistake; state survives daemon restarts and is reconciled on startup.
-- **Qualified, not assumed** — every support claim links dated evidence from
-  real hosts; desktop acceptance remains blocked while the Windows WSL engine
-  rebuild completes and by a macOS VM SSH identity/known-host boundary, recorded in
-  [`VM-ACCEPTANCE-2026-08-25.md`](docs/desktop/VM-ACCEPTANCE-2026-08-25.md).
+- Linux engine execution uses Linux namespaces, cgroups, and networking.
+- Image builds and runs are limited to the host architecture. Foreign
+  architecture emulation, `--platform` builds, and multi-architecture manifests
+  are not supported; [Round 11](docs/remediation/ROUND-11-PLAN.md) records the
+  parked work.
+- The dashboard and fleet UI have separate, dated browser acceptance reports:
+  [dashboard](docs/desktop/DASHBOARD-TEST-REPORT-2026-08-25.md) and
+  [fleet](docs/fleet/FLEET-TEST-REPORT-2026-08-25.md).
 
 ## 🚀 Quickstart
 
@@ -40,20 +32,20 @@ Build a project the way you always have — a Dockerfile and one command:
 ./target/release/ferro-cli run myapp:1.0
 ```
 
-Launch the same Forge interface used by the desktop app in an ordinary browser:
+Launch the embedded local dashboard in a browser:
 
 ```bash
 ./target/release/ferro-cli dashboard --listen 127.0.0.1:43190
 ```
 
-The command starts its local daemon and prints a per-launch bearer-token URL.
-Use `--token-file PATH` when another process should read the token without
-capturing stdout. The listener exists only while `dashboard` is running.
-Non-loopback binds fail closed unless `--tls-cert`, `--tls-key`, and
-`--operator-gate` are supplied together.
+The command starts a local daemon and prints a bearer-token URL. `--token-file
+PATH` writes the token for another process. The listener exists only while the
+command runs. A non-loopback bind requires `--tls-cert`, `--tls-key`, and
+`--operator-gate`. The browser acceptance report covers the loopback token,
+Host and Origin checks, SSE, and all 24 dashboard checks.
 
-Run the manager-backed Fleet tab against the existing operator-authenticated
-admin gRPC endpoint:
+Run the manager-backed fleet UI against the existing operator mTLS admin gRPC
+endpoint:
 
 ```bash
 ferro-mgr fleet-ui --listen 127.0.0.1:8443 \
@@ -63,15 +55,22 @@ ferro-mgr fleet-ui --listen 127.0.0.1:8443 \
   --operator-cert operator.crt --operator-key operator.key
 ```
 
-The Fleet tab shows hosts, per-host containers and logs, desired-state
-deployments with rollback, and Doctor summaries. Certificate-bound `view`
-sessions are read-only; `operate` actions are appended to the fleet witness
-journal. Plain HTTP is rejected except for explicit loopback-only test runs
-using `--insecure-loopback`.
+The UI has Hosts, Containers, Deploys, and Health screens. Certificate-bound
+`view` sessions are read-only; `operate` actions are written to the witness
+journal. TLS is required except for an explicit loopback test run using
+`--insecure-loopback`. The fleet report covers two rootless Linux hosts,
+revocation, role denial, deploy, rollback, and the displayed degraded-health
+boundary.
 
-Or point the real Docker CLI at Ferrocrate's daemon. The default build protocol
-is supported through the authenticated Buildx docker driver; the classic path
-remains available and produces the same image digest:
+The optional LAN image mirror announces images by mDNS and provides
+digest-verified, read-only peer pulls on private IPv4. When no peer succeeds,
+pull falls back to the registry. Its host/guest proof is recorded in the
+[LAN mirror evidence](docs/evidence/networking/2026-08-25-lan-image-mirror.md).
+
+The real Docker CLI can use Ferrocrate's daemon. Local Dockerfile builds use
+the authenticated Buildx docker driver by default; the classic path remains
+available and has the same image digest. Arbitrary LLB and `gateway.v0` are
+unsupported.
 
 ```bash
 export DOCKER_HOST=unix:///run/ferrocrate/docker.sock
@@ -86,7 +85,7 @@ active and restores the exact initial sysctl value on exit. Privileged
 networking tests need a disposable Linux host; a packaging test alone is not
 host-qualification evidence.
 
-## 🧭 How it works
+## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
@@ -100,7 +99,7 @@ network, and starts it. There is no virtual machine in the path on Linux:
 a container is a normal process tree the kernel isolates, which is where the
 speed comes from.
 
-## 📊 How it performs
+## Benchmark evidence
 
 <p align="center">
   <img src="docs/assets/benchmark.svg" alt="Dated host-local Docker and Ferrocrate operation medians; see the benchmark register for the current attached-run result" width="100%">
@@ -112,50 +111,42 @@ host details, and raw numbers:
 [`docs/benchmarks/`](docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md) and
 the [benchmark register](docs/evidence/performance/benchmark-register.md).
 
-## 🏗️ Architecture
+## Architecture
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
   <img src="docs/assets/architecture-light.svg" alt="Architecture — native CLI, Docker clients, Compose and CRI feed one daemon, which drives the container runtime, image store and networking stack on Linux kernel primitives" width="100%">
 </picture>
 
-Four client surfaces converge on one daemon. Below it, `ferro-core` owns
-container state and execution, the image store holds OCI layers and the build
-cache, and the networking stack (`ferro-net`/`ferro-netd`) provides bridges,
-DNS, IPv6, and WireGuard overlays — with iptables and nftables backends, and
-opt-in eBPF port publishing. A `ferro-cri` socket serves Kubernetes. The
-workspace also builds on macOS (Linux-only paths compile out) so the code
-can be developed and unit-tested there.
+The native CLI, Docker clients, Compose, and CRI connect to one daemon.
+`ferro-core` owns container state and execution; the image store holds OCI
+layers and build cache; `ferro-net`/`ferro-netd` provide bridges, DNS, IPv6,
+WireGuard, and iptables/nftables backends. eBPF port publishing is opt-in.
 
 ## 🖥️ Platform support
 
 | Platform | Status |
 |---|---|
-| Ubuntu 26.04 / 24.04, Debian 12 / 13, Fedora 42, Alpine 3.22 (x86_64, rootful) | Qualified with dated evidence per distro; full matrix re-run 2026-08-25 on main 90595943, conformance 60/60 per row |
-| Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
-| Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
-| Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows 11 (WSL2 backend) | Native desktop/UI rebuilt on `E:`; WSL engine rebuild is pending before authenticated bridge acceptance |
-| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF and release sidecars are available, but the supervisor's default SSH identity path is absent and a stale loopback known-host entry blocks the tunnel |
-| Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
+| Ubuntu 26.04 / 24.04, Debian 12 / 13, Fedora 42, Alpine 3.22 (x86_64, rootful) | Supported; dated rows are in the feature matrix |
+| Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified with opt-in `legacy-peercred`; default pidfd authentication remains fail-closed |
+| Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Supported; dated row is in the feature matrix |
+| Rootless mode | Qualified only on the host rows in the feature matrix; missing `SO_PEERPIDFD` fails closed unless legacy peercred is explicitly enabled |
+| Windows 11 | Accepted desktop backend through WSL2, 24/24 browser checks ([final VM verification](docs/desktop/VM-ACCEPTANCE-2026-08-25.md#final-vm-verification----2026-08-26)) |
+| macOS Tahoe | Accepted desktop backend through a QEMU-HVF Linux VM, 24/24 browser checks ([final VM verification](docs/desktop/VM-ACCEPTANCE-2026-08-25.md#final-vm-verification----2026-08-26)) |
 
 The authoritative support contract is
 [`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md) — every claim there links
 dated evidence in [`docs/evidence/`](docs/evidence/), and where a feature is
 experimental or unsupported, the matrix says so explicitly.
 
-## 🩺 Status
+## Status
 
-Ferrocrate targets Linux-first local development, not (yet) a universal Docker
-replacement. Coverage is strongest in lifecycle, images, and local Dockerfile
-builds. Multi-network containers, pluggable log drivers, and authenticated
-BuildKit session builds are qualified; arbitrary LLB and non-Dockerfile
-frontends remain explicit unsupported boundaries.
-AI-assisted restart/resource signals exist but are local, bounded, and off
-unless enabled (`FERROCRATE_AI=0` disables everything; automatic actions
-need a separate operator gate).
+Ferrocrate is Linux-first. Windows uses a WSL2 backend; macOS uses a Linux VM
+backend. The engine does not execute containers natively on Windows or macOS.
+The support contract, including experimental and unsupported rows, is in the
+[feature matrix](docs/FEATURE-MATRIX.md).
 
-## 🛠️ Development
+## CI and development
 
 ```bash
 cargo test --workspace          # full suite
@@ -164,9 +155,14 @@ bash scripts/docker-client-conformance.sh   # 85-scenario default-BuildKit gate
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), and
-[`docs/operations/external-ci.md`](docs/operations/external-ci.md) for the
-release gates. macOS-on-VMware lab setup for cross-platform testing is
-documented in [`docs/MACOS_ON_VMWARE.md`](docs/MACOS_ON_VMWARE.md).
+the [release-gate instructions](docs/operations/external-ci.md). GitHub
+Actions runs build, desktop/Tauri unit, frontend, and warning gates on the
+self-hosted Linux, macOS, and Windows lab runners for same-repository pushes
+and pull requests. Scheduled/manual packaging canaries build Linux deb/AppImage,
+macOS app/DMG, and Windows MSI/NSIS bundles. The Linux and macOS artifact
+records are [here](docs/evidence/packaging/2026-08-25-linux-artifacts.md) and
+[here](docs/evidence/packaging/2026-08-25-macos-dmg.md). macOS-on-VMware lab
+setup is documented in [`docs/MACOS_ON_VMWARE.md`](docs/MACOS_ON_VMWARE.md).
 
 ## 📄 License
 

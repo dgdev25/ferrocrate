@@ -716,7 +716,7 @@ impl BackendHost for SystemBackendHost {
 
     fn health(&self, transport: &Transport) -> Result<bool, BackendError> {
         let response = self.request(transport, &TransportRequest::new("GET", "/_ping"));
-        Ok(matches!(response, Ok(response) if response.status == 200 && response.body == b"OK"))
+        Ok(matches!(response, Ok(response) if response.status == 200 && daemon_ping_response_is_healthy(&response.body)))
     }
 
     fn request(
@@ -1117,6 +1117,11 @@ fn percent_encode_path(value: &str) -> String {
     encoded
 }
 
+fn daemon_ping_response_is_healthy(body: &[u8]) -> bool {
+    std::str::from_utf8(body)
+        .is_ok_and(|value| value.trim() == "OK")
+}
+
 fn serialize_request(request: &TransportRequest, token: Option<&str>) -> Vec<u8> {
     let mut wire = format!(
         "{} {} HTTP/1.1\r\nHost: ferrocrate-desktop\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -1301,6 +1306,12 @@ mod timeout_tests {
             condition.notify_all();
             Ok(())
         }
+    }
+
+    #[test]
+    fn daemon_ping_accepts_the_newline_terminated_engine_response() {
+        assert!(daemon_ping_response_is_healthy(b"OK\n"));
+        assert!(!daemon_ping_response_is_healthy(b"not ready\n"));
     }
 
     #[test]

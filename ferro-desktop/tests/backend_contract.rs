@@ -310,6 +310,18 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
 }
 
 #[test]
+fn wsl2_attaches_to_a_healthy_supervisor_owned_engine() {
+    let host = FakeHost::healthy(true);
+    let backend = Wsl2Backend::with_host(wsl_config(), host.clone());
+
+    let status = backend.start().expect("attach to the running WSL engine");
+
+    assert_eq!(status.state, BackendState::Running);
+    assert!(status.healthy);
+    assert!(host.starts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
     let host = FakeHost::ready_after_start();
     let config = MacosVmConfig {
@@ -340,6 +352,10 @@ fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
                 "2222",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "IdentityAgent=none",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",

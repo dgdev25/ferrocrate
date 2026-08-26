@@ -127,8 +127,12 @@ def run_sequence(seq: list[tuple[str, list[str]]], tag: str) -> dict | None:
     for index, (label, args) in enumerate(seq):
         d_code, d_out, d_err = DOCKER.run(args)
         f_code, f_out, f_err = FERROCRATE.run(args)
-        # Both refusing is agreement, whatever the wording.
-        agree_status = (d_code == 0) == (f_code == 0)
+        # Both refusing is agreement, whatever the wording. A crash is not a
+        # refusal: a timeout (124) or a signal death (128+) on one engine is a
+        # divergence even when the other engine also returned non-zero.
+        crashed = [name for name, code in (("docker", d_code), ("ferrocrate", f_code))
+                   if code == 124 or code >= 128]
+        agree_status = not crashed and (d_code == 0) == (f_code == 0)
         agree_stdout = normalise(d_out) == normalise(f_out) if d_code == 0 and f_code == 0 else True
         d_state, f_state = DOCKER.state(tag), FERROCRATE.state(tag)
         agree_state = d_state == f_state
@@ -138,7 +142,9 @@ def run_sequence(seq: list[tuple[str, list[str]]], tag: str) -> dict | None:
                 "step": index, "label": label, "args": args,
                 "docker": {"exit": d_code, "stdout": d_out[-400:], "stderr": d_err[-400:], "state": d_state},
                 "ferrocrate": {"exit": f_code, "stdout": f_out[-400:], "stderr": f_err[-400:], "state": f_state},
-                "reason": ("status" if not agree_status else "stdout" if not agree_stdout else "state"),
+                "reason": ("crash:" + ",".join(crashed) if crashed
+                           else "status" if not agree_status
+                           else "stdout" if not agree_stdout else "state"),
             }
     cleanup(tag)
     return None

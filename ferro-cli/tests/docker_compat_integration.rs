@@ -405,6 +405,67 @@ fn docker_compat_routes_support_version_prefix() {
 }
 
 #[test]
+fn docker_api_concurrent_multi_network_create_keeps_every_network_record() {
+    let harness = DaemonHarness::spawn();
+    let socket = harness.socket_path.clone();
+    let requests = ["compose-frontend", "compose-backend"]
+        .into_iter()
+        .map(|name| {
+            let socket = socket.clone();
+            thread::spawn(move || {
+                let body = format!(r#"{{"Name":"{name}","Driver":"bridge","IPAM":{{"Config":[]}}}}"#);
+                let request = format!(
+                    "POST /networks/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let mut stream = UnixStream::connect(socket).expect("connect daemon socket");
+                stream.write_all(request.as_bytes()).expect("write create request");
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let mut response = String::new();
+                stream.read_to_string(&mut response).expect("read create response");
+                response
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for request in requests {
+        let response = request.join().expect("network create thread");
+        assert!(response.starts_with("HTTP/1.1 201"), "network create response={response}");
+    }
+
+    for name in ["compose-frontend", "compose-backend"] {
+        let (status, body) = harness.request("GET", &format!("/networks/{name}"));
+        assert_eq!(status, 200, "network {name} vanished: {body}");
+    }
+}
+
+#[test]
+fn docker_api_create_then_list_keeps_the_fresh_container_record() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/containers/create?name=fresh-state-container",
+        "application/json",
+        br#"{"Image":"busybox","Cmd":["true"]}"#,
+    );
+    assert_eq!(status, 201, "create response={body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("create response JSON")["Id"]
+        .as_str()
+        .expect("created container ID")
+        .to_string();
+
+    let (status, body) = harness.request("GET", "/containers/json?all=1");
+    assert_eq!(status, 200, "list response={body}");
+    let containers = serde_json::from_str::<Vec<serde_json::Value>>(&body)
+        .expect("container list JSON");
+    assert!(
+        containers.iter().any(|container| container["Id"] == id),
+        "freshly created container was hidden from list: {body}"
+    );
+}
+
+#[test]
 fn native_cli_automatically_delegates_to_active_daemon_owner() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;

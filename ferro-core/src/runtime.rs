@@ -11994,9 +11994,21 @@ fn reap_orphaned_slirp4netns_helpers(
     runtime_dir: &Path,
     store: &SqliteContainerStore,
 ) -> Result<(), RuntimeError> {
+    reap_orphaned_slirp4netns_helpers_in(runtime_dir, store, Path::new("/proc"))
+}
+
+/// The durable container record is the ownership authority.  A helper can be
+/// started before its PID metadata is refreshed, and a container can be in a
+/// transitional state while creation is being committed; neither makes its
+/// runtime directory or helper an orphan.
+fn reap_orphaned_slirp4netns_helpers_in(
+    runtime_dir: &Path,
+    store: &SqliteContainerStore,
+    proc_root: &Path,
+) -> Result<(), RuntimeError> {
     let containers_dir = runtime_dir.join("containers");
     let records = store.list()?;
-    for entry in fs::read_dir("/proc")?.flatten() {
+    for entry in fs::read_dir(proc_root)?.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
@@ -12018,12 +12030,9 @@ fn reap_orphaned_slirp4netns_helpers(
         {
             continue;
         }
-        let owned = records.iter().any(|record| {
-            record.id.as_bytes() == id.as_bytes()
-                && matches!(record.status.as_str(), "running" | "paused")
-                && record.slirp4netns_pid == Some(pid)
-                && record.slirp4netns_start_time == process_start_time_for_pid(pid)
-        });
+        let owned = records
+            .iter()
+            .any(|record| record.id.as_bytes() == id.as_bytes());
         if !owned {
             if let Err(error) = kill_pid(pid) {
                 log::warn!("failed to reap orphaned slirp4netns helper {pid}: {error}");
@@ -16789,6 +16798,51 @@ mod tests {
             !status.success(),
             "helper must be terminated on terminal lifecycle"
         );
+    }
+
+    #[test]
+    fn slirp_reaper_leaves_a_recorded_container_helper_alone() {
+        let runtime = tempfile::tempdir().expect("runtime root");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record = fixture_container_record("recorded-helper", "created");
+        store.put(&record).expect("persist recorded container");
+
+        let socket = runtime
+            .path()
+            .join("containers")
+            .join(&record.id)
+            .join("slirp4netns.sock");
+        std::fs::create_dir_all(socket.parent().expect("socket parent"))
+            .expect("helper directory");
+        let mut helper = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "slirp4netns",
+                &format!("--api-socket={}", socket.display()),
+            ])
+            .spawn()
+            .expect("start helper stand-in");
+        for _ in 0..50 {
+            if std::fs::read(format!("/proc/{}/cmdline", helper.id()))
+                .ok()
+                .is_some_and(|cmdline| super::slirp_api_socket_from_cmdline(&cmdline).is_some())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        super::reap_orphaned_slirp4netns_helpers(runtime.path(), &store)
+            .expect("recorded helper must not be reaped");
+        assert!(
+            helper.try_wait().expect("helper status").is_none(),
+            "the reaper must not kill a helper whose container has a durable record"
+        );
+        let _ = helper.kill();
+        let _ = helper.wait();
     }
 
     #[test]

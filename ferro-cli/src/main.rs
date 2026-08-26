@@ -17033,6 +17033,11 @@ fn prune_live_attach_registrations(
 #[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
+    /// Docker Compose submits independent network requests concurrently.  A
+    /// network lifecycle is a read-modify-write transaction over the durable
+    /// network store, so serialize it for the daemon rather than letting two
+    /// successful creates overwrite each other's publication.
+    network_operations: Mutex<()>,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
     starting: Mutex<std::collections::HashSet<String>>,
     attach_readiness: Mutex<HashMap<String, Vec<Weak<DockerAttachReadiness>>>>,
@@ -17088,6 +17093,7 @@ impl DockerCompatState {
         }
         Ok(Self {
             next_id: AtomicU64::new(0),
+            network_operations: Mutex::new(()),
             pending: Mutex::new(pending),
             starting: Mutex::new(std::collections::HashSet::new()),
             attach_readiness: Mutex::new(HashMap::new()),
@@ -18029,10 +18035,6 @@ fn run_daemon(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     listener.set_nonblocking(true).map_err(|err| format!("daemon: set socket nonblocking: {err}"))?;
-    // Publish atomically in the same startup step as lock acquisition, before
-    // opening engine stores. This bounds the lock-held/no-owner window to the
-    // socket bind itself and lets native clients immediately delegate.
-    engine_owner.publish_daemon_owner(socket_path)?;
     reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     let runtime_dir = Arc::new(runtime_dir);
     let runtime = Arc::new(
@@ -18049,6 +18051,11 @@ fn run_daemon(
         LocalVolumeStore::open(runtime_dir.join("volumes")).map_err(|err| err.to_string())?,
     );
     let state = Arc::new(DockerCompatState::new(runtime_dir.as_ref())?);
+    // Do not advertise delegation until reconciliation and every request
+    // store are ready.  A client that observes ownership between socket bind
+    // and initialization could otherwise fall back to a second direct runtime
+    // and race the daemon's startup reapers/record reconciliation.
+    engine_owner.publish_daemon_owner(socket_path)?;
     if let Some(addr) = metrics_addr {
         start_metrics_server(runtime.clone(), store.clone(), addr)?;
     }
@@ -20542,6 +20549,10 @@ fn handle_docker_compat_connection(
                 }
             }
             ("POST", "/networks/create") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let spec = parse_docker_network_create_spec(&request.body)?;
                 if !matches!(spec.driver.as_deref(), None | Some("") | Some("bridge")) {
                     return Err("docker: only bridge network driver is supported".to_string());
@@ -20589,6 +20600,10 @@ fn handle_docker_compat_connection(
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/networks/prune") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_network_filters(&filters)?;
                 let associations = runtime.list().map_err(|error| error.to_string())?;
@@ -20623,6 +20638,10 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("DELETE", path) if path.starts_with("/networks/") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let id = path.trim_start_matches("/networks/");
                 handle_network_authorized(
                     runtime_dir.as_ref(),
@@ -23628,7 +23647,7 @@ async fn handle_buildkit_control_request(
             };
             let result = execute_buildkit_frontend(
                 state.as_ref(),
-                execution.as_ref(),
+                execution.clone(),
                 build.as_ref(),
                 &frontend,
             )
@@ -23738,7 +23757,7 @@ async fn handle_buildkit_control_request(
         let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
         let result = execute_buildkit_frontend(
             state.as_ref(),
-            execution.as_ref(),
+            execution.clone(),
             build.as_ref(),
             &solve,
         )
@@ -23949,7 +23968,7 @@ fn buildkit_outer_solve_response(
 #[cfg(target_os = "linux")]
 async fn execute_buildkit_frontend(
     state: &DockerCompatState,
-    execution: &BuildkitExecutionContext,
+    execution: Arc<BuildkitExecutionContext>,
     build: &BuildkitBuild,
     request: &buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
 ) -> Result<BuildkitBuildResult, String> {
@@ -24025,14 +24044,6 @@ async fn execute_buildkit_frontend(
             session_auth.insert(registry, auth);
         }
     }
-    let pulled_bases = prefetch_dockerfile_bases(
-        execution.store.as_ref(),
-        &execution.origin,
-        &execution.authorization,
-        &dockerfile,
-        Some(&session_auth),
-    )?;
-
     let exporter = build
         .request
         .exporters
@@ -24045,7 +24056,46 @@ async fn execute_buildkit_frontend(
         .filter(|name| !name.is_empty())
         .unwrap_or("local/build:latest")
         .to_string();
-    let platform = request.frontend_opt.get("platform").map(String::as_str);
+    let platform = request.frontend_opt.get("platform").cloned();
+    // Registry pulls and the classic build executor are synchronous.  Running
+    // them on this h2 request runtime makes reqwest's blocking client try to
+    // tear down its private Tokio runtime from an async context, which aborts
+    // BuildKit's control stream while resolving a cold external base.
+    let blocking_execution = execution.clone();
+    let blocking_image_name = image_name.clone();
+    let (pulled_bases, build_output) = tokio::task::spawn_blocking(move || {
+        let pulled_bases = prefetch_dockerfile_bases(
+            blocking_execution.store.as_ref(),
+            &blocking_execution.origin,
+            &blocking_execution.authorization,
+            &dockerfile,
+            Some(&session_auth),
+        )?;
+        let build_output = execute_build(
+            blocking_execution.store.as_ref(),
+            &blocking_execution.origin,
+            &blocking_execution.authorization,
+            Some(dockerfile.to_str().ok_or_else(|| {
+                "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
+            })?),
+            None,
+            Some(&blocking_image_name),
+            "gzip",
+            "oci",
+            None,
+            platform.as_deref(),
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            None,
+        )?;
+        Ok::<_, String>((pulled_bases, build_output))
+    })
+    .await
+    .map_err(|error| format!("buildkit solve: blocking build worker failed: {error}"))??;
+
     let mut steps = dockerfile_contents
         .lines()
         .map(str::trim)
@@ -24058,26 +24108,6 @@ async fn execute_buildkit_frontend(
             buildkit_metadata_reference(base)?
         ));
     }
-    let build_output = execute_build(
-        execution.store.as_ref(),
-        &execution.origin,
-        &execution.authorization,
-        Some(dockerfile.to_str().ok_or_else(|| {
-            "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
-        })?),
-        None,
-        Some(&image_name),
-        "gzip",
-        "oci",
-        None,
-        platform,
-        None,
-        None,
-        &[],
-        &[],
-        None,
-        None,
-    )?;
     let mut output = pulled_bases
         .iter()
         .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))

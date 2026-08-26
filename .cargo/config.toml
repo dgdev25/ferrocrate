@@ -1,0 +1,5 @@
+# Building the clap command tree in `Cli::parse_from` needs several megabytes
+# of stack in debug builds; the 2 MiB default test thread overflows before the
+# first parse starts. Tests run under cargo inherit this floor.
+[env]
+RUST_MIN_STACK = "16777216"

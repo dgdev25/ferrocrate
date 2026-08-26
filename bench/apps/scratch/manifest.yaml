@@ -1,0 +1,13 @@
+name: scratch
+repo: /data/dev/ferrocrate-glm-S5/bench/apps/scratch/context
+pin: local
+class: seed
+stack: static
+base_image: alpine:3.20
+start: sh -c 'exec sleep infinity'
+port: 8080
+health: /
+data_paths: []
+env: {}
+skip: [doctor run-detached health ps logs inspect top stats exec cp-out cp-in diff pause unpause restart stop start rename commit export kill wait rm rmi-committed data-write data-read volume-ls volume-inspect volume-rm network-create network-run network-rm compose-up compose-health compose-ps compose-logs compose-down err-bad-image err-no-container err-port-in-use events image-prune search]
+note: seed-defect repro context (S4/S5); every skip is a step the repro context cannot serve — it builds an image, nothing serves traffic on port 8080.

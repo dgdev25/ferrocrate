@@ -1,0 +1,1 @@
+Run bench/run-all.sh both, then python3 bench/scoreboard.py. For every new product failure not covered by an open ticket, open a ticket file. Commit bench/results/<date>/ and the scoreboard and tickets. Do not fix code in this session. Print exactly BENCH-RUN-COMPLETE on its own line when committed.

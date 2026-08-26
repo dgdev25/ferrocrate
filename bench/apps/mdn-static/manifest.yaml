@@ -1,0 +1,14 @@
+name: mdn-static
+repo: https://github.com/mdn/beginner-html-site-styled
+pin: main
+license: CC0-1.0
+class: greenfield
+stack: static
+base_image: nginx:1.27-alpine
+start: n/a
+port: 80
+health: /
+data_paths: []
+env: {}
+skip: []
+note: no build tool at all; COPY only

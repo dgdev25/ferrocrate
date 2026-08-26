@@ -642,6 +642,7 @@ fn build_one_stage(
     } else {
         let mut copy_paths = stage.copy_paths.clone();
         for spec in &mut copy_paths {
+            spec.dest = resolve_copy_destination(stage.workdir.as_deref(), &spec.dest);
             if let Some(owner) = spec.owner.as_ref() {
                 let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
                 spec.owner = Some(CopyOwner::Numeric(uid, gid));
@@ -655,7 +656,8 @@ fn build_one_stage(
                 DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
             })?;
         let source = safe_context_source(&source_root, &copy.src)?;
-        let dest = safe_context_destination(&context_root, &copy.dest)?;
+        let destination = resolve_copy_destination(stage.workdir.as_deref(), &copy.dest);
+        let dest = safe_context_destination(&context_root, &destination)?;
         copy_path_recursive(&source, &dest)?;
         if let Some(owner) = copy.owner.as_ref() {
             let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
@@ -704,6 +706,28 @@ fn build_one_stage(
         layer_media_type,
         layer_size,
     })
+}
+
+fn resolve_copy_destination(workdir: Option<&str>, destination: &str) -> String {
+    if destination.starts_with('/') {
+        return destination.to_string();
+    }
+    let base = workdir.unwrap_or("/").trim_end_matches('/');
+    // Keep the directory intent of Docker's `./` spelling.  `Path` would
+    // normalize `/app/./` before `copy_from_context` can see its trailing
+    // slash, causing a multi-source COPY to treat `/app` as a file target.
+    if destination == "." || destination == "./" {
+        return if base.is_empty() || base == "/" {
+            "/".to_string()
+        } else {
+            format!("{base}/")
+        };
+    }
+    if base.is_empty() || base == "/" {
+        format!("/{destination}")
+    } else {
+        format!("{base}/{destination}")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1377,6 +1401,36 @@ fn build_layer_from_dir(
     }
 }
 
+/// Layers previously listed only regular files, so directories without any
+/// file inside and symlinks vanished from every generated layer. Explicit
+/// headers keep both alive across the tar round-trip.
+fn append_tar_dir_entry(
+    builder: &mut Builder<Vec<u8>>,
+    relative: &Path,
+) -> std::io::Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_mtime(0);
+    builder.append_data(&mut header, relative, std::io::empty())
+}
+
+/// Preserve the link verbatim; relative, absolute and dangling targets all
+/// survive instead of being dereferenced or silently dropped.
+fn append_tar_symlink_entry(
+    builder: &mut Builder<Vec<u8>>,
+    relative: &Path,
+    target: &Path,
+) -> std::io::Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    header.set_mtime(0);
+    builder.append_link(&mut header, relative, target)
+}
+
 fn add_directory(
     builder: &mut Builder<Vec<u8>>,
     base: &Path,
@@ -1407,7 +1461,12 @@ fn add_directory(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
+            append_tar_dir_entry(builder, &relative).map_err(DockerfileBuildError::Io)?;
             add_directory(builder, base, &entry_path, dockerfile_path)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&entry_path)?;
+            append_tar_symlink_entry(builder, &relative, &target)
+                .map_err(DockerfileBuildError::Io)?;
         } else if file_type.is_file() {
             builder
                 .append_path_with_name(&entry_path, &relative)
@@ -2116,8 +2175,18 @@ fn hash_context_dir_excluding(
     for rel_path in files {
         let full_path = context_dir.join(&rel_path);
         buf.extend_from_slice(rel_path.to_string_lossy().as_bytes());
-        let bytes = fs::read(&full_path)?;
-        buf.extend_from_slice(&bytes);
+        if fs::symlink_metadata(&full_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            // Hash the link target itself; reading the bytes would fail for
+            // dangling links and hide retargets behind the old content.
+            buf.extend_from_slice(b"link:");
+            buf.extend_from_slice(fs::read_link(&full_path)?.to_string_lossy().as_bytes());
+        } else {
+            let bytes = fs::read(&full_path)?;
+            buf.extend_from_slice(&bytes);
+        }
     }
     Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
 }
@@ -2219,7 +2288,7 @@ fn collect_context_files(
                 excluded_root,
                 out,
             )?;
-        } else if file_type.is_file() {
+        } else if file_type.is_file() || file_type.is_symlink() {
             out.push(relative);
         }
     }
@@ -4168,6 +4237,9 @@ fn run_stage_commands(
                 )
             })?)
         };
+        if rootless_bwrap.is_some() {
+            provision_rootless_build_network_files(rootfs)?;
+        }
         let mut cmd = if let Some(bwrap) = &rootless_bwrap {
             let mut command = Command::new(bwrap);
             command
@@ -4175,7 +4247,6 @@ fn run_stage_commands(
                     "--die-with-parent",
                     "--unshare-user",
                     "--unshare-pid",
-                    "--unshare-net",
                     "--unshare-uts",
                     "--uid",
                     "0",
@@ -4185,6 +4256,8 @@ fn run_stage_commands(
                 ])
                 .arg(rootfs)
                 .arg("/")
+                .arg("--proc")
+                .arg("/proc")
                 .arg("--chdir")
                 .arg(
                     workdir
@@ -4205,13 +4278,12 @@ fn run_stage_commands(
             command
         };
         cmd.stdin(Stdio::null());
-        // When an output cap is configured, capture the child's streams so
-        // runaway output fails the build instead of exhausting host memory.
+        // Capture every RUN stream. Besides enforcing the optional output
+        // cap, this lets a failed build report the command's actual output
+        // instead of leaving the user with a bare exit status.
         let output_cap = limits.max_output_bytes;
-        if output_cap.is_some() {
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
         // Set environment variables
         for entry in env {
@@ -4651,34 +4723,35 @@ fn run_stage_commands(
         let output_exceeded = Arc::new(AtomicBool::new(false));
         let mut output_drains = Vec::new();
         let cap = output_cap.unwrap_or(u64::MAX);
-        if output_cap.is_some() {
-            let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
-            if let Some(stream) = child.stdout.take() {
-                child_streams.push(Box::new(stream));
-            }
-            if let Some(stream) = child.stderr.take() {
-                child_streams.push(Box::new(stream));
-            }
-            for stream in child_streams {
-                let total = Arc::clone(&output_total);
-                let exceeded = Arc::clone(&output_exceeded);
-                output_drains.push(thread::spawn(move || {
-                    let mut stream = stream;
-                    let mut buffer = [0u8; 8192];
-                    loop {
-                        match stream.read(&mut buffer) {
-                            Ok(0) | Err(_) => break,
-                            Ok(read) => {
-                                let summed =
-                                    total.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
-                                if summed > cap {
-                                    exceeded.store(true, Ordering::Release);
-                                }
+        let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
+        if let Some(stream) = child.stdout.take() {
+            child_streams.push(Box::new(stream));
+        }
+        if let Some(stream) = child.stderr.take() {
+            child_streams.push(Box::new(stream));
+        }
+        for stream in child_streams {
+            let total = Arc::clone(&output_total);
+            let exceeded = Arc::clone(&output_exceeded);
+            output_drains.push(thread::spawn(move || {
+                let mut stream = stream;
+                let mut captured = Vec::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            captured.extend_from_slice(&buffer[..read]);
+                            let summed =
+                                total.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
+                            if summed > cap {
+                                exceeded.store(true, Ordering::Release);
                             }
                         }
                     }
-                }));
-            }
+                }
+                captured
+            }));
         }
         let status_result = loop {
             if let Some(status) = child.try_wait()? {
@@ -4720,8 +4793,11 @@ fn run_stage_commands(
             }
             thread::sleep(Duration::from_millis(20));
         };
+        let mut run_output = Vec::new();
         for drain in output_drains {
-            let _ = drain.join();
+            if let Ok(bytes) = drain.join() {
+                run_output.extend(bytes);
+            }
         }
         let mut cleanup_error = None;
         for (target, backup, existed) in secret_mounted.into_iter().rev() {
@@ -4779,11 +4855,37 @@ fn run_stage_commands(
         }
         let status = status_result?;
         if !status.success() {
+            let output = String::from_utf8_lossy(&run_output);
             return Err(DockerfileBuildError::Invalid(format!(
-                "RUN failed with status {status}"
+                "RUN {} failed with status {status}\n{}",
+                run.args.join(" "),
+                output.trim_end(),
             )));
         }
     }
+    Ok(())
+}
+
+/// Give a rootless Dockerfile RUN the same outbound resolver configuration as
+/// a rootless workload. Bubblewrap shares the host network until a dedicated
+/// slirp namespace is attached, so its rootfs must still contain a resolver
+/// file rather than inheriting the host mount namespace's `/etc`.
+fn provision_rootless_build_network_files(rootfs: &Path) -> Result<(), DockerfileBuildError> {
+    let source = Path::new("/etc/resolv.conf");
+    let bytes = fs::read(source).map_err(|error| {
+        DockerfileBuildError::Invalid(format!(
+            "rootless RUN cannot read host resolver {}: {error}",
+            source.display()
+        ))
+    })?;
+    let target = rootfs.join("etc/resolv.conf");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::symlink_metadata(&target).is_ok() {
+        fs::remove_file(&target)?;
+    }
+    fs::write(&target, bytes)?;
     Ok(())
 }
 
@@ -5407,6 +5509,8 @@ fn copy_context_dir(
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             copy_context_dir(root, &path, &target, dockerfile_path, ignore_patterns)?;
+        } else if file_type.is_symlink() {
+            copy_symlink(&path, &target)?;
         } else if file_type.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
@@ -5471,6 +5575,12 @@ fn copy_from_context(
                         .unwrap_or_else(|| "src".to_string()),
                 )
             };
+            fs::symlink_metadata(&source).map_err(|error| {
+                DockerfileBuildError::Invalid(format!(
+                    "COPY source {} is unavailable: {error}",
+                    source.display()
+                ))
+            })?;
             // Docker semantics: a source directory with a trailing slash
             // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
             // /out/), while a bare directory name is copied under its name.
@@ -5814,8 +5924,10 @@ fn copy_path_recursive_mode_with_excludes(
     if !relative.as_os_str().is_empty() && copy_path_is_excluded(relative, excludes) {
         return Ok(());
     }
-    let metadata = fs::metadata(src)?;
-    if metadata.is_dir() {
+    let metadata = fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() {
+        copy_symlink(src, dst)?;
+    } else if metadata.is_dir() {
         fs::create_dir_all(dst)?;
         // The runtime/build scratch directory can be nested inside the build
         // context.  Exclude that destination subtree while walking the
@@ -5838,16 +5950,43 @@ fn copy_path_recursive_mode_with_excludes(
                 &relative.join(name),
             )?;
         }
-    } else {
+    } else if metadata.is_file() {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(src, dst)?;
+    } else {
+        return Err(DockerfileBuildError::Unsupported(format!(
+            "COPY source has unsupported file type: {}",
+            src.display()
+        )));
     }
     if let Some(mode) = chmod {
         apply_copy_mode(dst, mode)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
+    let target = fs::read_link(src).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("COPY cannot read symlink {}: {error}", src.display()))
+    })?;
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::symlink_metadata(dst).is_ok() {
+        fs::remove_file(dst)?;
+    }
+    std::os::unix::fs::symlink(target, dst).map_err(DockerfileBuildError::Io)
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(src: &Path, _dst: &Path) -> Result<(), DockerfileBuildError> {
+    Err(DockerfileBuildError::Unsupported(format!(
+        "COPY symlink preservation requires a Unix filesystem: {}",
+        src.display()
+    )))
 }
 
 fn copy_path_is_excluded(relative: &Path, patterns: &[String]) -> bool {
@@ -5891,7 +6030,7 @@ mod tests {
         build_from_dockerfile_with_store_and_compression, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerfile_external_base_images, dockerignore_matches, export_build_cache,
-        export_build_cache_to_registry, file_matches_digest, import_build_cache,
+        export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
@@ -6194,6 +6333,135 @@ mod tests {
             .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
+    }
+
+    #[test]
+    fn copy_relative_destination_is_resolved_from_workdir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nWORKDIR /app\nCOPY source d\n",
+        )
+        .expect("dockerfile");
+        fs::create_dir_all(temp.path().join("source")).expect("source");
+        fs::write(temp.path().join("source/value"), "value").expect("value");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/workdir-copy:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("build");
+        assert_eq!(
+            fs::read_to_string(runtime.join("build/stage-0/app/d/value")).expect("WORKDIR COPY result"),
+            "value"
+        );
+    }
+
+    #[test]
+    fn copy_preserves_symlinks_and_empty_directories_in_the_layer() {
+        // S5: a directory containing a symlink must arrive whole, links
+        // preserved as links instead of silently dropped with their parent.
+        #[cfg(unix)]
+        {
+            let _env = crate::test_support::acquire_env_lock();
+            let temp = tempfile::tempdir().expect("tempdir");
+            let dockerfile = temp.path().join("Dockerfile");
+            fs::write(&dockerfile, "FROM scratch\nCOPY d /d\n").expect("dockerfile");
+            let source = temp.path().join("d");
+            fs::create_dir_all(source.join("bin")).expect("bin dir");
+            fs::write(source.join("real.txt"), "content").expect("real.txt");
+            std::os::unix::fs::symlink("../real.txt", source.join("bin/link"))
+                .expect("relative link");
+            std::os::unix::fs::symlink("/d/real.txt", source.join("absolute"))
+                .expect("absolute link");
+            std::os::unix::fs::symlink("missing-target", source.join("bin/dangling"))
+                .expect("dangling link");
+            fs::create_dir_all(source.join("empty")).expect("empty dir");
+
+            let runtime = temp.path().join("runtime");
+            let store = LocalImageStore::open(runtime.join("images")).expect("store");
+            build_from_dockerfile_with_store_and_compression(
+                &dockerfile,
+                Some("local/symlink-copy:latest"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            )
+            .expect("build");
+
+            let stage = runtime.join("build/stage-0/d");
+            assert_eq!(
+                fs::read_to_string(stage.join("real.txt")).expect("regular file"),
+                "content"
+            );
+            assert!(stage.join("bin").is_dir(), "directory holding a link survives");
+            assert_eq!(
+                fs::read_link(stage.join("bin/link")).expect("relative link"),
+                Path::new("../real.txt")
+            );
+            assert_eq!(
+                fs::read_link(stage.join("bin/dangling")).expect("dangling link"),
+                Path::new("missing-target")
+            );
+            assert_eq!(
+                fs::read_link(stage.join("absolute")).expect("absolute link"),
+                Path::new("/d/real.txt")
+            );
+            assert!(stage.join("empty").is_dir(), "empty directory survives");
+        }
+    }
+
+    #[test]
+    fn context_hash_includes_symlink_targets() {
+        #[cfg(unix)]
+        {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let dockerfile = temp.path().join("Dockerfile");
+            fs::write(&dockerfile, "FROM scratch\n").expect("dockerfile");
+            fs::write(temp.path().join("payload"), "one").expect("payload");
+            std::os::unix::fs::symlink("payload", temp.path().join("latest")).expect("link");
+
+            let first = hash_context_dir(temp.path(), &dockerfile).expect("hash");
+            fs::remove_file(temp.path().join("latest")).expect("remove link");
+            std::os::unix::fs::symlink("unrelated", temp.path().join("latest"))
+                .expect("retarget");
+            let second = hash_context_dir(temp.path(), &dockerfile).expect("hash");
+
+            assert_ne!(first, second);
+        }
+    }
+
+    #[test]
+    fn copy_multiple_sources_to_workdir_dot_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nWORKDIR /app\nCOPY package.json package-lock.json ./\n",
+        )
+        .expect("dockerfile");
+        fs::write(temp.path().join("package.json"), "{}").expect("package");
+        fs::write(temp.path().join("package-lock.json"), "{}").expect("lock");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/workdir-dot:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("build");
+        assert!(runtime.join("build/stage-0/app/package.json").is_file());
+        assert!(runtime.join("build/stage-0/app/package-lock.json").is_file());
     }
 
     #[test]
@@ -7858,6 +8126,87 @@ mod tests {
         .unwrap_or_else(|error| panic!("rootless RUN should succeed: {error}"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rootless_run_has_network_proc_and_a_resolver() {
+        if nix::unistd::Uid::effective().is_root() || skip_unavailable_rootless_build_sandbox() {
+            eprintln!("skipping: rootless build networking requires an unprivileged sandbox");
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).expect("context");
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /busybox\nRUN [\"/busybox\", \"sh\", \"-c\", \"test -d /proc/net && nslookup registry.npmjs.org\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, context.join("busybox")).expect("busybox");
+        let runtime = temp.path().join("runtime");
+        let store =
+            crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/rootless-network:latest"),
+            &runtime,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("rootless RUN needs network and /proc: {error}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_run_reports_its_command_and_stderr() {
+        if skip_unavailable_rootless_build_sandbox() {
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).expect("context");
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /busybox\nRUN [\"/busybox\", \"sh\", \"-c\", \"echo step-stderr >&2; exit 23\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, context.join("busybox")).expect("busybox");
+        let runtime = temp.path().join("runtime");
+        let store =
+            crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
+        let result = super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/run-output:latest"),
+            &runtime,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        );
+        let error = match result {
+            Ok(_) => panic!("RUN must fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("step-stderr"), "error={message}");
+        assert!(message.contains("exit 23"), "error={message}");
+    }
+
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";
 
     #[cfg(unix)]
@@ -8618,6 +8967,63 @@ mod tests {
         )
         .unwrap();
         assert!(!explicit_destination.join("app/skip.tmp").exists());
+    }
+
+    #[test]
+    fn copy_context_io_errors_name_the_source_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("node_modules/cors");
+        let error = super::copy_from_context(
+            temp.path(),
+            &temp.path().join("destination"),
+            &[super::CopySpec {
+                srcs: vec!["node_modules/cors".into()],
+                dest: "/cors".into(),
+                chmod: None,
+                owner: None,
+                checksum: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: false,
+            }],
+        )
+        .expect_err("a missing COPY source must fail");
+        assert!(
+            error.to_string().contains(&missing.display().to_string()),
+            "COPY error must identify the source path: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_relative_and_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+        use std::path::PathBuf;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(temp.path().join("real.txt"), "real").unwrap();
+        symlink("../real.txt", bin.join("link")).unwrap();
+        symlink("../missing.txt", bin.join("dangling")).unwrap();
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["bin".into()],
+                dest: "/bin".into(),
+                chmod: None,
+                owner: None,
+                checksum: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(fs::read_link(destination.join("bin/link")).unwrap(), PathBuf::from("../real.txt"));
+        assert_eq!(fs::read_link(destination.join("bin/dangling")).unwrap(), PathBuf::from("../missing.txt"));
     }
 
     #[test]

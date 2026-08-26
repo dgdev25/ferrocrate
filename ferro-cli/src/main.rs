@@ -368,6 +368,9 @@ pub enum Commands {
         /// Provide a Dockerfile secret (`id=NAME,src=PATH`); repeatable.
         #[arg(long = "secret")]
         secret: Vec<String>,
+        /// Build context directory or URL (defaults to the current directory).
+        #[arg(value_name = "CONTEXT")]
+        context: Option<String>,
     },
     /// Prune old local Dockerfile build-cache records deterministically.
     #[cfg(target_os = "linux")]
@@ -535,6 +538,9 @@ pub enum Commands {
     ContainerPrune {
         #[arg(long = "filter")]
         filters: Vec<String>,
+        /// Docker clients pass -f; pruning is always immediate here.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
     /// Read the durable Docker-compatible event stream.
     #[cfg(target_os = "linux")]
@@ -1126,6 +1132,9 @@ pub enum SystemCommands {
         /// Remove all unused images rather than dangling images only.
         #[arg(short = 'a', long = "all")]
         all: bool,
+        /// Remove volume and container directories without store records.
+        #[arg(long)]
+        orphans: bool,
     },
 }
 
@@ -1409,6 +1418,25 @@ pub enum EntitlementCommands {
     },
 }
 
+/// Translate the Docker CLI's grouped image/container spellings to the
+/// established native commands before clap parses the command line. Keeping
+/// the native spellings preserves backwards compatibility while this small
+/// adapter lets both surfaces share the same dispatch paths.
+fn normalize_docker_grouped_verbs(mut args: Vec<String>) -> Vec<String> {
+    let replacement = match args.as_slice() {
+        [group, verb, ..] if group == "image" && verb == "inspect" => Some("image-inspect"),
+        [group, verb, ..] if group == "image" && verb == "ls" => Some("images"),
+        [group, verb, ..] if group == "image" && verb == "rm" => Some("rmi"),
+        [group, verb, ..] if group == "container" && verb == "ls" => Some("containers"),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        args[0] = replacement.to_string();
+        args.remove(1);
+    }
+    args
+}
+
 pub fn main() {
     // Initialize tracing subscriber for structured logging (CQ-03)
     tracing_subscriber::fmt()
@@ -1447,7 +1475,10 @@ pub fn main() {
             process::exit(1);
         }
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(
+        std::iter::once("ferro-cli".to_string())
+            .chain(normalize_docker_grouped_verbs(raw_args.clone())),
+    );
     if let Ok(config) = load_cli_config() {
         if config.lan_mirror {
             unsafe { std::env::set_var("FERROCRATE_LAN_MIRROR", "1") };
@@ -2160,7 +2191,7 @@ fn doctor_state_store_check() -> Option<DoctorCheck> {
             problems.join("; ")
         },
         hint: (!ok).then(|| {
-            "orphaned directories are not deleted automatically: inspect them, then remove with `volume rm` after recreating a record or delete the directory manually; free space with `image-prune`, `container-prune`, and `volume prune`".to_string()
+            "remove orphaned directories with `ferro-cli system prune --orphans`; free space with `image-prune`, `container-prune`, and `volume prune`".to_string()
         }),
         remediated: false,
         action: None,
@@ -2545,6 +2576,21 @@ fn handle_doctor(
                 ok: true,
                 message: doctor_netns_root_message(&netns_root),
                 hint: None,
+                remediated: false,
+                action: None,
+            });
+            let rootful_networks = nix::unistd::Uid::effective().is_root();
+            checks.push(DoctorCheck {
+                id: "custom_networks".to_string(),
+                ok: rootful_networks,
+                message: if rootful_networks {
+                    "custom networks available".to_string()
+                } else {
+                    "custom networks need rootful mode".to_string()
+                },
+                hint: (!rootful_networks).then_some(
+                    "run the daemon in rootful mode to create custom bridge networks".to_string(),
+                ),
                 remediated: false,
                 action: None,
             });
@@ -4265,7 +4311,11 @@ fn prepare_remote_build(
     }
     Ok(PreparedRemoteBuild {
         request: RemoteBuildRequest {
-            dockerfile: dockerfile.map(|_| source_name.clone()),
+            // Native daemon builds always transfer a Dockerfile.  Preserve the
+            // default filename too: omitting it made a positional context fall
+            // back to the daemon's own current directory rather than the
+            // transferred workspace.
+            dockerfile: ferrofile.is_none().then_some(source_name.clone()),
             ferrofile: ferrofile.map(|_| source_name),
             tag: tag.map(str::to_string),
             compression: compression.to_string(),
@@ -5138,6 +5188,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_to,
                 build_context,
                 secret,
+                context,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -5155,6 +5206,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_to.as_deref(),
                 &build_context,
                 &secret,
+                context.as_deref(),
             ),
             #[cfg(target_os = "linux")]
             Commands::BuildCachePrune {
@@ -5212,7 +5264,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::System { command: SystemCommands::Prune { force: _, volumes, all } } => {
+            Commands::System { command: SystemCommands::Prune { force: _, volumes, all, orphans } } => {
                 handle_system_prune(
                     &runtime_dir,
                     &runtime,
@@ -5220,6 +5272,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     &surface_authorization,
                     volumes,
                     all,
+                    orphans,
                 )
             }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
@@ -5341,7 +5394,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::ContainerPrune { filters } => handle_container_prune(&runtime, &filters),
+            Commands::ContainerPrune { filters, .. } => handle_container_prune(&runtime, &filters),
             #[cfg(target_os = "linux")]
             Commands::Events {
                 since,
@@ -8119,9 +8172,11 @@ fn dispatch_remote_socket(
             cache_to,
             build_context,
             secret,
+            context,
         } => {
             (|| -> Result<(), String> {
                 let native_route = ferrofile.is_some()
+                    || context.is_some()
                     || compress != "gzip"
                     || image_format != "oci"
                     || embed_model.is_some()
@@ -8358,8 +8413,11 @@ fn dispatch_remote_socket(
             request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
         }
         Commands::System {
-            command: SystemCommands::Prune { volumes, all, .. },
+            command: SystemCommands::Prune { volumes, all, orphans, .. },
         } => (|| -> Result<(), String> {
+            if *orphans {
+                return Err("system prune --orphans requires a local daemon connection".to_string());
+            }
             let container_filters = serde_json::json!({"status": {"exited": true}});
             request(
                 "POST",
@@ -8521,7 +8579,7 @@ fn dispatch_remote_socket(
                 print_remote_container_list(&body, format, *quiet, *no_trunc)
             })
         })(),
-        Commands::ContainerPrune { filters } => (|| -> Result<(), String> {
+        Commands::ContainerPrune { filters, .. } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_container_prune_filters(&parsed)?;
             let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
@@ -10638,6 +10696,7 @@ fn handle_build(
     cache_to: Option<&str>,
     build_context: &[String],
     secrets: &[String],
+    context: Option<&str>,
 ) -> Result<(), String> {
     let output = execute_build(
         store,
@@ -10655,6 +10714,7 @@ fn handle_build(
         build_context,
         secrets,
         None,
+        context,
     )?;
     print!("{output}");
     Ok(())
@@ -10677,6 +10737,7 @@ fn execute_build(
     build_context: &[String],
     secrets: &[String],
     artifact_dir: Option<&Path>,
+    context: Option<&str>,
 ) -> Result<String, String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
@@ -10732,12 +10793,21 @@ fn execute_build(
             let tag = tag.unwrap_or("local/build:latest");
             parse_image_reference(tag).map_err(|err| err.to_string())?;
             // Resolve relative dockerfile paths against current working directory.
+            let context_dir = match context {
+                Some(value) if value.contains("://") => {
+                    return Err("build: remote URL contexts are not supported yet".to_string())
+                }
+                Some(value) => PathBuf::from(value),
+                None => std::env::current_dir()
+                    .map_err(|err| format!("failed to get current directory: {err}"))?,
+            };
+            if !context_dir.is_dir() {
+                return Err(format!("build: context is not a directory: {}", context_dir.display()));
+            }
             let dockerfile_path = if Path::new(dockerfile).is_absolute() {
                 PathBuf::from(dockerfile)
             } else {
-                std::env::current_dir()
-                    .map_err(|err| format!("failed to get current directory: {err}"))?
-                    .join(dockerfile)
+                context_dir.join(dockerfile)
             };
             prefetch_dockerfile_bases(
                 store,
@@ -12262,6 +12332,7 @@ fn handle_system_prune(
     authorization: &SurfaceAuthorization,
     volumes: bool,
     all: bool,
+    orphans: bool,
 ) -> Result<(), String> {
     println!("Containers:");
     handle_container_prune(runtime, &[])?;
@@ -12283,7 +12354,33 @@ fn handle_system_prune(
         println!("Volumes:");
         handle_volume(runtime_dir, VolumeCommands::Prune { filters: Vec::new() }, authorization)?;
     }
+    if orphans {
+        let removed = remove_orphan_state_directories(runtime_dir)?;
+        println!("Orphans: removed={removed}");
+    }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_orphan_state_directories(runtime_dir: &Path) -> Result<usize, String> {
+    let volumes = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+        .map_err(|error| format!("system prune --orphans: open volumes: {error}"))?
+        .list().map_err(|error| format!("system prune --orphans: list volumes: {error}"))?
+        .into_iter().map(|record| record.name).collect::<std::collections::HashSet<_>>();
+    let containers = ferro_core::sqlite_container_store::SqliteContainerStore::open(runtime_dir.join("containers.db"))
+        .and_then(|store| store.list()).map_err(|error| format!("system prune --orphans: list containers: {error}"))?
+        .into_iter().map(|record| record.id).collect::<std::collections::HashSet<_>>();
+    let mut removed = 0;
+    for (root, known) in [(runtime_dir.join("volumes"), volumes), (runtime_dir.join("containers"), containers)] {
+        for entry in std::fs::read_dir(&root).map_err(|error| format!("system prune --orphans: read {}: {error}", root.display()))? {
+            let entry = entry.map_err(|error| format!("system prune --orphans: read {}: {error}", root.display()))?;
+            if entry.path().is_dir() && !known.contains(&entry.file_name().to_string_lossy().to_string()) {
+                std::fs::remove_dir_all(entry.path()).map_err(|error| format!("system prune --orphans: remove {}: {error}", entry.path().display()))?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(target_os = "linux")]
@@ -13238,6 +13335,13 @@ fn handle_network_authorized(
             ipv6_gateway,
             labels,
         } => {
+            // Unit tests exercise the lifecycle with its in-memory bridge
+            // kernel, and API harnesses explicitly select a file-backed one.
+            // The rootful boundary applies to the real CLI kernel only.
+            #[cfg(not(test))]
+            if self::network_lifecycle::FileBackedNetworkKernel::from_env().is_none() {
+                custom_networks_need_rootful_mode(nix::unistd::Uid::effective().is_root())?;
+            }
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
             }
@@ -13450,6 +13554,13 @@ fn handle_network_authorized(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn custom_networks_need_rootful_mode(is_root: bool) -> Result<(), String> {
+    is_root
+        .then_some(())
+        .ok_or_else(|| "custom networks need rootful mode".to_string())
 }
 
 fn cli_network_kernel() -> Box<dyn self::network_lifecycle::NetworkKernel> {
@@ -18378,6 +18489,7 @@ fn handle_docker_compat_connection(
                     &build_context,
                     &secrets,
                     Some(workspace.path()),
+                    None,
                 )?;
                 let mut response = tar::Builder::new(Vec::new());
                 let mut header = tar::Header::new_gnu();
@@ -20223,6 +20335,7 @@ fn handle_docker_compat_connection(
                     None,
                     &[],
                     &[],
+                    None,
                 )?;
                 http_response(
                     200,
@@ -23855,6 +23968,7 @@ async fn execute_buildkit_frontend(
         &[],
         &[],
         None,
+        None,
     )?;
     let mut output = pulled_bases
         .iter()
@@ -27061,6 +27175,22 @@ volumes:
     }
 
     #[test]
+    fn rootless_custom_networks_have_a_plain_boundary_message() {
+        assert_eq!(
+            super::custom_networks_need_rootful_mode(false).unwrap_err(),
+            "custom networks need rootful mode"
+        );
+        assert!(super::custom_networks_need_rootful_mode(true).is_ok());
+    }
+
+    #[test]
+    fn system_prune_accepts_orphan_cleanup() {
+        let cli = Cli::try_parse_from(["ferrocrate", "system", "prune", "--orphans"])
+            .expect("parse orphan cleanup");
+        assert!(matches!(cli.command, Commands::System { command: super::SystemCommands::Prune { orphans: true, .. } }));
+    }
+
+    #[test]
     fn parses_build_command_with_tag() {
         let cli = Cli::parse_from([
             "ferrocrate",
@@ -27084,6 +27214,7 @@ volumes:
                 cache_to,
                 build_context,
                 secret,
+                context,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -27096,7 +27227,18 @@ volumes:
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
                 assert!(secret.is_empty());
+                assert!(context.is_none());
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_accepts_a_positional_context() {
+        let cli = Cli::try_parse_from(["ferrocrate", "build", "-t", "acme/app:dev", "."])
+            .expect("Docker-style build context must parse");
+        match cli.command {
+            Commands::Build { context, .. } => assert_eq!(context.as_deref(), Some(".")),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -27621,6 +27763,20 @@ volumes:
     }
 
     #[test]
+    fn docker_grouped_image_and_container_verbs_normalize_to_native_commands() {
+        for (args, expected) in [
+            (vec!["image", "inspect", "alpine:latest"], vec!["image-inspect", "alpine:latest"]),
+            (vec!["image", "ls"], vec!["images"]),
+            (vec!["image", "rm", "alpine:latest"], vec!["rmi", "alpine:latest"]),
+            (vec!["container", "ls"], vec!["containers"]),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let expected = expected.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(super::normalize_docker_grouped_verbs(args), expected);
+        }
+    }
+
+    #[test]
     fn parses_image_list_filters() {
         let cli = Cli::parse_from([
             "ferrocrate",
@@ -27710,7 +27866,7 @@ volumes:
             .expect("Docker system prune flags parse");
         assert!(matches!(
             cli.command,
-            Commands::System { command: super::SystemCommands::Prune { force: true, all: true, volumes: true } }
+            Commands::System { command: super::SystemCommands::Prune { force: true, all: true, volumes: true, orphans: false } }
         ));
     }
 
@@ -27736,6 +27892,32 @@ volumes:
         match cli.command {
             Commands::ImagePrune { filters } => {
                 assert_eq!(filters, vec!["dangling=true", "until=100"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_container_prune_force_and_filters() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "container-prune",
+            "-f",
+            "--filter",
+            "until=24h",
+        ]);
+        match cli.command {
+            Commands::ContainerPrune { filters, force } => {
+                assert!(force);
+                assert_eq!(filters, vec!["until=24h"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let plain = Cli::parse_from(["ferrocrate", "container-prune"]);
+        match plain.command {
+            Commands::ContainerPrune { filters, force } => {
+                assert!(!force);
+                assert!(filters.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -30258,6 +30440,7 @@ volumes:
             None,
             &[],
             &[],
+            None,
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -30397,6 +30580,7 @@ volumes:
             None,
             &[],
             &[],
+            None,
         )
         .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));

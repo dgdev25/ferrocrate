@@ -11,7 +11,7 @@
 # rather than product.
 set -uo pipefail
 BENCH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SUITE="${1:?cli-e2e | compose-e2e | critest}"; shift || true
+SUITE="${1:?cli-e2e | compose-e2e | critest | oci-runtime | moby-integration | buildkit-dockerfile}"; shift || true
 ENGINE=ferrocrate; REFRESH=0
 while [ $# -gt 0 ]; do case "$1" in --engine) ENGINE="$2"; shift 2;; --refresh) REFRESH=1; shift;; *) shift;; esac; done
 
@@ -28,6 +28,9 @@ case "$SUITE" in
   cli-e2e)     REPO=https://github.com/docker/cli;     DIR="$SRC/cli";     PIN="${SUITE_PIN:-master}";;
   compose-e2e) REPO=https://github.com/docker/compose; DIR="$SRC/compose"; PIN="${SUITE_PIN:-main}";;
   critest)     REPO=https://github.com/kubernetes-sigs/cri-tools; DIR="$SRC/cri-tools"; PIN="${SUITE_PIN:-master}";;
+  oci-runtime) REPO=https://github.com/opencontainers/runtime-tools; DIR="$SRC/runtime-tools"; PIN="${SUITE_PIN:-main}";;
+  moby-integration) REPO=https://github.com/moby/moby; DIR="$SRC/moby"; PIN="${SUITE_PIN:-master}";;
+  buildkit-dockerfile) REPO=https://github.com/moby/buildkit; DIR="$SRC/buildkit"; PIN="${SUITE_PIN:-master}";;
   *) echo "unknown suite: $SUITE" >&2; exit 2;;
 esac
 
@@ -64,8 +67,16 @@ record() { # name status ms tail
 
 # --- run and convert ---
 case "$SUITE" in
-  cli-e2e|compose-e2e)
-    [ "$SUITE" = cli-e2e ] && PKG=./e2e/... || PKG=./pkg/e2e/...
+  cli-e2e|compose-e2e|moby-integration|buildkit-dockerfile)
+    case "$SUITE" in
+      cli-e2e)             PKG=./e2e/...;;
+      compose-e2e)         PKG=./pkg/e2e/...;;
+      # Moby's integration suite is large and restarts the daemon in places; those
+      # cases go in skip.txt rather than being worked around. Nightly only.
+      moby-integration)    PKG=./integration/...;;
+      # BuildKit's Dockerfile frontend tests reach us through the Buildx docker driver.
+      buildkit-dockerfile) PKG=./frontend/dockerfile/...;;
+    esac
     echo "go test $PKG (this takes a while)"
     ( cd "$DIR" && go test -count=1 -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
     python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
@@ -94,6 +105,24 @@ with open(out, "a") as fh:
 print(f"{suite}/{engine}: {sum(1 for a in tests.values() if a=='pass')} pass, "
       f"{sum(1 for a in tests.values() if a=='fail')} fail, {sum(1 for a in tests.values() if a=='skip')} skip")
 PY
+    ;;
+  oci-runtime)
+    # runtime-tools validates the container the runtime actually produced against
+    # the OCI runtime spec: it builds a bundle, runs it through the runtime under
+    # test, and inspects the result from inside.
+    echo "building runtime-tools validators"
+    ( cd "$DIR" && make runtimetest validation-executables ) > "$WORK/build.log" 2>&1 || { echo "runtime-tools build failed; see $WORK/build.log" >&2; exit 2; }
+    RUNTIME="${OCI_RUNTIME:-$FERRO}"
+    passed=0; failed=0
+    for v in "$DIR"/validation/*.t; do
+      name="$(basename "$v" .t)"
+      if RUNTIME="$RUNTIME" timeout 120 "$v" > "$WORK/$name.out" 2>&1; then
+        record "$name" pass 0 "" 0; passed=$((passed+1))
+      else
+        record "$name" fail 0 "$(tail -c 400 "$WORK/$name.out")" 1; failed=$((failed+1))
+      fi
+    done
+    echo "oci-runtime/$ENGINE: $passed passed, $failed failed"
     ;;
   critest)
     if ! command -v critest >/dev/null 2>&1; then

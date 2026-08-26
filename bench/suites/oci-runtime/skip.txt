@@ -1,0 +1,2 @@
+# OCI runtime-spec validators outside the supported surface.
+# Populate after the first recorded run; empty means nothing is skipped.

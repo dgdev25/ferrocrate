@@ -1,0 +1,5 @@
+# BuildKit frontend cases outside the supported surface: arbitrary LLB and
+# gateway.v0 frontends are unsupported (see docs/FEATURE-MATRIX.md).
+TestClientGatewayFrontend
+TestLLB
+TestMultiPlatform

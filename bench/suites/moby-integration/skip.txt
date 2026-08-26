@@ -1,0 +1,7 @@
+# Moby integration cases that restart or reconfigure the daemon through systemd,
+# or that exercise swarm. Each needs a feature-matrix row before it is added.
+TestDaemonRestart
+TestLiveRestore
+TestSwarm
+TestService
+TestPluginInstall

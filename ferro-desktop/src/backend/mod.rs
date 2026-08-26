@@ -146,6 +146,10 @@ pub enum Transport {
         distro: String,
         path: PathBuf,
     },
+    ProcessDuplex {
+        command: CommandSpec,
+        endpoint: String,
+    },
     Loopback(SocketAddr),
     AuthenticatedLoopback {
         addr: SocketAddr,
@@ -160,6 +164,7 @@ impl fmt::Display for Transport {
             Self::WslUnixSocket { distro, path } => {
                 write!(formatter, "wsl://{distro}/$HOME/{}", path.display())
             }
+            Self::ProcessDuplex { endpoint, .. } => formatter.write_str(endpoint),
             Self::Loopback(addr) | Self::AuthenticatedLoopback { addr, .. } => {
                 write!(formatter, "http://{addr}")
             }
@@ -732,7 +737,9 @@ impl BackendHost for SystemBackendHost {
     ) -> Result<TransportResponse, BackendError> {
         match transport {
             Transport::UnixSocket(path) => request_unix(path, request),
-            Transport::WslUnixSocket { .. } => request_duplex(transport, request),
+            Transport::WslUnixSocket { .. } | Transport::ProcessDuplex { .. } => {
+                request_duplex(transport, request)
+            }
             Transport::Loopback(addr) => request_tcp(*addr, None, request),
             Transport::AuthenticatedLoopback { addr, bearer_token } => {
                 request_tcp(*addr, Some(bearer_token), request)
@@ -1060,6 +1067,27 @@ fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, Bac
                 .ok_or_else(|| BackendError::Transport("WSL socket stdin is unavailable".into()))?;
             let stdout = child.stdout.take().ok_or_else(|| {
                 BackendError::Transport("WSL socket stdout is unavailable".into())
+            })?;
+            Ok(Box::new(WslDuplexStream {
+                inner: Arc::new(WslDuplexInner {
+                    child: Mutex::new(child),
+                    stdin: Mutex::new(Some(stdin)),
+                    stdout: Mutex::new(stdout),
+                }),
+            }))
+        }
+        Transport::ProcessDuplex { command, .. } => {
+            let mut child = command
+                .to_command()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let stdin = child.stdin.take().ok_or_else(|| {
+                BackendError::Transport("guest relay stdin is unavailable".into())
+            })?;
+            let stdout = child.stdout.take().ok_or_else(|| {
+                BackendError::Transport("guest relay stdout is unavailable".into())
             })?;
             Ok(Box::new(WslDuplexStream {
                 inner: Arc::new(WslDuplexInner {

@@ -141,7 +141,6 @@ impl MacosVmBackend {
             config.vm_config.to_string_lossy().as_ref(),
             "stop",
         ]);
-        let guest_socket = PathBuf::from(".local/state/ferrocrate/ferrocrate.sock");
         let exec = CommandSpec::new("ssh").args([
             "-i".to_string(),
             config.ssh_key.display().to_string(),
@@ -159,33 +158,21 @@ impl MacosVmBackend {
             "StrictHostKeyChecking=accept-new".into(),
             format!("{}@127.0.0.1", config.guest_user),
         ]);
-        let tunnel = CommandSpec::new("ssh").args([
-            "-i".to_string(),
-            config.ssh_key.display().to_string(),
-            "-p".into(),
-            config.ssh_port.to_string(),
-            "-o".into(),
-            "BatchMode=yes".into(),
-            "-o".into(),
-            "IdentitiesOnly=yes".into(),
-            "-o".into(),
-            "IdentityAgent=none".into(),
-            "-o".into(),
-            "ExitOnForwardFailure=yes".into(),
-            "-o".into(),
-            format!("UserKnownHostsFile={}", known_hosts.display()),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
-            "-N".into(),
-            "-L".into(),
-            format!(
-                "{}:/home/{}/{}",
-                config.relay_addr,
-                config.guest_user,
-                guest_socket.display()
-            ),
-            format!("{}@127.0.0.1", config.guest_user),
+        let guest_socket = PathBuf::from(format!(
+            "/home/{}/.local/state/ferrocrate/ferrocrate.sock",
+            config.guest_user
+        ));
+        let relay = exec.clone().args([
+            "/usr/local/bin/ferrocrate".to_string(),
+            "__ferrocrate_desktop_relay".to_string(),
+            guest_socket.display().to_string(),
         ]);
+        let endpoint = format!(
+            "ssh://{}@127.0.0.1:{}/{}",
+            config.guest_user,
+            config.ssh_port,
+            guest_socket.display().to_string().trim_start_matches('/')
+        );
         let provisioner = guest_provisioner_command(&config, &known_hosts);
         Self {
             core: BackendCore::new(
@@ -193,11 +180,13 @@ impl MacosVmBackend {
                 Platform::Macos,
                 start,
                 exec,
-                Transport::Loopback(config.relay_addr),
+                Transport::ProcessDuplex {
+                    command: relay,
+                    endpoint,
+                },
                 host,
             )
             .with_auxiliary_start(provisioner)
-            .with_auxiliary_start(tunnel)
             .with_readiness_timeout(Duration::from_secs(180)),
             stop_command,
             managed: std::sync::atomic::AtomicBool::new(false),

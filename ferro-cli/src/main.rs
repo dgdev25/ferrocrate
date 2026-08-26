@@ -1427,6 +1427,17 @@ pub fn main() {
         }
         process::exit(125);
     }
+    if raw_args.first().map(String::as_str) == Some("__ferrocrate_desktop_relay") {
+        let Some(socket) = raw_args.get(1).filter(|_| raw_args.len() == 2) else {
+            eprintln!("desktop relay: expected one absolute socket path");
+            process::exit(2);
+        };
+        if let Err(error) = run_desktop_relay(socket) {
+            eprintln!("error: {error}");
+            process::exit(1);
+        }
+        return;
+    }
     match maybe_host_desktop_forward(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}
@@ -17815,6 +17826,30 @@ fn run_daemon(
             Err(error) => return Err(format!("daemon: accept failed: {error}")),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn run_desktop_relay(socket: &str) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+
+    let mut socket_write = UnixStream::connect(socket)
+        .map_err(|error| format!("desktop relay: connect {socket}: {error}"))?;
+    let mut socket_read = socket_write
+        .try_clone()
+        .map_err(|error| format!("desktop relay: clone socket: {error}"))?;
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = std::io::stdin().lock();
+        std::io::copy(&mut stdin, &mut socket_write)?;
+        socket_write.shutdown(std::net::Shutdown::Write)
+    });
+    let mut stdout = std::io::stdout().lock();
+    std::io::copy(&mut socket_read, &mut stdout)
+        .and_then(|_| stdout.flush())
+        .map_err(|error| format!("desktop relay: copy response: {error}"))?;
+    writer
+        .join()
+        .map_err(|_| "desktop relay: request copier panicked".to_string())?
+        .map_err(|error| format!("desktop relay: copy request: {error}"))
 }
 
 #[cfg(target_os = "linux")]

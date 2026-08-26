@@ -23647,7 +23647,7 @@ async fn handle_buildkit_control_request(
             };
             let result = execute_buildkit_frontend(
                 state.as_ref(),
-                execution.as_ref(),
+                execution.clone(),
                 build.as_ref(),
                 &frontend,
             )
@@ -23757,7 +23757,7 @@ async fn handle_buildkit_control_request(
         let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
         let result = execute_buildkit_frontend(
             state.as_ref(),
-            execution.as_ref(),
+            execution.clone(),
             build.as_ref(),
             &solve,
         )
@@ -23968,7 +23968,7 @@ fn buildkit_outer_solve_response(
 #[cfg(target_os = "linux")]
 async fn execute_buildkit_frontend(
     state: &DockerCompatState,
-    execution: &BuildkitExecutionContext,
+    execution: Arc<BuildkitExecutionContext>,
     build: &BuildkitBuild,
     request: &buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
 ) -> Result<BuildkitBuildResult, String> {
@@ -24044,14 +24044,6 @@ async fn execute_buildkit_frontend(
             session_auth.insert(registry, auth);
         }
     }
-    let pulled_bases = prefetch_dockerfile_bases(
-        execution.store.as_ref(),
-        &execution.origin,
-        &execution.authorization,
-        &dockerfile,
-        Some(&session_auth),
-    )?;
-
     let exporter = build
         .request
         .exporters
@@ -24064,7 +24056,46 @@ async fn execute_buildkit_frontend(
         .filter(|name| !name.is_empty())
         .unwrap_or("local/build:latest")
         .to_string();
-    let platform = request.frontend_opt.get("platform").map(String::as_str);
+    let platform = request.frontend_opt.get("platform").cloned();
+    // Registry pulls and the classic build executor are synchronous.  Running
+    // them on this h2 request runtime makes reqwest's blocking client try to
+    // tear down its private Tokio runtime from an async context, which aborts
+    // BuildKit's control stream while resolving a cold external base.
+    let blocking_execution = execution.clone();
+    let blocking_image_name = image_name.clone();
+    let (pulled_bases, build_output) = tokio::task::spawn_blocking(move || {
+        let pulled_bases = prefetch_dockerfile_bases(
+            blocking_execution.store.as_ref(),
+            &blocking_execution.origin,
+            &blocking_execution.authorization,
+            &dockerfile,
+            Some(&session_auth),
+        )?;
+        let build_output = execute_build(
+            blocking_execution.store.as_ref(),
+            &blocking_execution.origin,
+            &blocking_execution.authorization,
+            Some(dockerfile.to_str().ok_or_else(|| {
+                "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
+            })?),
+            None,
+            Some(&blocking_image_name),
+            "gzip",
+            "oci",
+            None,
+            platform.as_deref(),
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            None,
+        )?;
+        Ok::<_, String>((pulled_bases, build_output))
+    })
+    .await
+    .map_err(|error| format!("buildkit solve: blocking build worker failed: {error}"))??;
+
     let mut steps = dockerfile_contents
         .lines()
         .map(str::trim)
@@ -24077,26 +24108,6 @@ async fn execute_buildkit_frontend(
             buildkit_metadata_reference(base)?
         ));
     }
-    let build_output = execute_build(
-        execution.store.as_ref(),
-        &execution.origin,
-        &execution.authorization,
-        Some(dockerfile.to_str().ok_or_else(|| {
-            "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
-        })?),
-        None,
-        Some(&image_name),
-        "gzip",
-        "oci",
-        None,
-        platform,
-        None,
-        None,
-        &[],
-        &[],
-        None,
-        None,
-    )?;
     let mut output = pulled_bases
         .iter()
         .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))

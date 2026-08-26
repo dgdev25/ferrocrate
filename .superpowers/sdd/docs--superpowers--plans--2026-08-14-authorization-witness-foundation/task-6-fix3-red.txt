@@ -1,7 +1,0 @@
-Task 6 review fix round 3 RED evidence
-
-Command: cargo test -p ferro-core --test witness_journal rejects_v1_storage_instead_of_silently_opening_an_unreadable_journal -- --exact
-Observed: compile failed because JournalError::UnsupportedVersion did not exist. This demonstrated that V1 storage had no explicit rejection policy.
-
-Command: cargo test -p ferro-core --test witness_checkpoint key_store_requires_a_preprovisioned_private_root -- --exact
-Initial run reached the linker before execution because the host exposes only versioned libseccomp; subsequent verification used the task-local unversioned shim. Before the production change, KeyStore::create created the missing root, contradicting the asserted pre-provisioning contract.

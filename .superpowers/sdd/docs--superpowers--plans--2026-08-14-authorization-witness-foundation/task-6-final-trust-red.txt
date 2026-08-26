@@ -1,5 +1,0 @@
-Exceptional Task 6 trust correction RED evidence
-
-- Inspection showed deterministic Disabled state was learned only during append, after sidecar/artifact replacement.
-- The injected post-publication BindingMismatch regression initially showed the sidecar was deleted, leaving an unexplained unbound artifact.
-- Required behavior: preflight Disabled before publication; persist terminal BindingFailed/OperatorRequired across restart; block new publication and normal reconciliation.

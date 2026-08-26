@@ -42,3 +42,4 @@ prd2build.config.json
 *.db
 *.db-shm
 *.db-wal
+.superpowers/

@@ -22,8 +22,8 @@ builds runs under Docker, podman, or Kubernetes, and the other way round.
   PID start-time before signaling, so a recycled PID is never killed by
   mistake; state survives daemon restarts and is reconciled on startup.
 - **Qualified, not assumed** — every support claim links dated evidence from
-  real hosts; desktop acceptance remains blocked by a Windows web-bridge
-  lifetime failure and a macOS missing-engine-sidecar/CI boundary, recorded in
+  real hosts; desktop acceptance remains blocked while the Windows WSL engine
+  rebuild completes and by a macOS VM SSH identity/known-host boundary, recorded in
   [`VM-ACCEPTANCE-2026-08-25.md`](docs/desktop/VM-ACCEPTANCE-2026-08-25.md).
 
 ## 🚀 Quickstart
@@ -118,8 +118,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows 11 (WSL2 backend) | Engine start qualified; its tokenized web bridge exits before a local authenticated action, so acceptance remains pending |
-| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF are available, but the rebuilt supervisor lacks its `ferrocrate` engine sidecar and CI occupancy prevented that sidecar rebuild |
+| Windows 11 (WSL2 backend) | Native desktop/UI rebuilt on `E:`; WSL engine rebuild is pending before authenticated bridge acceptance |
+| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF and release sidecars are available, but the supervisor's default SSH identity path is absent and a stale loopback known-host entry blocks the tunnel |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is

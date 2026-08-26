@@ -209,7 +209,8 @@ struct FleetUiOptions {
     /// Lifetime of the browser login credential written to disk. The default of
     /// five minutes was too short to be usable: once it lapsed the operator was
     /// locked out, because refreshing one needs a live browser session and there
-    /// was none yet. Bounded by the session ceiling.
+    /// was none yet. Accepts 1 to 3600 seconds; it is the bootstrap credential,
+    /// so it may outlive a browser session by design.
     login_ttl_seconds: i64,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,

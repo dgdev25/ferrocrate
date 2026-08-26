@@ -1401,6 +1401,36 @@ fn build_layer_from_dir(
     }
 }
 
+/// Layers previously listed only regular files, so directories without any
+/// file inside and symlinks vanished from every generated layer. Explicit
+/// headers keep both alive across the tar round-trip.
+fn append_tar_dir_entry(
+    builder: &mut Builder<Vec<u8>>,
+    relative: &Path,
+) -> std::io::Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_mtime(0);
+    builder.append_data(&mut header, relative, std::io::empty())
+}
+
+/// Preserve the link verbatim; relative, absolute and dangling targets all
+/// survive instead of being dereferenced or silently dropped.
+fn append_tar_symlink_entry(
+    builder: &mut Builder<Vec<u8>>,
+    relative: &Path,
+    target: &Path,
+) -> std::io::Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    header.set_mtime(0);
+    builder.append_link(&mut header, relative, target)
+}
+
 fn add_directory(
     builder: &mut Builder<Vec<u8>>,
     base: &Path,
@@ -1431,7 +1461,12 @@ fn add_directory(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
+            append_tar_dir_entry(builder, &relative).map_err(DockerfileBuildError::Io)?;
             add_directory(builder, base, &entry_path, dockerfile_path)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&entry_path)?;
+            append_tar_symlink_entry(builder, &relative, &target)
+                .map_err(DockerfileBuildError::Io)?;
         } else if file_type.is_file() {
             builder
                 .append_path_with_name(&entry_path, &relative)
@@ -2140,8 +2175,18 @@ fn hash_context_dir_excluding(
     for rel_path in files {
         let full_path = context_dir.join(&rel_path);
         buf.extend_from_slice(rel_path.to_string_lossy().as_bytes());
-        let bytes = fs::read(&full_path)?;
-        buf.extend_from_slice(&bytes);
+        if fs::symlink_metadata(&full_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            // Hash the link target itself; reading the bytes would fail for
+            // dangling links and hide retargets behind the old content.
+            buf.extend_from_slice(b"link:");
+            buf.extend_from_slice(fs::read_link(&full_path)?.to_string_lossy().as_bytes());
+        } else {
+            let bytes = fs::read(&full_path)?;
+            buf.extend_from_slice(&bytes);
+        }
     }
     Ok(hex::encode(rvf_crypto::shake256_256(&buf)))
 }
@@ -2243,7 +2288,7 @@ fn collect_context_files(
                 excluded_root,
                 out,
             )?;
-        } else if file_type.is_file() {
+        } else if file_type.is_file() || file_type.is_symlink() {
             out.push(relative);
         }
     }
@@ -5985,7 +6030,7 @@ mod tests {
         build_from_dockerfile_with_store_and_compression, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerfile_external_base_images, dockerignore_matches, export_build_cache,
-        export_build_cache_to_registry, file_matches_digest, import_build_cache,
+        export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
@@ -6316,6 +6361,81 @@ mod tests {
             fs::read_to_string(runtime.join("build/stage-0/app/d/value")).expect("WORKDIR COPY result"),
             "value"
         );
+    }
+
+    #[test]
+    fn copy_preserves_symlinks_and_empty_directories_in_the_layer() {
+        // S5: a directory containing a symlink must arrive whole, links
+        // preserved as links instead of silently dropped with their parent.
+        #[cfg(unix)]
+        {
+            let _env = crate::test_support::acquire_env_lock();
+            let temp = tempfile::tempdir().expect("tempdir");
+            let dockerfile = temp.path().join("Dockerfile");
+            fs::write(&dockerfile, "FROM scratch\nCOPY d /d\n").expect("dockerfile");
+            let source = temp.path().join("d");
+            fs::create_dir_all(source.join("bin")).expect("bin dir");
+            fs::write(source.join("real.txt"), "content").expect("real.txt");
+            std::os::unix::fs::symlink("../real.txt", source.join("bin/link"))
+                .expect("relative link");
+            std::os::unix::fs::symlink("/d/real.txt", source.join("absolute"))
+                .expect("absolute link");
+            std::os::unix::fs::symlink("missing-target", source.join("bin/dangling"))
+                .expect("dangling link");
+            fs::create_dir_all(source.join("empty")).expect("empty dir");
+
+            let runtime = temp.path().join("runtime");
+            let store = LocalImageStore::open(runtime.join("images")).expect("store");
+            build_from_dockerfile_with_store_and_compression(
+                &dockerfile,
+                Some("local/symlink-copy:latest"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            )
+            .expect("build");
+
+            let stage = runtime.join("build/stage-0/d");
+            assert_eq!(
+                fs::read_to_string(stage.join("real.txt")).expect("regular file"),
+                "content"
+            );
+            assert!(stage.join("bin").is_dir(), "directory holding a link survives");
+            assert_eq!(
+                fs::read_link(stage.join("bin/link")).expect("relative link"),
+                Path::new("../real.txt")
+            );
+            assert_eq!(
+                fs::read_link(stage.join("bin/dangling")).expect("dangling link"),
+                Path::new("missing-target")
+            );
+            assert_eq!(
+                fs::read_link(stage.join("absolute")).expect("absolute link"),
+                Path::new("/d/real.txt")
+            );
+            assert!(stage.join("empty").is_dir(), "empty directory survives");
+        }
+    }
+
+    #[test]
+    fn context_hash_includes_symlink_targets() {
+        #[cfg(unix)]
+        {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let dockerfile = temp.path().join("Dockerfile");
+            fs::write(&dockerfile, "FROM scratch\n").expect("dockerfile");
+            fs::write(temp.path().join("payload"), "one").expect("payload");
+            std::os::unix::fs::symlink("payload", temp.path().join("latest")).expect("link");
+
+            let first = hash_context_dir(temp.path(), &dockerfile).expect("hash");
+            fs::remove_file(temp.path().join("latest")).expect("remove link");
+            std::os::unix::fs::symlink("unrelated", temp.path().join("latest"))
+                .expect("retarget");
+            let second = hash_context_dir(temp.path(), &dockerfile).expect("hash");
+
+            assert_ne!(first, second);
+        }
     }
 
     #[test]

@@ -22,8 +22,8 @@ jobs:
             target_dir: target
           - name: windows
             runner: [self-hosted, windows, ferro-lab]
-            # Separate from the machine-wide E:\cargo-target that VM acceptance runs use.
-            target_dir: E:\cargo-target-ci
+            # Separate from the machine-wide E:\cargo-target that VM acceptance runs use; C: has more room.
+            target_dir: C:\cargo-target-ci
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_TARGET_DIR: ${{ matrix.target_dir }}

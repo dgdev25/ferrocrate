@@ -3510,7 +3510,10 @@ mod tests {
         fn socket_path(&self) -> Option<PathBuf> { None }
     }
 
+    // On Windows this exec runs through the WSL2 backend, which is unavailable to the
+    // CI runner service account. The WSL2 path is covered by the VM acceptance report.
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn tauri_cli_consumer_routes_exec_through_backend() {
         let result = run_backend_command(
             "ferro-desktop",

@@ -5691,7 +5691,12 @@ fn copy_from_context(
             // Docker semantics: a source directory with a trailing slash
             // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
             // /out/), while a bare directory name is copied under its name.
-            let copy_contents = src.ends_with('/') && source.is_dir();
+            // `.` names the build context itself. Like an explicitly
+            // trailing-slash directory it contributes its contents, so
+            // `WORKDIR /src` + `COPY . .` must place Cargo.toml at /src,
+            // never /src/src/Cargo.toml.
+            let copy_contents =
+                (src == "." || src == "./" || src.ends_with('/')) && source.is_dir();
             let dest = if copy_contents {
                 dest_root.clone()
             } else if spec.parents {
@@ -6764,6 +6769,29 @@ mod tests {
                 "PORT=8080".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn copy_dot_into_workdir_copies_context_contents_not_context_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nWORKDIR /src\nCOPY . .\n").unwrap();
+        fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-dot:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("COPY . . build");
+
+        assert!(runtime.join("build/stage-0/src/Cargo.toml").is_file());
+        assert!(!runtime.join("build/stage-0/src/src/Cargo.toml").exists());
     }
 
     #[test]

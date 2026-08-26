@@ -150,6 +150,11 @@ pub struct ContainerRecord {
     pub ipv6_address: Option<String>,
     #[serde(default)]
     pub ports: Vec<PortMappingRecord>,
+    /// Identity of the rootless slirp4netns helper attached to this container.
+    #[serde(default)]
+    pub slirp4netns_pid: Option<u32>,
+    #[serde(default)]
+    pub slirp4netns_start_time: Option<u64>,
     #[serde(default)]
     pub mounts: Vec<ContainerMountRecord>,
     #[serde(default)]
@@ -270,6 +275,8 @@ impl ContainerRecord {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,

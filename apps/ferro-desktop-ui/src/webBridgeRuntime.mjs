@@ -122,7 +122,14 @@ export function createWebBridgeRuntime(options = {}) {
               payload = undefined;
             }
           } else {
-            payload = await response.json();
+            // An empty body is a valid answer (a 401 from the auto-login probe
+            // sends none). Parsing it must not surface as "Unexpected end of
+            // JSON input"; the status below is what decides success.
+            try {
+              payload = await response.json();
+            } catch {
+              payload = undefined;
+            }
           }
           if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
             throw new Error(String(payload?.error ?? `command ${command} failed (HTTP ${response.status ?? "unknown"})`));

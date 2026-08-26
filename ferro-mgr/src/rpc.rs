@@ -891,11 +891,18 @@ async fn execute_checked(
         )
         .await?;
     if result.exit_code != 0 {
-        return Err(if result.stderr.is_empty() {
-            format!("host command exited {}", result.exit_code)
-        } else {
+        // A failing host command sometimes writes its cause to stdout, and a
+        // pull failure has been seen writing to neither. Report whichever
+        // stream carries text, and name the action and node when both are
+        // empty so the operator is not left with a bare exit code.
+        let detail = if !result.stderr.trim().is_empty() {
             result.stderr
-        });
+        } else if !result.stdout.trim().is_empty() {
+            result.stdout
+        } else {
+            format!("{action} on {node_id} exited {} with no output", result.exit_code)
+        };
+        return Err(detail);
     }
     Ok(())
 }

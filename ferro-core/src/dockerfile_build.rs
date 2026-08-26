@@ -308,6 +308,7 @@ struct BaseImageInfo {
     descriptors: Vec<Descriptor>,
     digest: Option<String>,
     onbuild: Vec<String>,
+    env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,7 +687,7 @@ fn build_one_stage(
         run_stage_commands(
             &stage_root,
             &stage.run,
-            &stage.env,
+            &stage_environment(base_info, &stage.env),
             stage.workdir.as_deref(),
             stage.user.as_deref(),
             &runtime_dir
@@ -775,6 +776,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 descriptors: Vec::new(),
                 digest: None,
                 onbuild: Vec::new(),
+                env: Vec::new(),
             }
         } else {
             resolve_base_image(store, runtime_dir, &stage.base, authority)?
@@ -5324,6 +5326,7 @@ fn resolve_base_image(
             descriptors: Vec::new(),
             digest: None,
             onbuild: Vec::new(),
+            env: Vec::new(),
         });
     }
 
@@ -5342,11 +5345,13 @@ fn resolve_base_image(
     let layers = resolve_layer_paths_with_store(runtime_dir, base, store)
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
     let onbuild = load_base_onbuild_triggers(runtime_dir, &manifest.config.digest)?;
+    let env = load_base_environment(runtime_dir, &manifest.config.digest)?;
     Ok(BaseImageInfo {
         layers,
         descriptors: manifest.layers,
         digest: Some(record.digest),
         onbuild,
+        env,
     })
 }
 
@@ -5377,6 +5382,61 @@ fn load_base_onbuild_triggers(
             parse_onbuild(trigger)
         })
         .collect()
+}
+
+fn load_base_environment(
+    runtime_dir: &Path,
+    config_digest: &str,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    let path = config_path(runtime_dir, config_digest);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path)?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("base config JSON: {err}")))?;
+    let Some(values) = config
+        .get("config")
+        .and_then(|value| value.get("Env"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|entry| entry.contains('='))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    DockerfileBuildError::Invalid(
+                        "base config Env must contain key=value strings".to_string(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Compose base-image and Dockerfile `ENV` values. Dockerfile assignments
+/// override matching base keys but preserve base PATH/toolchain values.
+fn stage_environment(base: &BaseImageInfo, stage: &[String]) -> Vec<String> {
+    let mut env = Vec::new();
+    for entry in base.env.iter().chain(stage) {
+        let Some((key, _)) = entry.split_once('=') else {
+            continue;
+        };
+        if let Some(index) = env.iter().position(|existing: &String| {
+            existing
+                .split_once('=')
+                .is_some_and(|(existing_key, _)| existing_key == key)
+        }) {
+            env[index] = entry.clone();
+        } else {
+            env.push(entry.clone());
+        }
+    }
+    env
 }
 
 fn apply_onbuild_triggers(
@@ -6681,6 +6741,32 @@ mod tests {
     }
 
     #[test]
+    fn stage_environment_keeps_base_path_and_allows_dockerfile_overrides() {
+        let base = BaseImageInfo {
+            layers: Vec::new(),
+            descriptors: Vec::new(),
+            digest: None,
+            onbuild: Vec::new(),
+            env: vec![
+                "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                "RUSTUP_HOME=/usr/local/rustup".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            super::stage_environment(
+                &base,
+                &["PATH=/custom/bin".to_string(), "PORT=8080".to_string()]
+            ),
+            vec![
+                "PATH=/custom/bin".to_string(),
+                "RUSTUP_HOME=/usr/local/rustup".to_string(),
+                "PORT=8080".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn repeated_build_ignores_runtime_scratch_nested_in_context() {
         let _env = crate::test_support::acquire_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -6786,6 +6872,7 @@ mod tests {
             descriptors: Vec::new(),
             digest: None,
             onbuild: Vec::new(),
+            env: Vec::new(),
         };
         let keyed = BaseImageInfo {
             digest: Some("sha256:base".to_string()),
@@ -6830,6 +6917,7 @@ mod tests {
                     descriptors: Vec::new(),
                     digest: None,
                     onbuild: Vec::new(),
+                    env: Vec::new(),
                 }],
                 BUILD_CACHE_PLATFORM
             )

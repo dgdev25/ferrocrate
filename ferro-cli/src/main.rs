@@ -6883,13 +6883,7 @@ fn handle_run(
         )?,
     };
     let restart_policy = parse_restart_policy(restart_policy)?;
-    let effective_cmd = if let Some(entry) = entrypoint {
-        let mut out = parse_entrypoint(entry)?;
-        out.extend_from_slice(cmd);
-        out
-    } else {
-        cmd.to_vec()
-    };
+    let effective_cmd = resolve_run_command(&image_config, entrypoint, cmd)?;
 
     let run = |container_id: Option<&str>| {
         if let Some(container_id) = container_id {
@@ -11472,6 +11466,52 @@ fn image_config_volume_targets(config: &serde_json::Value) -> Vec<String> {
     targets.sort();
     targets.dedup();
     targets
+}
+
+/// Apply Docker's command precedence: a CLI entrypoint replaces the image
+/// entrypoint, while a CLI command replaces the image Cmd.  This must happen
+/// before handing the request to the runtime, which deliberately rejects an
+/// empty command.
+#[cfg(target_os = "linux")]
+fn resolve_run_command(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+) -> Result<Vec<String>, String> {
+    let image_config = image_config.get("config").unwrap_or(image_config);
+    let image_entrypoint = image_config_command(image_config, "Entrypoint")?;
+    let image_cmd = image_config_command(image_config, "Cmd")?;
+    let mut effective = match entrypoint {
+        Some(entrypoint) => parse_entrypoint(entrypoint)?,
+        None => image_entrypoint,
+    };
+    if cmd.is_empty() {
+        effective.extend(image_cmd);
+    } else {
+        effective.extend_from_slice(cmd);
+    }
+    Ok(effective)
+}
+
+#[cfg(target_os = "linux")]
+fn image_config_command(config: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {
+    let Some(value) = config.get(field) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    value
+        .as_array()
+        .ok_or_else(|| format!("run: image config {field} must be an array"))?
+        .iter()
+        .map(|part| {
+            part.as_str()
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("run: image config {field} contains an invalid command part"))
+        })
+        .collect()
 }
 
 fn docker_image_list_entry(
@@ -30538,6 +30578,26 @@ volumes:
             Commands::Push { image } => assert_eq!(image, "ghcr.io/acme/app:latest"),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_uses_image_entrypoint_and_cmd_when_cli_command_is_omitted() {
+        let config = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/usr/local/bin/server"],
+                "Cmd": ["--listen", "8080"]
+            }
+        });
+        assert_eq!(
+            super::resolve_run_command(&config, None, &[]).expect("image default command"),
+            ["/usr/local/bin/server", "--listen", "8080"]
+        );
+        assert_eq!(
+            super::resolve_run_command(&config, Some("/bin/sh -c"), &["echo ok".to_string()])
+                .expect("CLI entrypoint override"),
+            ["/bin/sh", "-c", "echo ok"]
+        );
     }
 
     #[test]

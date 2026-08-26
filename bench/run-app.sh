@@ -73,9 +73,16 @@ run_engine() {
     tail="$(tail -c 400 "$WORK/$name.err" | tr -d '\000' | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read())[1:-1])')"
     printf '{"app":"%s","engine":"%s","step":"%s","status":"%s","exit":%d,"ms":%d,"stderr_tail":"%s","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$st" "$ex" "$((t1-t0))" "$tail" "$RUN" "$HEAD" >> "$OUT"
     echo "$(echo $st | tr a-z A-Z) $name ($ex, $((t1-t0)) ms)"; }
-  xfail() { local name="$1"; shift; if timeout 60 "$@" >/dev/null 2>"$WORK/$name.err"; then
-      printf '{"app":"%s","engine":"%s","step":"%s","status":"fail","exit":0,"ms":0,"stderr_tail":"expected an error","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$RUN" "$HEAD" >> "$OUT"; echo "FAIL $name (no error)"
-    else printf '{"app":"%s","engine":"%s","step":"%s","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$RUN" "$HEAD" >> "$OUT"; echo "PASS $name (errored)"; fi; }
+  # An xfail step passes only when the engine refuses. A timeout (124) or a
+  # signal (128+) is a crash, not a refusal, and must not be recorded as a pass.
+  xfail() { local name="$1"; shift; timeout 60 "$@" >/dev/null 2>"$WORK/$name.err"; local ex=$?
+    if [ $ex -eq 0 ] || [ $ex -eq 124 ] || [ $ex -ge 128 ]; then
+      local why="expected an error"; [ $ex -eq 124 ] && why="timed out instead of refusing"
+      [ $ex -ge 128 ] && why="died on signal $((ex-128)) instead of refusing"
+      printf '{"app":"%s","engine":"%s","step":"%s","status":"fail","exit":%d,"ms":0,"stderr_tail":"%s","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$ex" "$why" "$RUN" "$HEAD" >> "$OUT"; echo "FAIL $name ($why)"
+    else
+      printf '{"app":"%s","engine":"%s","step":"%s","status":"pass","exit":%d,"ms":0,"stderr_tail":"","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$ex" "$RUN" "$HEAD" >> "$OUT"; echo "PASS $name (refused)"
+    fi; }
   # clean state
   $CLI rm -f "bench-$APP" "bench-$APP-r" "bench-$APP-a" "bench-$APP-b" "bench-$APP-net" >/dev/null 2>&1
   $CLI network rm "bench-$APP-net" >/dev/null 2>&1; [ -n "$FIRST_VOL" ] && $CLI volume rm "${FIRST_VOL%%:*}" >/dev/null 2>&1

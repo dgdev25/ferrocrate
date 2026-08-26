@@ -22,7 +22,13 @@ def latest():
     """newest jsonl per (app, engine)"""
     files = {}
     for f in sorted(glob.glob(os.path.join(RES, "*", "*.jsonl"))):
-        app, engine = os.path.basename(f)[:-6].rsplit("-", 1)
+        name = os.path.basename(f)[:-6]
+        # Result files are named <app>-<engine>. The fuzzer and any other
+        # producer that writes here uses its own shape and has no engine pair,
+        # so it is not a scoreboard row.
+        app, _, engine = name.rpartition("-")
+        if engine not in ("ferrocrate", "docker"):
+            continue
         files[(app, engine)] = f
     return files
 

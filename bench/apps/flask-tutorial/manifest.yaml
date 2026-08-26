@@ -1,0 +1,15 @@
+name: flask-tutorial
+repo: https://github.com/pallets/flask
+pin: main
+subdir: examples/tutorial
+license: BSD-3-Clause
+class: greenfield
+stack: python
+base_image: python:3.12-slim
+start: flask init-db && flask run --host 0.0.0.0 --port 5000
+port: 5000
+health: /
+data_paths: [instance]
+env: {FLASK_APP: flaskr}
+skip: []
+note: pip install of the package in the build; sqlite db under instance/

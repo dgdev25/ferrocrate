@@ -1,0 +1,14 @@
+name: microblog
+repo: https://github.com/miguelgrinberg/microblog
+pin: main
+license: MIT
+class: provided
+stack: python
+base_image: python:3.12-slim
+start: n/a (Dockerfile)
+port: 5000
+health: /auth/login
+data_paths: []
+env: {}
+skip: []
+note: Flask mega-tutorial app; its Dockerfile uses a venv and gunicorn; sqlite by default

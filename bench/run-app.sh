@@ -17,7 +17,7 @@ REPO="$(m repo)"; PIN="$(m pin)"; SUBDIR="$(m subdir)"; CLASS="$(m class)"; STAC
 START="$(m start)"; CPORT="$(m port)"; HEALTH="$(m health)"; HEALTH="${HEALTH:-/}"
 DATA_PATHS="$(m data_paths | tr -d '[]' | tr ',' ' ')"; SKIP="$(m skip | tr -d '[]' | tr ',' ' ')"
 BASE_IMAGE="$(m base_image)"; ENV_LIST="$(m env | tr -d '{}' | tr ',' ' ')"
-DOCKERFILE="$(m dockerfile)"; BUILD_FILE_ARG=""; [ -n "$DOCKERFILE" ] && BUILD_FILE_ARG="-f $DOCKERFILE"
+MAIN="$(m main)"; DOCKERFILE="$(m dockerfile)"; BUILD_FILE_ARG=""; [ -n "$DOCKERFILE" ] && BUILD_FILE_ARG="-f $DOCKERFILE"
 PORT="${BENCH_PORT:-$(( 32000 + $(printf '%s' "$APP" | cksum | cut -d' ' -f1) % 2000 ))}"
 
 # --- source ---
@@ -33,7 +33,7 @@ CTX="$SRC${SUBDIR:+/$SUBDIR}"; [ -d "$CTX" ] || { echo "context missing: $CTX" >
 # --- containerise greenfield apps from the stack template ---
 if [ "$CLASS" = greenfield ]; then
   T="$BENCH/templates/$STACK"; [ -d "$T" ] || { echo "no template for stack $STACK" >&2; exit 2; }
-  [ -f "$CTX/Dockerfile" ] || sed -e "s|@START@|$START|g" -e "s|@PORT@|$CPORT|g" -e "s|@BASE@|$BASE_IMAGE|g" "$T/Dockerfile.tmpl" > "$CTX/Dockerfile"
+  [ -f "$CTX/Dockerfile" ] || sed -e "s|@START@|$START|g" -e "s|@PORT@|$CPORT|g" -e "s|@BASE@|$BASE_IMAGE|g" -e "s|@MAIN@|${MAIN:-.}|g" "$T/Dockerfile.tmpl" > "$CTX/Dockerfile"
   [ -f "$CTX/.dockerignore" ] || cp "$T/dockerignore" "$CTX/.dockerignore" 2>/dev/null || true
   if [ ! -f "$CTX/compose.yaml" ] && [ ! -f "$CTX/docker-compose.yml" ]; then
     { echo "services:"; echo "  app:"; echo "    build: ."; echo "    ports: [\"$PORT:$CPORT\"]";

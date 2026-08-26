@@ -1,7 +1,7 @@
 name: gin-basic
 repo: https://github.com/gin-gonic/examples
 pin: master
-subdir: basic
+main: ./basic
 license: MIT
 class: greenfield
 stack: go
@@ -12,4 +12,4 @@ health: /ping
 data_paths: []
 env: {}
 skip: []
-note: multi-stage build to a distroless image; go mod download needs network in the build
+note: multi-stage build to a distroless image from the repo root (go.mod is at the root; main is ./basic); go mod download needs network in the build

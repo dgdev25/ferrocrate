@@ -4168,6 +4168,9 @@ fn run_stage_commands(
                 )
             })?)
         };
+        if rootless_bwrap.is_some() {
+            provision_rootless_build_network_files(rootfs)?;
+        }
         let mut cmd = if let Some(bwrap) = &rootless_bwrap {
             let mut command = Command::new(bwrap);
             command
@@ -4175,7 +4178,6 @@ fn run_stage_commands(
                     "--die-with-parent",
                     "--unshare-user",
                     "--unshare-pid",
-                    "--unshare-net",
                     "--unshare-uts",
                     "--uid",
                     "0",
@@ -4185,6 +4187,8 @@ fn run_stage_commands(
                 ])
                 .arg(rootfs)
                 .arg("/")
+                .arg("--proc")
+                .arg("/proc")
                 .arg("--chdir")
                 .arg(
                     workdir
@@ -4784,6 +4788,29 @@ fn run_stage_commands(
             )));
         }
     }
+    Ok(())
+}
+
+/// Give a rootless Dockerfile RUN the same outbound resolver configuration as
+/// a rootless workload. Bubblewrap shares the host network until a dedicated
+/// slirp namespace is attached, so its rootfs must still contain a resolver
+/// file rather than inheriting the host mount namespace's `/etc`.
+fn provision_rootless_build_network_files(rootfs: &Path) -> Result<(), DockerfileBuildError> {
+    let source = Path::new("/etc/resolv.conf");
+    let bytes = fs::read(source).map_err(|error| {
+        DockerfileBuildError::Invalid(format!(
+            "rootless RUN cannot read host resolver {}: {error}",
+            source.display()
+        ))
+    })?;
+    let target = rootfs.join("etc/resolv.conf");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::symlink_metadata(&target).is_ok() {
+        fs::remove_file(&target)?;
+    }
+    fs::write(&target, bytes)?;
     Ok(())
 }
 
@@ -7856,6 +7883,44 @@ mod tests {
             None,
         )
         .unwrap_or_else(|error| panic!("rootless RUN should succeed: {error}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootless_run_has_network_proc_and_a_resolver() {
+        if nix::unistd::Uid::effective().is_root() || skip_unavailable_rootless_build_sandbox() {
+            eprintln!("skipping: rootless build networking requires an unprivileged sandbox");
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).expect("context");
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /busybox\nRUN [\"/busybox\", \"sh\", \"-c\", \"test -d /proc/net && nslookup registry.npmjs.org\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, context.join("busybox")).expect("busybox");
+        let runtime = temp.path().join("runtime");
+        let store =
+            crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/rootless-network:latest"),
+            &runtime,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("rootless RUN needs network and /proc: {error}"));
     }
 
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";

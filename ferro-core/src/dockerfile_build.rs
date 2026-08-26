@@ -5434,6 +5434,8 @@ fn copy_context_dir(
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             copy_context_dir(root, &path, &target, dockerfile_path, ignore_patterns)?;
+        } else if file_type.is_symlink() {
+            copy_symlink(&path, &target)?;
         } else if file_type.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
@@ -5847,8 +5849,10 @@ fn copy_path_recursive_mode_with_excludes(
     if !relative.as_os_str().is_empty() && copy_path_is_excluded(relative, excludes) {
         return Ok(());
     }
-    let metadata = fs::metadata(src)?;
-    if metadata.is_dir() {
+    let metadata = fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() {
+        copy_symlink(src, dst)?;
+    } else if metadata.is_dir() {
         fs::create_dir_all(dst)?;
         // The runtime/build scratch directory can be nested inside the build
         // context.  Exclude that destination subtree while walking the
@@ -5871,16 +5875,43 @@ fn copy_path_recursive_mode_with_excludes(
                 &relative.join(name),
             )?;
         }
-    } else {
+    } else if metadata.is_file() {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(src, dst)?;
+    } else {
+        return Err(DockerfileBuildError::Unsupported(format!(
+            "COPY source has unsupported file type: {}",
+            src.display()
+        )));
     }
     if let Some(mode) = chmod {
         apply_copy_mode(dst, mode)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
+    let target = fs::read_link(src).map_err(|error| {
+        DockerfileBuildError::Invalid(format!("COPY cannot read symlink {}: {error}", src.display()))
+    })?;
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::symlink_metadata(dst).is_ok() {
+        fs::remove_file(dst)?;
+    }
+    std::os::unix::fs::symlink(target, dst).map_err(DockerfileBuildError::Io)
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(src: &Path, _dst: &Path) -> Result<(), DockerfileBuildError> {
+    Err(DockerfileBuildError::Unsupported(format!(
+        "COPY symlink preservation requires a Unix filesystem: {}",
+        src.display()
+    )))
 }
 
 fn copy_path_is_excluded(relative: &Path, patterns: &[String]) -> bool {
@@ -8714,6 +8745,38 @@ mod tests {
             error.to_string().contains(&missing.display().to_string()),
             "COPY error must identify the source path: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_relative_and_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+        use std::path::PathBuf;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(temp.path().join("real.txt"), "real").unwrap();
+        symlink("../real.txt", bin.join("link")).unwrap();
+        symlink("../missing.txt", bin.join("dangling")).unwrap();
+        let destination = temp.path().join("destination");
+        super::copy_from_context(
+            temp.path(),
+            &destination,
+            &[super::CopySpec {
+                srcs: vec!["bin".into()],
+                dest: "/bin".into(),
+                chmod: None,
+                owner: None,
+                checksum: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(fs::read_link(destination.join("bin/link")).unwrap(), PathBuf::from("../real.txt"));
+        assert_eq!(fs::read_link(destination.join("bin/dangling")).unwrap(), PathBuf::from("../missing.txt"));
     }
 
     #[test]

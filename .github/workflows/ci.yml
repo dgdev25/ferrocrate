@@ -16,11 +16,17 @@ jobs:
         include:
           - name: linux
             runner: [self-hosted, linux, x64, ferro-lab]
+            target_dir: target
           - name: macos
             runner: [self-hosted, macos, ferro-lab]
+            target_dir: target
           - name: windows
             runner: [self-hosted, windows, ferro-lab]
+            # Separate from the machine-wide E:\cargo-target that VM acceptance runs use.
+            target_dir: E:\cargo-target-ci
     runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TARGET_DIR: ${{ matrix.target_dir }}
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     steps:

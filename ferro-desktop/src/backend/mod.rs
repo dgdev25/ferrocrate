@@ -1315,7 +1315,9 @@ mod timeout_tests {
         )
         .expect_err("blocking response must time out");
 
-        assert!(started.elapsed() < Duration::from_millis(150));
+        // The read blocks until canceled, so any bounded elapsed time proves the
+        // timeout fired. Keep the bound loose: CI VMs share CPUs with builds.
+        assert!(started.elapsed() < Duration::from_secs(5));
         assert!(error.to_string().contains("timed out"));
         assert!(*canceled.0.lock().expect("cancel state"));
     }

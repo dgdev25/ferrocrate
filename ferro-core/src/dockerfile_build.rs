@@ -642,6 +642,7 @@ fn build_one_stage(
     } else {
         let mut copy_paths = stage.copy_paths.clone();
         for spec in &mut copy_paths {
+            spec.dest = resolve_copy_destination(stage.workdir.as_deref(), &spec.dest);
             if let Some(owner) = spec.owner.as_ref() {
                 let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
                 spec.owner = Some(CopyOwner::Numeric(uid, gid));
@@ -655,7 +656,8 @@ fn build_one_stage(
                 DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
             })?;
         let source = safe_context_source(&source_root, &copy.src)?;
-        let dest = safe_context_destination(&context_root, &copy.dest)?;
+        let destination = resolve_copy_destination(stage.workdir.as_deref(), &copy.dest);
+        let dest = safe_context_destination(&context_root, &destination)?;
         copy_path_recursive(&source, &dest)?;
         if let Some(owner) = copy.owner.as_ref() {
             let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
@@ -704,6 +706,28 @@ fn build_one_stage(
         layer_media_type,
         layer_size,
     })
+}
+
+fn resolve_copy_destination(workdir: Option<&str>, destination: &str) -> String {
+    if destination.starts_with('/') {
+        return destination.to_string();
+    }
+    let base = workdir.unwrap_or("/").trim_end_matches('/');
+    // Keep the directory intent of Docker's `./` spelling.  `Path` would
+    // normalize `/app/./` before `copy_from_context` can see its trailing
+    // slash, causing a multi-source COPY to treat `/app` as a file target.
+    if destination == "." || destination == "./" {
+        return if base.is_empty() || base == "/" {
+            "/".to_string()
+        } else {
+            format!("{base}/")
+        };
+    }
+    if base.is_empty() || base == "/" {
+        format!("/{destination}")
+    } else {
+        format!("{base}/{destination}")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6258,6 +6282,60 @@ mod tests {
             .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
+    }
+
+    #[test]
+    fn copy_relative_destination_is_resolved_from_workdir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nWORKDIR /app\nCOPY source d\n",
+        )
+        .expect("dockerfile");
+        fs::create_dir_all(temp.path().join("source")).expect("source");
+        fs::write(temp.path().join("source/value"), "value").expect("value");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/workdir-copy:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("build");
+        assert_eq!(
+            fs::read_to_string(runtime.join("build/stage-0/app/d/value")).expect("WORKDIR COPY result"),
+            "value"
+        );
+    }
+
+    #[test]
+    fn copy_multiple_sources_to_workdir_dot_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nWORKDIR /app\nCOPY package.json package-lock.json ./\n",
+        )
+        .expect("dockerfile");
+        fs::write(temp.path().join("package.json"), "{}").expect("package");
+        fs::write(temp.path().join("package-lock.json"), "{}").expect("lock");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/workdir-dot:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("build");
+        assert!(runtime.join("build/stage-0/app/package.json").is_file());
+        assert!(runtime.join("build/stage-0/app/package-lock.json").is_file());
     }
 
     #[test]

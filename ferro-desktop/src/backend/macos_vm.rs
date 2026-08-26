@@ -25,6 +25,8 @@ pub struct MacosVmConfig {
     pub ssh_port: u16,
     pub guest_user: String,
     pub ssh_key: PathBuf,
+    /// Host path to a Linux x86_64 ferrocrate binary copied into the guest.
+    pub guest_engine_path: PathBuf,
 }
 
 impl Default for MacosVmConfig {
@@ -60,6 +62,9 @@ impl Default for MacosVmConfig {
             ssh_key: std::env::var_os("FERROCRATE_VM_SSH_KEY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| vm_root.join("desktop_vm_ed25519")),
+            guest_engine_path: std::env::var_os("FERROCRATE_VM_GUEST_ENGINE_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| vm_root.join("ferrocrate-guest-engine-x86_64")),
         };
         Self::from_vm_state(&fallback.vm_config).unwrap_or(fallback)
     }
@@ -95,6 +100,14 @@ impl MacosVmConfig {
             ssh_port: record.ssh_port.unwrap_or(2222),
             guest_user: record.guest_user.unwrap_or_else(|| "ubuntu".into()),
             ssh_key,
+            guest_engine_path: std::env::var_os("FERROCRATE_VM_GUEST_ENGINE_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    vm_config
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("ferrocrate-guest-engine-x86_64")
+                }),
         })
     }
 }
@@ -115,7 +128,7 @@ impl MacosVmBackend {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("known_hosts");
-        let start = CommandSpec::new(config.launcher).args([
+        let start = CommandSpec::new(config.launcher.clone()).args([
             "vm",
             "--state-file",
             config.vm_config.to_string_lossy().as_ref(),
@@ -173,6 +186,7 @@ impl MacosVmBackend {
             ),
             format!("{}@127.0.0.1", config.guest_user),
         ]);
+        let provisioner = guest_provisioner_command(&config, &known_hosts);
         Self {
             core: BackendCore::new(
                 "macos-vm",
@@ -182,12 +196,74 @@ impl MacosVmBackend {
                 Transport::Loopback(config.relay_addr),
                 host,
             )
+            .with_auxiliary_start(provisioner)
             .with_auxiliary_start(tunnel)
             .with_readiness_timeout(Duration::from_secs(180)),
             stop_command,
             managed: std::sync::atomic::AtomicBool::new(false),
         }
     }
+}
+
+fn guest_provisioner_command(
+    config: &MacosVmConfig,
+    known_hosts: &Path,
+) -> CommandSpec {
+    let identity = config.ssh_key.display().to_string();
+    let port = config.ssh_port.to_string();
+    let known_hosts = format!("UserKnownHostsFile={}", known_hosts.display());
+    let target = format!("{}@127.0.0.1", config.guest_user);
+    let guest_tmp = format!("{target}:/tmp/ferrocrate");
+    let guest_runtime = format!("/home/{}/.local/state/ferrocrate", config.guest_user);
+    let service = format!(
+        "[Unit]\nDescription=Ferrocrate guest engine\nAfter=network-online.target\n\n[Service]\nType=simple\nUser={}\nExecStart=/usr/local/bin/ferrocrate daemon --socket {}/ferrocrate.sock --docker-compat\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n",
+        config.guest_user, guest_runtime
+    );
+    let remote = format!(
+        "sudo install -D -m 0755 /tmp/ferrocrate /usr/local/bin/ferrocrate && sudo install -d -o {user} -g {user} {runtime} && printf %s {service} | sudo tee /etc/systemd/system/ferrocrate.service >/dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now ferrocrate.service",
+        user = posix_shell_quote(&config.guest_user),
+        runtime = posix_shell_quote(&guest_runtime),
+        service = posix_shell_quote(&service),
+    );
+    let ssh_options = [
+        "-i".to_string(),
+        identity.clone(),
+        "-p".to_string(),
+        port.clone(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "IdentitiesOnly=yes".to_string(),
+        "-o".to_string(),
+        "IdentityAgent=none".to_string(),
+        "-o".to_string(),
+        known_hosts,
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+    ];
+    let quote_words = |words: &[String]| {
+        words
+            .iter()
+            .map(|word| posix_shell_quote(word))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let scp = format!(
+        "scp {} {} {}",
+        quote_words(&ssh_options),
+        posix_shell_quote(&config.guest_engine_path.display().to_string()),
+        posix_shell_quote(&guest_tmp),
+    );
+    let mut ssh_words = ssh_options.to_vec();
+    ssh_words.push(target);
+    ssh_words.push(remote);
+    let ssh = format!("ssh {}", quote_words(&ssh_words));
+    CommandSpec::new("sh").args(vec![
+        "-lc".to_string(),
+        format!(
+            "until {scp}; do sleep 1; done; until {ssh}; do sleep 1; done; exec sleep 2147483647"
+        ),
+    ])
 }
 
 impl Backend for MacosVmBackend {

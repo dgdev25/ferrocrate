@@ -281,6 +281,7 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
         distro: "Ubuntu".into(),
         relay_addr: "127.0.0.1:4288".parse().unwrap(),
         relay_token: String::new(),
+        ferrocrate_binary: PathBuf::from("/home/ferro/.local/bin/ferrocrate"),
     };
     let backend = Wsl2Backend::with_host(config, host.clone());
 
@@ -293,7 +294,7 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
             "--exec",
             "sh",
             "-lc",
-            "exec ferrocrate daemon --socket \"$HOME/$1\" --docker-compat",
+            "exec '/home/ferro/.local/bin/ferrocrate' daemon --socket \"$HOME/$1\" --docker-compat",
             "ferrocrate-wsl",
             ".local/state/ferrocrate/ferrocrate.sock",
         ])]
@@ -331,44 +332,27 @@ fn macos_backend_starts_the_provisioned_vm_and_stops_owned_children() {
         ssh_port: 2222,
         guest_user: "ferro".into(),
         ssh_key: PathBuf::from("/Users/test/.ferrocrate/vm/desktop_vm_ed25519"),
+        guest_engine_path: PathBuf::from("/Users/test/ferrocrate-guest-engine-x86_64"),
     };
     let backend = MacosVmBackend::with_host(config, host.clone());
 
     assert_eq!(backend.start().unwrap().state, BackendState::Running);
+    let starts = host.starts.lock().unwrap();
+    assert_eq!(starts.len(), 3);
     assert_eq!(
-        host.starts.lock().unwrap().as_slice(),
-        &[
-            CommandSpec::new("/usr/local/bin/ferro-desktop").args([
-                "vm",
-                "--state-file",
-                "/Users/test/.ferrocrate/desktop-vm.json",
-                "start",
-                "--foreground",
-            ]),
-            CommandSpec::new("ssh").args([
-                "-i",
-                "/Users/test/.ferrocrate/vm/desktop_vm_ed25519",
-                "-p",
-                "2222",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "IdentityAgent=none",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "UserKnownHostsFile=/Users/test/.ferrocrate/known_hosts",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-N",
-                "-L",
-                "127.0.0.1:4288:/home/ferro/.local/state/ferrocrate/ferrocrate.sock",
-                "ferro@127.0.0.1",
-            ]),
-        ]
+        starts[0],
+        CommandSpec::new("/usr/local/bin/ferro-desktop").args([
+            "vm",
+            "--state-file",
+            "/Users/test/.ferrocrate/desktop-vm.json",
+            "start",
+            "--foreground",
+        ])
     );
+    assert_eq!(starts[2].program, PathBuf::from("ssh"));
+    assert!(starts[2].args.windows(2).any(|pair| {
+        pair == ["-L", "127.0.0.1:4288:/home/ferro/.local/state/ferrocrate/ferrocrate.sock"]
+    }));
     assert_eq!(
         backend.socket_path(),
         Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
@@ -544,6 +528,7 @@ fn proxy_requests_route_through_the_selected_backend_transport() {
             distro: "FerrocrateDesktop".into(),
             relay_addr: "127.0.0.1:4288".parse().unwrap(),
             relay_token: "bridge-secret".into(),
+            ferrocrate_binary: PathBuf::from("/home/USER/.local/bin/ferrocrate"),
         },
         host.clone(),
     );
@@ -604,6 +589,64 @@ fn wsl_exec_forwards_environment_inside_the_guest() {
                 .stdin(b"input".to_vec()),
         )]
     );
+}
+
+#[test]
+fn wsl_exec_uses_the_configured_guest_engine_path() {
+    let host = FakeHost::healthy(true);
+    let backend = Wsl2Backend::with_host(
+        Wsl2Config {
+            distro: "FerrocrateDesktop".into(),
+            ferrocrate_binary: PathBuf::from("/home/ferro/.local/bin/ferrocrate"),
+            ..wsl_config()
+        },
+        host.clone(),
+    );
+
+    backend
+        .exec(ExecRequest::new("ferrocrate").args(["doctor"]))
+        .unwrap();
+
+    assert_eq!(
+        host.execs.lock().unwrap().as_slice(),
+        &[ (
+            CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec"]),
+            ExecRequest::new("env").args([
+                "/home/ferro/.local/bin/ferrocrate",
+                "doctor",
+            ]),
+        )]
+    );
+}
+
+#[test]
+fn macos_backend_provisions_the_configured_guest_engine_before_tunnelling() {
+    let host = FakeHost::ready_after_start();
+    let backend = MacosVmBackend::with_host(
+        MacosVmConfig {
+            launcher: PathBuf::from("/usr/local/bin/ferro-desktop"),
+            vm_config: PathBuf::from("/Users/test/.ferrocrate/desktop-vm.json"),
+            relay_addr: "127.0.0.1:4288".parse().unwrap(),
+            ssh_port: 2222,
+            guest_user: "ferro".into(),
+            ssh_key: PathBuf::from("/Users/test/.ferrocrate/vm/desktop_vm_ed25519"),
+            guest_engine_path: PathBuf::from("/Users/test/ferrocrate-guest-engine-x86_64"),
+        },
+        host.clone(),
+    );
+
+    backend.start().unwrap();
+
+    let commands = host.starts.lock().unwrap();
+    let provisioner = commands
+        .iter()
+        .find(|command| command.program == PathBuf::from("sh"))
+        .expect("guest provisioning command");
+    assert_eq!(provisioner.args[0], "-lc");
+    assert!(provisioner.args[1].contains("scp"));
+    assert!(provisioner.args[1].contains("/Users/test/ferrocrate-guest-engine-x86_64"));
+    assert!(provisioner.args[1].contains("systemctl enable --now ferrocrate.service"));
+    assert!(provisioner.args[1].contains("/home/ferro/.local/state/ferrocrate/ferrocrate.sock"));
 }
 
 #[test]

@@ -120,7 +120,7 @@ can be developed and unit-tested there.
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
 | Windows 11 (WSL2 backend) | Host/network-blocked boundary: the dependency and host/UI builds are present, but the WSL engine build and a later SSH outage prevent browser acceptance |
-| macOS Tahoe (Linux VM backend) | Host/network-blocked boundary: nested virtualization, QEMU, and Node/npm are present and a fresh build was launched, but an SSH outage prevents VM/browser acceptance |
+| macOS Tahoe (Linux VM backend) | Qualified host boundary: nested virtualization, QEMU, and Node/npm are present, but an independently owned guest Cargo build prevents a compliant VM/browser acceptance run |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is

@@ -13416,6 +13416,7 @@ struct RunNetworkBinding {
     bridge_name: Option<String>,
 }
 
+#[cfg(test)]
 fn bind_run_network(
     runtime_dir: &Path,
     network: &str,

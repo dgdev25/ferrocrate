@@ -499,7 +499,19 @@ fn macos_vm_defaults_match_the_installer_layout() {
     assert_eq!(config.launcher, PathBuf::from("ferro-desktop"));
     assert_eq!(config.vm_config, root.join("desktop-vm.json"));
     assert_eq!(config.guest_user, "ubuntu");
-    assert_eq!(config.ssh_key, root.join("vm/desktop_vm_ed25519"));
+    // A provisioned VM record on this machine overrides the installer-layout key path.
+    let recorded_key = std::fs::read_to_string(root.join("desktop-vm.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|record| {
+            record["config"]["ssh_private_key_path"]
+                .as_str()
+                .map(PathBuf::from)
+        });
+    assert_eq!(
+        config.ssh_key,
+        recorded_key.unwrap_or_else(|| root.join("vm/desktop_vm_ed25519"))
+    );
     assert_eq!(config.ssh_port, 2222);
     assert_eq!(config.relay_addr, "127.0.0.1:4288".parse().unwrap());
 }

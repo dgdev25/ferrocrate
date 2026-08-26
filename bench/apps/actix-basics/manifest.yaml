@@ -5,11 +5,11 @@ license: Apache-2.0
 class: greenfield
 stack: rust
 base_image: rust:1.97-slim
-start: /opt/app/basics
+start: /opt/app/docker_sample
 port: 8080
 health: /
 data_paths: []
 env: {}
 skip: []
-note: cargo workspace; builds only the basics package from the repo root; long build measures cache reuse
-main: -p basics
+note: cargo workspace; the basics/* examples bind 127.0.0.1 and are unreachable through a published port, so this uses the docker/ example (package docker_sample, binds 0.0.0.0:8080); builds only that package from the repo root
+main: -p docker_sample

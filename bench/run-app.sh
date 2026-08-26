@@ -36,7 +36,9 @@ if [ "$COMPOSE_ONLY" = true ]; then SKIP="$SKIP build images image-inspect histo
 # --- containerise greenfield apps from the stack template ---
 if [ "$CLASS" = greenfield ]; then
   T="$BENCH/templates/$STACK"; [ -d "$T" ] || { echo "no template for stack $STACK" >&2; exit 2; }
-  [ -f "$CTX/Dockerfile" ] || sed -e "s|@START@|$START|g" -e "s|@PORT@|$CPORT|g" -e "s|@BASE@|$BASE_IMAGE|g" -e "s|@MAIN@|${MAIN:-.}|g" "$T/Dockerfile.tmpl" > "$CTX/Dockerfile"
+  # Escape & for sed's replacement semantics before substituting @START@.
+  START_SED="${START//&/\\&}"
+  [ -f "$CTX/Dockerfile" ] || sed -e "s|@START@|$START_SED|g" -e "s|@PORT@|$CPORT|g" -e "s|@BASE@|$BASE_IMAGE|g" -e "s|@MAIN@|${MAIN:-.}|g" "$T/Dockerfile.tmpl" > "$CTX/Dockerfile"
   [ -f "$CTX/.dockerignore" ] || cp "$T/dockerignore" "$CTX/.dockerignore" 2>/dev/null || true
   if [ ! -f "$CTX/compose.yaml" ] && [ ! -f "$CTX/docker-compose.yml" ]; then
     { echo "services:"; echo "  app:"; echo "    build: ."; echo "    ports: [\"$PORT:$CPORT\"]";

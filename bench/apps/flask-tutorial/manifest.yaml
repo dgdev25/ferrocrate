@@ -6,10 +6,10 @@ license: BSD-3-Clause
 class: greenfield
 stack: python
 base_image: python:3.12-slim
-start: flask init-db && flask run --host 0.0.0.0 --port 5000
+start: FLASK_APP=flaskr flask init-db && exec flask --app flaskr run --host 0.0.0.0 --port 5000
 port: 5000
 health: /
 data_paths: [instance]
-env: {FLASK_APP: flaskr}
+env: {}
 skip: []
-note: pip install of the package in the build; sqlite db under instance/
+note: pip install of the package in the build; sqlite db under instance/. FLASK_APP is set inline because the runner splits the env map on spaces, so `env: {FLASK_APP: flaskr}` reaches the container as an empty value.

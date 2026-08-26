@@ -10,5 +10,5 @@ port: 5000
 health: /auth/login
 data_paths: []
 env: {}
-skip: []
-note: Flask mega-tutorial app; its Dockerfile uses a venv and gunicorn; sqlite by default
+skip: [build, images, image-inspect, history, tag, save, rmi-tag, load, run-detached, health, ps, logs, inspect, top, stats, exec, cp-out, cp-in, diff, pause, unpause, restart, stop, start, rename, commit, export, kill, wait, rm, rmi-committed, err-port-in-use]
+note: Flask mega-tutorial app. Its own Dockerfile fails on Docker at the pin (`pip install -r requirements.txt` exits 1 — unpinned dependencies no longer resolve), so the build and lifecycle steps are skipped: an app failure, not a Ferrocrate boundary. Re-enable when the pin moves to a commit whose requirements install, or when the manifest pins a working commit.

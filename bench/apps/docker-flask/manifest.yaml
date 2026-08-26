@@ -7,11 +7,11 @@ stack: python
 base_image: python:3.13-slim
 start: n/a (Dockerfile)
 port: 8000
-health: /up
+health: /up/
 compose_port: 8000
 data_paths: []
 env: {}
 skip: []
 compose_only: true
-setup: cp -n .env.example .env 2>/dev/null || true
-note: production-style Flask with compose (postgres, redis, worker); tests build args and healthchecks
+setup: cp -n .env.example .env 2>/dev/null || true; grep -q COMPOSE_PROFILES= .env || echo COMPOSE_PROFILES=web >> .env; sed -i 's|"${DOCKER_WEB_PORT_FORWARD:-127.0.0.1:8000}:${PORT:-8000}"|"8000:8000"|' compose.yaml
+note: production-style Flask with compose (postgres, redis, worker); tests build args and healthchecks. Three bench-only adjustments: the web service sits behind profiles=[web], enabled via COMPOSE_PROFILES in .env; the upstream ports entry interpolates ${PORT}, which collides with the bench-exported PORT and breaks the mapping, pinned back to 8000:8000 by a sed; the real endpoint is /up/, not /up (308 redirect).

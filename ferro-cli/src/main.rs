@@ -28871,6 +28871,20 @@ volumes:
 
     #[test]
     fn parses_volume_commands() {
+        // Building the clap command tree inside `Cli::parse_from` needs more
+        // stack than the 2 MiB default test thread in debug builds.
+        parses_volume_commands_impl();
+    }
+
+    fn parses_volume_commands_impl() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(parses_volume_commands_body)
+            .expect("spawn parse test thread");
+        handle.join().expect("parse test thread");
+    }
+
+    fn parses_volume_commands_body() {
         let create = Cli::parse_from(["ferrocrate", "volume", "create", "data"]);
         match create.command {
             Commands::Volume { command } => match command {

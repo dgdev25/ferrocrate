@@ -2,8 +2,12 @@
 FROM @BASE@ AS build
 WORKDIR /src
 COPY . .
-RUN go mod download && CGO_ENABLED=0 go build -o /out/app @MAIN@
-FROM gcr.io/distroless/static-debian12
+# -buildvcs=false: go build inside a build stage cannot stamp the VCS info
+# from a mounted clone and aborts with "error obtaining VCS status".
+RUN go mod download && CGO_ENABLED=0 go build -buildvcs=false -o /out/app @MAIN@
+# Alpine instead of distroless: the matrix runs "exec sh" against the
+# container, and distroless ships no shell.
+FROM alpine:3.22
 COPY --from=build /out/app /app
 ENV PORT=@PORT@
 EXPOSE @PORT@

@@ -77,7 +77,9 @@ matrix_run() {
   # Compose
   if [ "$HAS_COMPOSE" = 1 ]; then
     step compose-up     bash -c "cd '$CTX' && $COMPOSE up -d --build"
-    step compose-health bash -c "for i in \$(seq 1 120); do curl -sf -o /dev/null 'http://127.0.0.1:${COMPOSE_PORT}${HEALTH}' && exit 0; sleep 1; done; curl -s -o /dev/null -w 'HTTP %{http_code} on port ${COMPOSE_PORT}\n' 'http://127.0.0.1:${COMPOSE_PORT}${HEALTH}'; exit 1"
+    # --resolve pins the probe to IPv4 loopback while sending Host: localhost,
+    # which reverse proxies with hostname rules (e.g. Traefik) require.
+    step compose-health bash -c "for i in \$(seq 1 120); do curl -sf --resolve localhost:${COMPOSE_PORT}:127.0.0.1 -o /dev/null 'http://localhost:${COMPOSE_PORT}${HEALTH}' && exit 0; sleep 1; done; curl -s --resolve localhost:${COMPOSE_PORT}:127.0.0.1 -o /dev/null -w 'HTTP %{http_code} on port ${COMPOSE_PORT}\n' 'http://localhost:${COMPOSE_PORT}${HEALTH}'; exit 1"
     step compose-ps     bash -c "cd '$CTX' && $COMPOSE ps"
     step compose-logs   bash -c "cd '$CTX' && $COMPOSE logs --tail 20"
     step compose-down   bash -c "cd '$CTX' && $COMPOSE down -v"

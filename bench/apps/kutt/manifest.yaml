@@ -12,5 +12,6 @@ data_paths: []
 env: {}
 skip: []
 compose_only: true
-setup: cp -n .example.env .env 2>/dev/null || cp -n .env.example .env 2>/dev/null || true
-note: URL shortener; compose brings postgres and redis; tests env-file handling and depends_on
+setup: cp -n .example.env .env 2>/dev/null || cp -n .env.example .env 2>/dev/null || true; sed -i "s/^JWT_SECRET=$/JWT_SECRET=bench-local-secret/" .env; sed -i "s/3000:3000/34990:3000/" docker-compose.yml
+compose_port: 34990
+note: URL shortener; sqlite-backed server only. .example.env ships an empty JWT_SECRET and the app refuses to boot without one, so setup fills it. The compose file hardcodes host port 3000, which other dev services on this host hold, so setup remaps the published side to 34990 and compose_port matches. Remap cannot use $PORT because manifest setup runs before run-app.sh exports it.

@@ -1,52 +1,52 @@
-{"app":"gin-basic","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"info","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":33327,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"build","status":"fail","exit":1,"ms":3107,"stderr_tail":"d -o /out/app ./basic\n   6 |     FROM gcr.io/distroless/static-debian12\n   7 |     COPY --from=build /out/app /app\n--------------------\nERROR: failed to build: failed to solve: process \"/bin/sh -c go mod download && CGO_ENABLED=0 go build -o /out/app ./basic\" did not complete successfully: exit code: 1\n\nView build details: docker-desktop://dashboard/build/default/default/kp6xungexncem1wmoz3jv22it\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"images","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"image-inspect","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:latest\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"history","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:latest\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"tag","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:latest\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"save","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:latest\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"rmi-tag","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:bench-tag\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"load","status":"fail","exit":1,"ms":104,"stderr_tail":"open /tmp/bench-gin-basic-docker.jYuP9T/image.tar: no such file or directory\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"run-detached","status":"fail","exit":125,"ms":705,"stderr_tail":"Unable to find image 'bench/gin-basic:latest' locally\ndocker: Error response from daemon: pull access denied for bench/gin-basic, repository does not exist or may require 'docker login'\n\nRun 'docker run --help' for more information\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"health","status":"fail","exit":1,"ms":30326,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"logs","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"inspect","status":"fail","exit":1,"ms":103,"stderr_tail":"error: no such object: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"top","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"stats","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"exec","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"cp-out","status":"fail","exit":1,"ms":105,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"cp-in","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"diff","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"pause","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"unpause","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"restart","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"stop","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"start","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic\nfailed to start containers: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"rename","status":"fail","exit":1,"ms":104,"stderr_tail":"failed to rename container: Error response from daemon: No such container: bench-gin-basic\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"commit","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic-r\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"export","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic-r\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"kill","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: cannot kill container: bench-gin-basic-r: No such container: bench-gin-basic-r\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"wait","status":"fail","exit":1,"ms":204,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic-r\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"rm","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: No such container: bench-gin-basic-r\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"rmi-committed","status":"fail","exit":1,"ms":104,"stderr_tail":"Error response from daemon: No such image: bench/gin-basic:committed\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"network-run","status":"fail","exit":125,"ms":705,"stderr_tail":"Unable to find image 'bench/gin-basic:latest' locally\ndocker: Error response from daemon: pull access denied for bench/gin-basic, repository does not exist or may require 'docker login'\n\nRun 'docker run --help' for more information\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"compose-up","status":"fail","exit":1,"ms":903,"stderr_tail":"ENABLED=0 go build -o /out/app ./basic\n\n   6 |     FROM gcr.io/distroless/static-debian12\n\n   7 |     COPY --from=build /out/app /app\n\n--------------------\n\nfailed to solve: process \"/bin/sh -c go mod download && CGO_ENABLED=0 go build -o /out/app ./basic\" did not complete successfully: exit code: 1\n\n\n\nView build details: docker-desktop://dashboard/build/default/default/qsqqydel4rfgubjg5o3n35qor\n\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"compose-health","status":"fail","exit":1,"ms":121091,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"err-port-in-use","status":"fail","exit":1,"ms":703,"stderr_tail":"Unable to find image 'bench/gin-basic:latest' locally\ndocker: Error response from daemon: pull access denied for bench/gin-basic, repository does not exist or may require 'docker login'\n\nRun 'docker run --help' for more information\ngrep: /tmp/bench-gin-basic-docker.jYuP9T/port.err: No such file or directory\n","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"events","status":"pass","exit":0,"ms":5108,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1003,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
-{"app":"gin-basic","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-26T15:36Z","head":"09e87b74"}
+{"app":"gin-basic","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"info","status":"pass","exit":0,"ms":1904,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1804,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"build","status":"pass","exit":0,"ms":13413,"stderr_tail":"431a413b70b19553fc225cae993d96999c7dfd870ff434569fb97e6823337f 0.0s done\n#12 exporting manifest list sha256:bb74afec53cba307299f68b66fa3e378e925607eae40110070f5199c06b11f85 0.0s done\n#12 naming to docker.io/bench/gin-basic:latest done\n#12 unpacking to docker.io/bench/gin-basic:latest done\n#12 DONE 0.1s\n\nView build details: docker-desktop://dashboard/build/default/default/u5wdrmamdv3rws7lsix64opsj\n","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"images","status":"pass","exit":0,"ms":310,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"history","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"tag","status":"pass","exit":0,"ms":116,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"save","status":"pass","exit":0,"ms":709,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":114,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"load","status":"pass","exit":0,"ms":617,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":737,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"health","status":"pass","exit":0,"ms":110,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"ps","status":"pass","exit":0,"ms":209,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"logs","status":"pass","exit":0,"ms":110,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":115,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"top","status":"pass","exit":0,"ms":113,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1107,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"exec","status":"pass","exit":0,"ms":209,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":116,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":312,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"diff","status":"pass","exit":0,"ms":212,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"pause","status":"pass","exit":0,"ms":107,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":111,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"restart","status":"pass","exit":0,"ms":1717,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"stop","status":"pass","exit":0,"ms":449,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"start","status":"pass","exit":0,"ms":1412,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"rename","status":"pass","exit":0,"ms":107,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"commit","status":"pass","exit":0,"ms":524,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"export","status":"pass","exit":0,"ms":309,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"kill","status":"pass","exit":0,"ms":616,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"wait","status":"pass","exit":0,"ms":221,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"rm","status":"pass","exit":0,"ms":314,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":209,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":109,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":221,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":4335,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":317,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":2618,"stderr_tail":" Image gin-basic-app Building \n Image gin-basic-app Built \n Network gin-basic_default Creating \n Network gin-basic_default Creating \n Network gin-basic_default Created \n Network gin-basic_default Created \n Container gin-basic-app-1 Creating \n Container gin-basic-app-1 Created \n Container gin-basic-app-1 Starting \n Container gin-basic-app-1 Started \n","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":109,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":309,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":207,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":2027,"stderr_tail":" Container gin-basic-app-1 Stopping \n Container gin-basic-app-1 Stopped \n Container gin-basic-app-1 Removing \n Container gin-basic-app-1 Removed \n Network gin-basic_default Removing \n Network gin-basic_default Removed \n","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":2011,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"events","status":"pass","exit":0,"ms":5115,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":7009,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":904,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}
+{"app":"gin-basic","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-26T19:47Z","head":"e9987725"}

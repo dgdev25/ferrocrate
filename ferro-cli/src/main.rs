@@ -2642,18 +2642,11 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
-            let rootful_networks = nix::unistd::Uid::effective().is_root();
             checks.push(DoctorCheck {
                 id: "custom_networks".to_string(),
-                ok: rootful_networks,
-                message: if rootful_networks {
-                    "custom networks available".to_string()
-                } else {
-                    "custom networks need rootful mode".to_string()
-                },
-                hint: (!rootful_networks).then_some(
-                    "run the daemon in rootful mode to create custom bridge networks".to_string(),
-                ),
+                ok: true,
+                message: "custom networks available (rootless uses slirp4netns namespaces)".to_string(),
+                hint: None,
                 remediated: false,
                 action: None,
             });
@@ -6771,7 +6764,7 @@ fn handle_run(
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
 ) -> Result<String, String> {
-    let binding = bind_run_network(runtime_dir, network, bridge_cidr, bridge_name)?;
+    let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
     let selected_network_name = binding.association;
     let resolved_bridge_cidr = binding.bridge_cidr;
@@ -13429,6 +13422,27 @@ fn bind_run_network(
     bridge_cidr: Option<&str>,
     bridge_name: Option<&str>,
 ) -> Result<RunNetworkBinding, String> {
+    bind_run_network_inner(runtime_dir, None, network, bridge_cidr, bridge_name)
+}
+
+#[cfg(target_os = "linux")]
+fn bind_run_network_for_runtime(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    network: &str,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
+) -> Result<RunNetworkBinding, String> {
+    bind_run_network_inner(runtime_dir, Some(runtime), network, bridge_cidr, bridge_name)
+}
+
+fn bind_run_network_inner(
+    runtime_dir: &Path,
+    runtime: Option<&ContainerRuntime>,
+    network: &str,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
+) -> Result<RunNetworkBinding, String> {
     let mut mode = network.to_string();
     if mode == "encrypted" {
         mode = "wireguard".to_string();
@@ -13456,7 +13470,16 @@ fn bind_run_network(
         Some(mode.clone())
     } else {
         let named = resolve_named_network(runtime_dir, network)?;
-        mode = "bridge".to_string();
+        // A rootless slirp4netns namespace is owned by the first running
+        // container on a named network. Join it for later members, matching
+        // the Compose rootless network path without requiring a host bridge.
+        let records = runtime.and_then(|runtime| runtime.list().ok()).unwrap_or_default();
+        mode = rootless_named_network_mode(
+            nix::unistd::Uid::effective().is_root(),
+            &records,
+            &named.name,
+        )
+        .unwrap_or_else(|| "bridge".to_string());
         if resolved_bridge_cidr.is_none() {
             resolved_bridge_cidr = Some(named.bridge_cidr.clone());
         }
@@ -13471,6 +13494,25 @@ fn bind_run_network(
         bridge_cidr: resolved_bridge_cidr,
         bridge_name: resolved_bridge_name,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_named_network_mode(
+    is_root: bool,
+    records: &[ferro_core::container_store::ContainerRecord],
+    network_name: &str,
+) -> Option<String> {
+    (!is_root).then(|| {
+        records.iter().find(|record| {
+            record.status == "running"
+                && record
+                    .effective_network_endpoints()
+                    .iter()
+                    .any(|endpoint| endpoint.network_name == network_name)
+        })
+    })
+    .flatten()
+    .map(|record| format!("container:pid:{}", record.pid))
 }
 
 fn resolve_named_network(runtime_dir: &Path, name: &str) -> Result<NetworkRecord, String> {
@@ -13559,13 +13601,6 @@ fn handle_network_authorized(
             ipv6_gateway,
             labels,
         } => {
-            // Unit tests exercise the lifecycle with its in-memory bridge
-            // kernel, and API harnesses explicitly select a file-backed one.
-            // The rootful boundary applies to the real CLI kernel only.
-            #[cfg(not(test))]
-            if self::network_lifecycle::FileBackedNetworkKernel::from_env().is_none() {
-                custom_networks_need_rootful_mode(nix::unistd::Uid::effective().is_root())?;
-            }
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
             }
@@ -13600,7 +13635,17 @@ fn handle_network_authorized(
                     record.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_create(runtime_dir, &record, proof)?;
+            if nix::unistd::Uid::effective().is_root()
+                || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                || cfg!(test)
+            {
+                execute_network_create(runtime_dir, &record, proof)?;
+            } else {
+                // Rootless named networks are user-space slirp namespaces;
+                // publishing the record makes the first member the leader.
+                save_networks(runtime_dir, &records.iter().cloned().chain(std::iter::once(record.clone())).collect::<Vec<_>>())?;
+                proof.finish(true).map_err(|error| error.to_string())?;
+            }
             println!(
                 "network create: name={} driver={} subnet={} gateway={}",
                 record.name, record.driver, record.subnet, record.gateway
@@ -13736,7 +13781,16 @@ fn handle_network_authorized(
                     stored.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_remove(runtime_dir, &stored, &associations, proof)?;
+            if nix::unistd::Uid::effective().is_root()
+                || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                || cfg!(test)
+            {
+                execute_network_remove(runtime_dir, &stored, &associations, proof)?;
+            } else {
+                let remaining = records.into_iter().filter(|record| record.name != name).collect::<Vec<_>>();
+                save_networks(runtime_dir, &remaining)?;
+                proof.finish(true).map_err(|error| error.to_string())?;
+            }
             println!("network rm: {name}");
         }
         NetworkCommands::Prune { filters } => {
@@ -13771,20 +13825,25 @@ fn handle_network_authorized(
                         record.generation,
                     )
                     .map_err(|error| error.to_string())?;
-                execute_network_remove(runtime_dir, &record, &associations, proof)?;
+                if nix::unistd::Uid::effective().is_root()
+                    || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                    || cfg!(test)
+                {
+                    execute_network_remove(runtime_dir, &record, &associations, proof)?;
+                } else {
+                    let remaining = load_networks(runtime_dir)?
+                        .into_iter()
+                        .filter(|candidate| candidate.name != record.name)
+                        .collect::<Vec<_>>();
+                    save_networks(runtime_dir, &remaining)?;
+                    proof.finish(true).map_err(|error| error.to_string())?;
+                }
                 deleted.push(record.name);
             }
             println!("network prune: removed={}", deleted.len());
         }
     }
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn custom_networks_need_rootful_mode(is_root: bool) -> Result<(), String> {
-    is_root
-        .then_some(())
-        .ok_or_else(|| "custom networks need rootful mode".to_string())
 }
 
 fn cli_network_kernel() -> Box<dyn self::network_lifecycle::NetworkKernel> {
@@ -22181,7 +22240,7 @@ fn docker_info_capabilities(is_root: bool, peer_auth_mode: PeerAuthMode) -> serd
     serde_json::json!({
         "SecurityOptions": if is_root { Vec::<String>::new() } else { vec!["name=rootless".to_string()] },
         "FerrocrateCapabilities": {
-            "CustomNetworks": is_root,
+            "CustomNetworks": true,
             "PeerAuthentication": peer_auth_mode.to_string(),
         },
     })
@@ -25652,10 +25711,7 @@ mod tests {
     fn docker_info_capabilities_report_rootless_network_truth() {
         let rootless = super::docker_info_capabilities(false, super::PeerAuthMode::Pidfd);
         assert_eq!(rootless["SecurityOptions"], serde_json::json!(["name=rootless"]));
-        assert_eq!(
-            rootless["FerrocrateCapabilities"]["CustomNetworks"],
-            false
-        );
+        assert_eq!(rootless["FerrocrateCapabilities"]["CustomNetworks"], true);
 
         let rootful = super::docker_info_capabilities(true, super::PeerAuthMode::LegacyPeercred);
         assert_eq!(rootful["SecurityOptions"], serde_json::json!([]));
@@ -27529,15 +27585,6 @@ volumes:
     }
 
     #[test]
-    fn rootless_custom_networks_have_a_plain_boundary_message() {
-        assert_eq!(
-            super::custom_networks_need_rootful_mode(false).unwrap_err(),
-            "custom networks need rootful mode"
-        );
-        assert!(super::custom_networks_need_rootful_mode(true).is_ok());
-    }
-
-    #[test]
     fn system_prune_accepts_orphan_cleanup() {
         let cli = Cli::try_parse_from(["ferrocrate", "system", "prune", "--orphans"])
             .expect("parse orphan cleanup");
@@ -29405,6 +29452,38 @@ volumes:
         assert_eq!(
             binding.bridge_cidr.as_deref(),
             Some(record.bridge_cidr.as_str())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_named_network_joins_the_first_running_member_namespace() {
+        let leader = serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+            serde_json::json!({
+                "id": "leader",
+                "pid": 4242,
+                "image": "example.invalid/app:latest",
+                "command": ["sleep", "infinity"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "network_endpoints": [{
+                    "network_name": "app-net",
+                    "endpoint_id": "leader-endpoint",
+                    "interface_name": "eth0",
+                    "generation": 1
+                }]
+            }),
+        )
+        .expect("container record");
+        assert_eq!(
+            super::rootless_named_network_mode(false, &[leader], "app-net"),
+            Some("container:pid:4242".to_string())
+        );
+        assert_eq!(
+            super::rootless_named_network_mode(true, &[], "app-net"),
+            None
         );
     }
 

@@ -397,8 +397,8 @@ fn docker_compat_routes_support_version_prefix() {
             );
             assert_eq!(
                 info["FerrocrateCapabilities"]["CustomNetworks"],
-                is_root,
-                "custom network capability must match daemon privilege: {info}"
+                true,
+                "custom network capability must be available in rootless and rootful modes: {info}"
             );
         }
     }

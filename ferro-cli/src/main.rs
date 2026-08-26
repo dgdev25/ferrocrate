@@ -1129,6 +1129,9 @@ pub enum SystemCommands {
         /// Remove all unused images rather than dangling images only.
         #[arg(short = 'a', long = "all")]
         all: bool,
+        /// Remove volume and container directories without store records.
+        #[arg(long)]
+        orphans: bool,
     },
 }
 
@@ -2163,7 +2166,7 @@ fn doctor_state_store_check() -> Option<DoctorCheck> {
             problems.join("; ")
         },
         hint: (!ok).then(|| {
-            "orphaned directories are not deleted automatically: inspect them, then remove with `volume rm` after recreating a record or delete the directory manually; free space with `image-prune`, `container-prune`, and `volume prune`".to_string()
+            "remove orphaned directories with `ferro-cli system prune --orphans`; free space with `image-prune`, `container-prune`, and `volume prune`".to_string()
         }),
         remediated: false,
         action: None,
@@ -5236,7 +5239,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::System { command: SystemCommands::Prune { force: _, volumes, all } } => {
+            Commands::System { command: SystemCommands::Prune { force: _, volumes, all, orphans } } => {
                 handle_system_prune(
                     &runtime_dir,
                     &runtime,
@@ -5244,6 +5247,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     &surface_authorization,
                     volumes,
                     all,
+                    orphans,
                 )
             }
             Commands::History { image, format } => handle_history(&image_store, &image, &format),
@@ -8384,8 +8388,11 @@ fn dispatch_remote_socket(
             request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
         }
         Commands::System {
-            command: SystemCommands::Prune { volumes, all, .. },
+            command: SystemCommands::Prune { volumes, all, orphans, .. },
         } => (|| -> Result<(), String> {
+            if *orphans {
+                return Err("system prune --orphans requires a local daemon connection".to_string());
+            }
             let container_filters = serde_json::json!({"status": {"exited": true}});
             request(
                 "POST",
@@ -12300,6 +12307,7 @@ fn handle_system_prune(
     authorization: &SurfaceAuthorization,
     volumes: bool,
     all: bool,
+    orphans: bool,
 ) -> Result<(), String> {
     println!("Containers:");
     handle_container_prune(runtime, &[])?;
@@ -12321,7 +12329,33 @@ fn handle_system_prune(
         println!("Volumes:");
         handle_volume(runtime_dir, VolumeCommands::Prune { filters: Vec::new() }, authorization)?;
     }
+    if orphans {
+        let removed = remove_orphan_state_directories(runtime_dir)?;
+        println!("Orphans: removed={removed}");
+    }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_orphan_state_directories(runtime_dir: &Path) -> Result<usize, String> {
+    let volumes = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+        .map_err(|error| format!("system prune --orphans: open volumes: {error}"))?
+        .list().map_err(|error| format!("system prune --orphans: list volumes: {error}"))?
+        .into_iter().map(|record| record.name).collect::<std::collections::HashSet<_>>();
+    let containers = ferro_core::sqlite_container_store::SqliteContainerStore::open(runtime_dir.join("containers.db"))
+        .and_then(|store| store.list()).map_err(|error| format!("system prune --orphans: list containers: {error}"))?
+        .into_iter().map(|record| record.id).collect::<std::collections::HashSet<_>>();
+    let mut removed = 0;
+    for (root, known) in [(runtime_dir.join("volumes"), volumes), (runtime_dir.join("containers"), containers)] {
+        for entry in std::fs::read_dir(&root).map_err(|error| format!("system prune --orphans: read {}: {error}", root.display()))? {
+            let entry = entry.map_err(|error| format!("system prune --orphans: read {}: {error}", root.display()))?;
+            if entry.path().is_dir() && !known.contains(&entry.file_name().to_string_lossy().to_string()) {
+                std::fs::remove_dir_all(entry.path()).map_err(|error| format!("system prune --orphans: remove {}: {error}", entry.path().display()))?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(target_os = "linux")]
@@ -27125,6 +27159,13 @@ volumes:
     }
 
     #[test]
+    fn system_prune_accepts_orphan_cleanup() {
+        let cli = Cli::try_parse_from(["ferrocrate", "system", "prune", "--orphans"])
+            .expect("parse orphan cleanup");
+        assert!(matches!(cli.command, Commands::System { command: super::SystemCommands::Prune { orphans: true, .. } }));
+    }
+
+    #[test]
     fn parses_build_command_with_tag() {
         let cli = Cli::parse_from([
             "ferrocrate",
@@ -27786,7 +27827,7 @@ volumes:
             .expect("Docker system prune flags parse");
         assert!(matches!(
             cli.command,
-            Commands::System { command: super::SystemCommands::Prune { force: true, all: true, volumes: true } }
+            Commands::System { command: super::SystemCommands::Prune { force: true, all: true, volumes: true, orphans: false } }
         ));
     }
 

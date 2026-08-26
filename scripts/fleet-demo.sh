@@ -294,7 +294,7 @@ up() {
 wait_for_pid_exit() {
   local path="$1" label="$2"
   for _ in $(seq 1 50); do
-    pid_alive "$path" || return
+    pid_alive "$path" || return 0
     sleep 0.1
   done
   note "$label did not exit after SIGTERM"

@@ -1,7 +1,6 @@
 name: actix-basics
 repo: https://github.com/actix/examples
 pin: main
-subdir: basics/basics
 license: Apache-2.0
 class: greenfield
 stack: rust
@@ -12,4 +11,5 @@ health: /
 data_paths: []
 env: {}
 skip: []
-note: long build; measures build-cache reuse across runs
+note: cargo workspace; builds only the basics package from the repo root; long build measures cache reuse
+main: -p basics

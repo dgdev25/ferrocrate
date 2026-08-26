@@ -1,0 +1,14 @@
+name: node-getting-started
+repo: https://github.com/heroku/node-js-getting-started
+pin: main
+license: Unlicense
+class: greenfield
+stack: node
+base_image: node:22-slim
+start: node index.js
+port: 3000
+health: /
+data_paths: []
+env: {PORT: "3000"}
+skip: []
+note: minimal Express app with a package.json and lockfile; replaces the express repo example, which has no package.json

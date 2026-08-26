@@ -5,7 +5,7 @@ main: ./basic
 license: MIT
 class: greenfield
 stack: go
-base_image: golang:1.23
+base_image: golang:1.25
 start: /app
 port: 8080
 health: /ping

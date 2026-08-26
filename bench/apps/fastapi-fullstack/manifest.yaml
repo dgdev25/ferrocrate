@@ -10,5 +10,7 @@ port: 8000
 health: /api/v1/utils/health-check/
 data_paths: []
 env: {}
-skip: [build, run-detached, health, restart, start, err-port-in-use]
+skip: []
+compose_only: true
+setup: cp -n .env.example .env 2>/dev/null || true
 note: multi-service compose (backend, frontend, db, adminer); lifecycle steps run through compose; the single-image steps are skipped

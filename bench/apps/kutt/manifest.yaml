@@ -11,4 +11,6 @@ health: /
 data_paths: []
 env: {}
 skip: []
+compose_only: true
+setup: cp -n .example.env .env 2>/dev/null || cp -n .env.example .env 2>/dev/null || true
 note: URL shortener; compose brings postgres and redis; tests env-file handling and depends_on

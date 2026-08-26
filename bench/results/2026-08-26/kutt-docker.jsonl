@@ -1,0 +1,52 @@
+{"app":"kutt","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"info","status":"pass","exit":0,"ms":2304,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2605,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"build","status":"pass","exit":0,"ms":25724,"stderr_tail":"est done\n#10 unpacking to docker.io/bench/kutt:latest\n#10 unpacking to docker.io/bench/kutt:latest 1.3s done\n#10 DONE 5.6s\n\n \u001b[33m1 warning found (use docker --debug to expand):\n\u001b[0m - JSONArgsRecommended: JSON arguments recommended for CMD to prevent unintended behavior related to OS signals (line 25)\n\nView build details: docker-desktop://dashboard/build/default/default/l7rq53qkjzopwidydbxq7t0ej\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"images","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"save","status":"pass","exit":0,"ms":1204,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"load","status":"pass","exit":0,"ms":804,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":804,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"health","status":"fail","exit":1,"ms":30324,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"logs","status":"pass","exit":0,"ms":103,"stderr_tail":"\u001b[37m================================\u001b[0m\n \u001b[33mMissing\u001b[0m environment variables:\n    \u001b[34mJWT_SECRET\u001b[0m: undefined\n\u001b[37m================================\u001b[0m\n\u001b[33m\n Exiting with error code 1\u001b[0m\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"top","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not running\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"stats","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"exec","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not running\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"cp-in","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not running\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"diff","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"pause","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not running\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"unpause","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: Container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not paused\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"restart","status":"fail","exit":1,"ms":30579,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"stop","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"start","status":"fail","exit":1,"ms":30423,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"rename","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"commit","status":"pass","exit":0,"ms":1605,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"export","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"kill","status":"fail","exit":1,"ms":103,"stderr_tail":"Error response from daemon: cannot kill container: bench-kutt-r: container 091e3e2b8611bf9a5c88cdf04087df2503ebe9077fc477e5b7765e984c9dd686 is not running\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2905,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"compose-up","status":"fail","exit":1,"ms":4405,"stderr_tail":" Network kutt_default Created \n Container kutt-server-1 Creating \n Container kutt-server-1 Created \n Container kutt-server-1 Starting \nError response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint kutt-server-1 (6971661b3bc2ec550718cdd44e3cdf578a579177b599bc5befc890818ee1931f): Bind for 0.0.0.0:3000 failed: port is already allocated\n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":403,"stderr_tail":" Container kutt-server-1 Stopping \n Container kutt-server-1 Stopped \n Container kutt-server-1 Removing \n Container kutt-server-1 Removed \n Volume kutt_custom Removing \n Volume kutt_db_data_sqlite Removing \n Network kutt_default Removing \n Volume kutt_custom Removed \n Volume kutt_db_data_sqlite Removed \n Network kutt_default Removed \n","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"err-port-in-use","status":"fail","exit":1,"ms":2806,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"events","status":"pass","exit":0,"ms":5107,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":3005,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}
+{"app":"kutt","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-26T15:15Z","head":"91242b94"}

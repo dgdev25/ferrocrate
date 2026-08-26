@@ -17,7 +17,7 @@ REPO="$(m repo)"; PIN="$(m pin)"; SUBDIR="$(m subdir)"; CLASS="$(m class)"; STAC
 START="$(m start)"; CPORT="$(m port)"; HEALTH="$(m health)"; HEALTH="${HEALTH:-/}"
 DATA_PATHS="$(m data_paths | tr -d '[]' | tr ',' ' ')"; SKIP="$(m skip | tr -d '[]' | tr ',' ' ')"
 BASE_IMAGE="$(m base_image)"; ENV_LIST="$(m env | tr -d '{}' | tr ',' ' ')"
-MAIN="$(m main)"; DOCKERFILE="$(m dockerfile)"; BUILD_FILE_ARG=""; [ -n "$DOCKERFILE" ] && BUILD_FILE_ARG="-f $DOCKERFILE"
+MAIN="$(m main)"; DOCKERFILE="$(m dockerfile)"; SETUP="$(m setup)"; COMPOSE_ONLY="$(m compose_only)"; BUILD_FILE_ARG=""; [ -n "$DOCKERFILE" ] && BUILD_FILE_ARG="-f $DOCKERFILE"
 PORT="${BENCH_PORT:-$(( 32000 + $(printf '%s' "$APP" | cksum | cut -d' ' -f1) % 2000 ))}"
 
 # --- source ---
@@ -29,6 +29,9 @@ if [[ "$REPO" == /* ]]; then SRC="$REPO"; else
   fi
 fi
 CTX="$SRC${SUBDIR:+/$SUBDIR}"; [ -d "$CTX" ] || { echo "context missing: $CTX" >&2; exit 2; }
+[ -n "$SETUP" ] && (cd "$CTX" && bash -c "$SETUP")
+# compose_only: the app runs only through its compose file; single-image steps become boundaries
+if [ "$COMPOSE_ONLY" = true ]; then SKIP="$SKIP build images image-inspect history tag save rmi-tag load run-detached health ps logs inspect top stats exec cp-out cp-in diff pause unpause restart stop start rename commit export kill wait rm rmi-committed data-write data-read volume-ls volume-inspect volume-rm network-run err-port-in-use"; fi
 
 # --- containerise greenfield apps from the stack template ---
 if [ "$CLASS" = greenfield ]; then

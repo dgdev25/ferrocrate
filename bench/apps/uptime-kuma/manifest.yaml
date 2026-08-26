@@ -3,6 +3,7 @@ repo: https://github.com/louislam/uptime-kuma
 pin: master
 license: MIT
 class: provided
+compose_only: true
 stack: node
 base_image: node:22-bookworm-slim
 start: n/a (Dockerfile at docker/dockerfile)
@@ -11,5 +12,4 @@ health: /
 data_paths: [data]
 env: {}
 skip: []
-dockerfile: docker/dockerfile
-note: sqlite on a volume, websockets, multi-stage Dockerfile in docker/
+note: compose.yaml pulls the upstream image; exercises compose, volumes, and websockets without a local build

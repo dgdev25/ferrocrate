@@ -208,9 +208,9 @@ pub fn prepare_dockerfile_build_with_contexts(
     let mut base_digests = Vec::with_capacity(stages.len());
     let stage_aliases = earlier_stage_aliases(&stages)?;
     for (index, stage) in stages.iter().enumerate() {
-        if stage.base.eq_ignore_ascii_case("scratch") {
-            base_digests.push((stage.base.clone(), None));
-        } else if stage_aliases[index].contains_key(&stage.base.to_ascii_lowercase()) {
+        if stage.base.eq_ignore_ascii_case("scratch")
+            || stage_aliases[index].contains_key(&stage.base.to_ascii_lowercase())
+        {
             base_digests.push((stage.base.clone(), None));
         } else {
             let record = resolve_reference(store, &stage.base)?.ok_or_else(|| {

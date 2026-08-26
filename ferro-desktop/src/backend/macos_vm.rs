@@ -379,7 +379,7 @@ mod tests {
 
         for command in commands
             .iter()
-            .filter(|command| command.program == PathBuf::from("ssh"))
+            .filter(|command| command.program.as_path() == Path::new("ssh"))
         {
             assert!(command
                 .args

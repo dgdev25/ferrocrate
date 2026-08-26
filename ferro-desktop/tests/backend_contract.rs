@@ -5,7 +5,7 @@ use ferro_desktop::backend::{
     TransportResponse, Wsl2Backend, Wsl2Config,
 };
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 struct FakeDuplex(std::io::Cursor<Vec<u8>>);
@@ -453,7 +453,7 @@ fn macos_backend_uses_per_request_guest_relay_without_a_shared_host_port() {
         .lock()
         .unwrap()
         .iter()
-        .all(|command| command.program != PathBuf::from("ssh")));
+        .all(|command| command.program.as_path() != Path::new("ssh")));
     assert_eq!(
         host.requests.lock().unwrap()[0].0.to_string(),
         "ssh://ferro@127.0.0.1:2222/home/ferro/.local/state/ferrocrate/ferrocrate.sock"
@@ -731,7 +731,7 @@ fn macos_backend_provisions_the_configured_guest_engine_before_relay_health() {
     let commands = host.starts.lock().unwrap();
     let provisioner = commands
         .iter()
-        .find(|command| command.program == PathBuf::from("sh"))
+        .find(|command| command.program.as_path() == Path::new("sh"))
         .expect("guest provisioning command");
     assert_eq!(provisioner.args[0], "-lc");
     assert!(provisioner.args[1].contains("scp"));

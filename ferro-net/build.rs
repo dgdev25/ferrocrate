@@ -181,22 +181,64 @@ fn require_bpf_toolchain() {
         env::set_var("PATH", path);
     }
 
-    let output = Command::new(&rustup)
-        .args([
-            "component",
-            "list",
-            "--toolchain",
-            BPF_TOOLCHAIN,
-            "--installed",
-        ])
-        .output()
-        .unwrap_or_else(|error| panic!("failed to inspect {BPF_TOOLCHAIN}: {error}"));
-    let components = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && components.lines().any(|line| line.starts_with("rust-src")),
-        "the deterministic BPF toolchain is missing. Install it with: \
-         rustup toolchain install {BPF_TOOLCHAIN} --component rust-src"
-    );
+    // FU-001: `rustup component list` takes the rustup lock, so every build of
+    // this crate blocked (and sometimes failed) while another cargo or rustup
+    // process held it. Rustup records installed components in a plain text file
+    // inside the toolchain, one name per line — the same list the command
+    // prints. Read that first; only shell out when the file cannot be read, so
+    // an unusual rustup layout still works.
+    if !bpf_toolchain_has_rust_src_on_disk() {
+        let output = Command::new(&rustup)
+            .args([
+                "component",
+                "list",
+                "--toolchain",
+                BPF_TOOLCHAIN,
+                "--installed",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("failed to inspect {BPF_TOOLCHAIN}: {error}"));
+        let components = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && components.lines().any(|line| line.starts_with("rust-src")),
+            "the deterministic BPF toolchain is missing. Install it with: \
+             rustup toolchain install {BPF_TOOLCHAIN} --component rust-src"
+        );
+    }
+}
+
+/// Read the toolchain's own component list from disk. Returns false when the
+/// file is absent or unreadable, which sends the caller to the rustup command.
+#[cfg(target_os = "linux")]
+fn bpf_toolchain_has_rust_src_on_disk() -> bool {
+    let rustup_home = env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")));
+    let Some(rustup_home) = rustup_home else {
+        return false;
+    };
+    // The toolchain directory carries the host triple; the build script is given
+    // it as HOST. Fall back to a prefix match when HOST is not set.
+    let toolchains = rustup_home.join("toolchains");
+    let candidate = match env::var("HOST") {
+        Ok(host) => toolchains.join(format!("{BPF_TOOLCHAIN}-{host}")),
+        Err(_) => match fs::read_dir(&toolchains) {
+            Ok(entries) => {
+                let prefix = format!("{BPF_TOOLCHAIN}-");
+                match entries.filter_map(Result::ok).find(|entry| {
+                    entry.file_name().to_string_lossy().starts_with(&prefix)
+                }) {
+                    Some(entry) => entry.path(),
+                    None => return false,
+                }
+            }
+            Err(_) => return false,
+        },
+    };
+    match fs::read_to_string(candidate.join("lib/rustlib/components")) {
+        Ok(components) => components.lines().any(|line| line.trim() == "rust-src"),
+        Err(_) => false,
+    }
 }
 
 #[cfg(target_os = "linux")]

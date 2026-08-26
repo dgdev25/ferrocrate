@@ -17033,6 +17033,11 @@ fn prune_live_attach_registrations(
 #[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
+    /// Docker Compose submits independent network requests concurrently.  A
+    /// network lifecycle is a read-modify-write transaction over the durable
+    /// network store, so serialize it for the daemon rather than letting two
+    /// successful creates overwrite each other's publication.
+    network_operations: Mutex<()>,
     pending: Mutex<HashMap<String, DockerCreateSpec>>,
     starting: Mutex<std::collections::HashSet<String>>,
     attach_readiness: Mutex<HashMap<String, Vec<Weak<DockerAttachReadiness>>>>,
@@ -17088,6 +17093,7 @@ impl DockerCompatState {
         }
         Ok(Self {
             next_id: AtomicU64::new(0),
+            network_operations: Mutex::new(()),
             pending: Mutex::new(pending),
             starting: Mutex::new(std::collections::HashSet::new()),
             attach_readiness: Mutex::new(HashMap::new()),
@@ -20543,6 +20549,10 @@ fn handle_docker_compat_connection(
                 }
             }
             ("POST", "/networks/create") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let spec = parse_docker_network_create_spec(&request.body)?;
                 if !matches!(spec.driver.as_deref(), None | Some("") | Some("bridge")) {
                     return Err("docker: only bridge network driver is supported".to_string());
@@ -20590,6 +20600,10 @@ fn handle_docker_compat_connection(
                 http_response(201, body.to_string().as_bytes(), "application/json")
             }
             ("POST", "/networks/prune") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_network_filters(&filters)?;
                 let associations = runtime.list().map_err(|error| error.to_string())?;
@@ -20624,6 +20638,10 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("DELETE", path) if path.starts_with("/networks/") => {
+                let _network_operation = state
+                    .network_operations
+                    .lock()
+                    .map_err(|_| "docker: network operation lock poisoned".to_string())?;
                 let id = path.trim_start_matches("/networks/");
                 handle_network_authorized(
                     runtime_dir.as_ref(),

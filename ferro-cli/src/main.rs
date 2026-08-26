@@ -368,6 +368,9 @@ pub enum Commands {
         /// Provide a Dockerfile secret (`id=NAME,src=PATH`); repeatable.
         #[arg(long = "secret")]
         secret: Vec<String>,
+        /// Build context directory or URL (defaults to the current directory).
+        #[arg(value_name = "CONTEXT")]
+        context: Option<String>,
     },
     /// Prune old local Dockerfile build-cache records deterministically.
     #[cfg(target_os = "linux")]
@@ -4265,7 +4268,11 @@ fn prepare_remote_build(
     }
     Ok(PreparedRemoteBuild {
         request: RemoteBuildRequest {
-            dockerfile: dockerfile.map(|_| source_name.clone()),
+            // Native daemon builds always transfer a Dockerfile.  Preserve the
+            // default filename too: omitting it made a positional context fall
+            // back to the daemon's own current directory rather than the
+            // transferred workspace.
+            dockerfile: ferrofile.is_none().then_some(source_name.clone()),
             ferrofile: ferrofile.map(|_| source_name),
             tag: tag.map(str::to_string),
             compression: compression.to_string(),
@@ -5138,6 +5145,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_to,
                 build_context,
                 secret,
+                context,
             } => handle_build(
                 &image_store,
                 &runtime
@@ -5155,6 +5163,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_to.as_deref(),
                 &build_context,
                 &secret,
+                context.as_deref(),
             ),
             #[cfg(target_os = "linux")]
             Commands::BuildCachePrune {
@@ -8119,9 +8128,11 @@ fn dispatch_remote_socket(
             cache_to,
             build_context,
             secret,
+            context,
         } => {
             (|| -> Result<(), String> {
                 let native_route = ferrofile.is_some()
+                    || context.is_some()
                     || compress != "gzip"
                     || image_format != "oci"
                     || embed_model.is_some()
@@ -10638,6 +10649,7 @@ fn handle_build(
     cache_to: Option<&str>,
     build_context: &[String],
     secrets: &[String],
+    context: Option<&str>,
 ) -> Result<(), String> {
     let output = execute_build(
         store,
@@ -10655,6 +10667,7 @@ fn handle_build(
         build_context,
         secrets,
         None,
+        context,
     )?;
     print!("{output}");
     Ok(())
@@ -10677,6 +10690,7 @@ fn execute_build(
     build_context: &[String],
     secrets: &[String],
     artifact_dir: Option<&Path>,
+    context: Option<&str>,
 ) -> Result<String, String> {
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
@@ -10732,12 +10746,21 @@ fn execute_build(
             let tag = tag.unwrap_or("local/build:latest");
             parse_image_reference(tag).map_err(|err| err.to_string())?;
             // Resolve relative dockerfile paths against current working directory.
+            let context_dir = match context {
+                Some(value) if value.contains("://") => {
+                    return Err("build: remote URL contexts are not supported yet".to_string())
+                }
+                Some(value) => PathBuf::from(value),
+                None => std::env::current_dir()
+                    .map_err(|err| format!("failed to get current directory: {err}"))?,
+            };
+            if !context_dir.is_dir() {
+                return Err(format!("build: context is not a directory: {}", context_dir.display()));
+            }
             let dockerfile_path = if Path::new(dockerfile).is_absolute() {
                 PathBuf::from(dockerfile)
             } else {
-                std::env::current_dir()
-                    .map_err(|err| format!("failed to get current directory: {err}"))?
-                    .join(dockerfile)
+                context_dir.join(dockerfile)
             };
             prefetch_dockerfile_bases(
                 store,
@@ -18378,6 +18401,7 @@ fn handle_docker_compat_connection(
                     &build_context,
                     &secrets,
                     Some(workspace.path()),
+                    None,
                 )?;
                 let mut response = tar::Builder::new(Vec::new());
                 let mut header = tar::Header::new_gnu();
@@ -20223,6 +20247,7 @@ fn handle_docker_compat_connection(
                     None,
                     &[],
                     &[],
+                    None,
                 )?;
                 http_response(
                     200,
@@ -23855,6 +23880,7 @@ async fn execute_buildkit_frontend(
         &[],
         &[],
         None,
+        None,
     )?;
     let mut output = pulled_bases
         .iter()
@@ -27084,6 +27110,7 @@ volumes:
                 cache_to,
                 build_context,
                 secret,
+                context,
             } => {
                 assert_eq!(dockerfile.as_deref(), Some("./Dockerfile"));
                 assert!(ferrofile.is_none());
@@ -27096,7 +27123,18 @@ volumes:
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
                 assert!(secret.is_empty());
+                assert!(context.is_none());
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_accepts_a_positional_context() {
+        let cli = Cli::try_parse_from(["ferrocrate", "build", "-t", "acme/app:dev", "."])
+            .expect("Docker-style build context must parse");
+        match cli.command {
+            Commands::Build { context, .. } => assert_eq!(context.as_deref(), Some(".")),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -30258,6 +30296,7 @@ volumes:
             None,
             &[],
             &[],
+            None,
         )
         .expect_err("dockerfile should be read");
         assert!(
@@ -30397,6 +30436,7 @@ volumes:
             None,
             &[],
             &[],
+            None,
         )
         .expect_err("invalid tag");
         assert!(err.contains("invalid image reference"));

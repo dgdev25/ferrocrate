@@ -1115,6 +1115,7 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
     let key_path = vm_dir.join("vm_ssh_key");
     let pub_path = vm_dir.join("vm_ssh_key.pub");
     if key_path.exists() && pub_path.exists() {
+        restrict_ssh_private_key(&key_path)?;
         return Ok((key_path, pub_path));
     }
     let status = Command::new("ssh-keygen")
@@ -1128,7 +1129,21 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
             "failed to generate vm ssh key".to_string(),
         ));
     }
+    restrict_ssh_private_key(&key_path)?;
     Ok((key_path, pub_path))
+}
+
+#[cfg(unix)]
+fn restrict_ssh_private_key(key_path: &Path) -> Result<(), DesktopError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_ssh_private_key(_key_path: &Path) -> Result<(), DesktopError> {
+    Ok(())
 }
 
 fn ensure_cloud_init_iso(vm_dir: &Path, ssh_pubkey: &str) -> Result<PathBuf, DesktopError> {

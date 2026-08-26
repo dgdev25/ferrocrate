@@ -54,13 +54,15 @@ def main():
             per_group[(GROUP_OF.get(step, "other"), c)] += 1
             if c == "product":
                 tickets.append((app, step, r["exit"], r["stderr_tail"][:160]))
-        total = sum(counts.values()) or 1
+        total = sum(counts.values())
         run = next(iter(ferro.values()))["run"] if ferro else "-"
-        rows.append(f"| {app} | {run} | {counts['pass']}/{total} | {counts['product']} | {counts['app-or-env']} | {counts['boundary']} | {counts['unpaired']} |")
+        dpass = sum(1 for r in dock.values() if r["status"] == "pass")
+        fcol = f"{counts['pass']}/{total}" if ferro else "no run"
+        rows.append(f"| {app} | {run} | {fcol} | {dpass}/{len(dock) or '-'} | {counts['product']} | {counts['app-or-env']} | {counts['boundary']} | {counts['unpaired']} |")
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
     md = [f"# Real-app bench scoreboard", "", f"Generated {now} from the newest result file per app and engine.",
           "Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.", "",
-          "| App | Run | Ferrocrate pass | Product | App/env | Boundary | Unpaired |", "|---|---|---:|---:|---:|---:|---:|", *rows, "",
+          "| App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |", "|---|---|---:|---:|---:|---:|---:|---:|", *rows, "",
           "## By group (Ferrocrate)", "", "| Group | Pass | Product | App/env | Boundary |", "|---|---:|---:|---:|---:|"]
     for g, _ in GROUPS + [("other", [])]:
         md.append(f"| {g} | {per_group[(g,'pass')]} | {per_group[(g,'product')]} | {per_group[(g,'app-or-env')]} | {per_group[(g,'boundary')]} |")

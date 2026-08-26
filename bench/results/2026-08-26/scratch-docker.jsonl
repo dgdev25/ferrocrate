@@ -1,0 +1,47 @@
+{"app":"scratch","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"info","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"doctor","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1605,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"build","status":"pass","exit":0,"ms":303,"stderr_tail":"manifest list sha256:8e9c648670c8256bb29d8ce3dbf1d4187ec68c15f8b381481044683663d392ab\n#8 exporting manifest list sha256:8e9c648670c8256bb29d8ce3dbf1d4187ec68c15f8b381481044683663d392ab done\n#8 naming to docker.io/bench/scratch:latest done\n#8 unpacking to docker.io/bench/scratch:latest done\n#8 DONE 0.1s\n\nView build details: docker-desktop://dashboard/build/default/default/6d4qmkh7ag36m22aihp80wx1r\n","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"images","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"save","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"load","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"network-create","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"network-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"events","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1805,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"image-prune","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"docker","step":"search","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}

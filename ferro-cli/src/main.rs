@@ -19601,6 +19601,7 @@ fn handle_docker_compat_connection(
                     (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
+                    let id = resolve_container_id(&runtime, requested_id)?;
                     runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };

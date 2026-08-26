@@ -1439,6 +1439,25 @@ fn docker_compat_start_and_stop_events_are_emitted_exactly_once_by_runtime() {
 }
 
 #[test]
+fn docker_compat_restarts_stopped_container_by_name() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");
+    let id = create_sleeping_restart_container(&harness, "restart-by-name", "no");
+
+    let (status, response) = harness.request("POST", "/v1.45/containers/restart-by-name/stop?t=0");
+    assert_eq!(status, 204, "stop response={response}");
+    assert_ne!(inspect_container(&harness, &id)["State"]["Status"], "running");
+
+    let (status, response) = harness.request("POST", "/v1.45/containers/restart-by-name/start");
+    assert_eq!(status, 204, "restart response={response}");
+    assert_eq!(inspect_container(&harness, &id)["State"]["Status"], "running");
+
+    let (status, response) =
+        harness.request("DELETE", "/v1.45/containers/restart-by-name?force=true");
+    assert_eq!(status, 204, "cleanup response={response}");
+}
+
+#[test]
 fn docker_compat_daemon_boot_restarts_always_record_with_mismatched_identity() {
     let mut harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");

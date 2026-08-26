@@ -5575,11 +5575,12 @@ fn copy_from_context(
     let remote_root = tempfile::tempdir()?;
     for spec in copies {
         let dest_root = dst_root.join(spec.dest.trim_start_matches('/'));
-        let multiple = spec.srcs.len() > 1 || spec.dest.ends_with('/');
+        let sources = expand_copy_sources(src_root, &spec.srcs)?;
+        let multiple = sources.len() > 1 || spec.dest.ends_with('/');
         if multiple {
             fs::create_dir_all(&dest_root)?;
         }
-        for src in &spec.srcs {
+        for src in &sources {
             if spec.parents
                 && Path::new(src)
                     .components()
@@ -5679,6 +5680,93 @@ fn copy_from_context(
         }
     }
     Ok(())
+}
+
+/// Expand Dockerfile COPY/ADD source globs against the build context.  This
+/// deliberately does not use the process shell: context paths stay confined
+/// to `src_root`, and an empty expansion remains a Dockerfile error.
+fn expand_copy_sources(
+    src_root: &Path,
+    sources: &[String],
+) -> Result<Vec<String>, DockerfileBuildError> {
+    let mut expanded = Vec::new();
+    for source in sources {
+        if is_remote_add_source(source) || !source.contains(['*', '?', '[']) {
+            expanded.push(source.clone());
+            continue;
+        }
+        let relative = Path::new(source.trim_start_matches('/'));
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "COPY source escapes the build context".to_string(),
+            ));
+        }
+        let mut matches = Vec::new();
+        collect_copy_glob_matches(
+            src_root,
+            src_root,
+            source.trim_start_matches('/'),
+            &mut matches,
+        )?;
+        matches.sort();
+        if matches.is_empty() {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "COPY source {} is unavailable: glob matched no files",
+                src_root.join(source).display()
+            )));
+        }
+        expanded.extend(matches);
+    }
+    Ok(expanded)
+}
+
+fn collect_copy_glob_matches(
+    root: &Path,
+    directory: &Path,
+    pattern: &str,
+    matches: &mut Vec<String>,
+) -> Result<(), DockerfileBuildError> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("context walk stays under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if copy_glob_matches(pattern, &relative) {
+            matches.push(relative.clone());
+        }
+        if entry.file_type()?.is_dir() {
+            collect_copy_glob_matches(root, &path, pattern, matches)?;
+        }
+    }
+    Ok(())
+}
+
+/// Match the shell glob subset Docker accepts for context sources. `*` and
+/// `?` do not cross directory separators, matching filepath-style patterns.
+fn copy_glob_matches(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern {
+            [] => value.is_empty(),
+            [b'*', rest @ ..] => {
+                matches(rest, value)
+                    || (!value.is_empty() && value[0] != b'/' && matches(pattern, &value[1..]))
+            }
+            [b'?', rest @ ..] => {
+                !value.is_empty() && value[0] != b'/' && matches(rest, &value[1..])
+            }
+            [byte, rest @ ..] => {
+                !value.is_empty() && *byte == value[0] && matches(rest, &value[1..])
+            }
+        }
+    }
+    matches(pattern.as_bytes(), value.as_bytes())
 }
 
 fn resolve_copy_owner(
@@ -6523,6 +6611,39 @@ mod tests {
         assert!(runtime
             .join("build/stage-0/app/package-lock.json")
             .is_file());
+    }
+
+    #[test]
+    fn copy_expands_context_globs_without_copying_non_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY package*.json /app/\n").unwrap();
+        fs::write(temp.path().join("package.json"), "manifest").unwrap();
+        fs::write(temp.path().join("package-lock.json"), "lock").unwrap();
+        fs::write(temp.path().join("package.txt"), "not json").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-glob:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("glob COPY build");
+
+        let app = runtime.join("build/stage-0/app");
+        assert_eq!(
+            fs::read_to_string(app.join("package.json")).unwrap(),
+            "manifest"
+        );
+        assert_eq!(
+            fs::read_to_string(app.join("package-lock.json")).unwrap(),
+            "lock"
+        );
+        assert!(!app.join("package.txt").exists());
     }
 
     #[test]

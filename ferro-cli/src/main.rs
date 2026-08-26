@@ -7343,6 +7343,18 @@ fn selected_remote_context_endpoint() -> Result<Option<String>, String> {
     }
 }
 
+/// Dockerfile builds submitted to the local daemon are still local builds.
+/// Surface its structured message verbatim so a failed RUN's captured stdout
+/// and stderr remain readable rather than being hidden in an HTTP wrapper.
+#[cfg(target_os = "linux")]
+fn local_build_http_error(status: u16, body: &[u8]) -> String {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    format!("build failed (HTTP {status}): {message}")
+}
+
 #[cfg(target_os = "linux")]
 fn remote_docker_request(
     socket_path: &str,
@@ -7994,9 +8006,16 @@ fn dispatch_remote_socket(
             |(status, body)| {
                 if (200..300).contains(&status) {
                     Ok(body)
+                } else if path == "/ferrocrate/build" || path.starts_with("/build?") {
+                    Err(local_build_http_error(status, &body))
                 } else {
+                    let transport = if owner.is_some() {
+                        "local daemon request"
+                    } else {
+                        "remote context request"
+                    };
                     Err(format!(
-                        "remote context request returned HTTP {status}: {}",
+                        "{transport} returned HTTP {status}: {}",
                         String::from_utf8_lossy(&body)
                     ))
                 }
@@ -8361,10 +8380,7 @@ fn dispatch_remote_socket(
                     ),
                 }?;
                 if !(200..300).contains(&status) {
-                    return Err(format!(
-                        "remote context request returned HTTP {status}: {}",
-                        String::from_utf8_lossy(&body)
-                    ));
+                    return Err(local_build_http_error(status, &body));
                 }
                 if !body.is_empty() {
                     print_json(body, "json")?;
@@ -33153,6 +33169,17 @@ volumes:
         .expect("decode stream");
         worker.join().expect("stream worker");
         assert_eq!(output, b"hello world");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_build_failure_preserves_run_output_without_remote_context_label() {
+        let message = super::local_build_http_error(
+            400,
+            br#"{"message":"invalid Dockerfile: RUN echo visible-step-output && false failed with status exit status: 1\nvisible-step-output"}"#,
+        );
+        assert!(message.contains("visible-step-output"), "{message}");
+        assert!(!message.contains("remote context"), "{message}");
     }
 
     #[test]

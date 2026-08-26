@@ -1,52 +1,52 @@
-{"app":"spring-petclinic","engine":"docker","step":"version","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"info","status":"pass","exit":0,"ms":2005,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":25721,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"build","status":"pass","exit":0,"ms":63947,"stderr_tail":"e\n#12 exporting manifest list sha256:36f21daf055fee695ca54eac9828eee5d369e6f9bc7238c55c8f0d688cc3f622 done\n#12 naming to docker.io/bench/spring-petclinic:latest done\n#12 unpacking to docker.io/bench/spring-petclinic:latest\n#12 unpacking to docker.io/bench/spring-petclinic:latest 0.2s done\n#12 DONE 1.6s\n\nView build details: docker-desktop://dashboard/build/default/default/isivoltgedqwgw62pxxkl0x73\n","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"images","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"history","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"save","status":"pass","exit":0,"ms":1703,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"load","status":"pass","exit":0,"ms":903,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"health","status":"pass","exit":0,"ms":4206,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"restart","status":"pass","exit":0,"ms":14515,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10311,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"start","status":"pass","exit":0,"ms":4305,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"commit","status":"pass","exit":0,"ms":604,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"export","status":"pass","exit":0,"ms":604,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2405,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":37026,"stderr_tail":"clinic_default Created \n Container spring-petclinic-postgres-1 Creating \n Container spring-petclinic-mysql-1 Creating \n Container spring-petclinic-mysql-1 Created \n Container spring-petclinic-postgres-1 Created \n Container spring-petclinic-postgres-1 Starting \n Container spring-petclinic-mysql-1 Starting \n Container spring-petclinic-mysql-1 Started \n Container spring-petclinic-postgres-1 Started \n","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"compose-health","status":"fail","exit":1,"ms":60545,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":2505,"stderr_tail":"ing-petclinic-mysql-1 Stopping \n Container spring-petclinic-postgres-1 Stopped \n Container spring-petclinic-postgres-1 Removing \n Container spring-petclinic-postgres-1 Removed \n Container spring-petclinic-mysql-1 Stopped \n Container spring-petclinic-mysql-1 Removing \n Container spring-petclinic-mysql-1 Removed \n Network spring-petclinic_default Removing \n Network spring-petclinic_default Removed \n","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":2205,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"events","status":"pass","exit":0,"ms":5106,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1804,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
-{"app":"spring-petclinic","engine":"docker","step":"search","status":"pass","exit":0,"ms":602,"stderr_tail":"","run":"2026-08-26T15:20Z","head":"91242b94"}
+{"app":"spring-petclinic","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1705,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"build","status":"pass","exit":0,"ms":60249,"stderr_tail":"8938d6f99fe0dd5f8568dfad11c1be3e58c84c3079c7691cfec90646d5 done\n#12 exporting manifest list sha256:0f8b0da442b3d67b203cbd3bc29d6162cf348fc16b903a68c677724f24296827 done\n#12 naming to docker.io/bench/spring-petclinic:latest done\n#12 unpacking to docker.io/bench/spring-petclinic:latest done\n#12 DONE 0.0s\n\nView build details: docker-desktop://dashboard/build/default/default/d8kojct0un9etffw5wekous5g\n","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"images","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"save","status":"pass","exit":0,"ms":2505,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"load","status":"pass","exit":0,"ms":2404,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":1304,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"health","status":"pass","exit":0,"ms":5207,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"diff","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"pause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"restart","status":"pass","exit":0,"ms":14913,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10309,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"start","status":"pass","exit":0,"ms":4305,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"rename","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"commit","status":"pass","exit":0,"ms":3705,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"export","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"wait","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2405,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":403,"stderr_tail":"clinic_default Created \n Container spring-petclinic-mysql-1 Creating \n Container spring-petclinic-postgres-1 Creating \n Container spring-petclinic-postgres-1 Created \n Container spring-petclinic-mysql-1 Created \n Container spring-petclinic-postgres-1 Starting \n Container spring-petclinic-mysql-1 Starting \n Container spring-petclinic-postgres-1 Started \n Container spring-petclinic-mysql-1 Started \n","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"compose-health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":10610,"stderr_tail":"-petclinic-postgres-1 Stopping \n Container spring-petclinic-postgres-1 Stopped \n Container spring-petclinic-postgres-1 Removing \n Container spring-petclinic-postgres-1 Removed \n Container spring-petclinic-mysql-1 Stopped \n Container spring-petclinic-mysql-1 Removing \n Container spring-petclinic-mysql-1 Removed \n Network spring-petclinic_default Removing \n Network spring-petclinic_default Removed \n","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":705,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"events","status":"pass","exit":0,"ms":5106,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}
+{"app":"spring-petclinic","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-26T15:46Z","head":"379cb3e5"}

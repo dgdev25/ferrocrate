@@ -2603,6 +2603,8 @@ async fn cri_journal_seeded_container_remove_hits_injected_crash_point() {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,

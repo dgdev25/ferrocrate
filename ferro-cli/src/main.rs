@@ -485,6 +485,14 @@ pub enum Commands {
         /// Docker image-prune selector (`dangling=true|false` or `until=UNIX_SECONDS`).
         #[arg(long = "filter")]
         filters: Vec<String>,
+        /// Docker clients pass -f; pruning is always immediate here.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Docker-compatible grouped image operations.
+    Image {
+        #[command(subcommand)]
+        command: ImageCommands,
     },
     /// Authenticate to a container registry and store the verified credentials.
     Login {
@@ -522,7 +530,7 @@ pub enum Commands {
         no_trunc: bool,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         all: bool,
         #[arg(long)]
         limit: Option<usize>,
@@ -541,6 +549,11 @@ pub enum Commands {
         /// Docker clients pass -f; pruning is always immediate here.
         #[arg(short = 'f', long)]
         force: bool,
+    },
+    /// Docker-compatible grouped container operations.
+    Container {
+        #[command(subcommand)]
+        command: ContainerCommands,
     },
     /// Read the durable Docker-compatible event stream.
     #[cfg(target_os = "linux")]
@@ -571,6 +584,9 @@ pub enum Commands {
         format: String,
         #[arg(long)]
         follow: bool,
+        /// Docker-compatible inverse of --follow.
+        #[arg(long = "no-stream", conflicts_with = "follow")]
+        no_stream: bool,
     },
     #[cfg(target_os = "linux")]
     /// List processes running inside a container.
@@ -1112,7 +1128,12 @@ pub enum ComposeCommands {
     /// Print the parsed, interpolated Compose model as YAML.
     Config,
     /// Stop and remove a Compose project, optionally limited to services.
-    Down { services: Vec<String> },
+    Down {
+        /// Remove named project volumes as Docker Compose does.
+        #[arg(short = 'v', long = "volumes")]
+        volumes: bool,
+        services: Vec<String>,
+    },
     /// List containers of a Compose project.
     Ps,
     /// Read logs of Compose services.
@@ -1135,6 +1156,35 @@ pub enum SystemCommands {
         /// Remove volume and container directories without store records.
         #[arg(long)]
         orphans: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerCommands {
+    /// Remove stopped containers that match Docker prune filters.
+    Prune {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImageCommands {
+    /// Remove one or more stored images by reference.
+    Rm {
+        #[arg(short = 'f', long)]
+        force: bool,
+        #[arg(required = true)]
+        images: Vec<String>,
+    },
+    /// Remove dangling or time-filtered images.
+    Prune {
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 }
 
@@ -3678,6 +3728,7 @@ fn run_remote_compose_watch_loop(
             RemoteComposeWatchSignal::Disconnected => return Ok(()),
             RemoteComposeWatchSignal::Changed => {
                 send_command(ComposeCommands::Down {
+                    volumes: false,
                     services: Vec::new(),
                 })?;
             }
@@ -4873,10 +4924,12 @@ impl CommandOwnership {
             | Commands::History { .. }
             | Commands::Rmi { .. }
             | Commands::ImagePrune { .. }
+            | Commands::Image { .. }
             | Commands::Volume { .. }
             | Commands::Network { .. }
             | Commands::Containers { .. }
             | Commands::ContainerPrune { .. }
+            | Commands::Container { .. }
             | Commands::Events { .. }
             | Commands::Logs { .. }
             | Commands::Stats { .. }
@@ -5297,7 +5350,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image, &surface_authorization)
             }),
-            Commands::ImagePrune { filters } => {
+            Commands::ImagePrune { filters, .. } => {
+                handle_image_prune(&image_store, &surface_authorization, &filters)
+            }
+            Commands::Image { command: ImageCommands::Rm { images, .. } } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image, &surface_authorization)
+            }),
+            Commands::Image { command: ImageCommands::Prune { filters, .. } } => {
                 handle_image_prune(&image_store, &surface_authorization, &filters)
             }
             Commands::Login {
@@ -5395,6 +5454,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             #[cfg(target_os = "linux")]
             Commands::ContainerPrune { filters, .. } => handle_container_prune(&runtime, &filters),
+            Commands::Container { command: ContainerCommands::Prune { filters, .. } } => {
+                handle_container_prune(&runtime, &filters)
+            }
             #[cfg(target_os = "linux")]
             Commands::Events {
                 since,
@@ -5423,6 +5485,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 container,
                 format,
                 follow,
+                ..
             } => handle_stats(&runtime, &container, &format, follow),
             #[cfg(target_os = "linux")]
             Commands::Top { container, format } => handle_top(&runtime, &container, &format),
@@ -5634,7 +5697,11 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image)
             }),
-            Commands::ImagePrune { filters } => handle_image_prune(&image_store, &filters),
+            Commands::ImagePrune { filters, .. } => handle_image_prune(&image_store, &filters),
+            Commands::Image { command: ImageCommands::Rm { images, .. } } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image)
+            }),
+            Commands::Image { command: ImageCommands::Prune { filters, .. } } => handle_image_prune(&image_store, &filters),
             Commands::Pull { image, lazy } => handle_pull(&image_store, &image, lazy),
             Commands::Push { image } => handle_push(&image_store, &image),
             Commands::Ai { command } => handle_ai(command),
@@ -7276,6 +7343,18 @@ fn selected_remote_context_endpoint() -> Result<Option<String>, String> {
     }
 }
 
+/// Dockerfile builds submitted to the local daemon are still local builds.
+/// Surface its structured message verbatim so a failed RUN's captured stdout
+/// and stderr remain readable rather than being hidden in an HTTP wrapper.
+#[cfg(target_os = "linux")]
+fn local_build_http_error(status: u16, body: &[u8]) -> String {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    format!("build failed (HTTP {status}): {message}")
+}
+
 #[cfg(target_os = "linux")]
 fn remote_docker_request(
     socket_path: &str,
@@ -7927,9 +8006,16 @@ fn dispatch_remote_socket(
             |(status, body)| {
                 if (200..300).contains(&status) {
                     Ok(body)
+                } else if path == "/ferrocrate/build" || path.starts_with("/build?") {
+                    Err(local_build_http_error(status, &body))
                 } else {
+                    let transport = if owner.is_some() {
+                        "local daemon request"
+                    } else {
+                        "remote context request"
+                    };
                     Err(format!(
-                        "remote context request returned HTTP {status}: {}",
+                        "{transport} returned HTTP {status}: {}",
                         String::from_utf8_lossy(&body)
                     ))
                 }
@@ -8294,10 +8380,7 @@ fn dispatch_remote_socket(
                     ),
                 }?;
                 if !(200..300).contains(&status) {
-                    return Err(format!(
-                        "remote context request returned HTTP {status}: {}",
-                        String::from_utf8_lossy(&body)
-                    ));
+                    return Err(local_build_http_error(status, &body));
                 }
                 if !body.is_empty() {
                     print_json(body, "json")?;
@@ -8505,7 +8588,7 @@ fn dispatch_remote_socket(
             )
             .map(|_| ())
         }),
-        Commands::ImagePrune { filters } => (|| -> Result<(), String> {
+        Commands::ImagePrune { filters, .. } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_image_prune_filters(&parsed)?;
             let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
@@ -8518,6 +8601,20 @@ fn dispatch_remote_socket(
                     println!("{}", String::from_utf8_lossy(&body));
                 }
             })
+        })(),
+        Commands::Image { command: ImageCommands::Rm { force, images } } => images.iter().try_for_each(|image| {
+            request(
+                "DELETE",
+                format!("/images/{}?force={force}", percent_encode_path_component(image)),
+            )
+            .map(|_| ())
+        }),
+        Commands::Image { command: ImageCommands::Prune { filters, .. } } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_image_prune_filters(&parsed)?;
+            let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+            request("POST", format!("/images/prune?filters={}", percent_encode_path_component(&encoded)))
+                .and_then(|body| print_json(body, "text"))
         })(),
         Commands::Pull { image, lazy } => (|| -> Result<(), String> {
             let parsed = ferro_core::registry::parse_image_reference(image)
@@ -8591,6 +8688,13 @@ fn dispatch_remote_socket(
                 ),
             )
             .and_then(|body| print_json(body, "json"))
+        })(),
+        Commands::Container { command: ContainerCommands::Prune { filters, .. } } => (|| -> Result<(), String> {
+            let parsed = parse_cli_filters(filters)?;
+            validate_docker_container_prune_filters(&parsed)?;
+            let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+            request("POST", format!("/containers/prune?filters={}", percent_encode_path_component(&encoded)))
+                .and_then(|body| print_json(body, "text"))
         })(),
         Commands::Events {
             since,
@@ -8806,6 +8910,7 @@ fn dispatch_remote_socket(
             container,
             format,
             follow,
+            ..
         } => {
             if *follow {
                 if format != "json" {
@@ -14960,7 +15065,10 @@ fn handle_compose(
                     volume_store,
                     authenticated_origin,
                     file,
-                    ComposeCommands::Down { services: Vec::new() },
+                    ComposeCommands::Down {
+                        volumes: false,
+                        services: Vec::new(),
+                    },
                 )?;
             }
         }
@@ -14995,7 +15103,7 @@ fn handle_compose(
         ComposeCommands::Config => {
             output = serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?;
         }
-        ComposeCommands::Down { services } => {
+        ComposeCommands::Down { services, volumes: _ } => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
             let containers = runtime.list().map_err(|err| err.to_string())?;
             let requested = compose_explicit_service_selection(&project, &services)?;
@@ -27821,6 +27929,24 @@ volumes:
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_flag_aliases_and_grouped_image_container_verbs_parse() {
+        for args in [
+            vec!["ferrocrate", "ps", "-a"],
+            vec!["ferrocrate", "stats", "--no-stream", "demo"],
+            vec!["ferrocrate", "container", "prune", "-f"],
+            vec!["ferrocrate", "container", "prune", "--force"],
+            vec!["ferrocrate", "image", "prune", "-f"],
+            vec!["ferrocrate", "image", "prune", "--force"],
+            vec!["ferrocrate", "image", "rm", "demo:latest"],
+            vec!["ferrocrate", "compose", "down", "-v"],
+            vec!["ferrocrate", "compose", "down", "--volumes"],
+        ] {
+            Cli::try_parse_from(args).expect("Docker-compatible alias parses");
+        }
+    }
+
     #[test]
     fn help_lists_native_easy_win_verbs() {
         let mut command = Cli::command();
@@ -27874,7 +28000,7 @@ volumes:
     fn parses_image_prune_command() {
         let cli = Cli::parse_from(["ferrocrate", "image-prune"]);
         match cli.command {
-            Commands::ImagePrune { filters } => assert!(filters.is_empty()),
+            Commands::ImagePrune { filters, .. } => assert!(filters.is_empty()),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -27890,7 +28016,7 @@ volumes:
             "until=100",
         ]);
         match cli.command {
-            Commands::ImagePrune { filters } => {
+            Commands::ImagePrune { filters, .. } => {
                 assert_eq!(filters, vec!["dangling=true", "until=100"]);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -33045,6 +33171,17 @@ volumes:
         assert_eq!(output, b"hello world");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_build_failure_preserves_run_output_without_remote_context_label() {
+        let message = super::local_build_http_error(
+            400,
+            br#"{"message":"invalid Dockerfile: RUN echo visible-step-output && false failed with status exit status: 1\nvisible-step-output"}"#,
+        );
+        assert!(message.contains("visible-step-output"), "{message}");
+        assert!(!message.contains("remote context"), "{message}");
+    }
+
     #[test]
     fn parses_logs_follow_flag() {
         let cli = Cli::try_parse_from(["ferrocrate", "logs", "c1", "--follow"])
@@ -33070,6 +33207,7 @@ volumes:
                 container,
                 format,
                 follow,
+                ..
             } => {
                 assert_eq!(container, "c1");
                 assert_eq!(format, "json");

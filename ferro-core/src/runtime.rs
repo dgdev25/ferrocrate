@@ -115,9 +115,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
 #[cfg(test)]
 use std::io::Seek;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -890,11 +890,7 @@ impl CreationRollback {
         let safe_netns = match (&self.netns_name, self.namespace_owned) {
             (Some(_), false) => None,
             (Some(name), true) if self.network_ownership.is_none() => {
-                match netns_deletion_decision(
-                    &netns::netns_root(),
-                    name,
-                    self.namespace_identity,
-                ) {
+                match netns_deletion_decision(&netns::netns_root(), name, self.namespace_identity) {
                     NetnsDeletionDecision::Delete => Some(name.as_str()),
                     NetnsDeletionDecision::NothingToDelete => None,
                     NetnsDeletionDecision::RefuseIdentityMismatch => {
@@ -1877,6 +1873,7 @@ impl ContainerRuntime {
             &runtime.authorization,
             kernel_ops,
         )?;
+        reap_orphaned_slirp4netns_helpers(runtime_dir, &runtime.store)?;
         runtime.reconcile_pending_mutations()?;
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
@@ -3282,8 +3279,8 @@ impl ContainerRuntime {
             self.phase_hook
                 .reached("run", LifecyclePhasePoint::CgroupKernelEffect)?;
             rollback.track_cgroup(cgroup_name)?;
-            let cgroup_metadata = fs::metadata(&group)
-                .map_err(path_io("inspect container cgroup", &group))?;
+            let cgroup_metadata =
+                fs::metadata(&group).map_err(path_io("inspect container cgroup", &group))?;
             rollback.mark_typed_resource(
                 cgroup_plan.expect("cgroup plan exists"),
                 ResourceIdentity::Cgroup {
@@ -3419,6 +3416,8 @@ impl ContainerRuntime {
                     protocol: mapping.protocol.clone(),
                 })
                 .collect(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: persisted_mounts.to_vec(),
             tmpfs_mounts: persisted_tmpfs_mounts.to_vec(),
             readonly_rootfs,
@@ -3501,6 +3500,19 @@ impl ContainerRuntime {
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
                     rollback.slirp_process = Some((helper_pid, helper_start_time));
+                    record.slirp4netns_pid = Some(helper_pid);
+                    record.slirp4netns_start_time = Some(helper_start_time);
+                    let persisted = if let Some(reservation) = record.pending_mutation.as_ref() {
+                        self.store
+                            .put_for_mutation(&record, reservation.operation_id)
+                    } else {
+                        self.store.put(&record)
+                    };
+                    if let Err(error) = persisted {
+                        let _ = kill_pid(child_id);
+                        rollback.rollback();
+                        return Err(error.into());
+                    }
                     if let Err(error) = configure_slirp_host_forwards(&api_socket, port_mappings) {
                         let _ = kill_pid(child_id);
                         rollback.rollback();
@@ -4044,9 +4056,7 @@ impl ContainerRuntime {
         let cgroup = manager.read_stats(group_path);
         let needs_process_fallback = cgroup
             .as_ref()
-            .map(|stats| {
-                stats.memory_current.unwrap_or(0) == 0 || stats.cpu_usage_usec.is_none()
-            })
+            .map(|stats| stats.memory_current.unwrap_or(0) == 0 || stats.cpu_usage_usec.is_none())
             .unwrap_or(true);
         let process = (needs_process_fallback && pid_identity_matches(&record))
             .then(|| process_tree_stats(record.pid))
@@ -4172,6 +4182,7 @@ impl ContainerRuntime {
         // terminal states as a successful no-op so the following delete can
         // complete instead of reporting a spurious post-effect conflict.
         if matches!(record.status.as_str(), "stopped" | "killed" | "exited") {
+            terminate_slirp4netns_helper(&record);
             self.persist_user_stopped(proof, id, true)?;
             return Ok(());
         }
@@ -4196,6 +4207,7 @@ impl ContainerRuntime {
                 let _ = nix::sys::signal::kill(launcher, nix::sys::signal::Signal::SIGKILL);
             }
         }
+        terminate_slirp4netns_helper(&record);
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status_with_user_stopped(
@@ -4262,6 +4274,7 @@ impl ContainerRuntime {
         if signal == Some(nix::sys::signal::Signal::SIGKILL)
             && matches!(record.status.as_str(), "stopped" | "killed" | "exited")
         {
+            terminate_slirp4netns_helper(&record);
             self.persist_user_stopped(proof, id, true)?;
             return Ok(());
         }
@@ -4315,6 +4328,7 @@ impl ContainerRuntime {
             probe_pid(record.pid)?;
             return Ok(());
         }
+        terminate_slirp4netns_helper(&record);
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         self.persist_effect_status_with_user_stopped(proof, intent, id, "running", "killed", true)?;
@@ -4632,7 +4646,14 @@ impl ContainerRuntime {
             move_link_to_runtime_netns(&peer_interface, netns_name)?;
             run_cmd(&ip_netns_exec(
                 netns_name,
-                &["ip", "link", "set", &peer_interface, "name", &interface_name],
+                &[
+                    "ip",
+                    "link",
+                    "set",
+                    &peer_interface,
+                    "name",
+                    &interface_name,
+                ],
             ))?;
             run_cmd(&ip_netns_exec(
                 netns_name,
@@ -5454,6 +5475,7 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        terminate_slirp4netns_helper(&record);
         let operation_id = record
             .pending_mutation
             .as_ref()
@@ -5662,7 +5684,9 @@ impl ContainerRuntime {
                 .store
                 .get(id)?
                 .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-            let permit = self.authorization.authorize(Action::ContainerExec, &record)?;
+            let permit = self
+                .authorization
+                .authorize(Action::ContainerExec, &record)?;
             self.phase_hook.reached(
                 runtime_action_name(Action::ContainerExec),
                 LifecyclePhasePoint::DecisionDurable,
@@ -5740,7 +5764,11 @@ impl ContainerRuntime {
                     break;
                 }
                 Err(ContainerStoreError::MutationConflict) if attempt < 255 => {
-                    if self.store.get(id)?.is_some_and(|record| record.pending_mutation.is_none()) {
+                    if self
+                        .store
+                        .get(id)?
+                        .is_some_and(|record| record.pending_mutation.is_none())
+                    {
                         let _ = self.store.re_reserve_mutation(
                             id,
                             operation_id,
@@ -6553,13 +6581,17 @@ fn process_stats_from_stat(
     if page_size == 0 || ticks_per_second == 0 {
         return None;
     }
-    let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
     let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
     let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
     let resident_pages = fields.get(21)?.parse::<i64>().ok()?.max(0) as u64;
     let ticks_to_usec = |ticks: u64| {
-        ((ticks as u128).saturating_mul(1_000_000) / ticks_per_second as u128)
-            .min(u64::MAX as u128) as u64
+        ((ticks as u128).saturating_mul(1_000_000) / ticks_per_second as u128).min(u64::MAX as u128)
+            as u64
     };
     let cpu_user_usec = ticks_to_usec(user_ticks);
     let cpu_system_usec = ticks_to_usec(system_ticks);
@@ -6588,15 +6620,37 @@ fn process_tree_stats(root: u32) -> Option<CgroupStats> {
     for pid in pids {
         let Some(sample) = fs::read_to_string(format!("/proc/{pid}/stat"))
             .ok()
-            .and_then(|stat| process_stats_from_stat(&stat, page_size as u64, ticks_per_second as u64))
+            .and_then(|stat| {
+                process_stats_from_stat(&stat, page_size as u64, ticks_per_second as u64)
+            })
         else {
             continue;
         };
         samples = samples.saturating_add(1);
-        aggregate.memory_current = Some(aggregate.memory_current.unwrap_or(0).saturating_add(sample.memory_current.unwrap_or(0)));
-        aggregate.cpu_usage_usec = Some(aggregate.cpu_usage_usec.unwrap_or(0).saturating_add(sample.cpu_usage_usec.unwrap_or(0)));
-        aggregate.cpu_user_usec = Some(aggregate.cpu_user_usec.unwrap_or(0).saturating_add(sample.cpu_user_usec.unwrap_or(0)));
-        aggregate.cpu_system_usec = Some(aggregate.cpu_system_usec.unwrap_or(0).saturating_add(sample.cpu_system_usec.unwrap_or(0)));
+        aggregate.memory_current = Some(
+            aggregate
+                .memory_current
+                .unwrap_or(0)
+                .saturating_add(sample.memory_current.unwrap_or(0)),
+        );
+        aggregate.cpu_usage_usec = Some(
+            aggregate
+                .cpu_usage_usec
+                .unwrap_or(0)
+                .saturating_add(sample.cpu_usage_usec.unwrap_or(0)),
+        );
+        aggregate.cpu_user_usec = Some(
+            aggregate
+                .cpu_user_usec
+                .unwrap_or(0)
+                .saturating_add(sample.cpu_user_usec.unwrap_or(0)),
+        );
+        aggregate.cpu_system_usec = Some(
+            aggregate
+                .cpu_system_usec
+                .unwrap_or(0)
+                .saturating_add(sample.cpu_system_usec.unwrap_or(0)),
+        );
     }
     if samples == 0 {
         return None;
@@ -6614,19 +6668,34 @@ fn stats_with_process_fallback<E>(
         (Err(error), None) => Err(error),
         (Ok(mut cgroup), Some(process)) => {
             cgroup.memory_current = Some(
-                cgroup.memory_current.unwrap_or(0).max(process.memory_current.unwrap_or(0)),
+                cgroup
+                    .memory_current
+                    .unwrap_or(0)
+                    .max(process.memory_current.unwrap_or(0)),
             );
             cgroup.pids_current = Some(
-                cgroup.pids_current.unwrap_or(0).max(process.pids_current.unwrap_or(0)),
+                cgroup
+                    .pids_current
+                    .unwrap_or(0)
+                    .max(process.pids_current.unwrap_or(0)),
             );
             cgroup.cpu_usage_usec = Some(
-                cgroup.cpu_usage_usec.unwrap_or(0).max(process.cpu_usage_usec.unwrap_or(0)),
+                cgroup
+                    .cpu_usage_usec
+                    .unwrap_or(0)
+                    .max(process.cpu_usage_usec.unwrap_or(0)),
             );
             cgroup.cpu_user_usec = Some(
-                cgroup.cpu_user_usec.unwrap_or(0).max(process.cpu_user_usec.unwrap_or(0)),
+                cgroup
+                    .cpu_user_usec
+                    .unwrap_or(0)
+                    .max(process.cpu_user_usec.unwrap_or(0)),
             );
             cgroup.cpu_system_usec = Some(
-                cgroup.cpu_system_usec.unwrap_or(0).max(process.cpu_system_usec.unwrap_or(0)),
+                cgroup
+                    .cpu_system_usec
+                    .unwrap_or(0)
+                    .max(process.cpu_system_usec.unwrap_or(0)),
             );
             Ok(cgroup)
         }
@@ -10360,9 +10429,8 @@ fn ebpf_external_route() -> Result<EbpfExternalRoute, RuntimeError> {
 }
 
 fn interface_ifindex(interface: &str) -> Result<u32, RuntimeError> {
-    interface_ifindex_optional(interface)?.ok_or_else(|| {
-        RuntimeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound))
-    })
+    interface_ifindex_optional(interface)?
+        .ok_or_else(|| RuntimeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)))
 }
 
 fn interface_ifindex_optional(interface: &str) -> Result<Option<u32>, RuntimeError> {
@@ -11858,11 +11926,20 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
                 "slirp4netns is unavailable or not a trusted root-owned executable",
             ))
         })?;
-    let mut child = Command::new(slirp_binary)
+    let mut command = Command::new(slirp_binary);
+    command
         .args(rest)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    // The helper must not retain daemon sockets, client connections, or a
+    // coordinator lock after the spawning request has returned.
+    unsafe {
+        command.pre_exec(|| {
+            close_inherited_helper_fds();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
     if let Some(status) = child.try_wait()? {
         return Err(RuntimeError::Io(std::io::Error::other(format!(
             "slirp4netns exited before setup completed: {status}"
@@ -11880,6 +11957,97 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
         let _ = child.wait();
     });
     Ok((helper_pid, helper_start_time))
+}
+
+fn close_inherited_helper_fds() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        if nix::libc::syscall(nix::libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) == 0 {
+            return;
+        }
+    }
+    // Older kernels lack close_range. The fallback covers the conventional
+    // descriptor range used by the daemon and its launchers.
+    for fd in 3..1024 {
+        unsafe { nix::libc::close(fd) };
+    }
+}
+
+fn terminate_slirp4netns_helper(record: &ContainerRecord) {
+    let (Some(pid), Some(start_time)) = (record.slirp4netns_pid, record.slirp4netns_start_time)
+    else {
+        return;
+    };
+    if process_start_time_for_pid(pid) == Some(start_time) {
+        if let Err(error) = kill_pid(pid) {
+            log::warn!(
+                "failed to stop slirp4netns helper {pid} for container {}: {error}",
+                record.id
+            );
+        }
+    }
+}
+
+/// Remove helpers whose socket belongs to this runtime but whose exact
+/// process identity is absent from a live container record.
+fn reap_orphaned_slirp4netns_helpers(
+    runtime_dir: &Path,
+    store: &SqliteContainerStore,
+) -> Result<(), RuntimeError> {
+    let containers_dir = runtime_dir.join("containers");
+    let records = store.list()?;
+    for entry in fs::read_dir("/proc")?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let Some(socket) = slirp_api_socket_from_cmdline(&cmdline) else {
+            continue;
+        };
+        let socket = Path::new(socket);
+        let Ok(relative) = socket.strip_prefix(&containers_dir) else {
+            continue;
+        };
+        let mut components = relative.components();
+        let Some(std::path::Component::Normal(id)) = components.next() else {
+            continue;
+        };
+        if components.next().is_some() || socket.file_name() != Some(OsStr::new("slirp4netns.sock"))
+        {
+            continue;
+        }
+        let owned = records.iter().any(|record| {
+            record.id.as_bytes() == id.as_bytes()
+                && matches!(record.status.as_str(), "running" | "paused")
+                && record.slirp4netns_pid == Some(pid)
+                && record.slirp4netns_start_time == process_start_time_for_pid(pid)
+        });
+        if !owned {
+            if let Err(error) = kill_pid(pid) {
+                log::warn!("failed to reap orphaned slirp4netns helper {pid}: {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn slirp_api_socket_from_cmdline(cmdline: &[u8]) -> Option<&str> {
+    let mut args = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty());
+    let executable = args.next()?;
+    if !Path::new(OsStr::from_bytes(executable))
+        .file_name()
+        .is_some_and(|name| name == "slirp4netns")
+    {
+        return None;
+    }
+    args.find_map(|arg| {
+        arg.strip_prefix(b"--api-socket=")
+            .and_then(|path| std::str::from_utf8(path).ok())
+    })
 }
 
 fn configure_slirp_host_forwards(
@@ -11910,8 +12078,11 @@ fn configure_slirp_host_forwards(
                             ))
                         })?;
                     if let Some(error) = value.get("error") {
+                        let holder = host_port_holder(mapping.host_port)
+                            .map(|holder| format!("; host port {} is held by {holder}", mapping.host_port))
+                            .unwrap_or_default();
                         return Err(RuntimeError::Network(format!(
-                            "slirp4netns failed to add host forwarding: {error}"
+                            "slirp4netns failed to add host forwarding: {error}{holder}"
                         )));
                     }
                     if value
@@ -11940,6 +12111,21 @@ fn configure_slirp_host_forwards(
         }
     }
     Ok(())
+}
+
+fn host_port_holder(port: u16) -> Option<String> {
+    let output = Command::new("ss").args(["-ltnp"]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let marker = format!(":{port}");
+    let line = text.lines().find(|line| line.contains(&marker) && line.contains("pid="))?;
+    let process_start = line.find("((\"")? + 3;
+    let process_end = line[process_start..].find('"')? + process_start;
+    let pid_start = line.find("pid=")? + 4;
+    let pid_end = line[pid_start..]
+        .find(|character: char| !character.is_ascii_digit())
+        .map(|offset| pid_start + offset)
+        .unwrap_or(line.len());
+    Some(format!("process {} (pid {})", &line[process_start..process_end], &line[pid_start..pid_end]))
 }
 
 fn rootless_netns_enabled() -> bool {
@@ -12276,10 +12462,15 @@ fn update_container_hosts(
             continue;
         }
         for endpoint in peer.effective_network_endpoints() {
-            let entries = network_entries.entry(endpoint.network_name.clone()).or_default();
-            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
-                .into_iter()
-                .flatten()
+            let entries = network_entries
+                .entry(endpoint.network_name.clone())
+                .or_default();
+            for ip in [
+                endpoint.ipv4_address.as_ref(),
+                endpoint.ipv6_address.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 let names = entries.entry(ip.clone()).or_default();
                 names.insert(peer.id.clone());
@@ -12340,7 +12531,10 @@ fn update_container_hosts(
         }
         let dns_config = if !endpoint_gateways.is_empty() {
             ferro_net::dns::DnsConfig {
-                servers: endpoint_gateways.into_iter().map(|gateway| gateway.to_string()).collect(),
+                servers: endpoint_gateways
+                    .into_iter()
+                    .map(|gateway| gateway.to_string())
+                    .collect(),
                 search: Vec::new(),
             }
         } else if rootless_netns_enabled()
@@ -12383,9 +12577,12 @@ fn container_hosts_entries(
             if !target_networks.contains(&endpoint.network_name) {
                 continue;
             }
-            for ip in [endpoint.ipv4_address.as_ref(), endpoint.ipv6_address.as_ref()]
-                .into_iter()
-                .flatten()
+            for ip in [
+                endpoint.ipv4_address.as_ref(),
+                endpoint.ipv6_address.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 let names = entries.entry(ip.clone()).or_default();
                 names.insert(peer.id.clone());
@@ -12431,7 +12628,9 @@ fn ensure_embedded_dns(
             "embedded DNS could not bind {gateway}:53 for network {network_name}: {error}"
         ))
     })?;
-    let hosts_path = runtime_dir.join("dns").join(format!("{network_name}.hosts"));
+    let hosts_path = runtime_dir
+        .join("dns")
+        .join(format!("{network_name}.hosts"));
     thread::Builder::new()
         .name(format!("ferro-dns-{network_name}"))
         .spawn(move || {
@@ -12468,25 +12667,18 @@ fn dns_response(query: &[u8], hosts_path: &Path) -> Option<Vec<u8>> {
     let hosts = fs::read_to_string(hosts_path).ok()?;
     let mut known_name = false;
     let address = hosts.lines().find_map(|line| {
-            let mut fields = line.split_whitespace();
-            let address = fields.next()?.parse::<Ipv4Addr>().ok()?;
-            if fields.any(|candidate| candidate == name) {
-                known_name = true;
-                (qtype == 1).then_some(address)
-            } else {
-                None
-            }
-        });
+        let mut fields = line.split_whitespace();
+        let address = fields.next()?.parse::<Ipv4Addr>().ok()?;
+        if fields.any(|candidate| candidate == name) {
+            known_name = true;
+            (qtype == 1).then_some(address)
+        } else {
+            None
+        }
+    });
     let mut response = Vec::with_capacity(question_end + 16);
     response.extend_from_slice(&query[..2]);
-    response.extend_from_slice(
-        &if known_name {
-            0x8180_u16
-        } else {
-            0x8183_u16
-        }
-        .to_be_bytes(),
-    );
+    response.extend_from_slice(&if known_name { 0x8180_u16 } else { 0x8183_u16 }.to_be_bytes());
     response.extend_from_slice(&1_u16.to_be_bytes());
     response.extend_from_slice(&(u16::from(address.is_some())).to_be_bytes());
     response.extend_from_slice(&0_u16.to_be_bytes());
@@ -12536,8 +12728,7 @@ fn write_runtime_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Run
         file.sync_all()
             .map_err(path_io("sync runtime file staging file", &temporary))?;
         drop(file);
-        fs::rename(&temporary, path)
-            .map_err(path_io("publish runtime file", path))?;
+        fs::rename(&temporary, path).map_err(path_io("publish runtime file", path))?;
         OpenOptions::new()
             .read(true)
             .open(parent)
@@ -12985,9 +13176,8 @@ fn allocate_named_endpoint_ipv4(
 }
 
 fn named_endpoint_host_interface(container_id: &str, network_name: &str) -> String {
-    let digest = rvf_crypto::shake256_256(
-        format!("named-veth\0{container_id}\0{network_name}").as_bytes(),
-    );
+    let digest =
+        rvf_crypto::shake256_256(format!("named-veth\0{container_id}\0{network_name}").as_bytes());
     format!("v{}", hex::encode(&digest[..7]))
 }
 
@@ -14673,7 +14863,10 @@ mod tests {
         let error = super::write_runtime_file_atomically(&path, b"hosts")
             .expect_err("missing parent must fail");
         let message = error.to_string();
-        assert!(message.contains("create runtime file staging file"), "{message}");
+        assert!(
+            message.contains("create runtime file staging file"),
+            "{message}"
+        );
         assert!(message.contains("missing-parent"), "{message}");
         assert!(message.contains("network.hosts"), "{message}");
     }
@@ -15794,6 +15987,8 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,
@@ -15862,6 +16057,8 @@ mod tests {
             ip_address: None,
             ipv6_address: None,
             ports: Vec::new(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,
@@ -16543,6 +16740,8 @@ mod tests {
             ip_address: Some("10.44.1.2".to_string()),
             ipv6_address: None,
             ports: Vec::new(),
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,
@@ -16559,6 +16758,37 @@ mod tests {
             managed_cleanup_provenance: None,
             managed_host_veth: None,
         }
+    }
+
+    #[test]
+    fn slirp_cmdline_requires_the_helper_and_returns_its_socket() {
+        assert_eq!(
+            super::slirp_api_socket_from_cmdline(
+                b"/usr/bin/slirp4netns\0--api-socket=/tmp/runtime/containers/demo/slirp4netns.sock\x00"
+            ),
+            Some("/tmp/runtime/containers/demo/slirp4netns.sock")
+        );
+        assert!(
+            super::slirp_api_socket_from_cmdline(b"sleep\0--api-socket=/tmp/helper.sock\x00")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_lifecycle_reaps_the_verified_slirp_helper() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn helper stand-in");
+        let mut record = fixture_container_record("slirp-cleanup", "stopped");
+        record.slirp4netns_pid = Some(child.id());
+        record.slirp4netns_start_time = super::process_start_time_for_pid(child.id());
+        super::terminate_slirp4netns_helper(&record);
+        let status = child.wait().expect("wait helper stand-in");
+        assert!(
+            !status.success(),
+            "helper must be terminated on terminal lifecycle"
+        );
     }
 
     #[test]
@@ -16980,8 +17210,7 @@ mod tests {
     #[test]
     fn unmarked_mount_plan_classifies_unchanged_or_quarantines_replacement() {
         const NAMESPACE_MARKER: &str = "FERRO_MOUNT_PLAN_NAMESPACE_CHILD";
-        if !nix::unistd::Uid::effective().is_root()
-            && std::env::var_os(NAMESPACE_MARKER).is_none()
+        if !nix::unistd::Uid::effective().is_root() && std::env::var_os(NAMESPACE_MARKER).is_none()
         {
             let child = std::process::Command::new("unshare")
                 .args(["--user", "--map-root-user", "--mount", "--fork"])
@@ -17186,11 +17415,15 @@ mod tests {
         runtime.store.put(&record).unwrap();
 
         let error = runtime
-            .mediate_existing(Action::ContainerKill, &record.id, |_runtime, _proof, _intent| {
-                Err::<(), _>(RuntimeError::PostEffectPersistence(
-                    crate::container_store::ContainerStoreError::MutationConflict,
-                ))
-            })
+            .mediate_existing(
+                Action::ContainerKill,
+                &record.id,
+                |_runtime, _proof, _intent| {
+                    Err::<(), _>(RuntimeError::PostEffectPersistence(
+                        crate::container_store::ContainerStoreError::MutationConflict,
+                    ))
+                },
+            )
             .unwrap_err();
 
         assert!(matches!(error, RuntimeError::PostEffectPersistence(_)));
@@ -17201,9 +17434,11 @@ mod tests {
         );
 
         runtime
-            .mediate_existing(Action::ContainerDelete, &record.id, |_runtime, _proof, _intent| {
-                Ok(())
-            })
+            .mediate_existing(
+                Action::ContainerDelete,
+                &record.id,
+                |_runtime, _proof, _intent| Ok(()),
+            )
             .expect("a fresh remove can reserve and complete after the lost kill write");
         assert!(runtime.store.get(&record.id).unwrap().is_none());
     }
@@ -18135,6 +18370,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 container_port: 80,
                 protocol: "tcp".to_string(),
             }],
+            slirp4netns_pid: None,
+            slirp4netns_start_time: None,
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
             readonly_rootfs: false,
@@ -18250,8 +18487,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             })
             .collect();
 
-        let removed = super::take_network_endpoint(&mut record, "frontend")
-            .expect("frontend endpoint");
+        let removed =
+            super::take_network_endpoint(&mut record, "frontend").expect("frontend endpoint");
 
         assert_eq!(removed.network_name, "frontend");
         assert_eq!(record.network_endpoints.len(), 1);
@@ -19411,7 +19648,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let _env_guard = acquire_lock(&CGROUP_ENV_LOCK);
         let _guard = acquire_lock(&RUNTIME_TEST_LOCK);
         if !nix::unistd::Uid::effective().is_root() && !crate::rootless::bubblewrap_available() {
-            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            eprintln!(
+                "skipping: {}",
+                crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE
+            );
             return;
         }
         for action in ["run", "restart"] {

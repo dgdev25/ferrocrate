@@ -4233,13 +4233,12 @@ fn run_stage_commands(
             command
         };
         cmd.stdin(Stdio::null());
-        // When an output cap is configured, capture the child's streams so
-        // runaway output fails the build instead of exhausting host memory.
+        // Capture every RUN stream. Besides enforcing the optional output
+        // cap, this lets a failed build report the command's actual output
+        // instead of leaving the user with a bare exit status.
         let output_cap = limits.max_output_bytes;
-        if output_cap.is_some() {
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
         // Set environment variables
         for entry in env {
@@ -4679,34 +4678,35 @@ fn run_stage_commands(
         let output_exceeded = Arc::new(AtomicBool::new(false));
         let mut output_drains = Vec::new();
         let cap = output_cap.unwrap_or(u64::MAX);
-        if output_cap.is_some() {
-            let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
-            if let Some(stream) = child.stdout.take() {
-                child_streams.push(Box::new(stream));
-            }
-            if let Some(stream) = child.stderr.take() {
-                child_streams.push(Box::new(stream));
-            }
-            for stream in child_streams {
-                let total = Arc::clone(&output_total);
-                let exceeded = Arc::clone(&output_exceeded);
-                output_drains.push(thread::spawn(move || {
-                    let mut stream = stream;
-                    let mut buffer = [0u8; 8192];
-                    loop {
-                        match stream.read(&mut buffer) {
-                            Ok(0) | Err(_) => break,
-                            Ok(read) => {
-                                let summed =
-                                    total.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
-                                if summed > cap {
-                                    exceeded.store(true, Ordering::Release);
-                                }
+        let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
+        if let Some(stream) = child.stdout.take() {
+            child_streams.push(Box::new(stream));
+        }
+        if let Some(stream) = child.stderr.take() {
+            child_streams.push(Box::new(stream));
+        }
+        for stream in child_streams {
+            let total = Arc::clone(&output_total);
+            let exceeded = Arc::clone(&output_exceeded);
+            output_drains.push(thread::spawn(move || {
+                let mut stream = stream;
+                let mut captured = Vec::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            captured.extend_from_slice(&buffer[..read]);
+                            let summed =
+                                total.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
+                            if summed > cap {
+                                exceeded.store(true, Ordering::Release);
                             }
                         }
                     }
-                }));
-            }
+                }
+                captured
+            }));
         }
         let status_result = loop {
             if let Some(status) = child.try_wait()? {
@@ -4748,8 +4748,11 @@ fn run_stage_commands(
             }
             thread::sleep(Duration::from_millis(20));
         };
+        let mut run_output = Vec::new();
         for drain in output_drains {
-            let _ = drain.join();
+            if let Ok(bytes) = drain.join() {
+                run_output.extend(bytes);
+            }
         }
         let mut cleanup_error = None;
         for (target, backup, existed) in secret_mounted.into_iter().rev() {
@@ -4807,8 +4810,11 @@ fn run_stage_commands(
         }
         let status = status_result?;
         if !status.success() {
+            let output = String::from_utf8_lossy(&run_output);
             return Err(DockerfileBuildError::Invalid(format!(
-                "RUN failed with status {status}"
+                "RUN {} failed with status {status}\n{}",
+                run.args.join(" "),
+                output.trim_end(),
             )));
         }
     }
@@ -8036,6 +8042,49 @@ mod tests {
             None,
         )
         .unwrap_or_else(|error| panic!("rootless RUN needs network and /proc: {error}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_run_reports_its_command_and_stderr() {
+        if skip_unavailable_rootless_build_sandbox() {
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).expect("context");
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /busybox\nRUN [\"/busybox\", \"sh\", \"-c\", \"echo step-stderr >&2; exit 23\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, context.join("busybox")).expect("busybox");
+        let runtime = temp.path().join("runtime");
+        let store =
+            crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
+        let result = super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+            &dockerfile,
+            Some("local/run-output:latest"),
+            &runtime,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        );
+        let error = match result {
+            Ok(_) => panic!("RUN must fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("step-stderr"), "error={message}");
+        assert!(message.contains("exit 23"), "error={message}");
     }
 
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";

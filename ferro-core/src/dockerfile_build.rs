@@ -5498,6 +5498,12 @@ fn copy_from_context(
                         .unwrap_or_else(|| "src".to_string()),
                 )
             };
+            fs::symlink_metadata(&source).map_err(|error| {
+                DockerfileBuildError::Invalid(format!(
+                    "COPY source {} is unavailable: {error}",
+                    source.display()
+                ))
+            })?;
             // Docker semantics: a source directory with a trailing slash
             // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
             // /out/), while a bare directory name is copied under its name.
@@ -8683,6 +8689,31 @@ mod tests {
         )
         .unwrap();
         assert!(!explicit_destination.join("app/skip.tmp").exists());
+    }
+
+    #[test]
+    fn copy_context_io_errors_name_the_source_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("node_modules/cors");
+        let error = super::copy_from_context(
+            temp.path(),
+            &temp.path().join("destination"),
+            &[super::CopySpec {
+                srcs: vec!["node_modules/cors".into()],
+                dest: "/cors".into(),
+                chmod: None,
+                owner: None,
+                checksum: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: false,
+            }],
+        )
+        .expect_err("a missing COPY source must fail");
+        assert!(
+            error.to_string().contains(&missing.display().to_string()),
+            "COPY error must identify the source path: {error}"
+        );
     }
 
     #[test]

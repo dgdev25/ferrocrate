@@ -4306,6 +4306,12 @@ fn run_stage_commands(
                 .arg("/")
                 .arg("--proc")
                 .arg("/proc")
+                // Cargo and other build tools open /dev/null while spawning
+                // their compiler children. Without a sandbox-local /dev,
+                // those children fail with a misleading ENOENT even though
+                // the stage executable is present.
+                .arg("--dev")
+                .arg("/dev")
                 .arg("--chdir")
                 .arg(
                     workdir

@@ -41,7 +41,7 @@ case "$row_id" in
   ubuntu-20.04-*) domain="ferro-ubuntu2004-01"; address="192.168.122.247" ;;
   debian-13-*) domain="ferro-debian-01"; address="192.168.122.20" ;;
   alpine-*) domain="ferro-alpine322-01"; address="192.168.122.128" ;;
-  aarch64-*) domain="ferro-arm-01-oracle"; address="132.145.25.108" ;;
+  aarch64-*) domain="ferro-arm-01-oracle"; address="${FERROCRATE_MATRIX_ARM_HOST:?set FERROCRATE_MATRIX_ARM_HOST to the aarch64 row host}" ;;
   *) echo "no libvirt guest mapping for row: $row_id" >&2; exit 2 ;;
 esac
 

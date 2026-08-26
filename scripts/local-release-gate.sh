@@ -52,11 +52,11 @@ else
     export RUSTUP_HOME="${RUSTUP_HOME:-$operator_home/.rustup}"
     export PATH="$operator_home/.cargo/bin:$PATH"
     cargo_bin="$operator_home/.cargo/bin/cargo"
-  elif [[ -x /home/USER/.cargo/bin/cargo ]]; then
-    export CARGO_HOME="${CARGO_HOME:-/home/USER/.cargo}"
-    export RUSTUP_HOME="${RUSTUP_HOME:-/home/USER/.rustup}"
-    export PATH="/home/USER/.cargo/bin:$PATH"
-    cargo_bin=/home/USER/.cargo/bin/cargo
+  elif [[ -x $HOME/.cargo/bin/cargo ]]; then
+    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+    export PATH="$HOME/.cargo/bin:$PATH"
+    cargo_bin=$HOME/.cargo/bin/cargo
   else
     echo "local release gate requires Cargo (set FERROCRATE_CARGO or expose the operator's Rustup toolchain)" >&2
     exit 2

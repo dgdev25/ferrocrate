@@ -631,7 +631,7 @@ fn proxy_requests_route_through_the_selected_backend_transport() {
             distro: "FerrocrateDesktop".into(),
             relay_addr: "127.0.0.1:4288".parse().unwrap(),
             relay_token: "bridge-secret".into(),
-            ferrocrate_binary: PathBuf::from("/home/USER/.local/bin/ferrocrate"),
+            ferrocrate_binary: PathBuf::from("/home/tester/.local/bin/ferrocrate"),
         },
         host.clone(),
     );

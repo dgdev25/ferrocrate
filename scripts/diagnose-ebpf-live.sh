@@ -14,10 +14,10 @@ command -v setsid >/dev/null 2>&1 || {
 
 # sudo resets the invoking user's Cargo/Rustup PATH. Keep the diagnostic
 # runnable from a privileged shell without requiring operators to mutate PATH.
-cargo_bin="${FERROCRATE_CARGO:-/home/USER/.cargo/bin/cargo}"
+cargo_bin="${FERROCRATE_CARGO:-$HOME/.cargo/bin/cargo}"
 [[ -x "$cargo_bin" ]] || { echo "missing Cargo executable: $cargo_bin" >&2; exit 2; }
-export CARGO_HOME="${CARGO_HOME:-/home/USER/.cargo}"
-export RUSTUP_HOME="${RUSTUP_HOME:-/home/USER/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 
 if [[ "$(id -u)" != 0 ]]; then
     echo "live eBPF diagnostics require root; rerun with sudo (exit 77)" >&2

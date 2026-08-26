@@ -18,7 +18,7 @@ command -v setsid >/dev/null 2>&1 || {
 
 cargo_bin="${FERROCRATE_CARGO:-}"
 if [[ -z "$cargo_bin" ]]; then
-  for candidate in /home/USER/.cargo/bin/cargo "$HOME/.cargo/bin/cargo"; do
+  for candidate in $HOME/.cargo/bin/cargo "$HOME/.cargo/bin/cargo"; do
     if [[ -x "$candidate" ]]; then
       cargo_bin="$candidate"
       break
@@ -30,8 +30,8 @@ fi
   exit 77
 }
 
-export CARGO_HOME="${CARGO_HOME:-/home/USER/.cargo}"
-export RUSTUP_HOME="${RUSTUP_HOME:-/home/USER/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 target_dir="${FERROCRATE_CRI_ROOTFUL_TARGET:-$(mktemp -d /tmp/ferrocrate-cri-rootful.XXXXXX)}"
 target_dir_owned=0
 if [[ -z "${FERROCRATE_CRI_ROOTFUL_TARGET:-}" ]]; then

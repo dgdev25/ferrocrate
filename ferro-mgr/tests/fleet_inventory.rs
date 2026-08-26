@@ -8,7 +8,7 @@ fn manager_persists_and_lists_active_and_revoked_host_inventory() {
     let store = ManagerStore::open(directory.path().join("manager.sqlite")).unwrap();
     for (node_id, endpoint, key) in [
         ("lab-x86", "192.168.122.9:50053", 1_u8),
-        ("oracle-arm", "132.145.25.108:50053", 2_u8),
+        ("oracle-arm", "203.0.113.10:50053", 2_u8),
     ] {
         store
             .register_node(Enrollment {

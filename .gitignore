@@ -16,3 +16,29 @@ apps/ferro-desktop-ui/src-tauri/gen/
 ui-verify/
 docs/assets/.claude-flow/
 :memory:
+
+# Agent tooling state (local only)
+.claude/
+.claude-flow/
+.swarm/
+.harness/
+.cif/
+.primer/
+memory/
+agentdb.rvf
+agentdb.rvf.lock
+ruvector.db
+.mcp.json
+prd2build.config.json
+.playwright-mcp/
+
+# Common local files
+.env
+.env.*
+*.log
+.DS_Store
+.vscode/
+.idea/
+*.db
+*.db-shm
+*.db-wal

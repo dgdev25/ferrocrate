@@ -475,6 +475,13 @@ impl BackendCore {
     }
 
     pub fn start(&self) -> Result<BackendStatus, BackendError> {
+        self.start_with_commands(&self.start_commands)
+    }
+
+    pub(crate) fn start_with_commands(
+        &self,
+        start_commands: &[CommandSpec],
+    ) -> Result<BackendStatus, BackendError> {
         *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Starting;
         if self.host.health(&self.transport).unwrap_or(false) {
             *self.owned.lock().map_err(|_| BackendError::State)? = false;
@@ -482,8 +489,7 @@ impl BackendCore {
             *self.failure.lock().map_err(|_| BackendError::State)? = None;
             return Ok(self.status());
         }
-        let start_result = self
-            .start_commands
+        let start_result = start_commands
             .iter()
             .try_for_each(|command| self.host.start(command));
         match start_result {

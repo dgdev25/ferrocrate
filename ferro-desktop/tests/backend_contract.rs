@@ -50,6 +50,7 @@ struct FakeHost {
     healthy_after_maintains: Option<usize>,
     becomes_healthy_on_start: bool,
     fail_program: Mutex<Option<String>>,
+    exec_stdout: Mutex<Vec<u8>>,
 }
 
 impl FakeHost {
@@ -70,6 +71,14 @@ impl FakeHost {
     fn healthy_after_maintains(count: usize) -> Arc<Self> {
         Arc::new(Self {
             healthy_after_maintains: Some(count),
+            ..Self::default()
+        })
+    }
+
+    fn resolves_engine_to(path: &str) -> Arc<Self> {
+        Arc::new(Self {
+            becomes_healthy_on_start: true,
+            exec_stdout: Mutex::new(format!("{path}\n").into_bytes()),
             ..Self::default()
         })
     }
@@ -150,7 +159,7 @@ impl BackendHost for FakeHost {
             .push((command.clone(), request.clone()));
         Ok(ExecResponse {
             code: 0,
-            stdout: b"ok".to_vec(),
+            stdout: self.exec_stdout.lock().unwrap().clone(),
             stderr: Vec::new(),
         })
     }
@@ -191,6 +200,7 @@ fn linux_config() -> LinuxNativeConfig {
 fn wsl_config() -> Wsl2Config {
     Wsl2Config {
         relay_token: "bridge-secret".into(),
+        ferrocrate_binary: PathBuf::from("/home/ferro/.local/bin/ferrocrate"),
         ..Wsl2Config::default()
     }
 }
@@ -308,6 +318,59 @@ fn wsl2_uses_a_real_subprocess_lifecycle() {
         Some(PathBuf::from(".local/state/ferrocrate/ferrocrate.sock"))
     );
     assert_eq!(backend.stop().unwrap().state, BackendState::Stopped);
+}
+
+#[test]
+fn wsl2_resolves_and_records_the_default_guest_engine_before_start() {
+    let host = FakeHost::resolves_engine_to("/home/ferro/.local/bin/ferrocrate");
+    let backend = Wsl2Backend::with_host(
+        Wsl2Config {
+            distro: "FerrocrateDesktop".into(),
+            relay_addr: "127.0.0.1:4288".parse().unwrap(),
+            relay_token: String::new(),
+            ferrocrate_binary: PathBuf::new(),
+        },
+        host.clone(),
+    );
+
+    backend.start().unwrap();
+    backend
+        .exec(ExecRequest::new("ferrocrate").args(["doctor", "--json"]))
+        .unwrap();
+
+    assert_eq!(
+        host.execs.lock().unwrap().as_slice(),
+        &[
+            (
+                CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec",]),
+                ExecRequest::new("sh").args([
+                    "-lc",
+                    "PATH=\"$HOME/.local/bin:$PATH\"; command -v ferrocrate",
+                ]),
+            ),
+            (
+                CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec",]),
+                ExecRequest::new("env").args([
+                    "/home/ferro/.local/bin/ferrocrate",
+                    "doctor",
+                    "--json",
+                ]),
+            ),
+        ]
+    );
+    assert_eq!(
+        host.starts.lock().unwrap().as_slice(),
+        &[CommandSpec::new("wsl.exe").args([
+            "-d",
+            "FerrocrateDesktop",
+            "--exec",
+            "sh",
+            "-lc",
+            "exec '/home/ferro/.local/bin/ferrocrate' daemon --socket \"$HOME/$1\" --docker-compat",
+            "ferrocrate-wsl",
+            ".local/state/ferrocrate/ferrocrate.sock",
+        ])]
+    );
 }
 
 #[test]

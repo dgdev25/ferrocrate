@@ -41,6 +41,27 @@ where
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StringListOrMap {
+    List(Vec<String>),
+    Map(HashMap<String, String>),
+}
+
+fn deserialize_string_list_or_map<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<StringListOrMap>::deserialize(deserializer)?;
+    Ok(value.map(|value| match value {
+        StringListOrMap::List(values) => values,
+        StringListOrMap::Map(values) => values
+            .into_iter()
+            .map(|(source, target)| format!("{source}:{target}"))
+            .collect(),
+    }))
+}
+
 /// Errors that can occur during compose file parsing or validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
@@ -109,9 +130,11 @@ pub struct Service {
     pub env_file: Option<Vec<String>>,
 
     /// Port mappings (e.g., "8080:80").
+    #[serde(default, deserialize_with = "deserialize_string_list_or_map")]
     pub ports: Option<Vec<String>>,
 
     /// Volume mount specifications.
+    #[serde(default, deserialize_with = "deserialize_string_list_or_map")]
     pub volumes: Option<Vec<String>>,
 
     /// Secrets mounted read-only under `/run/secrets` by default.
@@ -155,6 +178,7 @@ pub struct Service {
 
 /// Build configuration for creating container images.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(from = "BuildRepr")]
 pub struct Build {
     /// Build context path (relative to compose file).
     pub context: Option<String>,
@@ -164,6 +188,38 @@ pub struct Build {
 
     /// Build arguments as key-value pairs.
     pub args: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BuildRepr {
+    Short(String),
+    Long {
+        context: Option<String>,
+        dockerfile: Option<String>,
+        args: Option<HashMap<String, String>>,
+    },
+}
+
+impl From<BuildRepr> for Build {
+    fn from(value: BuildRepr) -> Self {
+        match value {
+            BuildRepr::Short(context) => Self {
+                context: Some(context),
+                dockerfile: None,
+                args: None,
+            },
+            BuildRepr::Long {
+                context,
+                dockerfile,
+                args,
+            } => Self {
+                context,
+                dockerfile,
+                args,
+            },
+        }
+    }
 }
 
 /// Container command - either a string or list of arguments.
@@ -521,6 +577,46 @@ services:
             DependsOn::Simple(list) => assert_eq!(list, &vec!["db".to_string()]),
             _ => panic!("unexpected depends_on"),
         }
+    }
+
+    #[test]
+    fn accepts_compose_short_and_mapping_service_forms() {
+        let compose = ComposeFile::parse(
+            r#"
+services:
+  short:
+    build: .
+    command: echo hello
+    environment: [A=1]
+    ports: ["8080:80"]
+    volumes: ["data:/var/lib/data"]
+  long:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.dev
+    command: ["echo", "hello"]
+    environment:
+      B: "2"
+    ports:
+      "8081": "81"
+    volumes:
+      cache: /cache
+"#,
+            &HashMap::new(),
+        )
+        .expect("Compose short and mapping forms must parse");
+        let short = &compose.services["short"];
+        assert_eq!(short.build.as_ref().and_then(|build| build.context.as_deref()), Some("."));
+        assert!(matches!(short.command, Some(super::Command::String(_))));
+        assert!(matches!(short.environment, Some(super::Environment::List(_))));
+        assert_eq!(short.ports, Some(vec!["8080:80".to_string()]));
+        assert_eq!(short.volumes, Some(vec!["data:/var/lib/data".to_string()]));
+        let long = &compose.services["long"];
+        assert_eq!(long.build.as_ref().and_then(|build| build.context.as_deref()), Some("./app"));
+        assert!(matches!(long.command, Some(super::Command::List(_))));
+        assert!(matches!(long.environment, Some(super::Environment::Map(_))));
+        assert_eq!(long.ports, Some(vec!["8081:81".to_string()]));
+        assert_eq!(long.volumes, Some(vec!["cache:/cache".to_string()]));
     }
 
     #[test]

@@ -43,3 +43,4 @@ prd2build.config.json
 *.db-shm
 *.db-wal
 .superpowers/
+bench/fuzz/__pycache__/

@@ -146,6 +146,10 @@ pub enum Transport {
         distro: String,
         path: PathBuf,
     },
+    ProcessDuplex {
+        command: CommandSpec,
+        endpoint: String,
+    },
     Loopback(SocketAddr),
     AuthenticatedLoopback {
         addr: SocketAddr,
@@ -160,6 +164,7 @@ impl fmt::Display for Transport {
             Self::WslUnixSocket { distro, path } => {
                 write!(formatter, "wsl://{distro}/$HOME/{}", path.display())
             }
+            Self::ProcessDuplex { endpoint, .. } => formatter.write_str(endpoint),
             Self::Loopback(addr) | Self::AuthenticatedLoopback { addr, .. } => {
                 write!(formatter, "http://{addr}")
             }
@@ -475,6 +480,13 @@ impl BackendCore {
     }
 
     pub fn start(&self) -> Result<BackendStatus, BackendError> {
+        self.start_with_commands(&self.start_commands)
+    }
+
+    pub(crate) fn start_with_commands(
+        &self,
+        start_commands: &[CommandSpec],
+    ) -> Result<BackendStatus, BackendError> {
         *self.state.lock().map_err(|_| BackendError::State)? = BackendState::Starting;
         if self.host.health(&self.transport).unwrap_or(false) {
             *self.owned.lock().map_err(|_| BackendError::State)? = false;
@@ -482,8 +494,7 @@ impl BackendCore {
             *self.failure.lock().map_err(|_| BackendError::State)? = None;
             return Ok(self.status());
         }
-        let start_result = self
-            .start_commands
+        let start_result = start_commands
             .iter()
             .try_for_each(|command| self.host.start(command));
         match start_result {
@@ -716,7 +727,7 @@ impl BackendHost for SystemBackendHost {
 
     fn health(&self, transport: &Transport) -> Result<bool, BackendError> {
         let response = self.request(transport, &TransportRequest::new("GET", "/_ping"));
-        Ok(matches!(response, Ok(response) if response.status == 200 && response.body == b"OK"))
+        Ok(matches!(response, Ok(response) if response.status == 200 && daemon_ping_response_is_healthy(&response.body)))
     }
 
     fn request(
@@ -726,7 +737,9 @@ impl BackendHost for SystemBackendHost {
     ) -> Result<TransportResponse, BackendError> {
         match transport {
             Transport::UnixSocket(path) => request_unix(path, request),
-            Transport::WslUnixSocket { .. } => request_duplex(transport, request),
+            Transport::WslUnixSocket { .. } | Transport::ProcessDuplex { .. } => {
+                request_duplex(transport, request)
+            }
             Transport::Loopback(addr) => request_tcp(*addr, None, request),
             Transport::AuthenticatedLoopback { addr, bearer_token } => {
                 request_tcp(*addr, Some(bearer_token), request)
@@ -1063,6 +1076,27 @@ fn connect_transport(transport: &Transport) -> Result<Box<dyn DuplexStream>, Bac
                 }),
             }))
         }
+        Transport::ProcessDuplex { command, .. } => {
+            let mut child = command
+                .to_command()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()?;
+            let stdin = child.stdin.take().ok_or_else(|| {
+                BackendError::Transport("guest relay stdin is unavailable".into())
+            })?;
+            let stdout = child.stdout.take().ok_or_else(|| {
+                BackendError::Transport("guest relay stdout is unavailable".into())
+            })?;
+            Ok(Box::new(WslDuplexStream {
+                inner: Arc::new(WslDuplexInner {
+                    child: Mutex::new(child),
+                    stdin: Mutex::new(Some(stdin)),
+                    stdout: Mutex::new(stdout),
+                }),
+            }))
+        }
         Transport::Loopback(addr) | Transport::AuthenticatedLoopback { addr, .. } => {
             if !addr.ip().is_loopback() {
                 return Err(BackendError::Transport(
@@ -1115,6 +1149,11 @@ fn percent_encode_path(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn daemon_ping_response_is_healthy(body: &[u8]) -> bool {
+    std::str::from_utf8(body)
+        .is_ok_and(|value| value.trim() == "OK")
 }
 
 fn serialize_request(request: &TransportRequest, token: Option<&str>) -> Vec<u8> {
@@ -1301,6 +1340,12 @@ mod timeout_tests {
             condition.notify_all();
             Ok(())
         }
+    }
+
+    #[test]
+    fn daemon_ping_accepts_the_newline_terminated_engine_response() {
+        assert!(daemon_ping_response_is_healthy(b"OK\n"));
+        assert!(!daemon_ping_response_is_healthy(b"not ready\n"));
     }
 
     #[test]

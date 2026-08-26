@@ -21,6 +21,8 @@ PAID_RELEASE_TOKEN_ENDPOINT="${PAID_RELEASE_TOKEN_ENDPOINT:-}"
 PAID_ENTITLEMENT_FILE="${PAID_ENTITLEMENT_FILE:-$HOME/.ferrocrate/entitlement.lic}"
 FERROCRATE_CONFIG_DIR="${FERROCRATE_CONFIG_DIR:-$HOME/.ferrocrate}"
 VM_STATE_FILE="${VM_STATE_FILE:-${FERROCRATE_DESKTOP_VM_STATE:-$FERROCRATE_CONFIG_DIR/desktop-vm.json}}"
+VM_STATE_DIR="$(dirname "$VM_STATE_FILE")"
+VM_KNOWN_HOSTS_PATH="${VM_KNOWN_HOSTS_PATH:-$VM_STATE_DIR/known_hosts}"
 VM_DIR="${VM_DIR:-${FERROCRATE_VM_DIR:-$FERROCRATE_CONFIG_DIR/vm}}"
 VM_DISK_PATH_OVERRIDE="${VM_DISK_PATH:-}"
 VM_DISK_PATH="${VM_DISK_PATH:-$VM_DIR/ferrocrate-desktop.qcow2}"
@@ -569,8 +571,8 @@ start_guest_socket_forward() {
     -i "$VM_SSH_KEY_PATH" \
     -p "$VM_SSH_PORT" \
     -o ExitOnForwardFailure=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$VM_KNOWN_HOSTS_PATH" \
     -L "127.0.0.1:${VM_API_PORT}:${VM_GUEST_SOCKET}" \
     "${VM_GUEST_USER}@127.0.0.1" &
   echo $! >"$pidfile"
@@ -705,8 +707,8 @@ guest_ssh() {
   ssh \
     -i "$VM_SSH_KEY_PATH" \
     -p "$VM_SSH_PORT" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$VM_KNOWN_HOSTS_PATH" \
     -o ConnectTimeout=10 \
     "${VM_GUEST_USER}@127.0.0.1" \
     -- bash -lc "$command_string"
@@ -769,6 +771,8 @@ bootstrap_desktop_vm() {
   fi
 
   vm_backend="$(vm_backend_for_host)"
+  mkdir -p "$VM_STATE_DIR"
+  rm -f "$VM_KNOWN_HOSTS_PATH"
   prepare_vm_image "$vm_backend"
   generate_vm_ssh_key
   generate_cloud_init_seed

@@ -1019,8 +1019,10 @@ fn default_vm_name() -> String {
 fn command_exists(bin: &str) -> bool {
     Command::new(bin)
         .arg("--version")
-        .status()
-        .map(|status| status.success())
+        .output()
+        // Some required tools (notably macOS ssh-keygen and hdiutil) do not
+        // implement `--version`; being executable is the availability test.
+        .map(|_| true)
         .unwrap_or(false)
 }
 
@@ -1113,18 +1115,52 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
     let key_path = vm_dir.join("vm_ssh_key");
     let pub_path = vm_dir.join("vm_ssh_key.pub");
     if key_path.exists() && pub_path.exists() {
+        restrict_ssh_private_key(&key_path)?;
         return Ok((key_path, pub_path));
     }
     let status = Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-f"])
-        .arg(&key_path)
+        .args(ssh_keygen_generate_args(&key_path))
         .status()?;
     if !status.success() {
         return Err(DesktopError::Invalid(
             "failed to generate vm ssh key".to_string(),
         ));
     }
+    restrict_ssh_private_key(&key_path)?;
     Ok((key_path, pub_path))
+}
+
+fn reset_vm_known_hosts(vm_dir: &Path) -> Result<(), DesktopError> {
+    let path = vm_dir.join("known_hosts");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ssh_keygen_generate_args(key_path: &Path) -> Vec<String> {
+    vec![
+        "-t".to_string(),
+        "ed25519".to_string(),
+        "-N".to_string(),
+        String::new(),
+        "-f".to_string(),
+        key_path.display().to_string(),
+    ]
+}
+
+#[cfg(unix)]
+fn restrict_ssh_private_key(key_path: &Path) -> Result<(), DesktopError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_ssh_private_key(_key_path: &Path) -> Result<(), DesktopError> {
+    Ok(())
 }
 
 fn ensure_cloud_init_iso(vm_dir: &Path, ssh_pubkey: &str) -> Result<PathBuf, DesktopError> {
@@ -1320,6 +1356,11 @@ fn run_daemon(
 }
 
 fn validate_daemon_addr(addr: &str, allow_remote: bool) -> Result<(), DesktopError> {
+    if addr == "127.0.0.1:4190" || addr == "localhost:4190" || addr == "[::1]:4190" {
+        return Err(DesktopError::Invalid(
+            "127.0.0.1:4190 is reserved for the web bridge; run the desktop daemon on its API port (default 127.0.0.1:4288)".to_string(),
+        ));
+    }
     if allow_remote {
         return Ok(());
     }
@@ -2132,6 +2173,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .to_string()
             });
             let vm_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+            reset_vm_known_hosts(vm_dir)?;
             let fs_backend = fs_backend.to_ascii_lowercase();
             if fs_backend != "virtiofs" && fs_backend != "9p" {
                 return Err(DesktopError::Invalid(format!(
@@ -2144,7 +2186,7 @@ fn run_vm_command(state_file: Option<&str>, command: VmCommands) -> Result<(), D
                     .parent()
                     .map(|p| p.join("virtiofsd.sock").display().to_string())
             });
-            let guest_user = guest_user.unwrap_or_else(|| "ferro".to_string());
+            let guest_user = guest_user.unwrap_or_else(|| "ubuntu".to_string());
             let mut ssh_private_key_path = ssh_private_key_path;
             let mut cloud_init_image_path = cloud_init_image_path;
             if backend.starts_with("qemu") {
@@ -3336,18 +3378,18 @@ fn backend_exec_request(cmd: &[String]) -> Result<BackendExecRequest, DesktopErr
 }
 
 fn select_exec_backend(_cmd: &[String]) -> Result<Box<dyn Backend>, DesktopError> {
-    #[cfg(windows)]
-    {
-        return Ok(Box::new(LinuxNativeBackend::new(
-            LinuxNativeConfig::default(),
-        )));
-    }
-
     #[cfg(target_os = "macos")]
     if !should_route_to_macos_guest(_cmd, exec_mode_from_env()) {
         return Ok(Box::new(LinuxNativeBackend::new(
             LinuxNativeConfig::default(),
         )));
+    }
+
+    #[cfg(windows)]
+    {
+        Ok(Box::new(LinuxNativeBackend::new(
+            LinuxNativeConfig::default(),
+        )))
     }
 
     #[cfg(not(windows))]
@@ -3463,6 +3505,8 @@ fn vm_state_running(state: &VmState) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::ensure_ssh_key;
     use super::{
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
@@ -3472,10 +3516,10 @@ mod tests {
         parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
-        terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
-        upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
-        write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
-        ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
+        ssh_keygen_generate_args, terminal_exec_create_path, terminal_exec_create_payload,
+        terminal_resize_path, upsert_forward_entry, validate_daemon_addr, vm_state_running,
+        volume_proxy_request, write_follow_frame, Cli, Commands, ExecMode, ExecRequest,
+        FollowChannel, FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
     #[cfg(windows)]
     use super::select_exec_backend;
@@ -3487,6 +3531,7 @@ mod tests {
     };
     use clap::Parser;
     use std::io::{BufRead, BufReader, Cursor, Read, Write};
+    use std::path::Path;
 
     #[test]
     fn cli_exec_consumer_builds_one_backend_program_request() {
@@ -3843,6 +3888,8 @@ mod tests {
     #[test]
     fn command_exists_treats_binary_name_as_literal_argv() {
         assert!(command_exists("rustc"));
+        assert!(command_exists("sh"));
+        assert!(command_exists("ssh-keygen"));
         assert!(!command_exists("rustc; printf injected"));
     }
 
@@ -4206,6 +4253,26 @@ mod tests {
         assert!(!vm_state_running(&state));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_ssh_key_creates_an_unencrypted_key_on_macos() {
+        let directory = tempfile::tempdir().expect("temp vm directory");
+        let (private_key, public_key) = ensure_ssh_key(directory.path()).expect("generate key");
+        assert!(private_key.is_file());
+        assert!(public_key.is_file());
+    }
+
+    #[test]
+    fn ssh_keygen_generation_uses_an_empty_passphrase_argument() {
+        assert_eq!(
+            ssh_keygen_generate_args(Path::new("/tmp/ferro-vm-key")),
+            vec!["-t", "ed25519", "-N", "", "-f", "/tmp/ferro-vm-key"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn exec_mode_parser_handles_known_values() {
         assert_eq!(parse_exec_mode(None), ExecMode::Auto);
@@ -4564,6 +4631,13 @@ mod tests {
         assert!(script.contains("$serviceName = \"FerroDesktop\""));
         assert!(script.contains("daemon --addr 127.0.0.1:4288"));
         assert!(script.contains("sc.exe create $serviceName"));
+    }
+
+    #[test]
+    fn daemon_refuses_the_port_reserved_for_the_web_bridge() {
+        let error = validate_daemon_addr("127.0.0.1:4190", false)
+            .expect_err("the web bridge exclusively owns port 4190");
+        assert!(error.to_string().contains("reserved for the web bridge"));
     }
 
     #[test]

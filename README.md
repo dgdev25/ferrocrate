@@ -22,9 +22,9 @@ builds runs under Docker, podman, or Kubernetes, and the other way round.
   PID start-time before signaling, so a recycled PID is never killed by
   mistake; state survives daemon restarts and is reconciled on startup.
 - **Qualified, not assumed** — every support claim links dated evidence from
-  real hosts; desktop acceptance is currently host-blocked by Windows WSL's
-  missing `socat` relay and Tahoe's unavailable nested VM/toolchain, recorded
-  in [`VM-ACCEPTANCE-2026-08-25.md`](docs/desktop/VM-ACCEPTANCE-2026-08-25.md).
+  real hosts; desktop acceptance remains blocked while the Windows WSL engine
+  rebuild completes and by a macOS VM SSH identity/known-host boundary, recorded in
+  [`VM-ACCEPTANCE-2026-08-25.md`](docs/desktop/VM-ACCEPTANCE-2026-08-25.md).
 
 ## 🚀 Quickstart
 
@@ -135,8 +135,8 @@ can be developed and unit-tested there.
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified 60/60 with the explicit `--peer-auth legacy-peercred` boundary; default pidfd authentication remains fail-closed |
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Qualified with dated evidence |
 | Rootless mode | Partial by distribution: the packaged Ubuntu 24.04+ AppArmor userns mechanism is qualified; hosts without `SO_PEERPIDFD` fail closed unless the daemon explicitly accepts legacy peercred's PID-reuse risk |
-| Windows 11 (WSL2 backend) | Build-completion boundary: native supervisor and web frontend built on the VM; Tauri, WSL-engine, and browser acceptance are not claimed |
-| macOS Tahoe (Linux VM backend) | Host-blocked boundary: nested virtualization is unavailable and vfkit/QEMU plus Node/npm are absent; no VM/browser acceptance claim |
+| Windows 11 (WSL2 backend) | Native desktop/UI rebuilt on `E:`; WSL engine rebuild is pending before authenticated bridge acceptance |
+| macOS Tahoe (Linux VM backend) | Blocked: QEMU/HVF and release sidecars are available, but the supervisor's default SSH identity path is absent and a stale loopback known-host entry blocks the tunnel |
 | Ubuntu 20.04 (HWE kernel 5.15) | Qualified 60/60 in opt-in `legacy-peercred` mode; stock kernel 5.4 remains below the enforced 5.10 minimum |
 
 The authoritative support contract is

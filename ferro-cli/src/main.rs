@@ -1427,6 +1427,17 @@ pub fn main() {
         }
         process::exit(125);
     }
+    if raw_args.first().map(String::as_str) == Some("__ferrocrate_desktop_relay") {
+        let Some(socket) = raw_args.get(1).filter(|_| raw_args.len() == 2) else {
+            eprintln!("desktop relay: expected one absolute socket path");
+            process::exit(2);
+        };
+        if let Err(error) = run_desktop_relay(socket) {
+            eprintln!("error: {error}");
+            process::exit(1);
+        }
+        return;
+    }
     match maybe_host_desktop_forward(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}
@@ -17896,6 +17907,30 @@ fn run_daemon(
 }
 
 #[cfg(target_os = "linux")]
+fn run_desktop_relay(socket: &str) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+
+    let mut socket_write = UnixStream::connect(socket)
+        .map_err(|error| format!("desktop relay: connect {socket}: {error}"))?;
+    let mut socket_read = socket_write
+        .try_clone()
+        .map_err(|error| format!("desktop relay: clone socket: {error}"))?;
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = std::io::stdin().lock();
+        std::io::copy(&mut stdin, &mut socket_write)?;
+        socket_write.shutdown(std::net::Shutdown::Write)
+    });
+    let mut stdout = std::io::stdout().lock();
+    std::io::copy(&mut socket_read, &mut stdout)
+        .and_then(|_| stdout.flush())
+        .map_err(|error| format!("desktop relay: copy response: {error}"))?;
+    writer
+        .join()
+        .map_err(|_| "desktop relay: request copier panicked".to_string())?
+        .map_err(|error| format!("desktop relay: copy request: {error}"))
+}
+
+#[cfg(target_os = "linux")]
 fn daemon_socket_identity(path: &Path) -> Result<(u64, u64), String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let metadata = std::fs::symlink_metadata(path)
@@ -19679,6 +19714,7 @@ fn handle_docker_compat_connection(
                     (pending_id.unwrap_or_else(|| requested_id.to_string()), spec)
                 };
                 let Some(spec) = spec else {
+                    let id = resolve_container_id(&runtime, requested_id)?;
                     runtime.start(&id).map_err(|error| error.to_string())?;
                     return Ok(http_response(204, &[], "text/plain"));
                 };

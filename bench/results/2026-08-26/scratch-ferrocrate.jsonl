@@ -1,47 +1,47 @@
-{"app":"scratch","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"doctor","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1504,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":703,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"network-create","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"network-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"events","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"image-prune","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
-{"app":"scratch","engine":"ferrocrate","step":"search","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T17:02Z","head":"11fb74a8"}
+{"app":"scratch","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"doctor","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":3908,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":1206,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"network-create","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"network-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"events","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"image-prune","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}
+{"app":"scratch","engine":"ferrocrate","step":"search","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-26T21:56Z","head":"864f01f7"}

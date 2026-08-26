@@ -3376,7 +3376,7 @@ mod tests {
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
-        registry_logout_command, run_backend_command, run_backend_command_with,
+        registry_logout_command, run_backend_command_with,
         run_container_bridge_command, start_image_build_stream_with, start_log_follow_stream_with,
         terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
         CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
@@ -3515,7 +3515,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn tauri_cli_consumer_routes_exec_through_backend() {
-        let result = run_backend_command(
+        let result = super::run_backend_command(
             "ferro-desktop",
             &[
                 "exec".into(),

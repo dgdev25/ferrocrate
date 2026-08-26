@@ -1119,10 +1119,7 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
         return Ok((key_path, pub_path));
     }
     let status = Command::new("ssh-keygen")
-        // macOS's ssh-keygen drops an empty argv value after `-N`; use its
-        // attached option form so this is unambiguously an empty passphrase.
-        .args(["-t", "ed25519", "-N=", "-f"])
-        .arg(&key_path)
+        .args(ssh_keygen_generate_args(&key_path))
         .status()?;
     if !status.success() {
         return Err(DesktopError::Invalid(
@@ -1131,6 +1128,17 @@ fn ensure_ssh_key(vm_dir: &Path) -> Result<(PathBuf, PathBuf), DesktopError> {
     }
     restrict_ssh_private_key(&key_path)?;
     Ok((key_path, pub_path))
+}
+
+fn ssh_keygen_generate_args(key_path: &Path) -> Vec<String> {
+    vec![
+        "-t".to_string(),
+        "ed25519".to_string(),
+        "-N".to_string(),
+        String::new(),
+        "-f".to_string(),
+        key_path.display().to_string(),
+    ]
 }
 
 #[cfg(unix)]
@@ -3481,6 +3489,7 @@ mod tests {
         parse_exec_mode, process_exec_request, read_exec_request, registry_login_request,
         render_macos_launch_agent_plist, render_windows_service_script, replay_follow_frames,
         run_request, save_forward_entries, save_vm_state, should_route_to_macos_guest,
+        ssh_keygen_generate_args,
         terminal_exec_create_path, terminal_exec_create_payload, terminal_resize_path,
         upsert_forward_entry, validate_daemon_addr, vm_state_running, volume_proxy_request,
         write_follow_frame, Cli, Commands, ExecMode, ExecRequest, FollowChannel, FollowFrame,
@@ -3488,6 +3497,7 @@ mod tests {
     };
     #[cfg(target_os = "macos")]
     use super::ensure_ssh_key;
+    use std::path::Path;
     #[cfg(target_os = "linux")]
     use super::{
         create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
@@ -4189,6 +4199,17 @@ mod tests {
         let (private_key, public_key) = ensure_ssh_key(directory.path()).expect("generate key");
         assert!(private_key.is_file());
         assert!(public_key.is_file());
+    }
+
+    #[test]
+    fn ssh_keygen_generation_uses_an_empty_passphrase_argument() {
+        assert_eq!(
+            ssh_keygen_generate_args(Path::new("/tmp/ferro-vm-key")),
+            vec!["-t", "ed25519", "-N", "", "-f", "/tmp/ferro-vm-key"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

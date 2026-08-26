@@ -15,6 +15,11 @@ SUITE="${1:?cli-e2e | compose-e2e | critest | oci-runtime | moby-integration | b
 ENGINE=ferrocrate; REFRESH=0
 while [ $# -gt 0 ]; do case "$1" in --engine) ENGINE="$2"; shift 2;; --refresh) REFRESH=1; shift;; *) shift;; esac; done
 
+# Docker exposes no CRI endpoint, so it cannot act as the oracle for critest.
+if [ "$SUITE" = critest ] && [ "$ENGINE" = docker ]; then
+  echo "critest has no Docker oracle: Docker exposes no CRI endpoint" >&2; exit 2
+fi
+
 SRC="${SUITE_SRC:-/data/dev/bench-suites}"; mkdir -p "$SRC"
 export PATH="$HOME/.local/go-install/go/bin:$PATH"
 DATE="$(date -u +%Y-%m-%d)"; RUN="$(date -u +%Y-%m-%dT%H:%MZ)"
@@ -42,14 +47,28 @@ fi
 echo "== $SUITE @ $(git -C "$DIR" rev-parse --short HEAD) on $ENGINE"
 
 # --- engine under test ---
+# critest speaks CRI, not the Docker API, so it needs the ferro-cri server on its
+# own socket. Every other suite goes through the Docker-compatible socket.
+CRI_PATH="${FERROCRATE_CRI_SOCKET:-/run/user/1000/ferrocrate-cri.sock}"
 if [ "$ENGINE" = ferrocrate ]; then
   command -v "$FERRO" >/dev/null 2>&1 || [ -x "$FERRO" ] || { echo "no ferro-cli at $FERRO" >&2; exit 2; }
-  pkill -f "^$FERRO daemon" 2>/dev/null; rm -f "$SOCK"
-  "$FERRO" daemon --docker-compat --socket "$SOCK" > "$WORK/daemon.log" 2>&1 &
-  DAEMON=$!
-  for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
-  export DOCKER_HOST="unix://$SOCK"
-  trap 'kill $DAEMON 2>/dev/null; rm -f "$SOCK"' EXIT
+  if [ "$SUITE" = critest ]; then
+    CRI_BIN="${FERROCRATE_CRI_BIN:-$BENCH/../target/release/ferro-cri}"
+    [ -x "$CRI_BIN" ] || { echo "no ferro-cri at $CRI_BIN; build it first" >&2; exit 2; }
+    pkill -f "^$CRI_BIN" 2>/dev/null; rm -f "$CRI_PATH"
+    FERROCRATE_CRI_SOCKET="$CRI_PATH" "$CRI_BIN" > "$WORK/daemon.log" 2>&1 &
+    DAEMON=$!
+    for _ in $(seq 1 100); do [ -S "$CRI_PATH" ] && break; sleep 0.1; done
+    [ -S "$CRI_PATH" ] || { echo "ferro-cri did not create $CRI_PATH; see $WORK/daemon.log" >&2; exit 2; }
+    trap 'kill $DAEMON 2>/dev/null; rm -f "$CRI_PATH"' EXIT
+  else
+    pkill -f "^$FERRO daemon" 2>/dev/null; rm -f "$SOCK"
+    "$FERRO" daemon --docker-compat --socket "$SOCK" > "$WORK/daemon.log" 2>&1 &
+    DAEMON=$!
+    for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
+    export DOCKER_HOST="unix://$SOCK"
+    trap 'kill $DAEMON 2>/dev/null; rm -f "$SOCK"' EXIT
+  fi
 else
   unset DOCKER_HOST
 fi
@@ -112,7 +131,16 @@ PY
     # test, and inspects the result from inside.
     echo "building runtime-tools validators"
     ( cd "$DIR" && make runtimetest validation-executables ) > "$WORK/build.log" 2>&1 || { echo "runtime-tools build failed; see $WORK/build.log" >&2; exit 2; }
-    RUNTIME="${OCI_RUNTIME:-$FERRO}"
+    # runtime-tools invokes an OCI runtime binary directly: create, start,
+    # state, delete against a bundle. Ferrocrate has no such binary today, so
+    # pointing this at ferro-cli would record false failures rather than real
+    # ones. Set OCI_RUNTIME explicitly to run the suite against one.
+    RUNTIME="${OCI_RUNTIME:-}"
+    if [ -z "$RUNTIME" ]; then
+      echo "oci-runtime: skipped — no OCI runtime binary. Set OCI_RUNTIME to run it." >&2
+      record "oci-runtime-suite" skip 0 "no OCI runtime binary; Ferrocrate exposes no create/start/state/delete interface" 0
+      echo "-> $OUT (skipped)"; exit 0
+    fi
     passed=0; failed=0
     for v in "$DIR"/validation/*.t; do
       name="$(basename "$v" .t)"
@@ -129,7 +157,7 @@ PY
       echo "building critest"; ( cd "$DIR" && make critest ) >"$WORK/build.log" 2>&1 || { echo "critest build failed; see $WORK/build.log" >&2; exit 2; }
       export PATH="$DIR/build/bin:$PATH"
     fi
-    CRI_SOCK="${FERROCRATE_CRI_SOCKET:-unix:///run/user/1000/ferrocrate-cri.sock}"
+    CRI_SOCK="unix://$CRI_PATH"
     echo "critest --runtime-endpoint $CRI_SOCK"
     critest --runtime-endpoint "$CRI_SOCK" --ginkgo.noColor > "$WORK/critest.out" 2>&1 || true
     grep -oE "^(•|S|F).*|^ *[0-9]+ (Passed|Failed|Pending|Skipped)" "$WORK/critest.out" | tail -5

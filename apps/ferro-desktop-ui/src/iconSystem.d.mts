@@ -7,6 +7,7 @@ export type IconName =
   | "compose"
   | "disk"
   | "globe"
+  | "servers"
   | "pulse"
   | "gear"
   | "play"
@@ -23,6 +24,6 @@ export type IconName =
 
 export function Icon(props: {
   name: IconName;
-  size?: 16 | 18 | 20;
+  size?: number;
   className?: string;
 }): ReactElement | null;

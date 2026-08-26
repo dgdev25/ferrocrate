@@ -98,7 +98,8 @@ export function FleetApp(): JSX.Element {
       setError("");
       setRunHost((current) => chooseRunHost(current, next.hosts as FleetHost[]));
       if (!deployHosts.length) {
-        setDeployHosts(next.hosts.filter((host: FleetHost) => host.connected).map((host: FleetHost) => host.node_id));
+        const nextHosts = next.hosts as FleetHost[];
+        setDeployHosts(nextHosts.filter((host) => host.connected).map((host) => host.node_id));
       }
     } catch (nextError) {
       if (isFleetSessionExpired(nextError)) {

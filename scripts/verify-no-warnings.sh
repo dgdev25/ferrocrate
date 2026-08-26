@@ -31,5 +31,8 @@ run_without_warnings cargo doc --workspace --no-deps
 (
   cd apps/ferro-desktop-ui
   run_without_warnings npm run build
+  # vite builds with esbuild, which strips types without checking them, so type
+  # errors were invisible to this gate until the declaration files had drifted.
+  run_without_warnings npm run typecheck
   run_without_warnings npm run lint
 )

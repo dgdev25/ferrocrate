@@ -22,6 +22,10 @@ export function listen<T>(event: string, handler: (event: { event: string; paylo
   return nativeTauriAvailable ? tauriListen<T>(event, handler) : webRuntime!.listen<T>(event, handler);
 }
 
-export function open(options?: { directory?: boolean; multiple?: boolean }) {
+export function open(options?: {
+  directory?: boolean;
+  multiple?: boolean;
+  filters?: Array<{ name: string; extensions: string[] }>;
+}) {
   return nativeTauriAvailable ? tauriOpen(options) : webRuntime!.open(options);
 }

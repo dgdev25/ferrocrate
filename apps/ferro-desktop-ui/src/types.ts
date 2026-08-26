@@ -3,7 +3,9 @@ export type CommandResult = {
   code: number;
   stdout: string;
   stderr: string;
-  message: string;
+  /** Set by the runtime. Results the UI builds itself omit it, and
+   *  commandMessage() falls back to stderr. */
+  message?: string;
 };
 
 export type DesktopSnapshot = {

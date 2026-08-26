@@ -10505,6 +10505,11 @@ fn ensure_image_present(
         return Ok(());
     }
     handle_pull_authorized(store, &canonical, false, origin, authorization)
+        .map_err(|error| format_image_pull_error(&canonical, &error))
+}
+
+fn format_image_pull_error(image: &str, reason: &str) -> String {
+    format!("run: pull image {image} failed: {reason}")
 }
 
 fn build_limits(
@@ -28295,6 +28300,16 @@ volumes:
             )),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pull_failure_names_the_requested_image_and_registry_reason() {
+        let error = super::format_image_pull_error(
+            "registry.invalid:5000/demo:latest",
+            "registry request failed: connection refused",
+        );
+        assert!(error.contains("registry.invalid:5000/demo:latest"));
+        assert!(error.contains("connection refused"));
     }
 
     #[test]

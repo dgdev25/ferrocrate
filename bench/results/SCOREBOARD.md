@@ -1,6 +1,6 @@
 # Real-app bench scoreboard
 
-Generated 2026-08-26 20:50Z from the newest result file per app and engine.
+Generated 2026-08-26 20:59Z from the newest result file per app and engine.
 Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.
 
 | App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |
@@ -9,7 +9,6 @@ Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Bounda
 | battleships | - | no run | 57/57 | 0 | 0 | 0 | 0 |
 | docker-flask | - | no run | 19/52 | 0 | 0 | 0 | 0 |
 | docker-todo | - | no run | 52/52 | 0 | 0 | 0 | 0 |
-| express-hello | - | no run | 19/52 | 0 | 0 | 0 | 0 |
 | fastapi-fullstack | - | no run | 14/47 | 0 | 0 | 0 | 0 |
 | flask-tutorial | - | no run | 57/57 | 0 | 0 | 0 | 0 |
 | gin-basic | - | no run | 52/52 | 0 | 0 | 0 | 0 |

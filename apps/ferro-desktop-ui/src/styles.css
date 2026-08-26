@@ -257,6 +257,62 @@ input::placeholder, textarea::placeholder { color: var(--ink-muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .app-shell { display: none; }
 
+.fleet-shell { min-width: 0; }
+.fleet-login-wrap { flex: 1; display: grid; place-items: center; padding: 24px; overflow: auto; }
+.fleet-login { width: min(440px, 100%); display: grid; gap: 12px; padding: 28px; }
+.fleet-login h1, .fleet-form h2, .fleet-output h2, .fleet-health-card h2 { margin: 0; color: var(--ink); }
+.fleet-login > p:not(.eyebrow) { margin: 0 0 4px; color: var(--ink-muted); }
+.fleet-login label, .fleet-form label { display: grid; gap: 5px; color: var(--ink-muted); font-size: 11px; font-weight: 650; }
+.fleet-login input, .fleet-form input, .fleet-form select { width: 100%; }
+.fleet-error { margin: 0; color: var(--error); }
+.fleet-cluster-summary { margin-left: auto; color: var(--ink-muted); font-size: 12px; }
+.fleet-role { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border: 1px solid var(--ink-border); border-radius: 99px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.fleet-role.role-operate { color: var(--brand); border-color: var(--brand-ring); background: var(--brand-light); }
+.fleet-role.role-view { color: var(--info); background: var(--ink-bg); }
+.fleet-subnav { min-height: 42px; display: flex; align-items: center; gap: 4px; padding: 6px 22px; border-bottom: 1px solid var(--ink-border); background: var(--ink-bg); }
+.fleet-subnav button { min-height: 29px; padding: 4px 12px; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--ink-muted); background: transparent; font-size: 12px; font-weight: 650; cursor: pointer; }
+.fleet-subnav button:hover { color: var(--ink); background: var(--surface); }
+.fleet-subnav button.active { color: var(--brand); border-color: var(--brand-ring); background: var(--brand-light); }
+.fleet-main { overflow: auto; }
+.fleet-content { display: grid; gap: 14px; }
+.fleet-form { display: grid; grid-template-columns: minmax(150px, 1fr) repeat(3, minmax(130px, 1fr)) auto; align-items: end; gap: 12px; padding: 16px; }
+.fleet-form > div:first-child { align-self: center; }
+.fleet-form .fleet-command-field { grid-column: span 2; }
+.fleet-form fieldset { min-width: 180px; display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 0; padding: 8px 10px; border: 1px solid var(--ink-border); border-radius: var(--radius-sm); }
+.fleet-form fieldset legend { padding: 0 4px; color: var(--ink-muted); font-size: 11px; font-weight: 650; }
+.fleet-form fieldset label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); }
+.fleet-form fieldset input { width: auto; accent-color: var(--brand); }
+.deploy-form { grid-template-columns: minmax(150px, 1fr) repeat(2, minmax(150px, 1fr)) minmax(220px, 1.3fr) auto; }
+.fleet-state { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-muted); font-weight: 650; text-transform: capitalize; }
+.fleet-state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.fleet-state.state-online { color: var(--ok); }
+.fleet-state.state-degraded { color: var(--warn); }
+.fleet-state.state-revoked { color: var(--error); }
+.fleet-inline-actions { display: flex; gap: 6px; }
+.fleet-output { min-height: 180px; padding: 14px; }
+.fleet-output pre, .fleet-health-card pre { max-height: 260px; margin: 10px 0 0; overflow: auto; padding: 12px; border-radius: var(--radius-sm); color: var(--terminal-ink); background: var(--terminal-bg); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; }
+.fleet-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.fleet-health-card { min-width: 0; display: grid; gap: 14px; padding: 16px; }
+.fleet-health-card > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fleet-health-card dl { display: grid; gap: 8px; margin: 0; }
+.fleet-health-card dl > div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 7px; border-bottom: 1px solid var(--ink-border); }
+.fleet-health-card dt { color: var(--ink-muted); }
+.fleet-health-card dd { margin: 0; color: var(--ink); font-family: var(--mono); text-align: right; }
+.fleet-health-card summary { color: var(--ink-muted); cursor: pointer; }
+
+@media (max-width: 1100px) {
+  .fleet-form, .deploy-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fleet-form > div:first-child, .fleet-form fieldset, .fleet-form .fleet-command-field { grid-column: 1 / -1; }
+  .fleet-form > button { justify-self: start; }
+}
+
+@media (max-width: 700px) {
+  .fleet-cluster-summary { display: none; }
+  .fleet-form, .deploy-form { grid-template-columns: 1fr; }
+  .fleet-form > * { grid-column: 1 !important; }
+  .fleet-inline-actions { flex-direction: column; }
+}
+
 @media (max-width: 1100px) {
   .detail-panel { min-width: 330px; } th, td { padding-left: 10px; padding-right: 10px; } .muted-cell { max-width: 150px; }
 }

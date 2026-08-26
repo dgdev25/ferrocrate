@@ -4435,7 +4435,7 @@ struct EngineLockGuard {
 impl EngineLockGuard {
     fn try_acquire(runtime_dir: &Path) -> Result<Option<Self>, String> {
         use nix::errno::Errno;
-        use nix::fcntl::{flock, FlockArg};
+        use nix::fcntl::{fcntl, flock, FcntlArg, FdFlag, FlockArg};
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -4453,6 +4453,8 @@ impl EngineLockGuard {
             .mode(0o600)
             .open(&lock_path)
             .map_err(|error| format!("engine: open owner lock: {error}"))?;
+        fcntl(&file, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+            .map_err(|error| format!("engine: set owner lock close-on-exec: {error}"))?;
         match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
             Ok(()) => {
                 let owner_path = runtime_root.join(ENGINE_OWNER_FILE);
@@ -4533,9 +4535,28 @@ const ENGINE_OWNER_POLL: Duration = Duration::from_millis(10);
 impl EngineAccess {
     fn select(runtime_dir: &Path) -> Result<Self, String> {
         let deadline = Instant::now() + ENGINE_OWNER_WAIT;
+        let mut reclaimed_pid = None;
         loop {
             if let Some(owner) = EngineLockGuard::try_acquire(runtime_dir)? {
                 return Ok(Self::Direct(owner));
+            }
+            if !engine_owner_record_exists(runtime_dir)? {
+                if let Some(pid) = stale_non_daemon_lock_holder(runtime_dir)? {
+                    if reclaimed_pid != Some(pid) {
+                        eprintln!(
+                            "WARN engine: reclaiming stale owner lock held by non-daemon pid {pid}"
+                        );
+                        reclaim_stale_lock_holder(pid)?;
+                        reclaimed_pid = Some(pid);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "engine: stale non-daemon owner lock held by pid {pid} did not release"
+                        ));
+                    }
+                    std::thread::sleep(ENGINE_OWNER_POLL);
+                    continue;
+                }
             }
             let last_error = match active_engine_endpoint(runtime_dir) {
                 Ok(endpoint) => return Ok(Self::Delegate(endpoint)),
@@ -4548,6 +4569,60 @@ impl EngineAccess {
             }
             std::thread::sleep(ENGINE_OWNER_POLL);
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn engine_owner_record_exists(runtime_dir: &Path) -> Result<bool, String> {
+    let runtime_root = runtime_dir
+        .canonicalize()
+        .map_err(|error| format!("engine: canonicalize owned runtime directory: {error}"))?;
+    Ok(runtime_root.join(ENGINE_OWNER_FILE).is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn stale_non_daemon_lock_holder(runtime_dir: &Path) -> Result<Option<u32>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_root = runtime_dir
+        .canonicalize()
+        .map_err(|error| format!("engine: canonicalize owned runtime directory: {error}"))?;
+    let inode = std::fs::metadata(runtime_root.join(ENGINE_LOCK_FILE))
+        .map_err(|error| format!("engine: inspect owner lock: {error}"))?
+        .ino();
+    let holder = std::fs::read_to_string("/proc/locks")
+        .map_err(|error| format!("engine: inspect kernel lock holders: {error}"))?
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.get(1) != Some(&"FLOCK") || fields.get(3) != Some(&"WRITE") {
+                return None;
+            }
+            let locked_inode = fields.get(5)?.rsplit_once(':')?.1.parse::<u64>().ok()?;
+            (locked_inode == inode).then(|| fields.get(4)?.parse::<u32>().ok()).flatten()
+        });
+    let Some(pid) = holder else { return Ok(None) };
+    if pid == std::process::id() || process_is_daemon(pid) {
+        return Ok(None);
+    }
+    Ok(Some(pid))
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_daemon(pid: u32) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .is_some_and(|command| command.split(|byte| *byte == 0).any(|argument| argument == b"daemon"))
+}
+
+#[cfg(target_os = "linux")]
+fn reclaim_stale_lock_holder(pid: u32) -> Result<(), String> {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(format!("engine: terminate stale lock holder pid {pid}: {error}")),
     }
 }
 
@@ -17693,7 +17768,6 @@ fn run_daemon(
     let mut engine_owner = EngineLockGuard::try_acquire(&engine_runtime_dir)?
         .ok_or_else(|| "daemon: runtime engine is already owned by another process".to_string())?;
     authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
-    reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     // A daemon owns the request thread independently of each workload. Keep
     // launched containers alive after the Docker API request returns; the
     // short-lived CLI path sets the same policy for detached operations.
@@ -17725,6 +17799,11 @@ fn run_daemon(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|err| format!("daemon: set socket permissions: {err}"))?;
     listener.set_nonblocking(true).map_err(|err| format!("daemon: set socket nonblocking: {err}"))?;
+    // Publish atomically in the same startup step as lock acquisition, before
+    // opening engine stores. This bounds the lock-held/no-owner window to the
+    // socket bind itself and lets native clients immediately delegate.
+    engine_owner.publish_daemon_owner(socket_path)?;
+    reconcile_orphan_bridges_at_daemon_start(&runtime_dir);
     let runtime_dir = Arc::new(runtime_dir);
     let runtime = Arc::new(
         ContainerRuntime::new(runtime_dir.as_ref())
@@ -17755,7 +17834,6 @@ fn run_daemon(
     } else {
         None
     };
-    engine_owner.publish_daemon_owner(socket_path)?;
     let mut bound_identity = daemon_socket_identity(socket_path)?;
     let mut last_socket_check = Instant::now();
 
@@ -25105,6 +25183,22 @@ mod tests {
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn doctor_keeps_the_container_database_separate_from_runtime_directories() {
+        let _guard = ENV_MUTEX.lock().expect("environment lock");
+        let previous = std::env::var_os("FERROCRATE_HOME");
+        let temp = tempfile::tempdir().expect("doctor state fixture");
+        unsafe { std::env::set_var("FERROCRATE_HOME", temp.path()) };
+        let check = super::doctor_state_store_check().expect("state check");
+        assert!(check.ok, "{}", check.message);
+        assert!(temp.path().join("containers.db").is_file());
+        assert!(!temp.path().join("containers").is_file());
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FERROCRATE_HOME", value) },
+            None => unsafe { std::env::remove_var("FERROCRATE_HOME") },
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn docker_info_capabilities_report_rootless_network_truth() {
@@ -25383,6 +25477,32 @@ mod tests {
         assert!(matches!(access, EngineAccess::Direct(_)));
         assert!(started.elapsed() >= Duration::from_millis(50));
         release.join().expect("release owner");
+    }
+
+    #[test]
+    fn held_lock_by_non_daemon_process_is_reclaimed_without_owner_record() {
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let lock_path = runtime.path().join("engine.lock");
+        let mut holder = std::process::Command::new("flock")
+            .args(["--no-fork", "-n"])
+            .arg(&lock_path)
+            .args(["sleep", "30"])
+            .spawn()
+            .expect("start non-daemon lock holder");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while EngineLockGuard::try_acquire(runtime.path())
+            .expect("probe non-daemon holder")
+            .is_some()
+        {
+            assert!(Instant::now() < deadline, "holder did not acquire lock");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let result = EngineAccess::select(runtime.path());
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let access = result.expect("reclaim non-daemon lock holder");
+        assert!(matches!(access, EngineAccess::Direct(_)));
     }
 
     #[test]

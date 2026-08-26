@@ -27,6 +27,10 @@ impl DesiredStateBuilder {
         }
     }
 
+    pub fn cluster_id(&self) -> &str {
+        &self.cluster_id
+    }
+
     pub fn snapshot(
         &self,
         revision: u64,

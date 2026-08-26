@@ -8,6 +8,7 @@ const RESOURCE_TABS = [
   ["compose", "compose", "Compose"],
   ["volumes", "disk", "Volumes"],
   ["networks", "globe", "Networks"],
+  ["fleet", "servers", "Fleet"],
 ];
 
 export function showGlobalRunAction(activeSection) {

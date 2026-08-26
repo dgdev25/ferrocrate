@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
-    DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
 };
 use thiserror::Error;
 
@@ -18,6 +18,10 @@ pub enum PkiError {
     Rcgen(#[from] rcgen::Error),
     #[error("certificate signing request does not request client authentication")]
     MissingClientAuth,
+    #[error("certificate PEM is invalid")]
+    InvalidPem,
+    #[error("certificate principal is invalid")]
+    InvalidPrincipal,
 }
 
 #[derive(Debug)]
@@ -31,6 +35,7 @@ pub struct CertificateAuthority {
     params: CertificateParams,
     key: KeyPair,
     certificate_pem: String,
+    loaded: bool,
 }
 
 impl CertificateAuthority {
@@ -48,11 +53,27 @@ impl CertificateAuthority {
             params,
             key,
             certificate_pem: certificate.pem(),
+            loaded: false,
         })
     }
 
     pub fn certificate_pem(&self) -> &str {
         &self.certificate_pem
+    }
+
+    pub fn private_key_pem(&self) -> String {
+        self.key.serialize_pem()
+    }
+
+    pub fn from_pem(certificate_pem: &str, private_key_pem: &str) -> Result<Self, PkiError> {
+        let key = KeyPair::from_pem(private_key_pem)?;
+        let _ = Issuer::from_ca_cert_pem(certificate_pem, &key)?;
+        Ok(Self {
+            params: CertificateParams::default(),
+            key,
+            certificate_pem: certificate_pem.to_string(),
+            loaded: true,
+        })
     }
 
     pub fn issue_node_certificate(
@@ -94,13 +115,18 @@ impl CertificateAuthority {
             format!("ferrocrate/{cluster_id}/{node_id}"),
         );
         params.is_ca = IsCa::NoCa;
-        let issuer = rcgen::Issuer::from_params(&self.params, &self.key);
-        Ok(CertificateSigningRequestParams {
+        let request = CertificateSigningRequestParams {
             params,
             public_key: request.public_key,
-        }
-        .signed_by(&issuer)?
-        .pem())
+        };
+        let certificate = if self.loaded {
+            let issuer = Issuer::from_ca_cert_pem(&self.certificate_pem, &self.key)?;
+            request.signed_by(&issuer)?
+        } else {
+            let issuer = Issuer::from_params(&self.params, &self.key);
+            request.signed_by(&issuer)?
+        };
+        Ok(certificate.pem())
     }
 
     fn issue(
@@ -118,8 +144,13 @@ impl CertificateAuthority {
         params.is_ca = IsCa::NoCa;
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let key = KeyPair::generate()?;
-        let issuer = rcgen::Issuer::from_params(&self.params, &self.key);
-        let certificate = params.signed_by(&key, &issuer)?;
+        let certificate = if self.loaded {
+            let issuer = Issuer::from_ca_cert_pem(&self.certificate_pem, &self.key)?;
+            params.signed_by(&key, &issuer)?
+        } else {
+            let issuer = Issuer::from_params(&self.params, &self.key);
+            params.signed_by(&key, &issuer)?
+        };
         Ok(IssuedCertificate {
             certificate_pem: certificate.pem(),
             private_key_pem: key.serialize_pem(),
@@ -145,4 +176,38 @@ pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+pub fn certificate_identity_from_der(der: &[u8]) -> Result<CertificateIdentity, PkiError> {
+    use x509_parser::prelude::FromDer as _;
+    let (_, certificate) = x509_parser::certificate::X509Certificate::from_der(der)
+        .map_err(|_| PkiError::InvalidPem)?;
+    let principal = certificate
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|name| name.as_str().ok())
+        .ok_or(PkiError::InvalidPrincipal)?;
+    let mut parts = principal.split('/');
+    if parts.next() != Some("ferrocrate") {
+        return Err(PkiError::InvalidPrincipal);
+    }
+    let cluster_id = parts.next().filter(|value| !value.is_empty());
+    let subject = parts.next().filter(|value| !value.is_empty());
+    if parts.next().is_some() {
+        return Err(PkiError::InvalidPrincipal);
+    }
+    let (cluster_id, subject) = cluster_id.zip(subject).ok_or(PkiError::InvalidPrincipal)?;
+    let role = if subject == "administrator" {
+        CertificateRole::Administrator
+    } else {
+        CertificateRole::Node {
+            node_id: subject.to_string(),
+        }
+    };
+    Ok(CertificateIdentity {
+        cluster_id: cluster_id.to_string(),
+        role,
+        expires_at: certificate.validity().not_after.timestamp(),
+    })
 }

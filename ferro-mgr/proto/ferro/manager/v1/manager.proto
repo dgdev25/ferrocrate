@@ -6,6 +6,12 @@ service ControlService { rpc ControlStream(stream AgentMessage) returns (stream 
 service AdminService {
   rpc Inspect(AdminRequest) returns (AdminResponse);
   rpc PublishDesired(PublishDesiredRequest) returns (PublishDesiredResponse);
+  rpc FleetSnapshot(FleetSnapshotRequest) returns (FleetSnapshotResponse);
+  rpc FleetCommand(FleetCommandRequest) returns (FleetCommandResponse);
+  rpc RevokeHost(FleetRevokeRequest) returns (FleetRevokeResponse);
+  rpc FleetDeploy(FleetDeployRequest) returns (FleetDeployResponse);
+  rpc FleetRollback(FleetRollbackRequest) returns (FleetDeployResponse);
+  rpc IssueEnrollmentToken(IssueEnrollmentTokenRequest) returns (IssueEnrollmentTokenResponse);
 }
 
 message EnrollRequest { string node_id = 1; bytes public_key = 2; string enrollment_token = 3; bytes csr = 4; string endpoint = 5; }
@@ -14,8 +20,19 @@ message OverlayState { string overlay_id = 1; repeated string routes = 2; repeat
 message Peer { string node_id = 1; bytes public_key = 2; string endpoint = 3; repeated string allowed_ips = 4; }
 message DesiredState { string cluster_id = 1; uint64 cluster_epoch = 2; uint64 revision = 3; repeated OverlayState overlays = 4; bytes signature = 5; int64 lease_expires_unix = 6; }
 message AgentMessage { string node_id = 1; uint64 acknowledged_revision = 2; bytes payload = 3; }
-message ManagerMessage { DesiredState desired_state = 1; string error = 2; bytes desired_authorization_bundle = 3; }
+message ManagerMessage { DesiredState desired_state = 1; string error = 2; bytes desired_authorization_bundle = 3; bytes command_json = 4; }
 message AdminRequest { string cluster_id = 1; }
 message AdminResponse { uint32 node_count = 1; uint64 cluster_epoch = 2; }
 message PublishDesiredRequest { string cluster_id = 1; string node_id = 2; repeated OverlayState overlays = 3; }
 message PublishDesiredResponse { uint64 revision = 1; }
+message FleetSnapshotRequest { string cluster_id = 1; }
+message FleetSnapshotResponse { string snapshot_json = 1; }
+message FleetCommandRequest { string cluster_id = 1; string node_id = 2; string action = 3; string arguments_json = 4; }
+message FleetCommandResponse { int32 exit_code = 1; string stdout = 2; string stderr = 3; }
+message FleetRevokeRequest { string cluster_id = 1; string node_id = 2; string reason = 3; }
+message FleetRevokeResponse { bool revoked = 1; }
+message FleetDeployRequest { string cluster_id = 1; string name = 2; string image = 3; repeated string command = 4; repeated string node_ids = 5; }
+message FleetRollbackRequest { string cluster_id = 1; string deployment_id = 2; }
+message FleetDeployResponse { string deployment_json = 1; }
+message IssueEnrollmentTokenRequest { string cluster_id = 1; string node_id = 2; string endpoint = 3; string overlay_scope = 4; }
+message IssueEnrollmentTokenResponse { string enrollment_token = 1; int64 expires_at = 2; }

@@ -5,6 +5,7 @@ pub mod control;
 pub mod controller_authorization;
 pub mod desired_state;
 pub mod enrollment;
+pub mod fleet;
 pub mod limits;
 pub mod metrics;
 pub mod node;

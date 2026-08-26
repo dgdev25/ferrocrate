@@ -1,0 +1,10 @@
+# Bench override for docker-todo: its Traefik routers only match Host(`localhost`),
+# while the bench health probe connects to 127.0.0.1. Extend both router rules so
+# 127.0.0.1 requests route to the client/backend services. Product files unchanged.
+services:
+  client:
+    labels:
+      traefik.http.routers.client.rule: 'Host(`localhost`) || Host(`127.0.0.1`)'
+  backend:
+    labels:
+      traefik.http.routers.backend.rule: 'Host(`localhost`) && PathPrefix(`/api`) || Host(`127.0.0.1`) && PathPrefix(`/api`)'

@@ -1,0 +1,19 @@
+# Bench Dockerfile for actix-basics.
+# Mirrors bench/templates/rust/Dockerfile.tmpl, with two app-specific deltas:
+#   - builds the real workspace package name (example-basics), not "basics"
+#   - the example binds 127.0.0.1 inside the container; forward it to 0.0.0.0
+#     so a published port reaches it without editing example source
+FROM rust:1.97-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p example-basics
+# trixie matches the builder's glibc; bookworm's 2.36 cannot load the binary.
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates socat \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/example-basics* /usr/local/bin/example-basics
+ENV PORT=8080
+EXPOSE 8080
+# The example binds 127.0.0.1 only. Wait until it listens, then forward the
+# container-facing port to it. Do not bind socat before the app: same port.
+CMD ["sh", "-c", "/usr/local/bin/example-basics & i=0; while ! socat -T 2 -u OPEN:/dev/null TCP:127.0.0.1:8080 >/dev/null 2>&1; do sleep 1; i=$((i+1)); [ $i -gt 60 ] && exit 1; done; exec socat TCP-LISTEN:8080,fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:8080"]

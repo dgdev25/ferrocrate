@@ -1,0 +1,19 @@
+# Tests that assert Docker-only behaviour the feature matrix declares out of scope.
+# Every entry needs a matching row in docs/FEATURE-MATRIX.md. Reviewed on every run;
+# never grown to hide a product failure.
+#
+# Cross-architecture images: Ferrocrate builds and runs host-architecture only
+# (docs/remediation/ROUND-11-PLAN.md is the parked work).
+TestBuildPlatform
+TestPushMultiArch
+TestManifestList
+# Swarm and cluster orchestration: not implemented, not on the roadmap.
+TestSwarm
+TestNodeLs
+TestServiceCreate
+TestStackDeploy
+TestSecretCreate
+TestConfigCreate
+# Daemon restart and reconfiguration: the suite restarts dockerd through systemd.
+TestDaemonRestart
+TestLiveRestore

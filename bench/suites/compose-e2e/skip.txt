@@ -1,0 +1,7 @@
+# Compose tests that need Docker-only features. Each needs a feature-matrix row.
+# Swarm-mode deploy targets.
+TestStackDeploy
+TestDeployMode
+# Multi-architecture build targets.
+TestBuildPlatform
+TestBake

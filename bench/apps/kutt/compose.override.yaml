@@ -1,0 +1,6 @@
+# Bench override for kutt: host port 3000 is held by an unrelated project
+# container on this bench host, so remap the published port. The container
+# still listens on 3000 internally (PORT=3000 in .example.env).
+services:
+  server:
+    ports: !override ["36003:3000"]

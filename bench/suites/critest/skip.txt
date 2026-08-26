@@ -1,0 +1,2 @@
+# critest cases outside the CRI surface Ferrocrate implements.
+# Populate after the first recorded run; empty means nothing is skipped.

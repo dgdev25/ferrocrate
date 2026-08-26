@@ -538,6 +538,9 @@ pub enum Commands {
     ContainerPrune {
         #[arg(long = "filter")]
         filters: Vec<String>,
+        /// Docker clients pass -f; pruning is always immediate here.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
     /// Read the durable Docker-compatible event stream.
     #[cfg(target_os = "linux")]
@@ -5391,7 +5394,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 Ok(())
             }
             #[cfg(target_os = "linux")]
-            Commands::ContainerPrune { filters } => handle_container_prune(&runtime, &filters),
+            Commands::ContainerPrune { filters, .. } => handle_container_prune(&runtime, &filters),
             #[cfg(target_os = "linux")]
             Commands::Events {
                 since,
@@ -8576,7 +8579,7 @@ fn dispatch_remote_socket(
                 print_remote_container_list(&body, format, *quiet, *no_trunc)
             })
         })(),
-        Commands::ContainerPrune { filters } => (|| -> Result<(), String> {
+        Commands::ContainerPrune { filters, .. } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
             validate_docker_container_prune_filters(&parsed)?;
             let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
@@ -27895,6 +27898,32 @@ volumes:
     }
 
     #[test]
+    fn parses_container_prune_force_and_filters() {
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "container-prune",
+            "-f",
+            "--filter",
+            "until=24h",
+        ]);
+        match cli.command {
+            Commands::ContainerPrune { filters, force } => {
+                assert!(force);
+                assert_eq!(filters, vec!["until=24h"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let plain = Cli::parse_from(["ferrocrate", "container-prune"]);
+        match plain.command {
+            Commands::ContainerPrune { filters, force } => {
+                assert!(!force);
+                assert!(filters.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rmi_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
@@ -28871,20 +28900,6 @@ volumes:
 
     #[test]
     fn parses_volume_commands() {
-        // Building the clap command tree inside `Cli::parse_from` needs more
-        // stack than the 2 MiB default test thread in debug builds.
-        parses_volume_commands_impl();
-    }
-
-    fn parses_volume_commands_impl() {
-        let handle = std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(parses_volume_commands_body)
-            .expect("spawn parse test thread");
-        handle.join().expect("parse test thread");
-    }
-
-    fn parses_volume_commands_body() {
         let create = Cli::parse_from(["ferrocrate", "volume", "create", "data"]);
         match create.command {
             Commands::Volume { command } => match command {

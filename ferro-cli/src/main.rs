@@ -1093,6 +1093,9 @@ pub enum ComposeCommands {
     Up {
         #[arg(long)]
         profile: Vec<String>,
+        /// Build images for services with a build section before starting.
+        #[arg(long, default_value_t = false)]
+        build: bool,
         /// Return immediately and leave services running. Default is
         /// Docker-compatible attached mode: the command stays alive while
         /// project containers run, which is also the supported mode for
@@ -1137,7 +1140,12 @@ pub enum ComposeCommands {
     /// List containers of a Compose project.
     Ps,
     /// Read logs of Compose services.
-    Logs,
+    Logs {
+        /// Number of lines to show from the end of each service log.
+        #[arg(long)]
+        tail: Option<usize>,
+        services: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -3721,6 +3729,7 @@ fn run_remote_compose_watch_loop(
     loop {
         send_command(ComposeCommands::Up {
             profile: profile.clone(),
+            build: false,
             detach: true,
             services: Vec::new(),
         })?;
@@ -14733,6 +14742,7 @@ fn handle_compose(
     match command {
         ComposeCommands::Up {
             profile,
+            build: _,
             detach,
             services,
         } => {
@@ -15094,6 +15104,7 @@ fn handle_compose(
                     file,
                     ComposeCommands::Up {
                         profile: profile.clone(),
+                        build: false,
                         detach: true,
                         services: Vec::new(),
                     },
@@ -15348,9 +15359,30 @@ fn handle_compose(
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
             output = format!("compose ps: {:?}\n", services);
         }
-        ComposeCommands::Logs => {
-            let services = compose_logs(&project).map_err(|err| err.to_string())?;
-            output = format!("compose logs: {:?}\n", services);
+        ComposeCommands::Logs { tail, services } => {
+            let order = compose_logs(&project).map_err(|err| err.to_string())?;
+            let requested = compose_explicit_service_selection(&project, &services)?;
+            for service in order.into_iter().filter(|name| requested.contains(name)) {
+                for record in compose_lifecycle_records_for_service(runtime, &service)? {
+                    let (stdout, stderr) = runtime.logs_split(&record.id).map_err(|error| error.to_string())?;
+                    let combined = format!("{stdout}{stderr}");
+                    let lines = match tail {
+                        Some(limit) => combined
+                            .lines()
+                            .rev()
+                            .take(limit)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None => combined.trim_end_matches('\n').to_string(),
+                    };
+                    if !lines.is_empty() {
+                        output.push_str(&format!("{service}  | {lines}\n"));
+                    }
+                }
+            }
         }
     }
     Ok(output)
@@ -15487,6 +15519,24 @@ fn compose_lifecycle_records(
     } else {
         Err(format!("compose lifecycle partial result: {}", failures.join("; ")))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn compose_lifecycle_records_for_service(
+    runtime: &ContainerRuntime,
+    service: &str,
+) -> Result<Vec<ferro_core::container_store::ContainerRecord>, String> {
+    let replica_prefix = format!("{service}-");
+    Ok(runtime
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| {
+            record.name.as_deref().is_some_and(|name| {
+                name == service || name.starts_with(&replica_prefix)
+            })
+        })
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -25992,6 +26042,7 @@ mod tests {
                 file_name: PathBuf::from("compose.yaml"),
                 command: super::ComposeCommands::Up {
                     profile: Vec::new(),
+                    build: false,
                     detach: false,
                     services: Vec::new(),
                 },
@@ -28200,14 +28251,29 @@ volumes:
 
     #[test]
     fn parses_compose_command() {
-        let cli = Cli::parse_from(["ferrocrate", "compose", "up", "-d"]);
+        let cli = Cli::parse_from(["ferrocrate", "compose", "up", "-d", "--build"]);
         match cli.command {
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
                 assert!(
-                    matches!(command, ComposeCommands::Up { profile, detach, services } if profile.is_empty() && detach && services.is_empty())
+                    matches!(command, ComposeCommands::Up { profile, detach, build, services } if profile.is_empty() && detach && build && services.is_empty())
                 );
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compose_logs_tail_and_services() {
+        let cli = Cli::parse_from([
+            "ferrocrate", "compose", "logs", "--tail", "20", "web",
+        ]);
+        match cli.command {
+            Commands::Compose { command, .. } => assert!(matches!(
+                command,
+                ComposeCommands::Logs { tail: Some(20), services }
+                    if services == ["web"]
+            )),
             other => panic!("unexpected command: {other:?}"),
         }
     }

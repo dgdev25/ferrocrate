@@ -5208,7 +5208,6 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     None,
                     None,
                     None,
-                    None,
                 )?;
                 trace_attached_run_phase(
                     attached_run_trace_started,
@@ -6765,8 +6764,7 @@ fn handle_run(
     ai_model: Option<&str>,
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
-    resolved_command: Option<&[String]>,
-    resolved_image_volumes: Option<&[String]>,
+    resolved_image_execution: Option<&ResolvedRunImageExecution>,
 ) -> Result<String, String> {
     let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
@@ -6823,18 +6821,28 @@ fn handle_run(
         .chain(volume_mounts.iter())
         .map(|mount| mount.target.to_string_lossy().into_owned())
         .collect::<std::collections::BTreeSet<_>>();
-    let image_reference = resolve_reference(store, &effective_image)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("run: image config is unavailable for {effective_image}"))?;
-    let (image_config, _) = docker_image_metadata(runtime_dir, store, &image_reference)?;
-    let image_volume_entries = resolved_image_volumes
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            image_config_volume_targets(&image_config)
-                .into_iter()
-                .filter(|target| !explicit_targets.contains(target.trim_start_matches('/')))
-                .collect()
-        });
+    let image_execution = match resolved_image_execution {
+        Some(execution) => execution.clone(),
+        None => resolve_run_image_execution(
+            runtime_dir,
+            store,
+            &effective_image,
+            entrypoint,
+            cmd,
+            workdir,
+            user,
+        )?,
+    };
+    let image_volume_entries = if resolved_image_execution.is_some() {
+        image_execution.volume_mounts.clone()
+    } else {
+        image_execution
+            .volume_targets
+            .iter()
+            .filter(|target| !explicit_targets.contains(target.trim_start_matches('/')))
+            .cloned()
+            .collect()
+    };
     let image_volume_mounts = parse_volume_mounts(
         volume_store,
         &image_volume_entries,
@@ -6884,10 +6892,7 @@ fn handle_run(
         )?,
     };
     let restart_policy = parse_restart_policy(restart_policy)?;
-    let effective_cmd = match resolved_command {
-        Some(command) => command.to_vec(),
-        None => resolve_run_command(&image_config, entrypoint, cmd)?,
-    };
+    let effective_cmd = image_execution.command;
 
     let run = |container_id: Option<&str>| {
         if let Some(container_id) = container_id {
@@ -6907,8 +6912,8 @@ fn handle_run(
                 &tmpfs,
                 read_only_rootfs,
                 no_new_privs,
-                workdir,
-                user,
+                image_execution.workdir.as_deref(),
+                image_execution.user.as_deref(),
                 name,
                 &port_mappings,
                 &effective_network,
@@ -6932,8 +6937,8 @@ fn handle_run(
                 &tmpfs,
                 read_only_rootfs,
                 no_new_privs,
-                workdir,
-                user,
+                image_execution.workdir.as_deref(),
+                image_execution.user.as_deref(),
                 name,
                 &port_mappings,
                 &effective_network,
@@ -11498,36 +11503,45 @@ fn resolve_run_command(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_compose_image_execution(
+fn resolve_run_image_execution(
+    runtime_dir: &Path,
     store: &LocalImageStore,
     image: &str,
     entrypoint: Option<&str>,
     cmd: &[String],
-) -> Result<ResolvedComposeImageExecution, String> {
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<ResolvedRunImageExecution, String> {
     let reference = resolve_reference(store, image)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("compose: image config is unavailable for {image}"))?;
-    let (config, _) = docker_image_metadata(&runtime_dir(), store, &reference)?;
-    resolve_compose_image_execution_from_config(&config, entrypoint, cmd)
+        .ok_or_else(|| format!("run: image config is unavailable for {image}"))?;
+    let (config, _) = docker_image_metadata(runtime_dir, store, &reference)?;
+    resolve_run_image_execution_from_config(&config, entrypoint, cmd, workdir, user)
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_compose_image_execution_from_config(
+fn resolve_run_image_execution_from_config(
     image_config: &serde_json::Value,
     entrypoint: Option<&str>,
     cmd: &[String],
-) -> Result<ResolvedComposeImageExecution, String> {
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<ResolvedRunImageExecution, String> {
     let config = image_config.get("config").unwrap_or(image_config);
-    Ok(ResolvedComposeImageExecution {
+    Ok(ResolvedRunImageExecution {
         command: resolve_run_command(image_config, entrypoint, cmd)?,
-        workdir: config
-            .get("WorkingDir")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        user: config
-            .get("User")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        workdir: workdir.map(str::to_owned).or_else(|| {
+            config
+                .get("WorkingDir")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
+        user: user.map(str::to_owned).or_else(|| {
+            config
+                .get("User")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
         volume_targets: image_config_volume_targets(image_config),
         volume_mounts: Vec::new(),
     })
@@ -14469,7 +14483,8 @@ struct PreparedComposeService {
 /// They are resolved before the child is authorized and then supplied to the
 /// launcher so the authorized request is the request that executes.
 #[cfg(target_os = "linux")]
-struct ResolvedComposeImageExecution {
+#[derive(Debug, Clone)]
+struct ResolvedRunImageExecution {
     command: Vec<String>,
     workdir: Option<String>,
     user: Option<String>,
@@ -15038,11 +15053,14 @@ fn handle_compose(
                     .map(ComposePrerequisite::mutation)
                     .collect::<Vec<_>>();
                 let mut image_execution = if mutations.is_empty() {
-                    Some(resolve_compose_image_execution(
+                    Some(resolve_run_image_execution(
+                        &runtime_dir(),
                         store,
                         &prepared.image,
                         service.entrypoint.as_deref(),
                         &compose_service_command(service),
+                        None,
+                        None,
                     )?)
                 } else {
                     None
@@ -15143,11 +15161,14 @@ fn handle_compose(
                     wait_for_compose_dependencies(runtime, depends_on)
                         .map_err(|error| format!("compose partial result: {error}"))?;
                 }
-                let mut image_execution = image_execution.unwrap_or(resolve_compose_image_execution(
+                let mut image_execution = image_execution.unwrap_or(resolve_run_image_execution(
+                    &runtime_dir(),
                     store,
                     &prepared.image,
                     service.entrypoint.as_deref(),
                     &compose_service_command(service),
+                    None,
+                    None,
                 )?);
                 resolve_compose_image_volume_mounts(
                     &mut image_execution,
@@ -16181,7 +16202,7 @@ fn run_compose_service(
     instance_override: Option<&str>,
     prepared_image: Option<&str>,
     network_override: Option<&str>,
-    image_execution: &ResolvedComposeImageExecution,
+    image_execution: &ResolvedRunImageExecution,
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
         image.to_owned()
@@ -16270,8 +16291,7 @@ fn run_compose_service(
             None,
             None,
             None,
-            Some(&image_execution.command),
-            Some(&image_execution.volume_mounts),
+            Some(image_execution),
         )?;
     }
     Ok(())
@@ -16291,7 +16311,7 @@ fn compose_service_execution_digest(
     instance: &str,
     image: &str,
     network_override: Option<&str>,
-    image_execution: &ResolvedComposeImageExecution,
+    image_execution: &ResolvedRunImageExecution,
 ) -> Result<(String, [u8; 32]), String> {
     let env_entries = compose_service_env(project_dir, service)?;
     let env = parse_env_entries(&env_entries)?;
@@ -16568,7 +16588,7 @@ fn compose_service_mounts(
 /// this to `handle_run` would authorize a different request than we launch.
 #[cfg(target_os = "linux")]
 fn resolve_compose_image_volume_mounts(
-    image_execution: &mut ResolvedComposeImageExecution,
+    image_execution: &mut ResolvedRunImageExecution,
     volume_store: &LocalVolumeStore,
     project_dir: &Path,
     compose: &ferro_compose::ComposeFile,
@@ -20394,7 +20414,6 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     Some(&id),
-                    None,
                     None,
                 );
                 if let Err(error) = start_result {
@@ -30840,13 +30859,58 @@ volumes:
             }
         });
 
-        let resolved = super::resolve_compose_image_execution_from_config(&config, None, &[])
-            .expect("compose resolves image execution inputs");
+        let resolved = super::resolve_run_image_execution_from_config(
+            &config,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("compose resolves image execution inputs");
 
         assert_eq!(resolved.command, ["/usr/local/bin/server", "--listen", "8080"]);
         assert_eq!(resolved.workdir.as_deref(), Some("/srv/app"));
         assert_eq!(resolved.user.as_deref(), Some("1001:1001"));
         assert_eq!(resolved.volume_targets, ["/var/lib/app"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_image_resolution_applies_image_defaults_and_cli_overrides_once() {
+        let config = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/image-entrypoint"],
+                "Cmd": ["--serve"],
+                "WorkingDir": "/image-workdir",
+                "User": "1001:1001",
+                "Volumes": {"/image-data": {}}
+            }
+        });
+
+        let defaults = super::resolve_run_image_execution_from_config(
+            &config,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("image defaults resolve");
+        assert_eq!(defaults.command, ["/image-entrypoint", "--serve"]);
+        assert_eq!(defaults.workdir.as_deref(), Some("/image-workdir"));
+        assert_eq!(defaults.user.as_deref(), Some("1001:1001"));
+        assert_eq!(defaults.volume_targets, ["/image-data"]);
+
+        let overrides = super::resolve_run_image_execution_from_config(
+            &config,
+            Some("/override-entrypoint"),
+            &["--override".to_string()],
+            Some("/override-workdir"),
+            Some("2000:2000"),
+        )
+        .expect("CLI overrides resolve");
+        assert_eq!(overrides.command, ["/override-entrypoint", "--override"]);
+        assert_eq!(overrides.workdir.as_deref(), Some("/override-workdir"));
+        assert_eq!(overrides.user.as_deref(), Some("2000:2000"));
     }
 
     #[test]
@@ -30887,7 +30951,6 @@ volumes:
             None,
             "no",
             false,
-            None,
             None,
             None,
             None,

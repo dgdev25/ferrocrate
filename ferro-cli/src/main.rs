@@ -18975,7 +18975,7 @@ fn handle_docker_compat_connection(
             && path != "/images/get"
         {
             let encoded_name = path.trim_start_matches("/images/").trim_end_matches("/get");
-            let name = percent_decode_query_component(encoded_name)?;
+            let name = percent_decode_path_segment(encoded_name)?;
             query.insert("names".to_string(), name);
             path = "/images/get".to_string();
         }
@@ -21159,7 +21159,7 @@ fn handle_docker_compat_connection(
                 let encoded_name = path
                     .trim_start_matches("/images/")
                     .trim_end_matches("/json");
-                let name = percent_decode_query_component(encoded_name)?;
+                let name = percent_decode_path_segment(encoded_name)?;
                 let reference = resolve_reference(&store, &name)
                     .map_err(|err| err.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;
@@ -21170,7 +21170,7 @@ fn handle_docker_compat_connection(
                 let encoded_name = path
                     .trim_start_matches("/images/")
                     .trim_end_matches("/history");
-                let name = percent_decode_query_component(encoded_name)?;
+                let name = percent_decode_path_segment(encoded_name)?;
                 let reference = resolve_reference(&store, &name)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("docker: unknown image {name}"))?;
@@ -21335,7 +21335,7 @@ fn handle_docker_compat_connection(
                 let encoded = path
                     .trim_start_matches("/images/")
                     .trim_end_matches("/push");
-                let reference = percent_decode_query_component(encoded)?;
+                let reference = percent_decode_path_segment(encoded)?;
                 handle_push(&store, &reference)?;
                 let body = docker_image_progress(&reference, "Pushed");
                 http_response(200, &body, "application/json")
@@ -21378,13 +21378,15 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("POST", path) if path.starts_with("/images/") && path.ends_with("/tag") => {
-                let source = path.trim_start_matches("/images/").trim_end_matches("/tag");
+                let source = percent_decode_path_segment(
+                    path.trim_start_matches("/images/").trim_end_matches("/tag"),
+                )?;
                 let repo = query
                     .get("repo")
                     .ok_or_else(|| "docker: image tag requires repo".to_string())?;
                 let tag = query.get("tag").map(String::as_str).unwrap_or("latest");
                 let target = format!("{repo}:{tag}");
-                let plan = prepare_image_tag(&store, source, &target)
+                let plan = prepare_image_tag(&store, &source, &target)
                     .map_err(|error| error.to_string())?;
                 let permit = surface_authorization
                     .authorize_image_tag_plan(&origin, &plan)
@@ -21394,8 +21396,8 @@ fn handle_docker_compat_connection(
                 http_response(201, &[], "text/plain")
             }
             ("DELETE", path) if path.starts_with("/images/") => {
-                let reference = path.trim_start_matches("/images/");
-                handle_rmi_authorized(&store, reference, &origin, &surface_authorization)?;
+                let reference = percent_decode_path_segment(path.trim_start_matches("/images/"))?;
+                handle_rmi_authorized(&store, &reference, &origin, &surface_authorization)?;
                 http_response(200, b"[]", "application/json")
             }
             ("POST", "/volumes/create") => {
@@ -25912,21 +25914,37 @@ fn split_path_query(path: &str) -> Result<(String, HashMap<String, String>), Str
 }
 
 fn percent_decode_query_component(value: &str) -> Result<String, String> {
+    percent_decode_component(value, true, "query component")
+}
+
+#[cfg(target_os = "linux")]
+fn percent_decode_path_segment(value: &str) -> Result<String, String> {
+    // `+` is a literal character in a URI path. Treating it as a space here
+    // would corrupt valid image names while decoding buildx's `%2F` paths.
+    percent_decode_component(value, false, "path segment")
+}
+
+#[cfg(target_os = "linux")]
+fn percent_decode_component(
+    value: &str,
+    plus_as_space: bool,
+    component: &str,
+) -> Result<String, String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
-            b'+' => decoded.push(b' '),
+            b'+' if plus_as_space => decoded.push(b' '),
             b'%' => {
                 if index + 2 >= bytes.len() {
-                    return Err("docker: malformed percent-encoded query component".to_string());
+                    return Err(format!("docker: malformed percent-encoded {component}"));
                 }
                 let high = (bytes[index + 1] as char).to_digit(16).ok_or_else(|| {
-                    "docker: malformed percent-encoded query component".to_string()
+                    format!("docker: malformed percent-encoded {component}")
                 })?;
                 let low = (bytes[index + 2] as char).to_digit(16).ok_or_else(|| {
-                    "docker: malformed percent-encoded query component".to_string()
+                    format!("docker: malformed percent-encoded {component}")
                 })?;
                 decoded.push(((high << 4) | low) as u8);
                 index += 2;
@@ -25935,7 +25953,7 @@ fn percent_decode_query_component(value: &str) -> Result<String, String> {
         }
         index += 1;
     }
-    String::from_utf8(decoded).map_err(|_| "docker: query component is not valid UTF-8".to_string())
+    String::from_utf8(decoded).map_err(|_| format!("docker: {component} is not valid UTF-8"))
 }
 
 #[cfg(target_os = "linux")]
@@ -26183,7 +26201,7 @@ mod tests {
         parse_restart_policy, parse_tmpfs_mounts, parse_volume_mounts, percent_encode_path_component,
         read_docker_request_after_auth, read_http_request, read_merkle_leaves, remote_commit_path,
         remote_docker_request, remote_docker_stream_request, should_desktop_forward,
-        split_path_query, structured_desktop_error, top_level_command_name,
+        percent_decode_path_segment, split_path_query, structured_desktop_error, top_level_command_name,
         validate_build_platform, validate_docker_container_name,
         validate_docker_container_prune_filters, validate_docker_exec_command,
         validate_docker_exec_create, validate_docker_exec_start,
@@ -32730,6 +32748,24 @@ volumes:
         );
         assert!(split_path_query("/containers/json?filters=%zz").is_err());
         assert!(split_path_query("/containers/json?filters=%C3").is_err());
+    }
+
+    #[test]
+    fn docker_image_path_segments_decode_buildx_references_without_corrupting_plain_names() {
+        assert_eq!(
+            percent_decode_path_segment("docker.io%2Fmoby%2Fbuildkit%3Abuildx-stable-1")
+                .expect("encoded buildx reference"),
+            "docker.io/moby/buildkit:buildx-stable-1"
+        );
+        assert_eq!(
+            percent_decode_path_segment("docker.io/library/alpine:latest")
+                .expect("plain reference"),
+            "docker.io/library/alpine:latest"
+        );
+        assert_eq!(
+            percent_decode_path_segment("repo+name:latest").expect("literal plus"),
+            "repo+name:latest"
+        );
     }
 
     #[test]

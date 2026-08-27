@@ -269,7 +269,7 @@ FROZEN
     # docker/compose, which does not: it fails with inconsistent vendoring and
     # collects zero tests. Decide per repository.
     MODFLAG=""; [ -d "$DIR/vendor" ] && MODFLAG="-mod=vendor"
-    ( cd "$DIR" && go test -count=1 $MODFLAG -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    ( cd "$DIR" && go test -count=1 $MODFLAG -timeout "${GO_TEST_TIMEOUT:-45m}" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
     if [ ! -s "$WORK/go.json" ]; then
       echo "$SUITE/$ENGINE: go test produced no output; first error follows" >&2
       head -5 "$WORK/go.err" >&2
@@ -413,7 +413,7 @@ PYEOF
     # pools have been fully subnetted") — an env failure that swamps the
     # oracle. Cap parallel tests; 4 leaves headroom in the pool.
     PAR="${GO_TEST_PARALLEL:-4}"
-    ( cd "$DIR" && "${PRE[@]}" go test -count=1 "$MODFLAG" -timeout 45m -parallel "$PAR" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    ( cd "$DIR" && "${PRE[@]}" go test -count=1 "$MODFLAG" -timeout "${GO_TEST_TIMEOUT:-45m}" -parallel "$PAR" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
     [ -n "${GATEPID:-}" ] && kill "$GATEPID" 2>/dev/null
     python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
 import json, re, sys

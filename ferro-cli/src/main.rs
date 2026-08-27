@@ -23962,16 +23962,19 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
 
     let mut buffer = Vec::new();
     let mut header_end = None;
-    let mut temp = [0u8; 4096];
+    // An upgraded connection may pipeline its protocol preface immediately
+    // after the HTTP terminator.  Do not read past that terminator here: the
+    // subsequent protocol owner must receive every post-upgrade byte.
+    let mut byte = [0u8; 1];
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| err.to_string())?;
     loop {
-        let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
+        let read = stream.read(&mut byte).map_err(|err| err.to_string())?;
         if read == 0 {
             break;
         }
-        buffer.extend_from_slice(&temp[..read]);
+        buffer.extend_from_slice(&byte[..read]);
         if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
             header_end = Some(pos + 4);
             break;
@@ -24184,6 +24187,17 @@ fn run_buildkit_control_transport(
     execution: Arc<BuildkitExecutionContext>,
     lifetime: Duration,
 ) -> Result<(), String> {
+    // `read_http_request` installs a short blocking timeout while parsing the
+    // HTTP/1.1 upgrade.  It is not a control-stream deadline: carrying it
+    // into Tokio lets an idle but healthy HTTP/2 transport fail underneath a
+    // long-lived solve.  The explicit `lifetime` below remains the sole
+    // control connection deadline.
+    stream
+        .set_read_timeout(None)
+        .map_err(|error| format!("buildkit control: clear read timeout failed: {error}"))?;
+    stream
+        .set_write_timeout(None)
+        .map_err(|error| format!("buildkit control: clear write timeout failed: {error}"))?;
     stream
         .set_nonblocking(true)
         .map_err(|error| format!("buildkit control: set nonblocking failed: {error}"))?;
@@ -29847,6 +29861,29 @@ volumes:
         drop(writer);
         let err = read_http_request(&mut reader).expect_err("incomplete body");
         assert!(err.contains("incomplete request body"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_http_request_leaves_upgraded_bytes_on_the_socket() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, mut reader) = UnixStream::pair().expect("create socket pair");
+        writer
+            .write_all(
+                b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            )
+            .expect("write upgrade and HTTP/2 preface");
+        let request = read_http_request(&mut reader).expect("read HTTP upgrade");
+        assert_eq!(request.path, "/grpc");
+        reader
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set preface read timeout");
+        let mut preface = [0_u8; 24];
+        reader
+            .read_exact(&mut preface)
+            .expect("HTTP parser must retain bytes after the upgrade request");
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     }
 
     #[test]

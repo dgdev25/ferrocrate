@@ -290,6 +290,17 @@ struct BuiltStage {
     layer_digest: String,
     layer_media_type: String,
     layer_size: i64,
+    /// The context layer precedes a RUN delta in the final image.  It is
+    /// absent for stages without RUN because `layer_*` is then the context
+    /// layer itself.
+    context_layer: Option<StageLayer>,
+}
+
+#[derive(Debug, Clone)]
+struct StageLayer {
+    digest: String,
+    media_type: String,
+    size: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,6 +631,7 @@ fn restore_stage_from_checkpoint(
         layer_digest: checkpoint.layer_digest.clone(),
         layer_media_type: checkpoint.layer_media_type.clone(),
         layer_size: checkpoint.layer_size,
+        context_layer: None,
     }))
 }
 
@@ -709,6 +721,16 @@ fn build_one_stage(
     apply_layer_tar(&stage_root, &layer_path)
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
 
+    let context_layer = if !stage.run.is_empty() {
+        Some(StageLayer {
+            digest: layer_digest.clone(),
+            media_type: layer_media_type.clone(),
+            size: layer_size,
+        })
+    } else {
+        None
+    };
+
     if !stage.run.is_empty() {
         // The context layer has already been applied to the rootfs.  RUN must
         // produce its own change set, not repeat that context layer (and never
@@ -751,6 +773,7 @@ fn build_one_stage(
         layer_digest,
         layer_media_type,
         layer_size,
+        context_layer,
     })
 }
 
@@ -1316,6 +1339,17 @@ fn execute_stages_and_publish(
     let config_bytes = config_json.as_bytes();
     let config_digest = sha256_digest_bytes(config_bytes);
     let mut layers = base_infos[final_idx].descriptors.clone();
+    if let Some(context_layer) = &final_output.context_layer {
+        layers.push(Descriptor {
+            media_type: context_layer.media_type.clone(),
+            digest: context_layer.digest.clone(),
+            size: context_layer.size,
+            urls: Vec::new(),
+            annotations: None,
+            artifact_type: None,
+            platform: None,
+        });
+    }
     layers.push(Descriptor {
         media_type: final_output.layer_media_type.clone(),
         digest: final_output.layer_digest.clone(),
@@ -6792,7 +6826,7 @@ mod tests {
     };
     use sha2::Digest;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::thread;
@@ -9145,6 +9179,58 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("step-stderr"), "error={message}");
         assert!(message.contains("exit 23"), "error={message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_layer_is_a_delta_and_manifest_retains_the_context_layer() {
+        if skip_unavailable_rootless_build_sandbox() {
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).unwrap();
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY busybox /bin/sh\nRUN [\"/bin/sh\", \"-c\", \"touch /marker\"]\n",
+        )
+        .unwrap();
+        fs::copy(busybox, context.join("busybox")).unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let result = build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/run-delta:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .unwrap();
+        let layers = resolve_layer_paths_with_store(&runtime, &result.reference, &store).unwrap();
+        assert_eq!(layers.len(), 2, "context followed by the RUN delta");
+        let decoder = flate2::read::GzDecoder::new(fs::File::open(&layers[1]).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let names = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&PathBuf::from("marker")));
+        assert!(!names.contains(&PathBuf::from("bin/sh")));
+
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        for layer in &layers {
+            crate::rootfs::apply_layer_tar(&root, layer).unwrap();
+        }
+        assert!(root.join("bin/sh").is_file());
+        assert!(root.join("marker").is_file());
     }
 
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";

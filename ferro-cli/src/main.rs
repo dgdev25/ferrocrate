@@ -22591,6 +22591,7 @@ fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore, peer
         "ContainersPaused": containers.iter().filter(|c| c.status == "paused").count(),
         "ContainersStopped": containers.iter().filter(|c| c.status == "exited" || c.status == "stopped").count(),
         "Images": images.len(), "Driver": "overlayfs", "OperatingSystem": std::env::consts::OS,
+        "OSType": "linux",
         "Architecture": std::env::consts::ARCH,
         "SecurityOptions": capabilities["SecurityOptions"],
         "FerrocrateCapabilities": capabilities["FerrocrateCapabilities"],

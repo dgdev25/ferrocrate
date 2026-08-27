@@ -411,6 +411,11 @@ fn docker_compat_routes_support_version_prefix() {
         if route.ends_with("/info") || route == "/info" {
             let info: serde_json::Value =
                 serde_json::from_str(&body).expect("info response is JSON");
+            assert_eq!(
+                info["OSType"],
+                "linux",
+                "Docker info must identify the daemon OS type: {info}"
+            );
             let is_root = nix::unistd::Uid::effective().is_root();
             assert_eq!(
                 info["SecurityOptions"]

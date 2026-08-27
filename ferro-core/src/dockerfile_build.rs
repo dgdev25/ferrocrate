@@ -602,10 +602,9 @@ fn restore_stage_from_checkpoint(
     {
         return Ok(None);
     }
-    let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
-    if stage_root.exists() {
-        fs::remove_dir_all(&stage_root)?;
-    }
+    // Checkpoint restore may run beside another build using the same runtime.
+    // Its root must therefore be per-attempt, just like the context scratch.
+    let stage_root = create_build_dir(runtime_dir, &format!("stage-{idx}"))?;
     let cas_root = runtime_dir.join("images").join("cas").join("blake3");
     if !base_info.layers.is_empty() {
         construct_rootfs_with_dedup(&stage_root, &base_info.layers, &cas_root)
@@ -641,10 +640,10 @@ fn build_one_stage(
     inherited_root: Option<&Path>,
     control: &BuildControl,
 ) -> Result<BuiltStage, DockerfileBuildError> {
-    let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
-    if stage_root.exists() {
-        let _ = fs::remove_dir_all(&stage_root);
-    }
+    // Stage roots are mutable during COPY and RUN. A fixed `stage-{idx}`
+    // directory lets concurrent builds overlay each other's context; allocate
+    // a private one for this attempt instead.
+    let stage_root = create_build_dir(runtime_dir, &format!("stage-{idx}"))?;
     let cas_root = runtime_dir.join("images").join("cas").join("blake3");
     if let Some(parent_root) = inherited_root {
         copy_rootfs_contents(parent_root, &stage_root)?;

@@ -3605,12 +3605,28 @@ fn docker_compat_auto_remove_preserves_wait_exit_result() {
         .expect("container id")
         .to_string();
 
-    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
-    assert_eq!(status, 204, "start response: {response}");
-    let (status, response) = harness.request(
-        "POST",
-        &format!("/v1.45/containers/{id}/wait?condition=next-exit"),
-    );
+    // The container runs `exit 7` and auto-removes, so a wait issued after the
+    // start races the removal and gets a 404 whenever the host is busy: that is
+    // the FU-010 flake, and Docker returns 404 for a removed container too. The
+    // Docker CLI avoids the race by registering the wait before starting, so
+    // this does the same. The property under test is unchanged: a waiter must
+    // receive the exit status even though AutoRemove is set.
+    let waiter = std::thread::scope(|scope| {
+        let wait_id = id.clone();
+        let harness_ref = &harness;
+        let handle = scope.spawn(move || {
+            harness_ref.request(
+                "POST",
+                &format!("/v1.45/containers/{wait_id}/wait?condition=next-exit"),
+            )
+        });
+        // Give the waiter time to register before the container can exit.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+        assert_eq!(status, 204, "start response: {response}");
+        handle.join().expect("wait thread")
+    });
+    let (status, response) = waiter;
     assert_eq!(status, 200, "wait response: {response}");
     let result = serde_json::from_str::<serde_json::Value>(&response).expect("wait JSON");
     assert_eq!(result["StatusCode"], 7, "wait response: {response}");

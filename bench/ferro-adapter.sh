@@ -7,7 +7,6 @@ case "$1" in
   ps)        shift; exec "$F" containers "$@" ;;
   image)     shift; case "$1" in
                inspect) shift; exec "$F" image-inspect "$@" ;;
-               prune)   shift; exec "$F" image-prune --force ;;
                ls|list) shift; exec "$F" images "$@" ;;
                rm)      shift; exec "$F" rmi "$@" ;;
                *) exec "$F" image "$@" ;; esac ;;

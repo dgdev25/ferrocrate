@@ -721,9 +721,7 @@ impl std::fmt::Debug for CriRuntime {
 
 impl CriRuntime {
     pub fn new(store: Arc<LocalImageStore>, authorization: Arc<SurfaceAuthorization>) -> Self {
-        let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
-            .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
-        let runtime_dir = std::path::PathBuf::from(runtime_dir);
+        let runtime_dir = runtime_dir();
         let sandboxes = load_sandboxes(&runtime_dir);
         reconcile_persisted_sandbox_networks(&sandboxes);
         let mut pending = load_pending_sandbox_networks(&runtime_dir);
@@ -2084,16 +2082,31 @@ fn measure_tree_usage(path: &Path) -> Result<(u64, u64), std::io::Error> {
     Ok((used_bytes, entries))
 }
 
+fn runtime_dir_from_environment(
+    ferrocrate_home: Option<std::ffi::OsString>,
+    legacy_runtime_dir: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    ferrocrate_home
+        .or(legacy_runtime_dir)
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ferrocrate")))
+        .unwrap_or_else(|| std::path::PathBuf::from(".ferrocrate"))
+}
+
+fn runtime_dir() -> std::path::PathBuf {
+    runtime_dir_from_environment(
+        std::env::var_os("FERROCRATE_HOME"),
+        std::env::var_os("FERROCRATE_RUNTIME_DIR"),
+    )
+}
+
 pub async fn serve(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
     serve_disabled(socket_path).await
 }
 
 pub async fn serve_disabled(socket_path: impl AsRef<Path>) -> Result<(), CriError> {
-    let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
-    let runtime = Arc::new(ferro_core::runtime::ContainerRuntime::new(Path::new(
-        &runtime_dir,
-    ))?);
+    let runtime_dir = runtime_dir();
+    let runtime = Arc::new(ferro_core::runtime::ContainerRuntime::new(&runtime_dir)?);
     serve_configured(
         socket_path,
         CriIdentityPolicy::transport_only("cri:local-transport"),
@@ -2137,9 +2150,8 @@ async fn serve_configured(
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
         })
     });
-    let runtime_dir = std::env::var("FERROCRATE_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/var/lib/ferrocrate".to_string());
-    let store = LocalImageStore::open(Path::new(&runtime_dir).join("images"))?;
+    let runtime_dir = runtime_dir();
+    let store = LocalImageStore::open(runtime_dir.join("images"))?;
     let store = Arc::new(store);
     if delegation_enabled && identity_policy.verifier.is_none() {
         return Err(CriError::Configuration(
@@ -2164,6 +2176,18 @@ async fn serve_configured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_dir_prefers_ferrocrate_home_and_keeps_runtime_dir_as_alias() {
+        assert_eq!(
+            runtime_dir_from_environment(Some("/home-store".into()), Some("/legacy-store".into())),
+            std::path::PathBuf::from("/home-store")
+        );
+        assert_eq!(
+            runtime_dir_from_environment(None, Some("/legacy-store".into())),
+            std::path::PathBuf::from("/legacy-store")
+        );
+    }
 
     #[test]
     fn sandbox_launch_network_mode_preserves_none() {

@@ -1,0 +1,77 @@
+{
+ "run": "2026-08-27T09:28Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "top",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-5ef2a33b",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "kill",
+   "args": [
+    "kill",
+    "fz-5ef2a33b"
+   ]
+  },
+  {
+   "label": "top",
+   "args": [
+    "top",
+    "fz-5ef2a33b"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-5ef2a33b"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 2,
+  "label": "top",
+  "args": [
+   "top",
+   "fz-5ef2a33b"
+  ],
+  "docker": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Error response from daemon: container 29cba51b706c3b289fbf3b84337aaa2c2059d4ef4faee5a0e835ae546e11b585 is not running\n",
+   "state": {
+    "containers": [
+     "fz-5ef2a33b exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "PID CMD STATE\n3194652 sleep 300 unknown\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-5ef2a33b exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

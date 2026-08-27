@@ -1,0 +1,72 @@
+{
+ "run": "2026-08-27T09:22Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "volume-rm",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-c55eaeab",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "volume-rm",
+   "args": [
+    "volume",
+    "rm",
+    "fzv-c55eaeab"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-c55eaeab"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 1,
+  "label": "volume-rm",
+  "args": [
+   "volume",
+   "rm",
+   "fzv-c55eaeab"
+  ],
+  "docker": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Error response from daemon: get fzv-c55eaeab: no such volume\n",
+   "state": {
+    "containers": [
+     "fz-c55eaeab running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "volume rm: not found fzv-c55eaeab\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-c55eaeab running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

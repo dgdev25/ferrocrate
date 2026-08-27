@@ -218,6 +218,22 @@ def gen_sequence(rng: random.Random, tag: str, length: int) -> list[tuple[str, l
     return seq
 
 
+def ensure_base_image() -> None:
+    """Keep the base image in the ferrocrate store.
+
+    ferro-cli's image prune removes every unused image including the base
+    (S49/S50); without this check the next sequence's run re-pulls from the
+    registry, and Docker Hub's unauthenticated rate limit then turns an
+    environmental failure into false divergences.
+    """
+    code, out, _ = FERROCRATE.run(["images", "--format", "json"], timeout=30)
+    refs = []
+    for record in FERROCRATE._records(out):
+        refs += FERROCRATE._fields("images", record)
+    if IMAGE.split("/")[-1] not in refs:
+        FERROCRATE.run(["pull", IMAGE], timeout=300)
+
+
 def cleanup(tag: str) -> None:
     for engine in (DOCKER, FERROCRATE):
         for name in (f"fz-{tag}", f"fz-{tag}-r", f"fz2-{tag}"):
@@ -226,6 +242,7 @@ def cleanup(tag: str) -> None:
         engine.run(["volume", "rm", f"fzv-{tag}"], timeout=30)
         engine.run(["rmi", f"fzimg-{tag}:latest"], timeout=30)
         engine.run(["rmi", f"fzimg2-{tag}:copy"], timeout=30)
+    ensure_base_image()
     shutil.rmtree(scratch_dir(tag), ignore_errors=True)
 
 
@@ -349,7 +366,7 @@ def audit() -> dict:
         "listening_ports": count_ports(),
         "container_dirs": len(list((state / "containers").glob("*"))) if (state / "containers").is_dir() else 0,
         "mounts": subprocess.run(
-            f"grep -c ' {home }' /proc/self/mountinfo || echo 0", shell=True,
+            f"grep -c '{home}/' /proc/self/mountinfo || echo 0", shell=True,
             capture_output=True, text=True).stdout.strip(),
     }
 

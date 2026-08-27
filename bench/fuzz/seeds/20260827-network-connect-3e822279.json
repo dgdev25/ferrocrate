@@ -1,0 +1,90 @@
+{
+ "run": "2026-08-27T08:39Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "network-connect",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-3e822279",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "network-create",
+   "args": [
+    "network",
+    "create",
+    "fzn-3e822279"
+   ]
+  },
+  {
+   "label": "network-connect",
+   "args": [
+    "network",
+    "connect",
+    "fzn-3e822279",
+    "fz-3e822279"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-3e822279"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 6,
+  "label": "network-connect",
+  "args": [
+   "network",
+   "connect",
+   "fzn-3e822279",
+   "fz-3e822279"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-3e822279 running"
+    ],
+    "images": [
+     "fzimg-3e822279:latest"
+    ],
+    "volumes": [],
+    "networks": [
+     "fzn-3e822279"
+    ]
+   }
+  },
+  "ferrocrate": {
+   "exit": 2,
+   "stdout": "",
+   "stderr": "error: unrecognized subcommand 'connect'\n\n  tip: a similar subcommand exists: 'inspect'\n\nUsage: ferro-cli network <COMMAND>\n\nFor more information, try '--help'.\n",
+   "state": {
+    "containers": [
+     "fz-3e822279 running"
+    ],
+    "images": [
+     "fzimg-3e822279:latest"
+    ],
+    "volumes": [],
+    "networks": [
+     "fzn-3e822279"
+    ]
+   }
+  },
+  "reason": "status"
+ }
+}

@@ -1,0 +1,70 @@
+{
+ "run": "2026-08-27T08:34Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "start",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-bfc2c236",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "start",
+   "args": [
+    "start",
+    "fz-bfc2c236"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-bfc2c236"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 4,
+  "label": "start",
+  "args": [
+   "start",
+   "fz-bfc2c236"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "fz-bfc2c236\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-bfc2c236 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "start: fz-bfc2c236: invalid container state: container is already running\n\u001b[2m2026-08-27T08:33:09.563149Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m start: 1 container operation(s) failed\nerror: start: 1 container operation(s) failed\n",
+   "state": {
+    "containers": [
+     "fz-bfc2c236 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

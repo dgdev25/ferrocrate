@@ -266,9 +266,36 @@ def pump(a, b):
         for s in (a, b):
             try: s.shutdown(socket.SHUT_RDWR)
             except OSError: pass
+# S31: the engine answers only GET /_ping, but every Docker-SDK client opens
+# its session with HEAD /_ping and treats 404 (not 405) as fatal, so sandbox
+# startup dies in waitForAPI before a single test runs. Answer HEAD here.
+PING_RESP = (b"HTTP/1.1 200 OK\r\n"
+             b"Api-Version: 1.43\r\n"
+             b"Builder-Version: 2\r\n"
+             b"Ostype: linux\r\n"
+             b"Docker-Experimental: false\r\n"
+             b"Content-Length: 0\r\n"
+             b"Connection: close\r\n\r\n")
+def read_head(c):
+    buf = b""
+    while b"\r\n\r\n" not in buf and len(buf) < 65536:
+        d = c.recv(4096)
+        if not d: return buf, True
+        buf += d
+    return buf, False
 def handle(c):
+    head, closed = read_head(c)
+    if closed and not head:
+        c.close(); return
+    line = head.split(b"\r\n", 1)[0]
+    parts = line.split()
+    if len(parts) >= 2 and parts[0] == b"HEAD" and parts[1].rstrip(b"/").endswith(b"_ping"):
+        c.sendall(PING_RESP); c.close(); return
     try: u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); u.connect(target)
     except OSError: c.close(); return
+    try:
+        if head: u.sendall(head)
+    except OSError: pass
     threading.Thread(target=pump, args=(c, u), daemon=True).start()
     pump(u, c)
 while True:

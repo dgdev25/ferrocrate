@@ -12400,13 +12400,20 @@ fn docker_load_image_archive(
         .get(config_name)
         .ok_or_else(|| format!("docker: image load is missing config {config_name}"))?;
     let config_digest = format!("sha256:{:x}", Sha256::digest(config_bytes));
-    let expected_config_name = format!(
-        "{}.json",
-        config_digest
-            .strip_prefix("sha256:")
-            .expect("sha256 digest has prefix")
-    );
-    if config_name != expected_config_name {
+    // Both layouts name the config by its content digest. Ferrocrate's save
+    // writes `<hex>.json`; docker 25+ writes `blobs/sha256/<hex>` with no
+    // suffix. Compare the digest to the basename modulo that suffix so a
+    // docker-save tarball loads while a config that is not content-addressed
+    // by its declared name still fails.
+    let declared_config_name = config_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(config_name)
+        .trim_end_matches(".json");
+    let config_hex = config_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 digest has prefix");
+    if declared_config_name != config_hex {
         return Err("docker: image load config digest does not match its filename".to_string());
     }
     let reference = manifest
@@ -32382,6 +32389,95 @@ volumes:
         handle_rm(&runtime, &volume_store, &authorization, "fz42-half", false, false)
             .expect("rm removes the half-built container");
         assert!(store.list().expect("list").is_empty());
+    }
+
+    // S52: `docker save` names the config blob `blobs/sha256/<hex>` with no
+    // `.json` suffix. `load` must accept that layout, and must still reject a
+    // config that is not named by its own content digest.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_load_accepts_the_docker_save_layout() {
+        use crate::linux_cli::docker_load_image_archive;
+        use sha2::Digest;
+
+        fn append_entry(
+            builder: &mut tar::Builder<Vec<u8>>,
+            path: &str,
+            bytes: &[u8],
+        ) {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes)
+                .expect("append archive entry");
+        }
+
+        let build_archive = |config_name: &str| {
+            let layer = b"ferrocrate-s52-layer".to_vec();
+            let layer_hex = format!("{:x}", sha2::Sha256::digest(&layer));
+            let config = serde_json::json!({
+                "architecture": "amd64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_hex}")]}
+            });
+            let config_bytes =
+                serde_json::to_vec(&config).expect("serialize image config");
+            let config_hex = format!("{:x}", sha2::Sha256::digest(&config_bytes));
+            let manifest = serde_json::json!([{
+                "Config": config_name.replace("{config_hex}", &config_hex),
+                "RepoTags": ["alpine:3.20"],
+                "Layers": [format!("blobs/sha256/{layer_hex}")],
+            }]);
+            let mut builder = tar::Builder::new(Vec::new());
+            append_entry(
+                &mut builder,
+                &config_name.replace("{config_hex}", &config_hex),
+                &config_bytes,
+            );
+            append_entry(&mut builder, &format!("blobs/sha256/{layer_hex}"), &layer);
+            append_entry(
+                &mut builder,
+                "manifest.json",
+                serde_json::to_vec(&manifest)
+                    .expect("serialize manifest")
+                    .as_slice(),
+            );
+            builder.into_inner().expect("finish archive")
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("image store");
+        let authorization = test_surface_authorization(temp.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+
+        let loaded = docker_load_image_archive(
+            temp.path(),
+            &store,
+            &authorization,
+            &origin,
+            &build_archive("blobs/sha256/{config_hex}"),
+        )
+        .expect("docker-save layout loads");
+        assert!(loaded.contains("alpine:3.20"), "loaded reference: {loaded}");
+        assert!(
+            store.resolve_reference(&loaded).expect("resolve").is_some(),
+            "loaded image must be published under its repo tag"
+        );
+
+        let error = docker_load_image_archive(
+            temp.path(),
+            &store,
+            &authorization,
+            &origin,
+            &build_archive("blobs/sha256/not-the-config-digest"),
+        )
+        .expect_err("config must stay content-addressed");
+        assert!(
+            error.contains("config digest does not match its filename"),
+            "got: {error}"
+        );
     }
 
     #[test]

@@ -9050,7 +9050,8 @@ fn dispatch_remote_socket(
                 .get("StatusCode")
                 .and_then(serde_json::Value::as_i64)
                 .unwrap_or_default();
-            println!("wait: container={} status_code={status}", container);
+            // Docker prints only the exit status code on stdout.
+            println!("{status}");
             Ok(())
         })()),
         Commands::Pause { containers } => handle_multiple_containers(containers, "pause", |container| request(
@@ -13094,10 +13095,12 @@ fn handle_wait(
         });
         println!(
             "{}",
-            serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+            serde_json::to_string(&output).map_err(|error| error.to_string())?
         );
     } else {
-        println!("wait: container={} status_code={status_code}", resolved);
+        // Docker prints only the exit status code on stdout; scripts use
+        // `wait` to capture it directly.
+        println!("{status_code}");
     }
     Ok(())
 }
@@ -31349,6 +31352,9 @@ volumes:
         handle_kill(&runtime, "fz41-kill", "SIGKILL").expect("kill");
         let killed = runtime.inspect("fz41-kill").expect("inspect killed record");
         assert_eq!(killed.status, "exited");
+        // S47: Docker reports a signalled container's status as 128 + signal,
+        // and `wait` prints that value.
+        assert_eq!(killed.last_exit_code, Some(137));
         assert_eq!(
             super::docker_container_list_entry(&killed, "")["State"], "exited",
             "docker ps State must be `exited`, never the termination cause"

@@ -4348,6 +4348,12 @@ impl ContainerRuntime {
         // `exited` is Docker's terminal state for a killed container; the
         // kill cause stays in the event/audit log and in `user_stopped`.
         self.persist_effect_status_with_user_stopped(proof, intent, id, "running", "exited", true)?;
+        // Docker reports the exit status of a signalled container as
+        // `128 + signal`, and `wait` prints that value. The live supervisor
+        // records the same number from the real exit; this write covers the
+        // paths where no supervisor survives to observe it.
+        let kill_exit_code = signal.map(|signal| 128 + signal as i32).unwrap_or(137);
+        self.persist_last_exit_code(proof, id, kill_exit_code)?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
@@ -4502,6 +4508,34 @@ impl ContainerRuntime {
             }
         }
         result.map_err(RuntimeError::PostEffectPersistence)
+    }
+
+    /// Publishes the terminal exit code under the mutation still open for this
+    /// operation, so the kill path can record `128 + signal` without losing its
+    /// reservation.
+    fn persist_last_exit_code(
+        &self,
+        proof: &AuthorizedRequest,
+        id: &str,
+        exit_code: i32,
+    ) -> Result<(), RuntimeError> {
+        let operation_id = self
+            .store
+            .get(id)?
+            .and_then(|record| {
+                record
+                    .pending_mutation
+                    .map(|reservation| reservation.operation_id)
+            })
+            .ok_or(ContainerStoreError::MutationConflict)?;
+        self.store
+            .set_last_exit_code_for_mutation(
+                id,
+                operation_id,
+                proof.canonical().resource_generation(),
+                exit_code,
+            )
+            .map_err(RuntimeError::PostEffectPersistence)
     }
 
     fn persist_user_stopped(

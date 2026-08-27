@@ -6259,13 +6259,13 @@ fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], RuntimeError
     }
     Ok(out)
 }
-fn generate_container_id() -> String {
+pub fn generate_container_id() -> String {
     // Use cryptographic randomness for unpredictable container IDs
     // Previously used predictable format: c<timestamp>-<pid>
     use std::fmt::Write;
     let mut rng = rand::rng();
-    let random_bytes: [u8; 16] = rng.random();
-    let mut hex = String::with_capacity(32);
+    let random_bytes: [u8; 32] = rng.random();
+    let mut hex = String::with_capacity(64);
     for byte in random_bytes {
         write!(&mut hex, "{byte:02x}").expect("hex format");
     }
@@ -18345,6 +18345,13 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         super::ensure_rootfs_workdir(temp.path(), "/var/lib/app").expect("prepare image workdir");
         assert!(temp.path().join("var/lib/app").is_dir());
         assert!(super::ensure_rootfs_workdir(temp.path(), "/safe/../escape").is_err());
+    }
+
+    #[test]
+    fn generated_container_ids_are_64_lowercase_hexadecimal_characters() {
+        let id = super::generate_container_id();
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 
     #[test]

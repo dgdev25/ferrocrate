@@ -1750,6 +1750,31 @@ fn docker_compat_logs_for_created_container_returns_empty_success() {
 }
 
 #[test]
+fn docker_compat_archive_reads_a_created_container_without_starting_it() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/created-archive:latest");
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=created-archive",
+        "application/json",
+        br#"{"Image":"compat/created-archive:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none"}}"#,
+    );
+    assert_eq!(status, 201, "create response={body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create JSON")["Id"]
+        .as_str().expect("container id").to_string();
+    let raw = harness.request_bytes_raw(
+        "GET",
+        &format!("/v1.45/containers/{id}/archive?path=%2Fbin%2Fbusybox"),
+        "application/x-tar",
+        &[],
+    );
+    let header_end = raw.windows(4).position(|window| window == b"\r\n\r\n").expect("response headers");
+    assert!(String::from_utf8_lossy(&raw[..header_end]).starts_with("HTTP/1.1 200 OK"));
+    let mut tar = tar::Archive::new(std::io::Cursor::new(&raw[header_end + 4..]));
+    assert!(tar.entries().expect("tar stream").next().is_some(), "tar must contain the requested image path");
+}
+
+#[test]
 fn docker_compat_changes_for_created_container_returns_empty_success() {
     let harness = DaemonHarness::spawn();
     let body = r#"{"Image":"busybox","Cmd":["true"]}"#;

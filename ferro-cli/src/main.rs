@@ -12413,6 +12413,49 @@ fn docker_get_container_archive(runtime_dir: &Path, runtime: &ContainerRuntime, 
 }
 
 #[cfg(target_os = "linux")]
+fn docker_materialize_pending_rootfs(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    id: &str,
+    spec: &DockerCreateSpec,
+) -> Result<(), String> {
+    let rootfs = runtime_dir.join("containers").join(id).join("rootfs");
+    if rootfs.is_dir() {
+        return Ok(());
+    }
+    let layers = ferro_core::image_fetch::resolve_layer_paths_with_store(runtime_dir, &spec.image, store)
+        .map_err(|error| format!("docker: materialize created container image: {error}"))?;
+    let images = runtime_dir.join("images");
+    ferro_core::layer_cache::construct_rootfs_cached(
+        &rootfs,
+        &layers,
+        &images.join("file-cas").join("shake256"),
+        &images.join("layer-cache"),
+    )
+    .map_err(|error| format!("docker: materialize created container rootfs: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_get_created_container_archive(
+    runtime_dir: &Path,
+    id: &str,
+    archive_path: &str,
+) -> Result<Vec<u8>, String> {
+    let rootfs = runtime_dir.join("containers").join(id).join("rootfs");
+    let selected = rootfs.join(archive_path.trim_start_matches('/')).canonicalize()
+        .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+    if !selected.starts_with(&rootfs) { return Err("docker: archive path escapes the container rootfs".to_string()); }
+    let mut archive = Vec::new();
+    let mut builder = tar::Builder::new(&mut archive);
+    append_export_archive_path(&mut builder, &rootfs, &selected, &[])
+        .map_err(|error| format!("docker: archive path: {error}"))?;
+    builder.finish().map_err(|error| format!("docker: finish archive: {error}"))?;
+    drop(builder);
+    Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
 fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, source: &str, destination: &str) -> Result<(), String> {
     let source_container = source.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
     let destination_container = destination.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
@@ -14302,7 +14345,9 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
     let records = runtime.list().map_err(|err| err.to_string())?;
     let matches = records
         .into_iter()
-        .filter(|record| record.name.as_deref() == Some(container))
+        .filter(|record| {
+            record.id.starts_with(container) || record.name.as_deref() == Some(container)
+        })
         .map(|record| record.id)
         .collect::<Vec<_>>();
     match matches.len() {
@@ -17109,14 +17154,15 @@ fn docker_pending_id(
     pending: &std::collections::HashMap<String, DockerCreateSpec>,
     requested: &str,
 ) -> Option<String> {
-    pending
-        .get_key_value(requested)
-        .or_else(|| {
-            pending
-                .iter()
-                .find(|(_, spec)| spec.name.as_deref() == Some(requested))
-        })
+    if pending.contains_key(requested) {
+        return Some(requested.to_string());
+    }
+    let matches = pending
+        .iter()
+        .filter(|(id, spec)| id.starts_with(requested) || spec.name.as_deref() == Some(requested))
         .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches.into_iter().next().expect("one pending match"))
 }
 
 #[cfg(target_os = "linux")]
@@ -17541,15 +17587,8 @@ struct DockerCompatState {
 }
 
 #[cfg(target_os = "linux")]
-fn docker_compat_id(prefix: &str, sequence: &AtomicU64) -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!(
-        "{prefix}{timestamp:x}-{}",
-        sequence.fetch_add(1, Ordering::SeqCst)
-    )
+fn docker_compat_id(_prefix: &str, _sequence: &AtomicU64) -> String {
+    ferro_core::runtime::generate_container_id()
 }
 
 #[cfg(target_os = "linux")]
@@ -19437,21 +19476,14 @@ fn handle_docker_compat_connection(
                     .pending
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                let body = if let Ok(record) = runtime.inspect(requested_id) {
-                    docker_inspect_payload(&record, include_size)
-                } else if let Ok(id) = resolve_container_id(&runtime, requested_id) {
-                    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                let body = if let Ok(record) = runtime.inspect(&id) {
                     docker_inspect_payload(&record, include_size)
                 } else {
-                    let (pending_id, spec) = pending
-                        .get_key_value(requested_id)
-                        .or_else(|| {
-                            pending
-                                .iter()
-                                .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
-                        })
+                    let spec = pending
+                        .get(&id)
                         .ok_or_else(|| format!("container not found: {requested_id}"))?;
-                    docker_pending_inspect_payload(pending_id, spec, include_size)
+                    docker_pending_inspect_payload(&id, spec, include_size)
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -19487,12 +19519,16 @@ fn handle_docker_compat_connection(
                 let archive_path = query
                     .get("path")
                     .ok_or_else(|| "docker: archive path is required".to_string())?;
-                let id = resolve_container_id(&runtime, id)?;
-                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                let rootfs = runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("rootfs");
+                let pending = state.pending.lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, id)?;
+                let created = runtime.inspect(&id).is_err();
+                if created {
+                    let spec = pending.get(&id)
+                        .ok_or_else(|| format!("docker: container not found: {id}"))?;
+                    docker_materialize_pending_rootfs(runtime_dir.as_ref(), &store, &id, spec)?;
+                }
+                let rootfs = runtime_dir.join("containers").join(&id).join("rootfs");
                 if !rootfs.is_dir() {
                     return Err(format!(
                         "docker: container rootfs is unavailable: {}",
@@ -19506,7 +19542,11 @@ fn handle_docker_compat_connection(
                 if !selected.starts_with(&rootfs) {
                     return Err("docker: archive path escapes the container rootfs".to_string());
                 }
-                let archive = docker_get_container_archive(runtime_dir.as_ref(), &runtime, &id, archive_path)?;
+                let archive = if created {
+                    docker_get_created_container_archive(runtime_dir.as_ref(), &id, archive_path)?
+                } else {
+                    docker_get_container_archive(runtime_dir.as_ref(), &runtime, &id, archive_path)?
+                };
                 let stat = docker_archive_path_stat(&selected, archive_path)?;
                 if request.method == "HEAD" {
                     http_response_with_headers(
@@ -31926,6 +31966,14 @@ volumes:
         assert!(validate_docker_container_name("../escape").is_err());
         assert!(validate_docker_container_name("name/with/slash").is_err());
         assert!(validate_docker_container_name(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn docker_compat_container_ids_are_64_lowercase_hexadecimal_characters() {
+        let next_id = std::sync::atomic::AtomicU64::new(0);
+        let id = super::docker_compat_id("d", &next_id);
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 
     #[test]

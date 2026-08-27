@@ -122,11 +122,11 @@ class DockerEngine(Engine):
 
 
 class FerroEngine(Engine):
-    # ferro-cli reports "killed" after a kill; docker's State vocabulary is
-    # created/running/paused/restarting/removing/exited/dead and kill leaves
-    # "exited". Mapped so the vocabulary gap does not mask later steps in a
-    # sequence; the gap itself is ticketed.
-    STATUS_MAP = {"killed": "exited"}
+    # ferro-cli reports "killed" after a kill and "stopped" after a stop; docker's
+    # State vocabulary is created/running/paused/restarting/removing/exited/dead,
+    # and both paths leave "exited". Mapped so the vocabulary gap does not mask
+    # later steps in a sequence; the gap itself is ticketed (S41).
+    STATUS_MAP = {"killed": "exited", "stopped": "exited"}
 
     def _fields(self, key: str, record: dict) -> list[str]:
         if key == "containers":

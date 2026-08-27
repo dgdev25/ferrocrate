@@ -5208,6 +5208,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     None,
                     None,
                     None,
+                    None,
                 )?;
                 trace_attached_run_phase(
                     attached_run_trace_started,
@@ -6765,6 +6766,7 @@ fn handle_run(
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
     resolved_command: Option<&[String]>,
+    resolved_image_volumes: Option<&[String]>,
 ) -> Result<String, String> {
     let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
@@ -6825,10 +6827,14 @@ fn handle_run(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("run: image config is unavailable for {effective_image}"))?;
     let (image_config, _) = docker_image_metadata(runtime_dir, store, &image_reference)?;
-    let image_volume_entries = image_config_volume_targets(&image_config)
-        .into_iter()
-        .filter(|target| !explicit_targets.contains(target.trim_start_matches('/')))
-        .collect::<Vec<_>>();
+    let image_volume_entries = resolved_image_volumes
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            image_config_volume_targets(&image_config)
+                .into_iter()
+                .filter(|target| !explicit_targets.contains(target.trim_start_matches('/')))
+                .collect()
+        });
     let image_volume_mounts = parse_volume_mounts(
         volume_store,
         &image_volume_entries,
@@ -11522,6 +11528,8 @@ fn resolve_compose_image_execution_from_config(
             .get("User")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        volume_targets: image_config_volume_targets(image_config),
+        volume_mounts: Vec::new(),
     })
 }
 
@@ -14465,6 +14473,8 @@ struct ResolvedComposeImageExecution {
     command: Vec<String>,
     workdir: Option<String>,
     user: Option<String>,
+    volume_targets: Vec<String>,
+    volume_mounts: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -15027,7 +15037,7 @@ fn handle_compose(
                     .iter()
                     .map(ComposePrerequisite::mutation)
                     .collect::<Vec<_>>();
-                let image_execution = if mutations.is_empty() {
+                let mut image_execution = if mutations.is_empty() {
                     Some(resolve_compose_image_execution(
                         store,
                         &prepared.image,
@@ -15037,6 +15047,17 @@ fn handle_compose(
                 } else {
                     None
                 };
+                if let Some(image_execution) = image_execution.as_mut() {
+                    resolve_compose_image_volume_mounts(
+                        image_execution,
+                        volume_store,
+                        &project_dir,
+                        &project.compose,
+                        service,
+                        &parent_origin,
+                        &surface_authorization,
+                    )?;
+                }
                 let initial_run_digest = if mutations.is_empty() {
                     compose_service_execution_digest(
                         runtime,
@@ -15122,12 +15143,21 @@ fn handle_compose(
                     wait_for_compose_dependencies(runtime, depends_on)
                         .map_err(|error| format!("compose partial result: {error}"))?;
                 }
-                let image_execution = image_execution.unwrap_or(resolve_compose_image_execution(
+                let mut image_execution = image_execution.unwrap_or(resolve_compose_image_execution(
                     store,
                     &prepared.image,
                     service.entrypoint.as_deref(),
                     &compose_service_command(service),
                 )?);
+                resolve_compose_image_volume_mounts(
+                    &mut image_execution,
+                    volume_store,
+                    &project_dir,
+                    &project.compose,
+                    service,
+                    &parent_origin,
+                    &surface_authorization,
+                )?;
                 let run_digest = compose_service_execution_digest(
                     runtime,
                     store,
@@ -16241,6 +16271,7 @@ fn run_compose_service(
             None,
             None,
             Some(&image_execution.command),
+            Some(&image_execution.volume_mounts),
         )?;
     }
     Ok(())
@@ -16268,7 +16299,8 @@ fn compose_service_execution_digest(
     let labels = parse_key_values("label", &label_entries)?;
     let publish = compose_service_ports(service);
     let ports = parse_publish(&publish)?;
-    let mount_entries = compose_service_mounts(project_dir, volume_store, compose, service)?;
+    let mut mount_entries = compose_service_mounts(project_dir, volume_store, compose, service)?;
+    mount_entries.extend(image_execution.volume_mounts.iter().cloned());
     let mounts = parse_bind_mounts(&mount_entries)?;
     let configured_network_backend = std::env::var("FERROCRATE_NETWORK_BACKEND")
         .unwrap_or_else(|_| "ebpf".to_string())
@@ -16529,6 +16561,54 @@ fn compose_service_mounts(
         &mut out,
     )?;
     Ok(out)
+}
+
+/// Materialize image-declared anonymous volumes before authorizing the compose
+/// child.  Their paths participate in the normalized mount facts, so deferring
+/// this to `handle_run` would authorize a different request than we launch.
+#[cfg(target_os = "linux")]
+fn resolve_compose_image_volume_mounts(
+    image_execution: &mut ResolvedComposeImageExecution,
+    volume_store: &LocalVolumeStore,
+    project_dir: &Path,
+    compose: &ferro_compose::ComposeFile,
+    service: &ComposeService,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+) -> Result<(), String> {
+    if !image_execution.volume_mounts.is_empty() || image_execution.volume_targets.is_empty() {
+        return Ok(());
+    }
+    let explicit_targets = parse_bind_mounts(&compose_service_mounts(
+        project_dir,
+        volume_store,
+        compose,
+        service,
+    )?)?
+    .into_iter()
+    .map(|mount| mount.target.to_string_lossy().into_owned())
+    .collect::<std::collections::BTreeSet<_>>();
+    for target in &image_execution.volume_targets {
+        if explicit_targets.contains(target.trim_start_matches('/')) {
+            continue;
+        }
+        let name = anonymous_volume_name();
+        let mut driver_opts = BTreeMap::new();
+        driver_opts.insert("ferrocrate.anonymous".to_string(), "true".to_string());
+        let plan = volume_store
+            .prepare_create(&name, "local", driver_opts)
+            .map_err(|error| error.to_string())?;
+        let permit = authorization
+            .authorize_volume_create_plan(origin, &plan)
+            .map_err(|error| error.to_string())?;
+        let record = volume_store
+            .create_with_driver_authorized(plan, permit)
+            .map_err(|error| error.to_string())?;
+        image_execution
+            .volume_mounts
+            .push(format!("{}:{target}", record.path));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -20314,6 +20394,7 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     Some(&id),
+                    None,
                     None,
                 );
                 if let Err(error) = start_result {
@@ -30754,7 +30835,8 @@ volumes:
                 "Entrypoint": ["/usr/local/bin/server"],
                 "Cmd": ["--listen", "8080"],
                 "WorkingDir": "/srv/app",
-                "User": "1001:1001"
+                "User": "1001:1001",
+                "Volumes": {"/var/lib/app": {}}
             }
         });
 
@@ -30764,6 +30846,7 @@ volumes:
         assert_eq!(resolved.command, ["/usr/local/bin/server", "--listen", "8080"]);
         assert_eq!(resolved.workdir.as_deref(), Some("/srv/app"));
         assert_eq!(resolved.user.as_deref(), Some("1001:1001"));
+        assert_eq!(resolved.volume_targets, ["/var/lib/app"]);
     }
 
     #[test]
@@ -30804,6 +30887,7 @@ volumes:
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

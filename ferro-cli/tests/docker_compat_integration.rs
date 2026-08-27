@@ -3375,6 +3375,33 @@ fn docker_compat_buildkit_control_hijacks_on_bare_and_versioned_paths() {
     }
 }
 
+#[test]
+fn docker_compat_buildkit_control_preserves_a_preface_coalesced_with_upgrade() {
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect docker socket");
+    stream
+        .write_all(
+            b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+        )
+        .expect("write upgrade and client preface together");
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read control upgrade");
+        response.push(byte[0]);
+    }
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("set settings read timeout");
+    let mut settings = [0_u8; 9];
+    stream
+        .read_exact(&mut settings)
+        .expect("server emits SETTINGS after the coalesced client preface");
+    assert_eq!(settings[3], 0x4, "expected HTTP/2 SETTINGS frame: {settings:?}");
+    assert_eq!(&settings[5..], &[0, 0, 0, 0], "SETTINGS must use stream 0");
+}
+
 #[derive(Clone, PartialEq, prost::Message)]
 struct TestBuildkitPlatform {
     #[prost(string, tag = "1")]

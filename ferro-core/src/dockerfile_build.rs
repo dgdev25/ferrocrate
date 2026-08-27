@@ -49,8 +49,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 use thiserror::Error;
 
-/// Maximum layer size (1GB) to prevent memory exhaustion attacks
-const MAX_LAYER_SIZE: usize = 1024 * 1024 * 1024;
+/// Maximum layer size, to prevent memory exhaustion. The layer is assembled in
+/// memory, so this bounds the peak. One gibibyte rejected ordinary application
+/// images that Docker builds without complaint, so the default is four
+/// gibibytes and `FERROCRATE_MAX_LAYER_BYTES` overrides it. Streaming the layer
+/// to disk would remove the need for a cap; that is tracked separately.
+const DEFAULT_MAX_LAYER_SIZE: usize = 4 * 1024 * 1024 * 1024;
+
+fn parse_max_layer_size(raw: Option<&str>) -> usize {
+    match raw {
+        Some(value) => value.trim().parse().unwrap_or(DEFAULT_MAX_LAYER_SIZE),
+        None => DEFAULT_MAX_LAYER_SIZE,
+    }
+}
+
+fn max_layer_size() -> usize {
+    parse_max_layer_size(std::env::var("FERROCRATE_MAX_LAYER_BYTES").ok().as_deref())
+}
 const MAX_ADD_REMOTE_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -1382,7 +1397,7 @@ fn build_layer_from_dir(
         .map_err(|err| io::Error::other(err.to_string()))?;
 
     // Security: Check layer size to prevent memory exhaustion
-    if tar_bytes.len() > MAX_LAYER_SIZE {
+    if tar_bytes.len() > max_layer_size() {
         return Err(DockerfileBuildError::LayerTooLarge(tar_bytes.len()));
     }
 
@@ -6025,6 +6040,19 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layer_cap_defaults_high_and_honours_the_override() {
+        // S23: a one gibibyte cap rejected ordinary application images.
+        assert_eq!(super::DEFAULT_MAX_LAYER_SIZE, 4 * 1024 * 1024 * 1024);
+        assert_eq!(super::parse_max_layer_size(Some("123")), 123);
+        assert_eq!(super::parse_max_layer_size(Some(" 456 ")), 456);
+        assert_eq!(
+            super::parse_max_layer_size(Some("not a number")),
+            super::DEFAULT_MAX_LAYER_SIZE
+        );
+        assert_eq!(super::parse_max_layer_size(None), super::DEFAULT_MAX_LAYER_SIZE);
+    }
+
     use super::{
         apply_onbuild_triggers, build_cache_key, build_cache_path,
         build_from_dockerfile_with_store_and_compression, build_journal_path,

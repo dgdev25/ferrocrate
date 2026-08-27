@@ -3791,7 +3791,11 @@ fn parse_volume_paths(value: &str) -> Result<Vec<String>, DockerfileBuildError> 
         return Ok(Vec::new());
     }
     if trimmed.starts_with('[') {
-        return parse_json_array(trimmed);
+        if let Some(paths) = try_parse_json_array(trimmed) {
+            return Ok(paths);
+        }
+        // Not a JSON array: treat the text as whitespace-separated paths,
+        // matching Docker's fallback.
     }
     Ok(trimmed.split_whitespace().map(|s| s.to_string()).collect())
 }
@@ -4249,26 +4253,31 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
-        if !cache_mounts.is_empty()
-            || !secret_mounts.is_empty()
-            || !ssh_mounts.is_empty()
-            || !tmpfs_mounts.is_empty()
-            || !bind_mounts.is_empty()
-        {
-            return Err(DockerfileBuildError::Unsupported(
-                "cache mounts require shell-form RUN".to_string(),
-            ));
+        // A leading '[' may open JSON exec form or a POSIX '[' test utility
+        // command. Only JSON exec form when the text actually parses as a
+        // JSON array; otherwise fall back to shell form, matching Docker.
+        if let Some(args) = try_parse_json_array(&command) {
+            if !cache_mounts.is_empty()
+                || !secret_mounts.is_empty()
+                || !ssh_mounts.is_empty()
+                || !tmpfs_mounts.is_empty()
+                || !bind_mounts.is_empty()
+            {
+                return Err(DockerfileBuildError::Unsupported(
+                    "cache mounts require shell-form RUN".to_string(),
+                ));
+            }
+            return Ok(RunSpec {
+                args,
+                _shell: false,
+                cache_mounts,
+                secret_mounts,
+                ssh_mounts,
+                tmpfs_mounts,
+                bind_mounts,
+            });
         }
-        let args = parse_json_array(&command)?;
-        return Ok(RunSpec {
-            args,
-            _shell: false,
-            cache_mounts,
-            secret_mounts,
-            ssh_mounts,
-            tmpfs_mounts,
-            bind_mounts,
-        });
+        // Not a JSON array: shell form, so mount flags stay valid.
     }
     if shell.is_empty() {
         return Err(DockerfileBuildError::Invalid(
@@ -4557,7 +4566,11 @@ fn parse_onbuild(raw: &str) -> Result<String, DockerfileBuildError> {
 fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.starts_with('[') {
-        return parse_json_array(trimmed);
+        // Only JSON exec form when the text actually parses as a JSON array;
+        // a POSIX '[' utility command falls back to shell form, like Docker.
+        if let Some(args) = try_parse_json_array(trimmed) {
+            return Ok(args);
+        }
     }
     if shell.is_empty() {
         return Err(DockerfileBuildError::Invalid(
@@ -4570,9 +4583,13 @@ fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, Docke
 }
 
 fn parse_json_array(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
-    let parsed: Vec<String> = serde_json::from_str(raw)
-        .map_err(|err| DockerfileBuildError::Invalid(format!("invalid JSON array: {err}")))?;
-    Ok(parsed)
+    try_parse_json_array(raw).ok_or_else(|| {
+        DockerfileBuildError::Invalid("invalid JSON array: expected a JSON string array".to_string())
+    })
+}
+
+fn try_parse_json_array(raw: &str) -> Option<Vec<String>> {
+    serde_json::from_str(raw).ok()
 }
 
 fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), DockerfileBuildError> {
@@ -9261,6 +9278,54 @@ mod tests {
         assert!(root.join("marker").is_file());
     }
 
+    #[test]
+    fn run_bracket_utility_executes_as_shell_form() {
+        if skip_unavailable_rootless_build_sandbox() {
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = temp.path().join("context");
+        fs::create_dir_all(&context).unwrap();
+        let dockerfile = context.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            concat!(
+                "FROM scratch\n",
+                "COPY busybox /bin/sh\n",
+                "COPY busybox /busybox\n",
+                "RUN [ \"$(busybox echo shell-ran)\" == \"shell-ran\" ]\n",
+                "RUN touch /shell-marker\n",
+                "RUN [\"/busybox\", \"touch\", \"/exec-marker\"]\n",
+            ),
+        )
+        .unwrap();
+        fs::copy(busybox, context.join("busybox")).unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/run-bracket-shell:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .unwrap_or_else(|error| panic!("bracket-utility RUN should build: {error}"));
+        let layers = resolve_layer_paths_with_store(&runtime, "local/run-bracket-shell:latest", &store)
+            .unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        for layer in &layers {
+            crate::rootfs::apply_layer_tar(&root, layer).unwrap();
+        }
+        assert!(root.join("shell-marker").is_file(), "shell-form RUN ran");
+        assert!(root.join("exec-marker").is_file(), "exec-form RUN ran");
+    }
+
     const SECRET_NEEDLE: &[u8] = b"TEST-SECRET-DO-NOT-USE";
 
     #[cfg(unix)]
@@ -9834,6 +9899,42 @@ mod tests {
         let trailing = parse_stages("FROM scratch\nRUN echo hi \\")
             .expect_err("dangling continuation must fail deterministically");
         assert!(trailing.to_string().contains("ends with an escape"));
+    }
+
+    #[test]
+    fn run_bracket_utility_falls_back_to_shell_form() {
+        let stages = parse_stages("FROM scratch\nRUN [ \"$(command)\" == \"value\" ]\n")
+            .expect("POSIX [ utility RUN should parse as shell form");
+        let run = &stages[0].run[0];
+        assert!(run._shell, "bracket-utility RUN must stay shell form");
+        assert_eq!(
+            run.args,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "[ \"$(command)\" == \"value\" ]".to_string()
+            ]
+        );
+
+        let entrypoint = parse_stages("FROM scratch\nENTRYPOINT [ \"$(command)\" == \"value\" ]\n")
+            .expect("POSIX [ utility ENTRYPOINT should parse as shell form");
+        assert_eq!(
+            entrypoint[0].entrypoint,
+            Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "[ \"$(command)\" == \"value\" ]".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn run_json_array_still_parses_as_exec_form() {
+        let stages = parse_stages("FROM scratch\nRUN [\"echo\", \"hi\"]\n")
+            .expect("JSON-array RUN should stay exec form");
+        let run = &stages[0].run[0];
+        assert!(!run._shell, "valid JSON-array RUN must stay exec form");
+        assert_eq!(run.args, vec!["echo".to_string(), "hi".to_string()]);
     }
 
     #[test]

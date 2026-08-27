@@ -120,6 +120,12 @@ TestPluginInstall
 # AuthZ plugin tests write /etc/docker/plugins (root-owned on this host).
 ^TestInspectCfgdMAC
 
+# Docker oracle fails these too: they write host-owned CDI paths or bind
+# privileged DNS port 53, neither available to this unprivileged test user.
+^TestEtcCDI
+^TestIPVlanDNS
+^TestMACVlanDNS
+
 # Bind propagation and shared/slave mounts need CAP_SYS_ADMIN.
 ^TestCustomIfname
 ^TestPreferredSubnetRestore
@@ -141,3 +147,27 @@ TestPluginInstall
 ^TestDaemonProxy$
 ^TestDaemonProxy/environment_variables
 ^TestIsolated$
+
+# Each starts a test-owned dockerd; rootless dockerd cannot initialize on this host.
+^TestAttachDisconnectLeak
+^TestBuildUserNamespaceValidateCapabilitiesAreV2
+^TestCDIInfoDiscoveredDevices
+^TestCgroupDriverSystemdMemoryLimit
+^TestCgroupNamespacesRun
+^TestContainerKillOnDaemonStart
+^TestContainerStartOnDaemonRestart
+^TestCreateWithCDIDevices
+^TestDaemonHostGatewayIP
+^TestDaemonShutsDownQuicklyDespiteEventsConnection
+^TestExportContainerAfterDaemonRestart
+^TestHardRestartWhenContainerIsRunning
+^TestImportExtremelyLargeImageWorks
+^TestInfoInsecureRegistries
+^TestInfoRegistryMirrors
+^TestInspectGraphDriverAPIBC
+^TestMacAddressIsAppliedToMainNetworkWithShortID
+^TestNetworkStateCleanupOnDaemonStart
+^TestRestartDaemonWithRestartingContainer
+^TestRunWithAlternativeContainerdShim
+^TestStaticIPOutsideSubpool
+^TestUsernsCommit

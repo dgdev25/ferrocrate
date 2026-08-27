@@ -3718,8 +3718,24 @@ fn docker_compat_attach_accepts_pre_start_hijack_handshake() {
     let attach = format!(
         "POST /v1.45/containers/{id}/attach?logs=1&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
     );
-    let (status, response) = harness.request_raw(&attach);
-    assert_eq!(status, 101, "attach handshake response: {response}");
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    stream
+        .write_all(attach.as_bytes())
+        .expect("write attach request");
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .expect("read attach handshake response");
+        response.push(byte[0]);
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+        "attach handshake response: {response}"
+    );
 }
 
 #[test]

@@ -110,7 +110,15 @@ case "$SUITE" in
       buildkit-dockerfile) PKG=./frontend/dockerfile/...;;
     esac
     echo "go test $PKG (this takes a while)"
-    ( cd "$DIR" && go test -count=1 -mod=vendor -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    # -mod=vendor is required by docker/cli, which vendors, and fatal for
+    # docker/compose, which does not: it fails with inconsistent vendoring and
+    # collects zero tests. Decide per repository.
+    MODFLAG=""; [ -d "$DIR/vendor" ] && MODFLAG="-mod=vendor"
+    ( cd "$DIR" && go test -count=1 $MODFLAG -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    if [ ! -s "$WORK/go.json" ]; then
+      echo "$SUITE/$ENGINE: go test produced no output; first error follows" >&2
+      head -5 "$WORK/go.err" >&2
+    fi
     python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
 import json, re, sys
 src, out, suite, engine, run, head, skip = sys.argv[1:8]

@@ -13009,6 +13009,7 @@ fn handle_top(runtime: &ContainerRuntime, container: &str, format: &str) -> Resu
         return Err("top: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)?;
     let payload = docker_top_payload(runtime, &resolved)?;
     if format == "json" {
         println!(
@@ -13173,6 +13174,8 @@ fn handle_kill(
         return Err("kill: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)
+        .map_err(|error| format!("cannot kill container: {resolved}: {error}"))?;
     let signal = parse_docker_kill_signal(Some(&signal_name.to_string()))?;
     runtime
         .kill_with_signal(&resolved, signal)
@@ -14389,6 +14392,7 @@ fn handle_exec(
         return Err("exec: command is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)?;
     let result = if interactive {
         let mut input = Vec::new();
         std::io::stdin()
@@ -14422,6 +14426,20 @@ fn handle_exec(
         eprint!("{}", result.stderr);
     }
     Ok(())
+}
+
+/// Docker rejects the `kill`, `top` and `exec` commands against a container
+/// whose state is not live, while the local runtime tolerates terminal states
+/// for race recovery. The CLI enforces Docker's contract here.
+fn require_live_container(runtime: &ContainerRuntime, resolved: &str) -> Result<(), String> {
+    let status = runtime
+        .inspect(resolved)
+        .map_err(|err| format!("container {resolved} lookup failed: {err}"))?
+        .status;
+    if matches!(status.as_str(), "running" | "paused" | "restarting") {
+        return Ok(());
+    }
+    Err(format!("container {resolved} is not running"))
 }
 
 #[cfg(target_os = "linux")]
@@ -20221,7 +20239,8 @@ fn handle_docker_compat_connection(
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    docker_resolve_id(&runtime, &pending, container)?
+                    let resolved = docker_resolve_id(&runtime, &pending, container)?;
+                    resolved
                 };
                 let id = docker_compat_id("e", &state.next_id);
                 state
@@ -31347,6 +31366,50 @@ volumes:
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
         assert!(err.contains("restart: container is required"));
+    }
+
+    #[test]
+    fn kill_top_exec_reject_a_container_that_is_not_running() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let stopped: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fzs-stopped",
+                "name": "fzs-stopped",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "exited",
+                "last_exit_code": 0
+            }))
+            .expect("decode stopped record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&stopped).expect("seed stopped record");
+
+        let err = handle_kill(&runtime, "fzs-stopped", "SIGKILL").expect_err("kill stopped");
+        assert!(err.contains("cannot kill container: fzs-stopped"));
+        assert!(err.contains("is not running"));
+
+        let err = handle_top(&runtime, "fzs-stopped", "text").expect_err("top stopped");
+        assert!(err.contains("fzs-stopped is not running"));
+
+        let err = handle_exec(
+            &runtime,
+            "fzs-stopped",
+            &["echo".to_string()],
+            &[],
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect_err("exec stopped");
+        assert!(err.contains("fzs-stopped is not running"));
     }
 
     // S40: `docker start` on a running container is a successful no-op, not

@@ -11507,6 +11507,7 @@ fn resolve_run_command(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_run_image_execution(
     runtime_dir: &Path,
     store: &LocalImageStore,

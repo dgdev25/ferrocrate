@@ -469,14 +469,14 @@ PY
       echo "-> $OUT (skipped)"; exit 0
     fi
     passed=0; failed=0
-    for v in "$DIR"/validation/*.t; do
+    while IFS= read -r -d '' v; do
       name="$(basename "$v" .t)"
-      if RUNTIME="$RUNTIME" timeout 120 "$v" > "$WORK/$name.out" 2>&1; then
+      if ( cd "$DIR" && RUNTIME="$RUNTIME" timeout 120 "$v" ) > "$WORK/$name.out" 2>&1; then
         record "$name" pass 0 "" 0; passed=$((passed+1))
       else
         record "$name" fail 0 "$(tail -c 400 "$WORK/$name.out")" 1; failed=$((failed+1))
       fi
-    done
+    done < <(find "$DIR/validation" -type f -name '*.t' -print0 | sort -z)
     echo "oci-runtime/$ENGINE: $passed passed, $failed failed"
     ;;
   critest)

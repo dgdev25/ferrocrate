@@ -135,24 +135,25 @@ record() { # name status ms tail
     "$SUITE" "$SUITE" "$ENGINE" "$1" "$2" "${5:-0}" "${3:-0}" "$tail" "$RUN" "$HEAD" >> "$OUT"
 }
 
+# Suites that spin up a local OCI registry as a process (buildkit's mirror,
+# moby's plugin tests) need a `registry` binary this host has no package
+# for. Extract it once from the registry:2 image through the oracle daemon;
+# every later run reuses the copy.
+ensure_registry_bin() {
+  REG="$BENCH/suites/buildkit-dockerfile/bin/registry"
+  if [ ! -x "$REG" ]; then
+    echo "extracting registry binary from registry:2 (local test registry needs it)"
+    mkdir -p "$(dirname "$REG")"
+    cid="$(docker create registry:2)" \
+      && docker cp "$cid":/bin/registry "$REG" >/dev/null \
+      && docker rm "$cid" >/dev/null \
+      || { echo "registry extraction failed" >&2; exit 2; }
+    chmod +x "$REG"
+  fi
+}
+
 # --- run and convert ---
 case "$SUITE" in
-  # Suites that spin up a local OCI registry as a process (buildkit's mirror,
-  # moby's plugin tests) need a `registry` binary this host has no package
-  # for. Extract it once from the registry:2 image through the oracle daemon;
-  # every later run reuses the copy.
-  ensure_registry_bin() {
-    REG="$BENCH/suites/buildkit-dockerfile/bin/registry"
-    if [ ! -x "$REG" ]; then
-      echo "extracting registry binary from registry:2 (local test registry needs it)"
-      mkdir -p "$(dirname "$REG")"
-      cid="$(docker create registry:2)" \
-        && docker cp "$cid":/bin/registry "$REG" >/dev/null \
-        && docker rm "$cid" >/dev/null \
-        || { echo "registry extraction failed" >&2; exit 2; }
-      chmod +x "$REG"
-    fi
-  }
   cli-e2e|compose-e2e|moby-integration|buildkit-dockerfile)
     case "$SUITE" in
       cli-e2e)             PKG=./e2e/...;;

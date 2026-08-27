@@ -18,13 +18,15 @@ use crate::rootfs::{apply_layer_tar, construct_rootfs_with_dedup};
 use crate::seccomp::{apply_seccomp_profile, default_seccomp_profile, SeccompProfile};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use lzma_rust2::XzReader;
 #[cfg(unix)]
 use nix::mount::{mount, MsFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
@@ -49,23 +51,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tar::{Archive, Builder};
 use thiserror::Error;
 
-/// Maximum layer size, to prevent memory exhaustion. The layer is assembled in
-/// memory, so this bounds the peak. One gibibyte rejected ordinary application
-/// images that Docker builds without complaint, so the default is four
-/// gibibytes and `FERROCRATE_MAX_LAYER_BYTES` overrides it. Streaming the layer
-/// to disk would remove the need for a cap; that is tracked separately.
-const DEFAULT_MAX_LAYER_SIZE: usize = 4 * 1024 * 1024 * 1024;
-
-fn parse_max_layer_size(raw: Option<&str>) -> usize {
-    match raw {
-        Some(value) => value.trim().parse().unwrap_or(DEFAULT_MAX_LAYER_SIZE),
-        None => DEFAULT_MAX_LAYER_SIZE,
-    }
-}
-
-fn max_layer_size() -> usize {
-    parse_max_layer_size(std::env::var("FERROCRATE_MAX_LAYER_BYTES").ok().as_deref())
-}
 const MAX_ADD_REMOTE_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -84,8 +69,6 @@ pub enum DockerfileBuildError {
     Invalid(String),
     #[error("compression error: {0}")]
     Compression(#[from] LayerCompressionError),
-    #[error("layer size exceeds maximum ({0} bytes)")]
-    LayerTooLarge(usize),
     #[error("image build authorization binding failed: {0}")]
     Authorization(String),
     #[error("registry error: {0}")]
@@ -524,6 +507,10 @@ struct BuildJournal {
     state: BuildJournalState,
     #[serde(default)]
     completed_stages: Vec<usize>,
+    /// Full output of the failing RUN. Kept on disk for diagnosis; CLI output
+    /// may be abbreviated but the journal must not discard the evidence.
+    #[serde(default)]
+    failure_output: Option<String>,
 }
 
 impl BuildJournal {
@@ -667,6 +654,14 @@ fn build_one_stage(
     } else {
         fs::create_dir_all(&stage_root)?;
     }
+    // The final stage descriptor is a single layer in this builder. Snapshot
+    // before applying COPY as well as RUN so that descriptor includes the
+    // context change set without re-emitting the base filesystem.
+    let stage_baseline = if stage.run.is_empty() {
+        None
+    } else {
+        Some(snapshot_stage_root(&stage_root)?)
+    };
 
     let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
     if stage.copy_paths.is_empty() {
@@ -678,6 +673,17 @@ fn build_one_stage(
             ignore_patterns,
         )?;
     } else {
+        // Docker applies .dockerignore before evaluating every COPY source,
+        // including the common `COPY . .` spelling.  Keep an isolated,
+        // filtered source tree so explicit COPYs cannot bypass that contract.
+        let filtered_context = create_build_dir(runtime_dir, &format!("filtered-context-{idx}"))?;
+        copy_context_dir(
+            context_dir,
+            context_dir,
+            &filtered_context,
+            dockerfile_path,
+            ignore_patterns,
+        )?;
         let mut copy_paths = stage.copy_paths.clone();
         for spec in &mut copy_paths {
             spec.dest = resolve_copy_destination(stage.workdir.as_deref(), &spec.dest);
@@ -686,7 +692,7 @@ fn build_one_stage(
                 spec.owner = Some(CopyOwner::Numeric(uid, gid));
             }
         }
-        copy_from_context(context_dir, &context_root, &copy_paths)?;
+        copy_from_context(&filtered_context, &context_root, &copy_paths)?;
     }
     for copy in &stage.copy_from {
         let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
@@ -704,7 +710,7 @@ fn build_one_stage(
         }
     }
 
-    let (mut layer_bytes, mut layer_media_type) =
+    let (layer_bytes, mut layer_media_type) =
         build_layer_from_dir(&context_root, Some(dockerfile_path), compression)?;
     let mut layer_digest = sha256_digest_bytes(&layer_bytes);
     let mut layer_size = layer_bytes.len() as i64;
@@ -729,12 +735,17 @@ fn build_one_stage(
             context_dir,
             control,
         )?;
-        let (rebuilt, media_type) = build_layer_from_dir(&stage_root, None, compression)?;
-        layer_bytes = rebuilt;
-        layer_media_type = media_type;
-        layer_digest = sha256_digest_bytes(&layer_bytes);
-        layer_size = layer_bytes.len() as i64;
-        write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
+        let layer_temp = runtime_dir.join("build").join(format!("stage-{idx}.layer"));
+        layer_media_type = build_layer_from_snapshot_to_file(
+            &stage_root,
+            stage_baseline.as_ref().expect("RUN stage baseline"),
+            compression,
+            &layer_temp,
+        )?;
+        let (digest, size) = write_blob_from_file(runtime_dir, &layer_temp)?;
+        let _ = fs::remove_file(layer_temp);
+        layer_digest = digest;
+        layer_size = size as i64;
     }
 
     Ok(BuiltStage {
@@ -870,6 +881,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 authorization_plan_digest: None,
                 state: BuildJournalState::Running,
                 completed_stages: Vec::new(),
+                failure_output: None,
             }
         }
     };
@@ -964,6 +976,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             } else {
                 BuildJournalState::Failed
             };
+            journal.failure_output = Some(error.to_string());
             // The journal is best-effort on the failure path; the build error
             // is the authoritative outcome and must not be masked.
             let _ = save_build_journal(runtime_dir, &journal);
@@ -1465,11 +1478,6 @@ fn build_layer_from_dir(
         .into_inner()
         .map_err(|err| io::Error::other(err.to_string()))?;
 
-    // Security: Check layer size to prevent memory exhaustion
-    if tar_bytes.len() > max_layer_size() {
-        return Err(DockerfileBuildError::LayerTooLarge(tar_bytes.len()));
-    }
-
     match compression {
         CompressionFormat::Gzip => {
             let gzip_bytes = compress_bytes_gzip(&tar_bytes)?;
@@ -1485,10 +1493,187 @@ fn build_layer_from_dir(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagePathState {
+    size: u64,
+    modified: Option<SystemTime>,
+    mode: u32,
+    kind: StagePathKind,
+    symlink_target: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagePathKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+fn snapshot_stage_root(
+    root: &Path,
+) -> Result<BTreeMap<PathBuf, StagePathState>, DockerfileBuildError> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        entries: &mut BTreeMap<PathBuf, StagePathState>,
+    ) -> io::Result<()> {
+        let mut children = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        children.sort_by_key(|entry| entry.path());
+        for child in children {
+            let path = child.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            let file_type = metadata.file_type();
+            let kind = if file_type.is_file() {
+                StagePathKind::File
+            } else if file_type.is_dir() {
+                StagePathKind::Directory
+            } else if file_type.is_symlink() {
+                StagePathKind::Symlink
+            } else {
+                StagePathKind::Other
+            };
+            let relative = path
+                .strip_prefix(root)
+                .expect("stage entry under root")
+                .to_path_buf();
+            entries.insert(
+                relative,
+                StagePathState {
+                    size: metadata.len(),
+                    modified: metadata.modified().ok(),
+                    #[cfg(unix)]
+                    mode: metadata.permissions().mode(),
+                    #[cfg(not(unix))]
+                    mode: 0,
+                    kind,
+                    symlink_target: if file_type.is_symlink() {
+                        Some(fs::read_link(&path)?)
+                    } else {
+                        None
+                    },
+                },
+            );
+            if file_type.is_dir() {
+                visit(root, &path, entries)?;
+            }
+        }
+        Ok(())
+    }
+    let mut entries = BTreeMap::new();
+    visit(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn build_layer_from_snapshot_to_file(
+    root: &Path,
+    before: &BTreeMap<PathBuf, StagePathState>,
+    compression: CompressionFormat,
+    output: &Path,
+) -> Result<String, DockerfileBuildError> {
+    let after = snapshot_stage_root(root)?;
+    let file = File::create(output)?;
+    let writer: Box<dyn Write> = match compression {
+        CompressionFormat::Gzip => Box::new(GzEncoder::new(file, Compression::default())),
+        CompressionFormat::Zstd => Box::new(
+            zstd::stream::write::Encoder::new(file, 0)
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .auto_finish(),
+        ),
+        CompressionFormat::None => {
+            return Err(DockerfileBuildError::Unsupported(
+                "uncompressed layers are not supported".to_string(),
+            ))
+        }
+    };
+    let mut builder = Builder::new(writer);
+    // A whiteout is a zero-length regular file next to the removed name.
+    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+        append_whiteout(&mut builder, path)?;
+    }
+    for (path, state) in &after {
+        if before.get(path) == Some(state) {
+            continue;
+        }
+        if before.get(path).is_some_and(|old| old.kind != state.kind) {
+            append_whiteout(&mut builder, path)?;
+        }
+        append_stage_path(&mut builder, root, path, state)?;
+    }
+    builder
+        .into_inner()
+        .map_err(|err| io::Error::other(err.to_string()))?
+        .flush()?;
+    match compression {
+        CompressionFormat::Gzip => Ok(OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string()),
+        CompressionFormat::Zstd => Ok(OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE.to_string()),
+        CompressionFormat::None => unreachable!(),
+    }
+}
+
+fn append_whiteout<W: Write>(
+    builder: &mut Builder<W>,
+    path: &Path,
+) -> Result<(), DockerfileBuildError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| DockerfileBuildError::Invalid("cannot whiteout stage root".to_string()))?;
+    let whiteout = path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(format!(".wh.{}", name.to_string_lossy()));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_mode(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, whiteout, io::empty())
+        .map_err(DockerfileBuildError::Io)
+}
+
+fn append_stage_path<W: Write>(
+    builder: &mut Builder<W>,
+    root: &Path,
+    relative: &Path,
+    state: &StagePathState,
+) -> Result<(), DockerfileBuildError> {
+    let path = root.join(relative);
+    match state.kind {
+        StagePathKind::File => builder
+            .append_path_with_name(path, relative)
+            .map_err(DockerfileBuildError::Io),
+        StagePathKind::Directory => {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(state.mode);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, relative, io::empty())
+                .map_err(DockerfileBuildError::Io)
+        }
+        StagePathKind::Symlink => append_tar_symlink_entry(
+            builder,
+            relative,
+            state
+                .symlink_target
+                .as_deref()
+                .unwrap_or_else(|| Path::new("")),
+        )
+        .map_err(DockerfileBuildError::Io),
+        StagePathKind::Other => Ok(()),
+    }
+}
+
 /// Layers previously listed only regular files, so directories without any
 /// file inside and symlinks vanished from every generated layer. Explicit
 /// headers keep both alive across the tar round-trip.
-fn append_tar_dir_entry(builder: &mut Builder<Vec<u8>>, relative: &Path) -> std::io::Result<()> {
+fn append_tar_dir_entry<W: Write>(
+    builder: &mut Builder<W>,
+    relative: &Path,
+) -> std::io::Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
@@ -1499,8 +1684,8 @@ fn append_tar_dir_entry(builder: &mut Builder<Vec<u8>>, relative: &Path) -> std:
 
 /// Preserve the link verbatim; relative, absolute and dangling targets all
 /// survive instead of being dereferenced or silently dropped.
-fn append_tar_symlink_entry(
-    builder: &mut Builder<Vec<u8>>,
+fn append_tar_symlink_entry<W: Write>(
+    builder: &mut Builder<W>,
     relative: &Path,
     target: &Path,
 ) -> std::io::Result<()> {
@@ -1635,6 +1820,34 @@ fn build_config_json(
 
 fn write_blob(runtime_dir: &Path, digest: &str, bytes: &[u8]) -> Result<(), DockerfileBuildError> {
     write_cas_blob(runtime_dir, "blobs", digest, bytes)
+}
+
+/// Install an already-streamed layer without ever materialising it in memory.
+/// The layer blob is the authoritative copy; unlike small config blobs it is
+/// deliberately not duplicated in the byte-addressed CAS.
+fn write_blob_from_file(
+    runtime_dir: &Path,
+    source: &Path,
+) -> Result<(String, u64), DockerfileBuildError> {
+    let mut input = File::open(source)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes += read as u64;
+    }
+    let digest = format!("sha256:{:x}", hasher.finalize());
+    let target = layer_blob_path(runtime_dir, &digest);
+    if !target.exists() {
+        fs::create_dir_all(target.parent().expect("layer blob parent"))?;
+        fs::copy(source, &target)?;
+    }
+    Ok((digest, bytes))
 }
 
 fn write_config(
@@ -4835,14 +5048,14 @@ fn run_stage_commands(
         let output_exceeded = Arc::new(AtomicBool::new(false));
         let mut output_drains = Vec::new();
         let cap = output_cap.unwrap_or(u64::MAX);
-        let mut child_streams: Vec<Box<dyn Read + Send>> = Vec::new();
+        let mut child_streams: Vec<(&str, Box<dyn Read + Send>)> = Vec::new();
         if let Some(stream) = child.stdout.take() {
-            child_streams.push(Box::new(stream));
+            child_streams.push(("stdout", Box::new(stream)));
         }
         if let Some(stream) = child.stderr.take() {
-            child_streams.push(Box::new(stream));
+            child_streams.push(("stderr", Box::new(stream)));
         }
-        for stream in child_streams {
+        for (name, stream) in child_streams {
             let total = Arc::clone(&output_total);
             let exceeded = Arc::clone(&output_exceeded);
             output_drains.push(thread::spawn(move || {
@@ -4862,7 +5075,7 @@ fn run_stage_commands(
                         }
                     }
                 }
-                captured
+                (name, captured)
             }));
         }
         let status_result = loop {
@@ -4905,10 +5118,15 @@ fn run_stage_commands(
             }
             thread::sleep(Duration::from_millis(20));
         };
-        let mut run_output = Vec::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
         for drain in output_drains {
-            if let Ok(bytes) = drain.join() {
-                run_output.extend(bytes);
+            if let Ok((name, bytes)) = drain.join() {
+                if name == "stdout" {
+                    stdout = bytes;
+                } else {
+                    stderr = bytes;
+                }
             }
         }
         let mut cleanup_error = None;
@@ -4967,11 +5185,13 @@ fn run_stage_commands(
         }
         let status = status_result?;
         if !status.success() {
-            let output = String::from_utf8_lossy(&run_output);
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
             return Err(DockerfileBuildError::Invalid(format!(
-                "RUN {} failed with status {status}\n{}",
+                "RUN {} failed with status {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
                 run.args.join(" "),
-                output.trim_end(),
+                stdout.trim_end(),
+                stderr.trim_end(),
             )));
         }
     }
@@ -5777,7 +5997,11 @@ fn copy_context_dir(
         let target = dst.join(relative);
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            copy_context_dir(root, &path, &target, dockerfile_path, ignore_patterns)?;
+            fs::create_dir_all(&target)?;
+            // `relative` is always rooted at the original context; keep the
+            // destination rooted there too. Passing `target` here duplicates
+            // every nested component (a/b becomes a/a/b).
+            copy_context_dir(root, &path, dst, dockerfile_path, ignore_patterns)?;
         } else if file_type.is_symlink() {
             copy_symlink(&path, &target)?;
         } else if file_type.is_file() {
@@ -6454,16 +6678,34 @@ mod tests {
     }
 
     #[test]
-    fn layer_cap_defaults_high_and_honours_the_override() {
-        // S23: a one gibibyte cap rejected ordinary application images.
-        assert_eq!(super::DEFAULT_MAX_LAYER_SIZE, 4 * 1024 * 1024 * 1024);
-        assert_eq!(super::parse_max_layer_size(Some("123")), 123);
-        assert_eq!(super::parse_max_layer_size(Some(" 456 ")), 456);
-        assert_eq!(
-            super::parse_max_layer_size(Some("not a number")),
-            super::DEFAULT_MAX_LAYER_SIZE
-        );
-        assert_eq!(super::parse_max_layer_size(None), super::DEFAULT_MAX_LAYER_SIZE);
+    fn run_layer_contains_only_changed_paths_and_whiteouts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/sh"), "base shell").unwrap();
+        std::fs::write(root.join("removed"), "base file").unwrap();
+        let before = super::snapshot_stage_root(&root).unwrap();
+        std::fs::write(root.join("marker"), "changed").unwrap();
+        std::fs::remove_file(root.join("removed")).unwrap();
+
+        let layer = temp.path().join("layer.gz");
+        super::build_layer_from_snapshot_to_file(
+            &root,
+            &before,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &layer,
+        )
+        .unwrap();
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(layer).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let names = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&std::path::PathBuf::from("marker")));
+        assert!(names.contains(&std::path::PathBuf::from(".wh.removed")));
+        assert!(!names.contains(&std::path::PathBuf::from("bin/sh")));
     }
 
     use super::{
@@ -7005,7 +7247,17 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(&dockerfile, "FROM scratch\nWORKDIR /src\nCOPY . .\n").unwrap();
-        fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("generated-checkstyle.java"), "ignored").unwrap();
+        fs::write(
+            temp.path().join(".dockerignore"),
+            "generated-checkstyle.java\n",
+        )
+        .unwrap();
         let runtime = temp.path().join("runtime");
         let store = LocalImageStore::open(runtime.join("images")).unwrap();
 
@@ -7021,6 +7273,9 @@ mod tests {
 
         assert!(runtime.join("build/stage-0/src/Cargo.toml").is_file());
         assert!(!runtime.join("build/stage-0/src/src/Cargo.toml").exists());
+        assert!(!runtime
+            .join("build/stage-0/src/generated-checkstyle.java")
+            .exists());
     }
 
     #[test]

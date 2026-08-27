@@ -6821,7 +6821,7 @@ fn handle_run(
         .chain(volume_mounts.iter())
         .map(|mount| mount.target.to_string_lossy().into_owned())
         .collect::<std::collections::BTreeSet<_>>();
-    let image_execution = match resolved_image_execution {
+    let mut image_execution = match resolved_image_execution {
         Some(execution) => execution.clone(),
         None => resolve_run_image_execution(
             runtime_dir,
@@ -6891,8 +6891,13 @@ fn handle_run(
             health_start_period,
         )?,
     };
+    if resolved_image_execution.is_none() {
+        apply_run_execution_overrides(&mut image_execution, &env, health);
+    }
     let restart_policy = parse_restart_policy(restart_policy)?;
+    let effective_health = image_execution.health.clone();
     let effective_cmd = image_execution.command;
+    let effective_env = image_execution.env;
 
     let run = |container_id: Option<&str>| {
         if let Some(container_id) = container_id {
@@ -6901,10 +6906,10 @@ fn handle_run(
                 store,
                 &effective_image,
                 &effective_cmd,
-                &env,
+                &effective_env,
                 &labels,
                 &annotations,
-                health.clone(),
+                effective_health.clone(),
                 restart_policy.clone(),
                 &caps,
                 limits.as_ref(),
@@ -6926,10 +6931,10 @@ fn handle_run(
                 store,
                 &effective_image,
                 &effective_cmd,
-                &env,
+                &effective_env,
                 &labels,
                 &annotations,
-                health,
+                effective_health,
                 restart_policy,
                 &caps,
                 limits.as_ref(),
@@ -11519,6 +11524,37 @@ fn resolve_run_image_execution(
     resolve_run_image_execution_from_config(&config, entrypoint, cmd, workdir, user)
 }
 
+/// Resolve the image-derived inputs once, then overlay Compose's explicit
+/// environment and healthcheck before authorizing the child. `handle_run`
+/// receives this object unchanged, so its runtime digest describes the launch.
+#[cfg(target_os = "linux")]
+fn resolve_compose_run_image_execution(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    image: &str,
+    project_dir: &Path,
+    service: &ComposeService,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+) -> Result<ResolvedRunImageExecution, String> {
+    let mut execution = resolve_run_image_execution(
+        runtime_dir,
+        store,
+        image,
+        entrypoint,
+        cmd,
+        None,
+        None,
+    )?;
+    let env = compose_service_env(project_dir, service)?;
+    apply_run_execution_overrides(
+        &mut execution,
+        &env,
+        compose_service_health_config(service)?,
+    );
+    Ok(execution)
+}
+
 #[cfg(target_os = "linux")]
 fn resolve_run_image_execution_from_config(
     image_config: &serde_json::Value,
@@ -11528,8 +11564,11 @@ fn resolve_run_image_execution_from_config(
     user: Option<&str>,
 ) -> Result<ResolvedRunImageExecution, String> {
     let config = image_config.get("config").unwrap_or(image_config);
+    let config_json = serde_json::to_string(image_config)
+        .map_err(|error| format!("run: serialize image config: {error}"))?;
     Ok(ResolvedRunImageExecution {
         command: resolve_run_command(image_config, entrypoint, cmd)?,
+        env: ferro_core::image_config::env_from_config(&config_json),
         workdir: workdir.map(str::to_owned).or_else(|| {
             config
                 .get("WorkingDir")
@@ -11542,9 +11581,43 @@ fn resolve_run_image_execution_from_config(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         }),
+        health: ferro_core::image_config::healthcheck_from_config(&config_json),
         volume_targets: image_config_volume_targets(image_config),
         volume_mounts: Vec::new(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn apply_run_execution_overrides(
+    image_execution: &mut ResolvedRunImageExecution,
+    env: &[String],
+    health: Option<ferro_core::container_store::HealthConfig>,
+) {
+    image_execution.env.extend(env.iter().cloned());
+    image_execution.env = dedup_run_env(std::mem::take(&mut image_execution.env));
+    if health.is_some() {
+        image_execution.health = health;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn dedup_run_env(entries: Vec<String>) -> Vec<String> {
+    let mut values = HashMap::with_capacity(entries.len());
+    let mut order = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = entry.split('=').next().unwrap_or("").trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        if !values.contains_key(&key) {
+            order.push(key.clone());
+        }
+        values.insert(key, entry);
+    }
+    order
+        .into_iter()
+        .filter_map(|key| values.remove(&key))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -14486,8 +14559,10 @@ struct PreparedComposeService {
 #[derive(Debug, Clone)]
 struct ResolvedRunImageExecution {
     command: Vec<String>,
+    env: Vec<String>,
     workdir: Option<String>,
     user: Option<String>,
+    health: Option<ferro_core::container_store::HealthConfig>,
     volume_targets: Vec<String>,
     volume_mounts: Vec<String>,
 }
@@ -15053,14 +15128,14 @@ fn handle_compose(
                     .map(ComposePrerequisite::mutation)
                     .collect::<Vec<_>>();
                 let mut image_execution = if mutations.is_empty() {
-                    Some(resolve_run_image_execution(
+                    Some(resolve_compose_run_image_execution(
                         &runtime_dir(),
                         store,
                         &prepared.image,
+                        &project_dir,
+                        service,
                         service.entrypoint.as_deref(),
                         &compose_service_command(service),
-                        None,
-                        None,
                     )?)
                 } else {
                     None
@@ -15161,14 +15236,14 @@ fn handle_compose(
                     wait_for_compose_dependencies(runtime, depends_on)
                         .map_err(|error| format!("compose partial result: {error}"))?;
                 }
-                let mut image_execution = image_execution.unwrap_or(resolve_run_image_execution(
+                let mut image_execution = image_execution.unwrap_or(resolve_compose_run_image_execution(
                     &runtime_dir(),
                     store,
                     &prepared.image,
+                    &project_dir,
+                    service,
                     service.entrypoint.as_deref(),
                     &compose_service_command(service),
-                    None,
-                    None,
                 )?);
                 resolve_compose_image_volume_mounts(
                     &mut image_execution,
@@ -16313,8 +16388,6 @@ fn compose_service_execution_digest(
     network_override: Option<&str>,
     image_execution: &ResolvedRunImageExecution,
 ) -> Result<(String, [u8; 32]), String> {
-    let env_entries = compose_service_env(project_dir, service)?;
-    let env = parse_env_entries(&env_entries)?;
     let label_entries = compose_service_labels(service);
     let labels = parse_key_values("label", &label_entries)?;
     let publish = compose_service_ports(service);
@@ -16327,7 +16400,6 @@ fn compose_service_execution_digest(
         .parse::<NetworkBackend>()
         .map_err(|error| error.to_string())?;
     let restart = parse_restart_policy(service.restart.as_deref().unwrap_or("no"))?;
-    let health = compose_service_health_config(service)?;
     let requested_network = network_override
         .map(str::to_string)
         .unwrap_or(compose_service_network(service, name, default_network)?);
@@ -16355,10 +16427,10 @@ fn compose_service_execution_digest(
             store,
             image,
             &image_execution.command,
-            &env,
+            &image_execution.env,
             &labels,
             &HashMap::new(),
-            health.as_ref(),
+            image_execution.health.as_ref(),
             &restart,
             &[],
             compose_limits.as_ref(),
@@ -30881,8 +30953,13 @@ volumes:
             "config": {
                 "Entrypoint": ["/image-entrypoint"],
                 "Cmd": ["--serve"],
+                "Env": ["IMAGE_ONLY=1", "OVERRIDE=image"],
                 "WorkingDir": "/image-workdir",
                 "User": "1001:1001",
+                "Healthcheck": {
+                    "Test": ["CMD", "echo", "healthy"],
+                    "Interval": 30000000000_u64
+                },
                 "Volumes": {"/image-data": {}}
             }
         });
@@ -30898,7 +30975,38 @@ volumes:
         assert_eq!(defaults.command, ["/image-entrypoint", "--serve"]);
         assert_eq!(defaults.workdir.as_deref(), Some("/image-workdir"));
         assert_eq!(defaults.user.as_deref(), Some("1001:1001"));
+        assert_eq!(defaults.env, ["IMAGE_ONLY=1", "OVERRIDE=image"]);
+        assert_eq!(
+            defaults.health.as_ref().map(|health| health.cmd.as_slice()),
+            Some(["echo".to_string(), "healthy".to_string()].as_slice())
+        );
         assert_eq!(defaults.volume_targets, ["/image-data"]);
+
+        let mut environment_and_health_overrides = defaults.clone();
+        super::apply_run_execution_overrides(
+            &mut environment_and_health_overrides,
+            &["OVERRIDE=compose".to_string(), "SERVICE_ONLY=1".to_string()],
+            Some(ferro_core::container_store::HealthConfig {
+                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), "ready".to_string()],
+                interval_secs: 5,
+                timeout_secs: 2,
+                retries: 1,
+                start_period_secs: 0,
+            }),
+        );
+        assert_eq!(
+            environment_and_health_overrides.env,
+            ["IMAGE_ONLY=1", "OVERRIDE=compose", "SERVICE_ONLY=1"]
+        );
+        assert_eq!(
+            environment_and_health_overrides
+                .health
+                .as_ref()
+                .map(|health| health.cmd.as_slice()),
+            Some(
+                ["/bin/sh".to_string(), "-c".to_string(), "ready".to_string()].as_slice()
+            )
+        );
 
         let overrides = super::resolve_run_image_execution_from_config(
             &config,

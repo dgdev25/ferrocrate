@@ -24187,6 +24187,17 @@ fn run_buildkit_control_transport(
     execution: Arc<BuildkitExecutionContext>,
     lifetime: Duration,
 ) -> Result<(), String> {
+    // `read_http_request` installs a short blocking timeout while parsing the
+    // HTTP/1.1 upgrade.  It is not a control-stream deadline: carrying it
+    // into Tokio lets an idle but healthy HTTP/2 transport fail underneath a
+    // long-lived solve.  The explicit `lifetime` below remains the sole
+    // control connection deadline.
+    stream
+        .set_read_timeout(None)
+        .map_err(|error| format!("buildkit control: clear read timeout failed: {error}"))?;
+    stream
+        .set_write_timeout(None)
+        .map_err(|error| format!("buildkit control: clear write timeout failed: {error}"))?;
     stream
         .set_nonblocking(true)
         .map_err(|error| format!("buildkit control: set nonblocking failed: {error}"))?;

@@ -377,9 +377,11 @@ def audit() -> dict:
         "ferro_daemons": count_procs(r"ferro-cli daemon"),
         "listening_ports": count_ports(),
         "container_dirs": len(list((state / "containers").glob("*"))) if (state / "containers").is_dir() else 0,
-        "mounts": subprocess.run(
-            f"grep -c '{home}/' /proc/self/mountinfo || echo 0", shell=True,
-            capture_output=True, text=True).stdout.strip(),
+        # pure-python count: `grep -c ... || echo 0` double-prints on no match
+        # (grep prints 0 AND exits 1), yielding "0\n0" — a string that broke the
+        # drift arithmetic with a TypeError at the first audit.
+        "mounts": sum(1 for line in Path("/proc/self/mountinfo").read_text().splitlines()
+                      if f"{home}/" in line),
     }
 
 

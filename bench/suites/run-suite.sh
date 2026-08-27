@@ -32,13 +32,27 @@ fi
 # emptied result file. A lock makes that impossible rather than discouraged.
 LOCKDIR="/path/to/ferrocrate-lab/locks"; mkdir -p "$LOCKDIR"
 LOCKFILE="$LOCKDIR/$SUITE-$ENGINE.lock"
-exec 8>"$LOCKFILE"
+exec 8>>"$LOCKFILE"
 if ! flock -n 8; then
-  holder="$(cat "$LOCKFILE" 2>/dev/null || echo unknown)"
+  # Read the holder's pid from a separate file: the lockfile's own fd is held
+  # open by the holder and its write may not have flushed when we read it.
+  holder="$(cat "$LOCKFILE.pid" 2>/dev/null || echo unknown)"
   echo "REFUSED: $SUITE/$ENGINE is already running (pid $holder). Not starting a second run." >&2
   exit 3
 fi
-echo $$ >&8
+echo $$ > "$LOCKFILE.pid"
+# Bash EXIT traps replace rather than stack, so there is exactly ONE trap in
+# this script. Later paths register what they need cleaned by setting these
+# variables; they must never call `trap ... EXIT` themselves.
+CLEANUP_DAEMON=""; CLEANUP_PATHS=""; CLEANUP_DOCKER_CONTEXT=""
+suite_cleanup() {
+  [ -n "$CLEANUP_DAEMON" ] && kill "$CLEANUP_DAEMON" 2>/dev/null
+  [ -n "$CLEANUP_DOCKER_CONTEXT" ] && docker context rm -f "$CLEANUP_DOCKER_CONTEXT" >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  [ -n "$CLEANUP_PATHS" ] && rm -f $CLEANUP_PATHS
+  rm -f "$LOCKFILE.pid"
+}
+trap suite_cleanup EXIT
 
 SRC="${SUITE_SRC:-/data/dev/bench-suites}"; mkdir -p "$SRC"
 export PATH="$HOME/.local/go-install/go/bin:$PATH"
@@ -117,7 +131,7 @@ if [ "$ENGINE" = ferrocrate ]; then
     DAEMON=$!
     for _ in $(seq 1 100); do [ -S "$CRI_PATH" ] && break; sleep 0.1; done
     [ -S "$CRI_PATH" ] || { echo "ferro-cri did not create $CRI_PATH; see $WORK/daemon.log" >&2; exit 2; }
-    trap 'kill $DAEMON 2>/dev/null; rm -f "$CRI_PATH"' EXIT
+    CLEANUP_DAEMON="$DAEMON"; CLEANUP_PATHS="$CRI_PATH"
   else
     pkill -f "^$FERRO daemon" 2>/dev/null; rm -f "$SOCK"
     # Launch through a differently named symlink: other agents on this host run
@@ -144,7 +158,7 @@ if [ "$ENGINE" = ferrocrate ]; then
     export DOCKER_CONTEXT="ferro-suite-$$"
     docker context create "$DOCKER_CONTEXT" --docker "host=unix://$SOCK" >/dev/null 2>&1 \
       || { echo "docker context create failed" >&2; exit 2; }
-    trap 'kill $DAEMON 2>/dev/null; rm -f "$SOCK"; docker context rm -f "$DOCKER_CONTEXT" >/dev/null 2>&1' EXIT
+    CLEANUP_DAEMON="$DAEMON"; CLEANUP_PATHS="$SOCK"; CLEANUP_DOCKER_CONTEXT="$DOCKER_CONTEXT"
   fi
 else
   unset DOCKER_HOST

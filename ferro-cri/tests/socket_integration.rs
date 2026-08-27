@@ -533,6 +533,27 @@ async fn cri_socket_serves_runtime_and_image_requests() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn cri_process_image_service_list_images_is_valid_protobuf() {
+    let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let runtime = tempfile::tempdir().expect("runtime tempdir");
+    let socket = runtime.path().join("cri-image-service.sock");
+    let mut daemon = spawn_cri_process(runtime.path(), &socket);
+    wait_for_socket(&socket).await;
+
+    let mut images = ImageServiceClient::new(connect_channel(socket).await);
+    let response = images
+        .list_images(ListImagesRequest::default())
+        .await
+        .expect("CRI ListImages must decode as a protobuf response")
+        .into_inner();
+    assert!(response.images.is_empty());
+
+    daemon.kill().expect("stop CRI daemon");
+    let _ = daemon.wait();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
     let runtime = tempfile::tempdir().expect("runtime tempdir");

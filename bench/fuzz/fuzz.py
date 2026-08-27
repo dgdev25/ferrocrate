@@ -409,6 +409,19 @@ def main() -> int:
             divergence = run_sequence(seq, tag)
             done += 1
             if divergence:
+                # A divergence that does not survive a re-run is flaky, not a
+                # finding: shrink() returns None for it and would otherwise
+                # crash the run on the record build below. Re-confirm once,
+                # then log it as flaky and keep going.
+                if not args.seed_file and run_sequence(seq, tag) is None:
+                    log.write(json.dumps({"run": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
+                                          "source": "fuzz", "reason": "flaky", "label": divergence["label"],
+                                          "sequence": [{"label": l, "args": a} for l, a in seq]}) + "\n")
+                    log.flush()
+                    print(f"FLAKY divergence at step {divergence['step']} ({divergence['label']}); "
+                          f"did not reproduce on re-run", flush=True)
+                    divergence = None
+            if divergence:
                 findings += 1
                 if args.seed_file:
                     minimal, divergence = seq, divergence
@@ -425,13 +438,15 @@ def main() -> int:
                 seed.parent.mkdir(parents=True, exist_ok=True)
                 seed.write_text(json.dumps(record, indent=1))
                 print(f"DIVERGENCE {divergence['reason']} at step {divergence['step']} ({divergence['label']}); "
-                      f"minimal sequence {len(minimal)} steps -> {seed.name}")
+                      f"minimal sequence {len(minimal)} steps -> {seed.name}", flush=True)
+            if done % 10 == 0:
+                print(f"progress: {done} sequences, {findings} divergences", flush=True)
             if args.audit and done % 100 == 0:
                 now = audit()
                 drift = {k: now[k] - baseline[k] for k in now if now[k] != baseline[k]}
                 log.write(json.dumps({"source": "fuzz-audit", "sequences": done, "counters": now, "drift": drift}) + "\n")
                 log.flush()
-                print(f"audit after {done}: {now}" + (f" DRIFT {drift}" if drift else " (clean)"))
+                print(f"audit after {done}: {now}" + (f" DRIFT {drift}" if drift else " (clean)"), flush=True)
             if deadline is None and done >= args.sequences:
                 break
             if deadline is not None and time.time() >= deadline:

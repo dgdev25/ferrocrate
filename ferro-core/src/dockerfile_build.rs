@@ -221,8 +221,11 @@ pub fn prepare_dockerfile_build_with_contexts(
     let stage_dependencies = build_stage_dependency_graph(&stages, named_contexts)?;
     let stage_batches = build_stage_execution_batches(&stage_dependencies)?;
     let mut base_digests = Vec::with_capacity(stages.len());
-    for stage in &stages {
-        if stage.base.eq_ignore_ascii_case("scratch") {
+    let stage_aliases = earlier_stage_aliases(&stages)?;
+    for (index, stage) in stages.iter().enumerate() {
+        if stage.base.eq_ignore_ascii_case("scratch")
+            || stage_aliases[index].contains_key(&stage.base.to_ascii_lowercase())
+        {
             base_digests.push((stage.base.clone(), None));
         } else {
             let record = resolve_reference(store, &stage.base)?.ok_or_else(|| {
@@ -320,6 +323,7 @@ struct BaseImageInfo {
     descriptors: Vec<Descriptor>,
     digest: Option<String>,
     onbuild: Vec<String>,
+    env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -631,6 +635,7 @@ fn build_one_stage(
     secrets: &HashMap<String, PathBuf>,
     stage_roots: &[PathBuf],
     stage_names: &HashMap<String, PathBuf>,
+    inherited_root: Option<&Path>,
     control: &BuildControl,
 ) -> Result<BuiltStage, DockerfileBuildError> {
     let stage_root = runtime_dir.join("build").join(format!("stage-{idx}"));
@@ -638,7 +643,9 @@ fn build_one_stage(
         let _ = fs::remove_dir_all(&stage_root);
     }
     let cas_root = runtime_dir.join("images").join("cas").join("blake3");
-    if !base_info.layers.is_empty() {
+    if let Some(parent_root) = inherited_root {
+        copy_rootfs_contents(parent_root, &stage_root)?;
+    } else if !base_info.layers.is_empty() {
         construct_rootfs_with_dedup(&stage_root, &base_info.layers, &cas_root)
             .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
     } else {
@@ -695,7 +702,7 @@ fn build_one_stage(
         run_stage_commands(
             &stage_root,
             &stage.run,
-            &stage.env,
+            &stage_environment(base_info, &stage.env),
             stage.workdir.as_deref(),
             stage.user.as_deref(),
             &runtime_dir
@@ -775,9 +782,20 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     )?;
     let named_contexts = canonicalize_named_contexts(named_contexts)?;
     let dockerfile_digest = hex::encode(Sha256::digest(dockerfile.as_bytes()));
+    let aliases = earlier_stage_aliases(&stages)?;
     let mut base_infos = Vec::new();
-    for stage in stages.iter() {
-        let base_info = resolve_base_image(store, runtime_dir, &stage.base, authority)?;
+    for (index, stage) in stages.iter().enumerate() {
+        let base_info = if aliases[index].contains_key(&stage.base.to_ascii_lowercase()) {
+            BaseImageInfo {
+                layers: Vec::new(),
+                descriptors: Vec::new(),
+                digest: None,
+                onbuild: Vec::new(),
+                env: Vec::new(),
+            }
+        } else {
+            resolve_base_image(store, runtime_dir, &stage.base, authority)?
+        };
         base_infos.push(base_info);
     }
     let mut stages = stages;
@@ -1074,6 +1092,12 @@ fn execute_stages_and_publish(
         // content-addressed stage identity.
         let worker_checkpoints = checkpoints.clone();
         let execute_stage = |idx: usize| -> Result<BuiltStage, DockerfileBuildError> {
+            let inherited_root = resolve_stage_root(
+                &roots_snapshot,
+                &names_snapshot,
+                &HashMap::new(),
+                &stages[idx].base,
+            );
             let checkpoint = worker_checkpoints
                 .get(&idx)
                 .filter(|checkpoint| checkpoint.build_key == stage_identities[idx])
@@ -1104,6 +1128,7 @@ fn execute_stages_and_publish(
                             secrets,
                             &roots_snapshot,
                             &names_snapshot,
+                            inherited_root.as_deref(),
                             control,
                         ),
                         Err(error) => Err(error),
@@ -1122,6 +1147,7 @@ fn execute_stages_and_publish(
                     secrets,
                     &roots_snapshot,
                     &names_snapshot,
+                    inherited_root.as_deref(),
                     control,
                 ),
             };
@@ -1419,10 +1445,7 @@ fn build_layer_from_dir(
 /// Layers previously listed only regular files, so directories without any
 /// file inside and symlinks vanished from every generated layer. Explicit
 /// headers keep both alive across the tar round-trip.
-fn append_tar_dir_entry(
-    builder: &mut Builder<Vec<u8>>,
-    relative: &Path,
-) -> std::io::Result<()> {
+fn append_tar_dir_entry(builder: &mut Builder<Vec<u8>>, relative: &Path) -> std::io::Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
@@ -2727,6 +2750,13 @@ fn build_stage_dependency_graph(
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // `FROM base` selects an earlier named stage before any registry
+        // reference of the same spelling. Make that filesystem dependency
+        // explicit so its RUN steps cannot be scheduled against another
+        // stage's rootfs.
+        if let Some(dependency) = names.get(&stage.base.to_ascii_lowercase()).copied() {
+            dependencies.push(dependency);
+        }
         dependencies.sort_unstable();
         dependencies.dedup();
         for dependency in &dependencies {
@@ -2739,6 +2769,24 @@ fn build_stage_dependency_graph(
         graph.push(dependencies);
     }
     Ok(graph)
+}
+
+fn earlier_stage_aliases(
+    stages: &[StageSpec],
+) -> Result<Vec<HashMap<String, usize>>, DockerfileBuildError> {
+    let mut aliases = HashMap::new();
+    let mut snapshots = Vec::with_capacity(stages.len());
+    for (index, stage) in stages.iter().enumerate() {
+        snapshots.push(aliases.clone());
+        if let Some(name) = stage.name.as_deref() {
+            if aliases.insert(name.to_ascii_lowercase(), index).is_some() {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "duplicate Dockerfile stage name: {name}"
+                )));
+            }
+        }
+    }
+    Ok(snapshots)
 }
 
 fn build_stage_execution_batches(
@@ -4273,6 +4321,12 @@ fn run_stage_commands(
                 .arg("/")
                 .arg("--proc")
                 .arg("/proc")
+                // Cargo and other build tools open /dev/null while spawning
+                // their compiler children. Without a sandbox-local /dev,
+                // those children fail with a misleading ENOENT even though
+                // the stage executable is present.
+                .arg("--dev")
+                .arg("/dev")
                 .arg("--chdir")
                 .arg(
                     workdir
@@ -5293,6 +5347,7 @@ fn resolve_base_image(
             descriptors: Vec::new(),
             digest: None,
             onbuild: Vec::new(),
+            env: Vec::new(),
         });
     }
 
@@ -5311,11 +5366,13 @@ fn resolve_base_image(
     let layers = resolve_layer_paths_with_store(runtime_dir, base, store)
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
     let onbuild = load_base_onbuild_triggers(runtime_dir, &manifest.config.digest)?;
+    let env = load_base_environment(runtime_dir, &manifest.config.digest)?;
     Ok(BaseImageInfo {
         layers,
         descriptors: manifest.layers,
         digest: Some(record.digest),
         onbuild,
+        env,
     })
 }
 
@@ -5346,6 +5403,61 @@ fn load_base_onbuild_triggers(
             parse_onbuild(trigger)
         })
         .collect()
+}
+
+fn load_base_environment(
+    runtime_dir: &Path,
+    config_digest: &str,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    let path = config_path(runtime_dir, config_digest);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path)?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("base config JSON: {err}")))?;
+    let Some(values) = config
+        .get("config")
+        .and_then(|value| value.get("Env"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|entry| entry.contains('='))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    DockerfileBuildError::Invalid(
+                        "base config Env must contain key=value strings".to_string(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Compose base-image and Dockerfile `ENV` values. Dockerfile assignments
+/// override matching base keys but preserve base PATH/toolchain values.
+fn stage_environment(base: &BaseImageInfo, stage: &[String]) -> Vec<String> {
+    let mut env = Vec::new();
+    for entry in base.env.iter().chain(stage) {
+        let Some((key, _)) = entry.split_once('=') else {
+            continue;
+        };
+        if let Some(index) = env.iter().position(|existing: &String| {
+            existing
+                .split_once('=')
+                .is_some_and(|(existing_key, _)| existing_key == key)
+        }) {
+            env[index] = entry.clone();
+        } else {
+            env.push(entry.clone());
+        }
+    }
+    env
 }
 
 fn apply_onbuild_triggers(
@@ -5544,11 +5656,12 @@ fn copy_from_context(
     let remote_root = tempfile::tempdir()?;
     for spec in copies {
         let dest_root = dst_root.join(spec.dest.trim_start_matches('/'));
-        let multiple = spec.srcs.len() > 1 || spec.dest.ends_with('/');
+        let sources = expand_copy_sources(src_root, &spec.srcs)?;
+        let multiple = sources.len() > 1 || spec.dest.ends_with('/');
         if multiple {
             fs::create_dir_all(&dest_root)?;
         }
-        for src in &spec.srcs {
+        for src in &sources {
             if spec.parents
                 && Path::new(src)
                     .components()
@@ -5599,7 +5712,12 @@ fn copy_from_context(
             // Docker semantics: a source directory with a trailing slash
             // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
             // /out/), while a bare directory name is copied under its name.
-            let copy_contents = src.ends_with('/') && source.is_dir();
+            // `.` names the build context itself. Like an explicitly
+            // trailing-slash directory it contributes its contents, so
+            // `WORKDIR /src` + `COPY . .` must place Cargo.toml at /src,
+            // never /src/src/Cargo.toml.
+            let copy_contents =
+                (src == "." || src == "./" || src.ends_with('/')) && source.is_dir();
             let dest = if copy_contents {
                 dest_root.clone()
             } else if spec.parents {
@@ -5648,6 +5766,93 @@ fn copy_from_context(
         }
     }
     Ok(())
+}
+
+/// Expand Dockerfile COPY/ADD source globs against the build context.  This
+/// deliberately does not use the process shell: context paths stay confined
+/// to `src_root`, and an empty expansion remains a Dockerfile error.
+fn expand_copy_sources(
+    src_root: &Path,
+    sources: &[String],
+) -> Result<Vec<String>, DockerfileBuildError> {
+    let mut expanded = Vec::new();
+    for source in sources {
+        if is_remote_add_source(source) || !source.contains(['*', '?', '[']) {
+            expanded.push(source.clone());
+            continue;
+        }
+        let relative = Path::new(source.trim_start_matches('/'));
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "COPY source escapes the build context".to_string(),
+            ));
+        }
+        let mut matches = Vec::new();
+        collect_copy_glob_matches(
+            src_root,
+            src_root,
+            source.trim_start_matches('/'),
+            &mut matches,
+        )?;
+        matches.sort();
+        if matches.is_empty() {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "COPY source {} is unavailable: glob matched no files",
+                src_root.join(source).display()
+            )));
+        }
+        expanded.extend(matches);
+    }
+    Ok(expanded)
+}
+
+fn collect_copy_glob_matches(
+    root: &Path,
+    directory: &Path,
+    pattern: &str,
+    matches: &mut Vec<String>,
+) -> Result<(), DockerfileBuildError> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("context walk stays under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if copy_glob_matches(pattern, &relative) {
+            matches.push(relative.clone());
+        }
+        if entry.file_type()?.is_dir() {
+            collect_copy_glob_matches(root, &path, pattern, matches)?;
+        }
+    }
+    Ok(())
+}
+
+/// Match the shell glob subset Docker accepts for context sources. `*` and
+/// `?` do not cross directory separators, matching filepath-style patterns.
+fn copy_glob_matches(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern {
+            [] => value.is_empty(),
+            [b'*', rest @ ..] => {
+                matches(rest, value)
+                    || (!value.is_empty() && value[0] != b'/' && matches(pattern, &value[1..]))
+            }
+            [b'?', rest @ ..] => {
+                !value.is_empty() && value[0] != b'/' && matches(rest, &value[1..])
+            }
+            [byte, rest @ ..] => {
+                !value.is_empty() && *byte == value[0] && matches(rest, &value[1..])
+            }
+        }
+    }
+    matches(pattern.as_bytes(), value.as_bytes())
 }
 
 fn resolve_copy_owner(
@@ -5917,6 +6122,17 @@ fn extract_add_tar<R: Read>(
     Ok(())
 }
 
+/// Seed a named-stage `FROM` root with the parent stage's *contents*.
+/// Copying the directory itself would introduce an extra `stage-N` path and
+/// make the stage's runtime tools invisible to RUN.
+fn copy_rootfs_contents(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        copy_path_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
 fn copy_path_recursive(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
     copy_path_recursive_mode(src, dst, None)
 }
@@ -5985,7 +6201,10 @@ fn copy_path_recursive_mode_with_excludes(
 #[cfg(unix)]
 fn copy_symlink(src: &Path, dst: &Path) -> Result<(), DockerfileBuildError> {
     let target = fs::read_link(src).map_err(|error| {
-        DockerfileBuildError::Invalid(format!("COPY cannot read symlink {}: {error}", src.display()))
+        DockerfileBuildError::Invalid(format!(
+            "COPY cannot read symlink {}: {error}",
+            src.display()
+        ))
     })?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -6367,11 +6586,7 @@ mod tests {
     fn copy_relative_destination_is_resolved_from_workdir() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
-        fs::write(
-            &dockerfile,
-            "FROM scratch\nWORKDIR /app\nCOPY source d\n",
-        )
-        .expect("dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nWORKDIR /app\nCOPY source d\n").expect("dockerfile");
         fs::create_dir_all(temp.path().join("source")).expect("source");
         fs::write(temp.path().join("source/value"), "value").expect("value");
         let runtime = temp.path().join("runtime");
@@ -6386,7 +6601,8 @@ mod tests {
         )
         .expect("build");
         assert_eq!(
-            fs::read_to_string(runtime.join("build/stage-0/app/d/value")).expect("WORKDIR COPY result"),
+            fs::read_to_string(runtime.join("build/stage-0/app/d/value"))
+                .expect("WORKDIR COPY result"),
             "value"
         );
     }
@@ -6429,7 +6645,10 @@ mod tests {
                 fs::read_to_string(stage.join("real.txt")).expect("regular file"),
                 "content"
             );
-            assert!(stage.join("bin").is_dir(), "directory holding a link survives");
+            assert!(
+                stage.join("bin").is_dir(),
+                "directory holding a link survives"
+            );
             assert_eq!(
                 fs::read_link(stage.join("bin/link")).expect("relative link"),
                 Path::new("../real.txt")
@@ -6458,8 +6677,7 @@ mod tests {
 
             let first = hash_context_dir(temp.path(), &dockerfile).expect("hash");
             fs::remove_file(temp.path().join("latest")).expect("remove link");
-            std::os::unix::fs::symlink("unrelated", temp.path().join("latest"))
-                .expect("retarget");
+            std::os::unix::fs::symlink("unrelated", temp.path().join("latest")).expect("retarget");
             let second = hash_context_dir(temp.path(), &dockerfile).expect("hash");
 
             assert_ne!(first, second);
@@ -6489,7 +6707,125 @@ mod tests {
         )
         .expect("build");
         assert!(runtime.join("build/stage-0/app/package.json").is_file());
-        assert!(runtime.join("build/stage-0/app/package-lock.json").is_file());
+        assert!(runtime
+            .join("build/stage-0/app/package-lock.json")
+            .is_file());
+    }
+
+    #[test]
+    fn copy_expands_context_globs_without_copying_non_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY package*.json /app/\n").unwrap();
+        fs::write(temp.path().join("package.json"), "manifest").unwrap();
+        fs::write(temp.path().join("package-lock.json"), "lock").unwrap();
+        fs::write(temp.path().join("package.txt"), "not json").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-glob:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("glob COPY build");
+
+        let app = runtime.join("build/stage-0/app");
+        assert_eq!(
+            fs::read_to_string(app.join("package.json")).unwrap(),
+            "manifest"
+        );
+        assert_eq!(
+            fs::read_to_string(app.join("package-lock.json")).unwrap(),
+            "lock"
+        );
+        assert!(!app.join("package.txt").exists());
+    }
+
+    #[test]
+    fn from_named_stage_uses_the_preceding_stage_filesystem() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS base\nCOPY artifact /tool\nFROM base\nCOPY marker /marker\n",
+        )
+        .expect("dockerfile");
+        fs::write(temp.path().join("artifact"), "compiled").expect("artifact");
+        fs::write(temp.path().join("marker"), "final").expect("marker");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/named-stage:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("named stage build");
+
+        assert_eq!(
+            fs::read_to_string(runtime.join("build/stage-1/tool")).unwrap(),
+            "compiled"
+        );
+        assert_eq!(
+            fs::read_to_string(runtime.join("build/stage-1/marker")).unwrap(),
+            "final"
+        );
+    }
+
+    #[test]
+    fn stage_environment_keeps_base_path_and_allows_dockerfile_overrides() {
+        let base = BaseImageInfo {
+            layers: Vec::new(),
+            descriptors: Vec::new(),
+            digest: None,
+            onbuild: Vec::new(),
+            env: vec![
+                "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                "RUSTUP_HOME=/usr/local/rustup".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            super::stage_environment(
+                &base,
+                &["PATH=/custom/bin".to_string(), "PORT=8080".to_string()]
+            ),
+            vec![
+                "PATH=/custom/bin".to_string(),
+                "RUSTUP_HOME=/usr/local/rustup".to_string(),
+                "PORT=8080".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_dot_into_workdir_copies_context_contents_not_context_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nWORKDIR /src\nCOPY . .\n").unwrap();
+        fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-dot:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("COPY . . build");
+
+        assert!(runtime.join("build/stage-0/src/Cargo.toml").is_file());
+        assert!(!runtime.join("build/stage-0/src/src/Cargo.toml").exists());
     }
 
     #[test]
@@ -6598,6 +6934,7 @@ mod tests {
             descriptors: Vec::new(),
             digest: None,
             onbuild: Vec::new(),
+            env: Vec::new(),
         };
         let keyed = BaseImageInfo {
             digest: Some("sha256:base".to_string()),
@@ -6642,6 +6979,7 @@ mod tests {
                     descriptors: Vec::new(),
                     digest: None,
                     onbuild: Vec::new(),
+                    env: Vec::new(),
                 }],
                 BUILD_CACHE_PLATFORM
             )
@@ -8102,7 +8440,10 @@ mod tests {
     #[cfg(unix)]
     fn skip_unavailable_rootless_build_sandbox() -> bool {
         if !nix::unistd::Uid::effective().is_root() && !crate::rootless::bubblewrap_available() {
-            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            eprintln!(
+                "skipping: {}",
+                crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE
+            );
             return true;
         }
         if host_blocks_rootless_build_sandbox() {
@@ -8120,7 +8461,10 @@ mod tests {
             return;
         }
         if !crate::rootless::bubblewrap_available() {
-            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            eprintln!(
+                "skipping: {}",
+                crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE
+            );
             return;
         }
         let Some(busybox) = static_busybox() else {
@@ -8215,17 +8559,18 @@ mod tests {
         let runtime = temp.path().join("runtime");
         let store =
             crate::image_store::LocalImageStore::open(runtime.join("images")).expect("image store");
-        let result = super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
-            &dockerfile,
-            Some("local/run-output:latest"),
-            &runtime,
-            crate::layer_compression::CompressionFormat::Gzip,
-            &store,
-            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-        );
+        let result =
+            super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+                &dockerfile,
+                Some("local/run-output:latest"),
+                &runtime,
+                crate::layer_compression::CompressionFormat::Gzip,
+                &store,
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+            );
         let error = match result {
             Ok(_) => panic!("RUN must fail"),
             Err(error) => error,
@@ -9050,8 +9395,14 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(fs::read_link(destination.join("bin/link")).unwrap(), PathBuf::from("../real.txt"));
-        assert_eq!(fs::read_link(destination.join("bin/dangling")).unwrap(), PathBuf::from("../missing.txt"));
+        assert_eq!(
+            fs::read_link(destination.join("bin/link")).unwrap(),
+            PathBuf::from("../real.txt")
+        );
+        assert_eq!(
+            fs::read_link(destination.join("bin/dangling")).unwrap(),
+            PathBuf::from("../missing.txt")
+        );
     }
 
     #[test]

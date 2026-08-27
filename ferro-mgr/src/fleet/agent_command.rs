@@ -218,7 +218,56 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(reader: R) -> Result<Stri
         bytes.truncate(MAX_OUTPUT_BYTES);
         bytes.extend_from_slice(b"\n[output truncated]\n");
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(strip_terminal_escapes(&String::from_utf8_lossy(&bytes)))
+}
+
+/// Fleet output is rendered by a browser, not a terminal. Remove ANSI CSI and
+/// OSC control sequences at the capture boundary so every consumer receives
+/// safe, readable text.
+fn strip_terminal_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            let start = index;
+            while index < bytes.len() && bytes[index] != 0x1b {
+                index += 1;
+            }
+            output.push_str(&value[start..index]);
+            continue;
+        }
+        index += 1;
+        match bytes.get(index) {
+            Some(b'[') => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            Some(_) => index += 1,
+            None => {}
+        }
+    }
+    output
 }
 
 fn reported_client_version(output: &str) -> String {
@@ -255,6 +304,16 @@ mod tests {
         assert_eq!(
             reported_client_version("Client:\n Version: \"0.1.0\"\n API version: \"1.45\"\n"),
             "0.1.0"
+        );
+    }
+
+    #[test]
+    fn fleet_output_strips_ansi_sequences_at_capture_boundary() {
+        assert_eq!(
+            super::strip_terminal_escapes(
+                "\u{1b}[33m WARN\u{1b}[0m pending cleanup journal \u{1b}]title\u{7}retained\n",
+            ),
+            " WARN pending cleanup journal retained\n"
         );
     }
 

@@ -1874,6 +1874,7 @@ impl ContainerRuntime {
             kernel_ops,
         )?;
         reap_orphaned_slirp4netns_helpers(runtime_dir, &runtime.store)?;
+        reap_orphaned_bwrap_launchers(runtime_dir, &runtime.store)?;
         runtime.reconcile_pending_mutations()?;
         runtime.reconcile_persisted_state()?;
         Ok(runtime)
@@ -12042,6 +12043,81 @@ fn reap_orphaned_slirp4netns_helpers_in(
     Ok(())
 }
 
+/// Reap bubblewrap launchers that are visibly bound to this runtime's
+/// container rootfs but no longer have both durable ownership record and
+/// rootfs.  The launcher creates its own process group, so terminate that
+/// group when present to reap the workload as well as its bwrap parent.
+fn reap_orphaned_bwrap_launchers(
+    runtime_dir: &Path,
+    store: &SqliteContainerStore,
+) -> Result<(), RuntimeError> {
+    let containers_dir = runtime_dir.join("containers");
+    let records = store.list()?;
+    for entry in fs::read_dir("/proc")?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let Some(rootfs) = bwrap_rootfs_from_cmdline(&cmdline) else {
+            continue;
+        };
+        let Ok(relative) = Path::new(rootfs).strip_prefix(&containers_dir) else {
+            continue;
+        };
+        let mut components = relative.components();
+        let Some(std::path::Component::Normal(id)) = components.next() else {
+            continue;
+        };
+        if components.next() != Some(std::path::Component::Normal(OsStr::new("rootfs")))
+            || components.next().is_some()
+        {
+            continue;
+        }
+        let rootfs_is_live = Path::new(rootfs).is_dir();
+        let record_is_live = records
+            .iter()
+            .any(|record| record.id.as_bytes() == id.as_bytes());
+        if !rootfs_is_live || !record_is_live {
+            terminate_container_process_tree(pid);
+        }
+    }
+    Ok(())
+}
+
+fn bwrap_rootfs_from_cmdline(cmdline: &[u8]) -> Option<&str> {
+    let args = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    let executable = args.first()?;
+    if !Path::new(OsStr::from_bytes(executable))
+        .file_name()
+        .is_some_and(|name| name == "bwrap")
+    {
+        return None;
+    }
+    args.windows(3).find_map(|args| {
+        (args[0] == b"--bind")
+            .then(|| std::str::from_utf8(args[1]).ok())
+            .flatten()
+            .filter(|path| path.ends_with("/rootfs"))
+    })
+}
+
+fn terminate_container_process_tree(pid: u32) {
+    let group = unsafe { nix::libc::getpgid(pid as i32) };
+    if group == pid as i32 {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-group),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    } else if let Err(error) = kill_pid(pid) {
+        log::warn!("failed to reap orphaned bwrap launcher {pid}: {error}");
+    }
+}
+
 fn slirp_api_socket_from_cmdline(cmdline: &[u8]) -> Option<&str> {
     let mut args = cmdline
         .split(|byte| *byte == 0)
@@ -16781,6 +16857,41 @@ mod tests {
             super::slirp_api_socket_from_cmdline(b"sleep\0--api-socket=/tmp/helper.sock\x00")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn bwrap_reaper_kills_a_launcher_without_a_container_record() {
+        let runtime = tempfile::tempdir().expect("runtime root");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("container store");
+        let rootfs = runtime.path().join("containers/orphan/rootfs");
+        std::fs::create_dir_all(&rootfs).expect("orphan rootfs");
+        let mut child = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a bwrap python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "bwrap",
+                "--bind",
+                rootfs.to_str().expect("rootfs path"),
+                rootfs.to_str().expect("rootfs path"),
+            ])
+            .spawn()
+            .expect("start bwrap stand-in");
+        for _ in 0..50 {
+            if std::fs::read(format!("/proc/{}/cmdline", child.id()))
+                .ok()
+                .is_some_and(|cmdline| super::bwrap_rootfs_from_cmdline(&cmdline).is_some())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        super::reap_orphaned_bwrap_launchers(runtime.path(), &store)
+            .expect("reap orphan launcher");
+        let status = child.wait().expect("wait reaped launcher");
+        assert!(!status.success(), "orphaned bwrap launcher must be terminated");
     }
 
     #[test]

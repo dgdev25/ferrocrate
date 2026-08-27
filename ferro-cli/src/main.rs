@@ -404,7 +404,12 @@ pub enum Commands {
     Load { #[arg(short = 'i', long)] input: String },
     /// Export a container filesystem as a tar archive.
     #[cfg(target_os = "linux")]
-    Export { #[arg(short = 'o', long)] output: String, container: String },
+    Export {
+        /// Write the archive to a file; omit to stream it to stdout.
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+        container: String,
+    },
     /// Show filesystem changes in a container.
     #[cfg(target_os = "linux")]
     Diff { container: String },
@@ -1093,6 +1098,9 @@ pub enum ComposeCommands {
     Up {
         #[arg(long)]
         profile: Vec<String>,
+        /// Build images for services with a build section before starting.
+        #[arg(long, default_value_t = false)]
+        build: bool,
         /// Return immediately and leave services running. Default is
         /// Docker-compatible attached mode: the command stays alive while
         /// project containers run, which is also the supported mode for
@@ -1137,7 +1145,12 @@ pub enum ComposeCommands {
     /// List containers of a Compose project.
     Ps,
     /// Read logs of Compose services.
-    Logs,
+    Logs {
+        /// Number of lines to show from the end of each service log.
+        #[arg(long)]
+        tail: Option<usize>,
+        services: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2629,18 +2642,11 @@ fn handle_doctor(
                 remediated: false,
                 action: None,
             });
-            let rootful_networks = nix::unistd::Uid::effective().is_root();
             checks.push(DoctorCheck {
                 id: "custom_networks".to_string(),
-                ok: rootful_networks,
-                message: if rootful_networks {
-                    "custom networks available".to_string()
-                } else {
-                    "custom networks need rootful mode".to_string()
-                },
-                hint: (!rootful_networks).then_some(
-                    "run the daemon in rootful mode to create custom bridge networks".to_string(),
-                ),
+                ok: true,
+                message: "custom networks available (rootless uses slirp4netns namespaces)".to_string(),
+                hint: None,
                 remediated: false,
                 action: None,
             });
@@ -3721,6 +3727,7 @@ fn run_remote_compose_watch_loop(
     loop {
         send_command(ComposeCommands::Up {
             profile: profile.clone(),
+            build: false,
             detach: true,
             services: Vec::new(),
         })?;
@@ -5395,7 +5402,14 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Export { output, container } => {
                 let archive = docker_export_container_archive(&runtime_dir, &runtime, &container)?;
-                std::fs::write(output, archive).map_err(|error| format!("docker: export write failed: {error}"))
+                if let Some(output) = output {
+                    std::fs::write(output, archive)
+                        .map_err(|error| format!("docker: export write failed: {error}"))
+                } else {
+                    std::io::stdout()
+                        .write_all(&archive)
+                        .map_err(|error| format!("docker: export stdout failed: {error}"))
+                }
             }
             #[cfg(target_os = "linux")]
             Commands::Cp { source, destination } => {
@@ -6750,7 +6764,7 @@ fn handle_run(
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
 ) -> Result<String, String> {
-    let binding = bind_run_network(runtime_dir, network, bridge_cidr, bridge_name)?;
+    let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
     let selected_network_name = binding.association;
     let resolved_bridge_cidr = binding.bridge_cidr;
@@ -6862,13 +6876,7 @@ fn handle_run(
         )?,
     };
     let restart_policy = parse_restart_policy(restart_policy)?;
-    let effective_cmd = if let Some(entry) = entrypoint {
-        let mut out = parse_entrypoint(entry)?;
-        out.extend_from_slice(cmd);
-        out
-    } else {
-        cmd.to_vec()
-    };
+    let effective_cmd = resolve_run_command(&image_config, entrypoint, cmd)?;
 
     let run = |container_id: Option<&str>| {
         if let Some(container_id) = container_id {
@@ -8412,7 +8420,13 @@ fn dispatch_remote_socket(
             ),
         )
         .and_then(|body| {
-            std::fs::write(output, body).map_err(|error| format!("export: {error}"))
+            if let Some(output) = output {
+                std::fs::write(output, body).map_err(|error| format!("export: {error}"))
+            } else {
+                std::io::stdout()
+                    .write_all(&body)
+                    .map_err(|error| format!("export: {error}"))
+            }
         }),
         Commands::Diff { container } => request(
             "GET",
@@ -10478,6 +10492,11 @@ fn ensure_image_present(
         return Ok(());
     }
     handle_pull_authorized(store, &canonical, false, origin, authorization)
+        .map_err(|error| format_image_pull_error(&canonical, &error))
+}
+
+fn format_image_pull_error(image: &str, reason: &str) -> String {
+    format!("run: pull image {image} failed: {reason}")
 }
 
 fn build_limits(
@@ -11442,6 +11461,52 @@ fn image_config_volume_targets(config: &serde_json::Value) -> Vec<String> {
     targets
 }
 
+/// Apply Docker's command precedence: a CLI entrypoint replaces the image
+/// entrypoint, while a CLI command replaces the image Cmd.  This must happen
+/// before handing the request to the runtime, which deliberately rejects an
+/// empty command.
+#[cfg(target_os = "linux")]
+fn resolve_run_command(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+) -> Result<Vec<String>, String> {
+    let image_config = image_config.get("config").unwrap_or(image_config);
+    let image_entrypoint = image_config_command(image_config, "Entrypoint")?;
+    let image_cmd = image_config_command(image_config, "Cmd")?;
+    let mut effective = match entrypoint {
+        Some(entrypoint) => parse_entrypoint(entrypoint)?,
+        None => image_entrypoint,
+    };
+    if cmd.is_empty() {
+        effective.extend(image_cmd);
+    } else {
+        effective.extend_from_slice(cmd);
+    }
+    Ok(effective)
+}
+
+#[cfg(target_os = "linux")]
+fn image_config_command(config: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {
+    let Some(value) = config.get(field) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    value
+        .as_array()
+        .ok_or_else(|| format!("run: image config {field} must be an array"))?
+        .iter()
+        .map(|part| {
+            part.as_str()
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("run: image config {field} contains an invalid command part"))
+        })
+        .collect()
+}
+
 fn docker_image_list_entry(
     runtime_dir: &Path,
     store: &LocalImageStore,
@@ -12201,9 +12266,56 @@ fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, so
         }
         (None, Some((container, path))) => {
             let source = Path::new(source);
-            let mut archive = tar::Builder::new(Vec::new()); archive.append_path_with_name(source, source.file_name().ok_or_else(|| "docker: cp source has no filename".to_string())?).map_err(|error| format!("docker: cp archive source: {error}"))?;
+            let source_name = source
+                .file_name()
+                .ok_or_else(|| "docker: cp source has no filename".to_string())?;
+            let id = resolve_container_id(runtime, container)?;
+            let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+            let rootfs = runtime_dir
+                .join("containers")
+                .join(&record.id)
+                .join("rootfs")
+                .canonicalize()
+                .map_err(|error| format!("docker: container rootfs is unavailable: {error}"))?;
+            let relative = path.trim_start_matches('/');
+            if !relative.is_empty()
+                && relative
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..")
+            {
+                return Err("docker: archive path must be a normalized absolute path".to_string());
+            }
+            let destination = rootfs.join(relative);
+            let (archive_target, archive_name) = match std::fs::metadata(&destination) {
+                Ok(metadata) if metadata.is_dir() => (path.to_string(), source_name.to_owned()),
+                Ok(_) => {
+                    let parent = Path::new(relative).parent().unwrap_or_else(|| Path::new(""));
+                    let name = Path::new(relative)
+                        .file_name()
+                        .ok_or_else(|| "docker: cp destination has no filename".to_string())?;
+                    (format!("/{}", parent.display()), name.to_owned())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let parent = Path::new(relative).parent().unwrap_or_else(|| Path::new(""));
+                    let name = Path::new(relative)
+                        .file_name()
+                        .ok_or_else(|| "docker: cp destination has no filename".to_string())?;
+                    (format!("/{}", parent.display()), name.to_owned())
+                }
+                Err(error) => return Err(format!("docker: cp inspect destination: {error}")),
+            };
+            let mut archive = tar::Builder::new(Vec::new());
+            if source.is_dir() {
+                archive
+                    .append_dir_all(&archive_name, source)
+                    .map_err(|error| format!("docker: cp archive source: {error}"))?;
+            } else {
+                archive
+                    .append_path_with_name(source, archive_name)
+                    .map_err(|error| format!("docker: cp archive source: {error}"))?;
+            }
             let archive = archive.into_inner().map_err(|error| format!("docker: cp archive source: {error}"))?;
-            docker_put_container_archive(runtime, container, path, &archive, false)
+            docker_put_container_archive(runtime, &id, &archive_target, &archive, false)
         }
         _ => Err("docker: cp requires exactly one CONTAINER:PATH operand".to_string()),
     }
@@ -13304,8 +13416,30 @@ struct RunNetworkBinding {
     bridge_name: Option<String>,
 }
 
+#[cfg(test)]
 fn bind_run_network(
     runtime_dir: &Path,
+    network: &str,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
+) -> Result<RunNetworkBinding, String> {
+    bind_run_network_inner(runtime_dir, None, network, bridge_cidr, bridge_name)
+}
+
+#[cfg(target_os = "linux")]
+fn bind_run_network_for_runtime(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    network: &str,
+    bridge_cidr: Option<&str>,
+    bridge_name: Option<&str>,
+) -> Result<RunNetworkBinding, String> {
+    bind_run_network_inner(runtime_dir, Some(runtime), network, bridge_cidr, bridge_name)
+}
+
+fn bind_run_network_inner(
+    runtime_dir: &Path,
+    runtime: Option<&ContainerRuntime>,
     network: &str,
     bridge_cidr: Option<&str>,
     bridge_name: Option<&str>,
@@ -13337,7 +13471,16 @@ fn bind_run_network(
         Some(mode.clone())
     } else {
         let named = resolve_named_network(runtime_dir, network)?;
-        mode = "bridge".to_string();
+        // A rootless slirp4netns namespace is owned by the first running
+        // container on a named network. Join it for later members, matching
+        // the Compose rootless network path without requiring a host bridge.
+        let records = runtime.and_then(|runtime| runtime.list().ok()).unwrap_or_default();
+        mode = rootless_named_network_mode(
+            nix::unistd::Uid::effective().is_root(),
+            &records,
+            &named.name,
+        )
+        .unwrap_or_else(|| "bridge".to_string());
         if resolved_bridge_cidr.is_none() {
             resolved_bridge_cidr = Some(named.bridge_cidr.clone());
         }
@@ -13352,6 +13495,25 @@ fn bind_run_network(
         bridge_cidr: resolved_bridge_cidr,
         bridge_name: resolved_bridge_name,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_named_network_mode(
+    is_root: bool,
+    records: &[ferro_core::container_store::ContainerRecord],
+    network_name: &str,
+) -> Option<String> {
+    (!is_root).then(|| {
+        records.iter().find(|record| {
+            record.status == "running"
+                && record
+                    .effective_network_endpoints()
+                    .iter()
+                    .any(|endpoint| endpoint.network_name == network_name)
+        })
+    })
+    .flatten()
+    .map(|record| format!("container:pid:{}", record.pid))
 }
 
 fn resolve_named_network(runtime_dir: &Path, name: &str) -> Result<NetworkRecord, String> {
@@ -13440,13 +13602,6 @@ fn handle_network_authorized(
             ipv6_gateway,
             labels,
         } => {
-            // Unit tests exercise the lifecycle with its in-memory bridge
-            // kernel, and API harnesses explicitly select a file-backed one.
-            // The rootful boundary applies to the real CLI kernel only.
-            #[cfg(not(test))]
-            if self::network_lifecycle::FileBackedNetworkKernel::from_env().is_none() {
-                custom_networks_need_rootful_mode(nix::unistd::Uid::effective().is_root())?;
-            }
             if is_builtin_network_mode(&name) {
                 return Err(format!("network: reserved name {name}"));
             }
@@ -13481,7 +13636,17 @@ fn handle_network_authorized(
                     record.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_create(runtime_dir, &record, proof)?;
+            if nix::unistd::Uid::effective().is_root()
+                || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                || cfg!(test)
+            {
+                execute_network_create(runtime_dir, &record, proof)?;
+            } else {
+                // Rootless named networks are user-space slirp namespaces;
+                // publishing the record makes the first member the leader.
+                save_networks(runtime_dir, &records.iter().cloned().chain(std::iter::once(record.clone())).collect::<Vec<_>>())?;
+                proof.finish(true).map_err(|error| error.to_string())?;
+            }
             println!(
                 "network create: name={} driver={} subnet={} gateway={}",
                 record.name, record.driver, record.subnet, record.gateway
@@ -13617,7 +13782,16 @@ fn handle_network_authorized(
                     stored.generation,
                 )
                 .map_err(|error| error.to_string())?;
-            execute_network_remove(runtime_dir, &stored, &associations, proof)?;
+            if nix::unistd::Uid::effective().is_root()
+                || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                || cfg!(test)
+            {
+                execute_network_remove(runtime_dir, &stored, &associations, proof)?;
+            } else {
+                let remaining = records.into_iter().filter(|record| record.name != name).collect::<Vec<_>>();
+                save_networks(runtime_dir, &remaining)?;
+                proof.finish(true).map_err(|error| error.to_string())?;
+            }
             println!("network rm: {name}");
         }
         NetworkCommands::Prune { filters } => {
@@ -13652,20 +13826,25 @@ fn handle_network_authorized(
                         record.generation,
                     )
                     .map_err(|error| error.to_string())?;
-                execute_network_remove(runtime_dir, &record, &associations, proof)?;
+                if nix::unistd::Uid::effective().is_root()
+                    || self::network_lifecycle::FileBackedNetworkKernel::from_env().is_some()
+                    || cfg!(test)
+                {
+                    execute_network_remove(runtime_dir, &record, &associations, proof)?;
+                } else {
+                    let remaining = load_networks(runtime_dir)?
+                        .into_iter()
+                        .filter(|candidate| candidate.name != record.name)
+                        .collect::<Vec<_>>();
+                    save_networks(runtime_dir, &remaining)?;
+                    proof.finish(true).map_err(|error| error.to_string())?;
+                }
                 deleted.push(record.name);
             }
             println!("network prune: removed={}", deleted.len());
         }
     }
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn custom_networks_need_rootful_mode(is_root: bool) -> Result<(), String> {
-    is_root
-        .then_some(())
-        .ok_or_else(|| "custom networks need rootful mode".to_string())
 }
 
 fn cli_network_kernel() -> Box<dyn self::network_lifecycle::NetworkKernel> {
@@ -14686,6 +14865,7 @@ fn handle_compose(
     match command {
         ComposeCommands::Up {
             profile,
+            build: _,
             detach,
             services,
         } => {
@@ -15047,6 +15227,7 @@ fn handle_compose(
                     file,
                     ComposeCommands::Up {
                         profile: profile.clone(),
+                        build: false,
                         detach: true,
                         services: Vec::new(),
                     },
@@ -15301,9 +15482,30 @@ fn handle_compose(
             let services = compose_ps(&project).map_err(|err| err.to_string())?;
             output = format!("compose ps: {:?}\n", services);
         }
-        ComposeCommands::Logs => {
-            let services = compose_logs(&project).map_err(|err| err.to_string())?;
-            output = format!("compose logs: {:?}\n", services);
+        ComposeCommands::Logs { tail, services } => {
+            let order = compose_logs(&project).map_err(|err| err.to_string())?;
+            let requested = compose_explicit_service_selection(&project, &services)?;
+            for service in order.into_iter().filter(|name| requested.contains(name)) {
+                for record in compose_lifecycle_records_for_service(runtime, &service)? {
+                    let (stdout, stderr) = runtime.logs_split(&record.id).map_err(|error| error.to_string())?;
+                    let combined = format!("{stdout}{stderr}");
+                    let lines = match tail {
+                        Some(limit) => combined
+                            .lines()
+                            .rev()
+                            .take(limit)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None => combined.trim_end_matches('\n').to_string(),
+                    };
+                    if !lines.is_empty() {
+                        output.push_str(&format!("{service}  | {lines}\n"));
+                    }
+                }
+            }
         }
     }
     Ok(output)
@@ -15440,6 +15642,24 @@ fn compose_lifecycle_records(
     } else {
         Err(format!("compose lifecycle partial result: {}", failures.join("; ")))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn compose_lifecycle_records_for_service(
+    runtime: &ContainerRuntime,
+    service: &str,
+) -> Result<Vec<ferro_core::container_store::ContainerRecord>, String> {
+    let replica_prefix = format!("{service}-");
+    Ok(runtime
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| {
+            record.name.as_deref().is_some_and(|name| {
+                name == service || name.starts_with(&replica_prefix)
+            })
+        })
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -22021,7 +22241,7 @@ fn docker_info_capabilities(is_root: bool, peer_auth_mode: PeerAuthMode) -> serd
     serde_json::json!({
         "SecurityOptions": if is_root { Vec::<String>::new() } else { vec!["name=rootless".to_string()] },
         "FerrocrateCapabilities": {
-            "CustomNetworks": is_root,
+            "CustomNetworks": true,
             "PeerAuthentication": peer_auth_mode.to_string(),
         },
     })
@@ -25492,10 +25712,7 @@ mod tests {
     fn docker_info_capabilities_report_rootless_network_truth() {
         let rootless = super::docker_info_capabilities(false, super::PeerAuthMode::Pidfd);
         assert_eq!(rootless["SecurityOptions"], serde_json::json!(["name=rootless"]));
-        assert_eq!(
-            rootless["FerrocrateCapabilities"]["CustomNetworks"],
-            false
-        );
+        assert_eq!(rootless["FerrocrateCapabilities"]["CustomNetworks"], true);
 
         let rootful = super::docker_info_capabilities(true, super::PeerAuthMode::LegacyPeercred);
         assert_eq!(rootful["SecurityOptions"], serde_json::json!([]));
@@ -25945,6 +26162,7 @@ mod tests {
                 file_name: PathBuf::from("compose.yaml"),
                 command: super::ComposeCommands::Up {
                     profile: Vec::new(),
+                    build: false,
                     detach: false,
                     services: Vec::new(),
                 },
@@ -26815,6 +27033,61 @@ mod tests {
             .expect("surface authorization")
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cp_into_container_accepts_new_file_and_directory_targets() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "copy-target",
+                "pid": 0,
+                "image": "example.invalid/copy:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited"
+            }))
+            .expect("container record");
+        store.put(&record).expect("store record");
+        let rootfs = temp.path().join("containers/copy-target/rootfs");
+        std::fs::create_dir_all(rootfs.join("tmp")).expect("container tmp");
+
+        let source = temp.path().join("in.txt");
+        std::fs::write(&source, "file copied in").expect("source file");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            source.to_str().expect("source path"),
+            "copy-target:/tmp/in.txt",
+        )
+        .expect("copy file into new target");
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("tmp/in.txt")).expect("copied file"),
+            "file copied in"
+        );
+
+        let directory = temp.path().join("dir");
+        std::fs::create_dir_all(&directory).expect("source directory");
+        std::fs::write(directory.join("nested.txt"), "directory copied in").expect("nested file");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            directory.to_str().expect("directory path"),
+            "copy-target:/tmp",
+        )
+        .expect("copy directory into existing target");
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("tmp/dir/nested.txt")).expect("copied directory"),
+            "directory copied in"
+        );
+    }
+
     #[test]
     fn compose_completed_successfully_wait_checks_persisted_exit_code() {
         let temp = configured_cli_runtime("disabled");
@@ -27310,15 +27583,6 @@ volumes:
                 .map(|_| "unsupported".to_string())
                 .map_err(|err| err.to_string())
         );
-    }
-
-    #[test]
-    fn rootless_custom_networks_have_a_plain_boundary_message() {
-        assert_eq!(
-            super::custom_networks_need_rootful_mode(false).unwrap_err(),
-            "custom networks need rootful mode"
-        );
-        assert!(super::custom_networks_need_rootful_mode(true).is_ok());
     }
 
     #[test]
@@ -27948,6 +28212,7 @@ volumes:
             vec!["ferrocrate", "save", "-o", "/tmp/image.tar", "alpine:latest"],
             vec!["ferrocrate", "load", "-i", "/tmp/image.tar"],
             vec!["ferrocrate", "export", "-o", "/tmp/rootfs.tar", "box"],
+            vec!["ferrocrate", "export", "box"],
             vec!["ferrocrate", "diff", "box"],
             vec!["ferrocrate", "search", "alpine"],
             vec!["ferrocrate", "create", "alpine", "echo", "ok"],
@@ -28098,16 +28363,41 @@ volumes:
 
     #[test]
     fn parses_compose_command() {
-        let cli = Cli::parse_from(["ferrocrate", "compose", "up", "-d"]);
+        let cli = Cli::parse_from(["ferrocrate", "compose", "up", "-d", "--build"]);
         match cli.command {
             Commands::Compose { file, command } => {
                 assert!(file.is_none());
                 assert!(
-                    matches!(command, ComposeCommands::Up { profile, detach, services } if profile.is_empty() && detach && services.is_empty())
+                    matches!(command, ComposeCommands::Up { profile, detach, build, services } if profile.is_empty() && detach && build && services.is_empty())
                 );
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_compose_logs_tail_and_services() {
+        let cli = Cli::parse_from([
+            "ferrocrate", "compose", "logs", "--tail", "20", "web",
+        ]);
+        match cli.command {
+            Commands::Compose { command, .. } => assert!(matches!(
+                command,
+                ComposeCommands::Logs { tail: Some(20), services }
+                    if services == ["web"]
+            )),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_failure_names_the_requested_image_and_registry_reason() {
+        let error = super::format_image_pull_error(
+            "registry.invalid:5000/demo:latest",
+            "registry request failed: connection refused",
+        );
+        assert!(error.contains("registry.invalid:5000/demo:latest"));
+        assert!(error.contains("connection refused"));
     }
 
     #[test]
@@ -29163,6 +29453,38 @@ volumes:
         assert_eq!(
             binding.bridge_cidr.as_deref(),
             Some(record.bridge_cidr.as_str())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rootless_named_network_joins_the_first_running_member_namespace() {
+        let leader = serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+            serde_json::json!({
+                "id": "leader",
+                "pid": 4242,
+                "image": "example.invalid/app:latest",
+                "command": ["sleep", "infinity"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "network_endpoints": [{
+                    "network_name": "app-net",
+                    "endpoint_id": "leader-endpoint",
+                    "interface_name": "eth0",
+                    "generation": 1
+                }]
+            }),
+        )
+        .expect("container record");
+        assert_eq!(
+            super::rootless_named_network_mode(false, &[leader], "app-net"),
+            Some("container:pid:4242".to_string())
+        );
+        assert_eq!(
+            super::rootless_named_network_mode(true, &[], "app-net"),
+            None
         );
     }
 
@@ -30336,6 +30658,26 @@ volumes:
             Commands::Push { image } => assert_eq!(image, "ghcr.io/acme/app:latest"),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_uses_image_entrypoint_and_cmd_when_cli_command_is_omitted() {
+        let config = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/usr/local/bin/server"],
+                "Cmd": ["--listen", "8080"]
+            }
+        });
+        assert_eq!(
+            super::resolve_run_command(&config, None, &[]).expect("image default command"),
+            ["/usr/local/bin/server", "--listen", "8080"]
+        );
+        assert_eq!(
+            super::resolve_run_command(&config, Some("/bin/sh -c"), &["echo ok".to_string()])
+                .expect("CLI entrypoint override"),
+            ["/bin/sh", "-c", "echo ok"]
+        );
     }
 
     #[test]

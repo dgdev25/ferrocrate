@@ -35,7 +35,7 @@ matrix_run() {
   step load           $CLI load -i "$WORK/image.tar"
 
   # Lifecycle
-  step run-detached   $CLI run -d --name "$name" -p "${PORT}:${CPORT}" $VOLS $ENVS "$IMG"
+  step run-detached   $CLI run -d --name "$name" -p "${PORT}:${CPORT}" $VOLS "${ENV_ARGS[@]}" "$IMG"
   step health         bash -c "for i in \$(seq 1 30); do curl -sf -o /dev/null '$url' && exit 0; sleep 1; done; curl -s -o /dev/null -w 'HTTP %{http_code}\n' '$url'; exit 1"
   step ps             $CLI ps -a
   step logs           $CLI logs "$name"

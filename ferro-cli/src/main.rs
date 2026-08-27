@@ -1569,6 +1569,8 @@ pub fn main() {
     }
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
+    // Daemon-side failures of the run verb are Docker exit status 125.
+    let run_daemon_error = matches!(cli.command, Commands::Run { .. });
     #[cfg(feature = "dashboard")]
     if matches!(&cli.command, Commands::Dashboard { .. }) {
         if let Some(message) = super::dashboard::unavailable_message() {
@@ -1585,6 +1587,11 @@ pub fn main() {
         );
         tracing::error!("{normalized}");
         eprintln!("error: {normalized}");
+        // Docker reserves 125 for daemon-side failures of the run verb
+        // (client usage errors still exit 2 through clap).
+        if run_daemon_error {
+            process::exit(125);
+        }
         process::exit(1);
     }
     let _ = ferro_core::observability::persist_authorization_fixture_evidence(
@@ -6743,6 +6750,47 @@ fn read_signing_key_file(path: &Path) -> Result<[u8; 32], String> {
 
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "linux")]
+/// Docker's run path creates the container before network setup, so a
+/// network failure leaves the half-built container behind in state `created`
+/// and scripts clean it up with `rm`. Mirror that leftover.
+fn persist_half_built_container(
+    runtime_dir: &Path,
+    image: &str,
+    cmd: &[String],
+    name: Option<&str>,
+) -> Result<(), String> {
+    let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime_dir.join("containers.db"),
+    )
+    .map_err(|error| error.to_string())?;
+    let id = ferro_core::runtime::generate_container_id();
+    let record: ferro_core::container_store::ContainerRecord =
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "pid": 0,
+            "image": image,
+            "command": cmd,
+            "created_at_unix": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "created"
+        }))
+        .map_err(|error| format!("run: half-built container record: {error}"))?;
+    store.put(&record).map_err(|error| error.to_string())?;
+    if let Some(name) = name {
+        // Hold the name so a later run cannot reuse the failed container's
+        // name, matching Docker's name-in-use error.
+        store
+            .reserve_name(name, &record.id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn handle_run(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -6787,7 +6835,17 @@ fn handle_run(
     forced_id: Option<&str>,
     resolved_image_execution: Option<&ResolvedRunImageExecution>,
 ) -> Result<String, String> {
-    let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
+    let binding = match bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)
+    {
+        Ok(binding) => binding,
+        Err(error) => {
+            // Docker creates the container first and fails network setup
+            // afterwards: the half-built container stays behind in state
+            // `created` and the caller removes it with `rm`.
+            persist_half_built_container(runtime_dir, image, cmd, name)?;
+            return Err(error);
+        }
+    };
     let effective_network = binding.mode;
     let selected_network_name = binding.association;
     let resolved_bridge_cidr = binding.bridge_cidr;
@@ -31933,6 +31991,78 @@ volumes:
         )
         .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn run_with_missing_network_leaves_a_created_container_behind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let runtime = ContainerRuntime::new(temp.path())
+            .expect("runtime")
+            .with_request_origin(origin);
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+        let err = handle_run(
+            temp.path(),
+            &runtime,
+            &store,
+            &volume_store,
+            "alpine:3.20",
+            &["sleep".to_string(), "5".to_string()],
+            "fz42-net",
+            "ebpf",
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("fz42-half"),
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            "no",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing network");
+        assert!(err.contains("network: not found"));
+
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let records = store.list().expect("list");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "created");
+        assert_eq!(records[0].name.as_deref(), Some("fz42-half"));
+
+        // `docker rm` cleans the half-built container up without `--force`.
+        handle_rm(&runtime, &volume_store, &authorization, "fz42-half", false, false)
+            .expect("rm removes the half-built container");
+        assert!(store.list().expect("list").is_empty());
     }
 
     #[test]

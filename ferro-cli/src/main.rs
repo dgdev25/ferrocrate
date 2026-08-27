@@ -21327,10 +21327,10 @@ fn handle_docker_compat_connection(
                 404,
                 "docker: plugin pull is unsupported; install a signed local plugin manifest",
             ),
-            ("GET", "/plugins") => docker_error_response(
-                404,
-                "docker: plugin listing is unsupported; plugins are installed from signed local manifests",
-            ),
+            // Plugin lifecycle management remains unsupported, but Docker
+            // clients use the list endpoint during test-environment setup and
+            // expect an empty JSON collection when no plugins are installed.
+            ("GET", "/plugins") => http_response(200, b"[]", "application/json"),
             ("GET", path) | ("POST", path) | ("PUT", path) | ("DELETE", path)
                 if path.starts_with("/plugins/") =>
             {

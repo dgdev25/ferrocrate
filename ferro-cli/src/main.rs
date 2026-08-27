@@ -13192,6 +13192,11 @@ fn handle_rm(
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
     }
+    if force && !container_exists(runtime, container)? {
+        // Docker treats `rm -f` of a missing container as a successful no-op;
+        // without `--force` the missing container is still an error.
+        return Ok(());
+    }
     let resolved = resolve_container_id(runtime, container)?;
     if force {
         force_kill_running_with_retry(
@@ -14419,6 +14424,21 @@ fn handle_exec(
 }
 
 #[cfg(target_os = "linux")]
+/// Whether a container name or id prefix currently resolves to a record.
+/// Used by `rm -f`, which must treat an absent container as already removed.
+fn container_exists(runtime: &ContainerRuntime, container: &str) -> Result<bool, String> {
+    if runtime.inspect(container).is_ok() {
+        return Ok(true);
+    }
+    Ok(runtime
+        .list()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .any(|record| {
+            record.id.starts_with(container) || record.name.as_deref() == Some(container)
+        }))
+}
+
 fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<String, String> {
     if runtime.inspect(container).is_ok() {
         return Ok(container.to_string());
@@ -31328,6 +31348,38 @@ volumes:
         assert!(err.contains("restart: container is required"));
     }
 
+    // S46: `docker rm -f` of a name that does not exist exits 0 as a no-op,
+    // while a plain `rm` still reports the missing container.
+    #[test]
+    fn rm_force_on_a_missing_container_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+
+        handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz46-missing",
+            true,
+            false,
+        )
+        .expect("rm -f of a missing container is a no-op");
+
+        let err = handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz46-missing",
+            false,
+            false,
+        )
+        .expect_err("rm without --force still fails");
+        assert!(err.contains("fz46-missing"), "got: {err}");
+    }
+
+    #[test]
     fn ps_reports_exited_after_kill_and_stop() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");

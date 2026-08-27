@@ -163,11 +163,15 @@ case "$SUITE" in
       moby-integration)    PKG=./integration/...
         # TestMain in every integration package pulls "frozen" fixture images
         # before any test runs, and panics in ~0.1s when it cannot find the
-        # list. The loader reads $DOCKERFILE (joined onto the package's parent
-        # dir, so a relative name resolves nowhere) and scans it for the
-        # RUN download-frozen-image-v2.sh block. Point it at the root
-        # Dockerfile, the only one carrying that block.
-        export DOCKERFILE="$DIR/Dockerfile"
+        # list. The loader opens <parent-of-package-dir>/Dockerfile (the
+        # $DOCKERFILE override is joined, not made absolute, so an absolute
+        # value still lands under that parent) and scans it for the
+        # RUN download-frozen-image-v2.sh block, which only the root Dockerfile
+        # carries. Put a symlink to it in every parent directory.
+        find "$DIR/integration" -name '*_test.go' | while read -r tf; do
+          pd="$(dirname "$(dirname "$tf")")"
+          [ -e "$pd/Dockerfile" ] || ln -s "$(realpath --relative-to="$pd" "$DIR/Dockerfile")" "$pd/Dockerfile"
+        done
         # Plugin tests exec a local `registry` binary (no distro package for
         # it); reuse the copy the buildkit suite extracts from registry:2.
         ensure_registry_bin

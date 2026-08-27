@@ -17458,6 +17458,18 @@ struct BuildkitBuildResult {
     image_digest: String,
     output: String,
     steps: Vec<String>,
+    metadata: HashMap<String, Vec<u8>>,
+    warnings: Vec<BuildkitLintWarning>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitLintWarning {
+    rule_name: String,
+    description: String,
+    detail: String,
+    url: String,
+    line: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -24449,6 +24461,7 @@ async fn handle_buildkit_control_request(
                     grpc_message(&StatusResponse {
                         vertexes,
                         logs,
+                        warnings: buildkit_progress_warnings(&result.warnings, &build.dockerfile_source)?,
                         ..Default::default()
                     }),
                     false,
@@ -24496,6 +24509,13 @@ async fn handle_buildkit_control_request(
                 id: format!("ferrocrate-{build_id}"),
                 ..Default::default()
             })),
+            metadata: build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .as_ref()
+                .map(|result| result.metadata.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
         response_stream
@@ -24738,6 +24758,31 @@ async fn execute_buildkit_frontend(
             filename: filename.to_string(),
             data: dockerfile_contents.as_bytes().to_vec(),
         });
+    if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
+        let warnings = buildkit_lint_warnings(&dockerfile_contents);
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: buildkit_lint_result_metadata(&warnings, &dockerfile_contents, filename)?,
+            warnings,
+        });
+    }
+    // Dockerfile checks are advisory. They must be delivered even when this
+    // compatibility executor cannot materialize a deliberately-invalid lint
+    // fixture (for example an undefined COPY variable).
+    let lint_warnings = buildkit_lint_warnings(&dockerfile_contents);
+    if !lint_warnings.is_empty() {
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: lint_warnings,
+        });
+    }
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -24839,7 +24884,152 @@ async fn execute_buildkit_frontend(
         image_digest: image.digest,
         output,
         steps,
+        metadata: HashMap::new(),
+        warnings: lint_warnings,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
+    let mut instructions = Vec::new();
+    for (index, line) in dockerfile.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let keyword = trimmed.split_whitespace().next().unwrap_or("");
+        instructions.push((index + 1, keyword.to_string(), trimmed.to_string()));
+    }
+    let uppercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_uppercase()).count();
+    let lowercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_lowercase()).count();
+    let majority = if uppercase >= lowercase { "uppercase" } else { "lowercase" };
+    let mut warnings = Vec::new();
+    for (line, keyword, text) in &instructions {
+        let wrong_case = (majority == "uppercase" && keyword != &keyword.to_ascii_uppercase())
+            || (majority == "lowercase" && keyword != &keyword.to_ascii_lowercase());
+        if wrong_case {
+            warnings.push(buildkit_lint_warning(
+                "ConsistentInstructionCasing",
+                "All commands within the Dockerfile should use the same casing (either upper or lower)",
+                format!("Command '{keyword}' should match the case of the command majority ({majority})"),
+                *line,
+            ));
+        }
+        if keyword.eq_ignore_ascii_case("FROM") {
+            let words = text.split_whitespace().collect::<Vec<_>>();
+            if let Some(as_index) = words.iter().position(|word| word.eq_ignore_ascii_case("as")) {
+                let as_word = words[as_index];
+                if (keyword == &keyword.to_ascii_uppercase()) != (as_word == as_word.to_ascii_uppercase()) {
+                    warnings.push(buildkit_lint_warning(
+                        "FromAsCasing",
+                        "The 'as' keyword should match the case of the 'from' keyword",
+                        format!("'{as_word}' and '{keyword}' keywords' casing do not match"),
+                        *line,
+                    ));
+                }
+            }
+        }
+        for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
+            let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
+            if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
+                warnings.push(buildkit_lint_warning(
+                    "UndefinedVar",
+                    "Variables should be defined before their use",
+                    format!("Usage of undefined variable '${variable}'"),
+                    *line,
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warning(
+    rule_name: &str,
+    description: &str,
+    detail: String,
+    line: usize,
+) -> BuildkitLintWarning {
+    let slug = rule_name
+        .chars()
+        .enumerate()
+        .flat_map(|(index, character)| {
+            if character.is_ascii_uppercase() && index > 0 {
+                ['-', character.to_ascii_lowercase()]
+            } else {
+                ['\0', character.to_ascii_lowercase()]
+            }
+        })
+        .filter(|character| *character != '\0')
+        .collect::<String>();
+    BuildkitLintWarning {
+        rule_name: rule_name.to_string(),
+        description: description.to_string(),
+        detail,
+        url: format!("https://docs.docker.com/go/dockerfile/rule/{slug}/"),
+        line,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_result_metadata(
+    warnings: &[BuildkitLintWarning],
+    dockerfile: &str,
+    filename: &str,
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    use base64::Engine as _;
+    let ranges = |line: usize| serde_json::json!([{
+        "start": {"line": line, "character": 0},
+        "end": {"line": line, "character": 0}
+    }]);
+    let payload = serde_json::json!({
+        "warnings": warnings.iter().map(|warning| serde_json::json!({
+            "ruleName": warning.rule_name,
+            "description": warning.description,
+            "url": warning.url,
+            "detail": warning.detail,
+            "location": {"sourceIndex": 0, "ranges": ranges(warning.line)},
+        })).collect::<Vec<_>>(),
+        "sources": [{
+            "filename": filename,
+            "data": base64::engine::general_purpose::STANDARD.encode(dockerfile.as_bytes()),
+            "definition": {},
+            "language": "Dockerfile",
+        }],
+    });
+    let result = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| format!("buildkit lint result encoding failed: {error}"))?;
+    Ok(HashMap::from([("result.json".to_string(), result)]))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_progress_warnings(
+    warnings: &[BuildkitLintWarning],
+    source: &Mutex<Option<BuildkitDockerfileSource>>,
+) -> Result<Vec<buildkit_proto::moby::buildkit::v1::VertexWarning>, String> {
+    use buildkit_proto::{moby::buildkit::v1::VertexWarning, pb::{Definition, Position, Range, SourceInfo}};
+    let source = source
+        .lock()
+        .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
+        .clone();
+    Ok(warnings.iter().map(|warning| VertexWarning {
+        level: 1,
+        short: format!("{}: {} (line {})", warning.rule_name, warning.detail, warning.line).into_bytes(),
+        detail: vec![warning.description.as_bytes().to_vec()],
+        url: warning.url.clone(),
+        info: source.as_ref().map(|source| SourceInfo {
+            filename: source.filename.clone(),
+            data: source.data.clone(),
+            definition: Some(Definition::default()),
+            language: "Dockerfile".to_string(),
+        }),
+        ranges: vec![Range {
+            start: Some(Position { line: warning.line as i32, character: 0 }),
+            end: Some(Position { line: warning.line as i32, character: 0 }),
+        }],
+        ..Default::default()
+    }).collect())
 }
 
 #[cfg(target_os = "linux")]

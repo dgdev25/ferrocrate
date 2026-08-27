@@ -16881,7 +16881,7 @@ fn append_compose_file_resource_mounts(
 #[derive(Debug, serde::Deserialize)]
 struct DockerCreateRequest {
     #[serde(rename = "Image")]
-    image: String,
+    image: Option<String>,
     #[serde(rename = "Cmd")]
     cmd: Option<Vec<String>>,
     #[serde(rename = "Env")]
@@ -16896,6 +16896,8 @@ struct DockerCreateRequest {
     labels: Option<HashMap<String, String>>,
     #[serde(rename = "Volumes")]
     volumes: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "ExposedPorts")]
+    exposed_ports: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "Healthcheck")]
     healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "Tty", default)]
@@ -16976,6 +16978,8 @@ struct DockerHostConfig {
     port_bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
     #[serde(rename = "NetworkMode")]
     network_mode: Option<String>,
+    #[serde(rename = "IpcMode")]
+    ipc_mode: Option<String>,
     #[serde(rename = "AutoRemove", default)]
     auto_remove: bool,
     #[serde(rename = "Memory")]
@@ -17112,6 +17116,10 @@ struct DockerCreateSpec {
     user: Option<String>,
     name: Option<String>,
     network_mode: String,
+    /// Host IPC is represented by the host shared-memory mount applied when
+    /// the pending container starts.
+    #[serde(default)]
+    ipc_mode_host: bool,
     #[serde(default)]
     network_aliases: Vec<String>,
     #[serde(default)]
@@ -17149,11 +17157,14 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
     // Docker's Binds mixes host-path binds (absolute source) with named
     // volumes. Keep each handle_run argument explicit here: these adjacent
     // string slices are otherwise easy to transpose without a type error.
-    let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
+    let (mut path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
         .binds
         .iter()
         .cloned()
         .partition(|entry| entry.starts_with('/'));
+    if spec.ipc_mode_host {
+        path_binds.push("/dev/shm:/dev/shm".to_string());
+    }
     volume_binds.extend(spec.image_volumes.iter().cloned());
 
     let mut annotations = spec
@@ -17166,6 +17177,9 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if spec.ipc_mode_host {
+        annotations.push("io.ferrocrate.ipc.mode=host".to_string());
+    }
     if !spec.network_aliases.is_empty() {
         annotations.push(format!(
             "io.ferrocrate.network.aliases={}",
@@ -21946,6 +21960,9 @@ fn docker_status_for_error(err: &str) -> u16 {
     if lowered.contains("docker hub search unavailable") {
         return 503;
     }
+    if lowered.contains("hostconfig.ipcmode=host is not supported") {
+        return 501;
+    }
     if lowered.contains("still running") {
         return 409;
     }
@@ -21963,6 +21980,8 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("missing")
         || lowered.contains("unsupported")
         || lowered.contains("too large")
+        || lowered.contains("minimum memory limit")
+        || lowered.contains("config cannot be empty")
         || lowered.contains("bad request")
         || lowered.contains("event query parameter")
         || lowered.contains("logs query parameter")
@@ -22976,8 +22995,12 @@ fn normalize_docker_api_path(path: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
-    let request: DockerCreateRequest =
-        serde_json::from_slice(body).map_err(|err| err.to_string())?;
+    if body.is_empty() {
+        return Err("invalid JSON: EOF".to_string());
+    }
+    let request: DockerCreateRequest = serde_json::from_slice(body)
+        .map_err(|err| format!("invalid JSON: {err}"))?;
+    validate_docker_create_request(&request)?;
     let name = name
         .map(|name| validate_docker_container_name(&name).map(|_| name))
         .transpose()?;
@@ -23004,6 +23027,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         binds: None,
         port_bindings: None,
         network_mode: None,
+        ipc_mode: None,
         auto_remove: false,
         memory: None,
         cpu_quota: None,
@@ -23054,7 +23078,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         .and_then(|config| config.options.clone())
         .unwrap_or_default();
     Ok(DockerCreateSpec {
-        image: request.image,
+        image: request.image.expect("validated Docker create image"),
         cmd,
         env,
         labels,
@@ -23065,6 +23089,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        ipc_mode_host: host_config.ipc_mode.as_deref() == Some("host"),
         network_aliases,
         tty: request.tty,
         log_options,
@@ -23081,6 +23106,73 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
             .map(|duration| duration.as_secs())
             .unwrap_or(0),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_create_request(request: &DockerCreateRequest) -> Result<(), String> {
+    if request.image.is_none() {
+        return Err("config cannot be empty in order to create a container".to_string());
+    }
+    if let Some(exposed_ports) = request.exposed_ports.as_ref() {
+        for port in exposed_ports.keys() {
+            validate_docker_port_spec(port)?;
+        }
+    }
+    let Some(host_config) = request.host_config.as_ref() else {
+        return Ok(());
+    };
+    if host_config.memory.is_some_and(|memory| memory > 0 && memory < 6 * 1024 * 1024) {
+        return Err("Minimum memory limit allowed is 6MB".to_string());
+    }
+    match host_config.ipc_mode.as_deref() {
+        None | Some("") => {}
+        Some("host") => {}
+        Some(_) => {
+            return Err(
+                "docker: unsupported HostConfig field IpcMode is set; this runtime does not implement it"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(policy) = host_config.restart_policy.as_ref() {
+        validate_docker_restart_policy(policy)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_port_spec(port: &str) -> Result<(), String> {
+    let invalid = || format!("invalid JSON: invalid port '{port}': invalid syntax");
+    let (number, protocol) = match port.split_once('/') {
+        Some((number, protocol)) if !protocol.contains('/') => (number, protocol),
+        Some(_) => return Err(invalid()),
+        None => (port, "tcp"),
+    };
+    if number.is_empty()
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+        || number.parse::<u16>().ok().filter(|number| *number > 0).is_none()
+        || !matches!(protocol, "tcp" | "udp" | "sctp")
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_restart_policy(policy: &DockerRestartPolicy) -> Result<(), String> {
+    if policy.maximum_retry_count < 0 {
+        return Err("invalid restart policy: maximum retry count cannot be negative".to_string());
+    }
+    let name = if policy.name.trim().is_empty() { "no" } else { policy.name.trim() };
+    if !matches!(name, "no" | "always" | "on-failure" | "unless-stopped") {
+        return Err(format!(
+            "invalid restart policy: unknown policy '{name}'; use one of 'no', 'always', 'on-failure', or 'unless-stopped'"
+        ));
+    }
+    if name != "on-failure" && policy.maximum_retry_count != 0 {
+        return Err("invalid restart policy: maximum retry count can only be used with 'on-failure'".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -23474,6 +23566,8 @@ fn docker_inspect_payload(
             "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
         "HostConfig": {
+            "IpcMode": record.annotations.get("io.ferrocrate.ipc.mode")
+                .map(String::as_str).unwrap_or(""),
             "LogConfig": {
                 "Type": record.annotations
                     .get("io.ferrocrate.log.driver")
@@ -23727,6 +23821,7 @@ fn docker_pending_inspect_payload(
             "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
         },
         "HostConfig": {
+            "IpcMode": if spec.ipc_mode_host { "host" } else { "" },
             "LogConfig": {
                 "Type": spec.log_driver,
                 "Config": spec.log_options,
@@ -32426,6 +32521,71 @@ volumes:
         .is_err());
     }
 
+    /// Mirrors Moby's `integration/container/TestCreateValidation` request
+    /// boundary: malformed create bodies must fail before unsupported-field
+    /// translation or pending-container mutation.
+    #[test]
+    fn docker_create_validation_matches_moby_errors_and_statuses() {
+        let invalid = [
+            (b"".as_slice(), "invalid JSON: EOF"),
+            (
+                br#"{}"#.as_slice(),
+                "config cannot be empty in order to create a container",
+            ),
+            (
+                br#"{"Image":"busybox","ExposedPorts":{"19039;1230":{}}}"#.as_slice(),
+                "invalid JSON: invalid port '19039;1230': invalid syntax",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"Memory":6291455,"CpuShares":1}}"#
+                    .as_slice(),
+                "Minimum memory limit allowed is 6MB",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"mystery","MaximumRetryCount":0}}}"#
+                    .as_slice(),
+                "invalid restart policy: unknown policy 'mystery'; use one of 'no', 'always', 'on-failure', or 'unless-stopped'",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":-1}}}"#
+                    .as_slice(),
+                "invalid restart policy: maximum retry count cannot be negative",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"always","MaximumRetryCount":1}}}"#
+                    .as_slice(),
+                "invalid restart policy: maximum retry count can only be used with 'on-failure'",
+            ),
+        ];
+
+        for (body, expected) in invalid {
+            let error = parse_docker_create_spec(body, None).expect_err(expected);
+            assert_eq!(error, expected);
+            assert_eq!(docker_status_for_error(&error), 400, "{error}");
+        }
+
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":0}}}"#,
+            None,
+        )
+        .expect("on-failure with zero retries is valid");
+        assert_eq!(spec.restart_policy, "on-failure");
+    }
+
+    #[test]
+    fn docker_create_ipc_mode_host_is_preserved_and_mounts_host_shared_memory() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"IpcMode":"host"}}"#,
+            None,
+        )
+        .expect("host IPC is supported");
+        assert!(spec.ipc_mode_host);
+        assert_eq!(
+            docker_start_run_inputs(&spec).path_binds,
+            vec!["/dev/shm:/dev/shm"]
+        );
+    }
+
     #[test]
     fn docker_create_spec_rejects_unsupported_host_config_fields() {
         for field in [
@@ -32533,6 +32693,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
@@ -32762,6 +32923,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                ipc_mode_host: false,
                 network_aliases: Vec::new(),
                 tty: false,
                 log_options: HashMap::new(),
@@ -32841,6 +33003,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
@@ -32981,6 +33144,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),

@@ -353,6 +353,55 @@ impl DaemonHarness {
 }
 
 #[test]
+fn docker_compat_ipc_mode_host_shares_dev_shm() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/ipc-host:latest");
+    let marker = format!(
+        "ferrocrate-ipc-host-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    );
+    let body = serde_json::json!({
+        "Image": "compat/ipc-host:latest",
+        "Cmd": ["/bin/busybox", "sh", "-c", format!("echo shared >/dev/shm/{marker}")],
+        "HostConfig": { "IpcMode": "host" },
+    })
+    .to_string();
+    let raw = format!(
+        "POST /v1.45/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    let (status, response) = harness.request_raw(&raw);
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create response JSON")["Id"]
+        .as_str()
+        .expect("created ID")
+        .to_string();
+    let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
+    assert_eq!(status, 200, "inspect response={response}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON")
+            ["HostConfig"]["IpcMode"],
+        "host"
+    );
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response={response}");
+
+    let host_marker = Path::new("/dev/shm").join(&marker);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !host_marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    let content = fs::read_to_string(&host_marker).expect("host IPC marker");
+    fs::remove_file(&host_marker).expect("remove host IPC marker");
+    assert_eq!(content, "shared\n");
+}
+
+#[test]
 fn docker_compat_routes_support_version_prefix() {
     let harness = DaemonHarness::spawn();
 

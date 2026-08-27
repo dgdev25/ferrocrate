@@ -17509,6 +17509,12 @@ fn prune_live_attach_registrations(
 #[cfg(target_os = "linux")]
 struct DockerCompatState {
     next_id: AtomicU64,
+    /// The daemon owns a single container-store connection, but compatibility
+    /// requests also touch name reservations and lifecycle state through
+    /// independent helpers.  Queue those short request transactions here so
+    /// concurrent Compose requests never expose a transient store lock to the
+    /// client.
+    container_store_operations: Mutex<()>,
     /// Docker Compose submits independent network requests concurrently.  A
     /// network lifecycle is a read-modify-write transaction over the durable
     /// network store, so serialize it for the daemon rather than letting two
@@ -17569,6 +17575,7 @@ impl DockerCompatState {
         }
         Ok(Self {
             next_id: AtomicU64::new(0),
+            container_store_operations: Mutex::new(()),
             network_operations: Mutex::new(()),
             pending: Mutex::new(pending),
             starting: Mutex::new(std::collections::HashSet::new()),
@@ -18941,6 +18948,15 @@ fn handle_docker_compat_connection(
             .map(|peer| peer.request_origin())
             .map_err(|error| format!("docker peer authentication failed: {error}"))
         })?;
+        // Keep store-backed compatibility operations in daemon process order.
+        // This is deliberately acquired after socket authentication and before
+        // creating the request-scoped runtime.  The lock is released before
+        // streaming response bodies, so long-lived `/events` or log followers
+        // never block unrelated API calls.
+        let _container_store_operation = state
+            .container_store_operations
+            .lock()
+            .map_err(|_| "docker: container store operation lock poisoned".to_string())?;
         let runtime = daemon_request_scope(&daemon_runtime, origin.clone())
             .map_err(|error| error.to_string())?;
         let surface_authorization = runtime

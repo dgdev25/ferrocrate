@@ -464,6 +464,34 @@ fn docker_api_concurrent_multi_network_create_keeps_every_network_record() {
 }
 
 #[test]
+fn docker_api_concurrent_container_lists_queue_on_the_daemon_store() {
+    let harness = DaemonHarness::spawn();
+    let socket = harness.socket_path.clone();
+    let requests = (0..50)
+        .map(|_| {
+            let socket = socket.clone();
+            thread::spawn(move || {
+                let request = b"GET /v1.45/containers/json?all=1 HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n";
+                let mut stream = UnixStream::connect(socket).expect("connect daemon socket");
+                stream.write_all(request).expect("write list request");
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let mut response = String::new();
+                stream.read_to_string(&mut response).expect("read list response");
+                response
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for request in requests {
+        let response = request.join().expect("container list thread");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "concurrent container list response={response}"
+        );
+    }
+}
+
+#[test]
 fn docker_api_create_then_list_keeps_the_fresh_container_record() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request_bytes(

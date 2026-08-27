@@ -167,8 +167,12 @@ def shrink(seq: list[tuple[str, list[str]]], tag: str) -> list[tuple[str, list[s
 def audit() -> dict:
     """Cleanup counters that must return to baseline after a soak."""
     def count(cmd: str) -> int:
+        # pgrep -c prints its own "0" on no match and also exits 1, so
+        # `pgrep -c X || echo 0` prints two lines ("0\n0\n"), which int()
+        # cannot parse. Take the last non-empty line only.
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        return int(p.stdout.strip() or 0)
+        lines = [l for l in p.stdout.strip().splitlines() if l.strip()]
+        return int(lines[-1]) if lines else 0
     state = Path(os.environ.get("FERROCRATE_HOME", str(Path.home() / ".ferrocrate")))
     return {
         "slirp4netns": count("pgrep -c slirp4netns || echo 0"),

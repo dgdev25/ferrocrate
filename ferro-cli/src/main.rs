@@ -1296,6 +1296,20 @@ pub enum NetworkCommands {
     Rm {
         name: String,
     },
+    /// Attach a container to a network.
+    Connect {
+        network: String,
+        container: String,
+        #[arg(long = "alias")]
+        aliases: Vec<String>,
+    },
+    /// Detach a container from a network.
+    Disconnect {
+        network: String,
+        container: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -9313,6 +9327,55 @@ fn dispatch_remote_socket(
         )
         .map(|_| ()),
         Commands::Network {
+            command:
+                NetworkCommands::Connect {
+                    network,
+                    container,
+                    aliases,
+                },
+        } => {
+            let body = serde_json::json!({
+                "Container": container,
+                "EndpointConfig": {"Aliases": aliases},
+            });
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body(
+                "POST",
+                format!(
+                    "/networks/{}/connect",
+                    percent_encode_path_component(&network)
+                ),
+                Some(body),
+            )
+            .map(|_| ())
+        }
+        Commands::Network {
+            command:
+                NetworkCommands::Disconnect {
+                    network,
+                    container,
+                    force,
+                },
+        } => {
+            let body = serde_json::json!({"Container": container, "Force": force});
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body(
+                "POST",
+                format!(
+                    "/networks/{}/disconnect",
+                    percent_encode_path_component(&network)
+                ),
+                Some(body),
+            )
+            .map(|_| ())
+        }
+        Commands::Network {
             command: NetworkCommands::Prune { filters },
         } => (|| -> Result<(), String> {
             let parsed = parse_cli_filters(filters)?;
@@ -14144,6 +14207,72 @@ fn handle_network_authorized(
                 proof.finish(true).map_err(|error| error.to_string())?;
             }
             println!("network rm: {name}");
+        }
+        NetworkCommands::Connect {
+            network,
+            container,
+            aliases,
+        } => {
+            let id = resolve_container_id(runtime, &container)?;
+            let mut config = docker_named_endpoint_config(runtime_dir, &network)?;
+            config.aliases = aliases;
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkAttach,
+                    ResourceKind::Network,
+                    &config.network_name,
+                    config.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            match runtime.connect_network(&id, config) {
+                Ok(()) => permit.finish(true).map_err(|error| error.to_string())?,
+                Err(error) => {
+                    if matches!(
+                        error,
+                        ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                    ) {
+                        permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                    } else {
+                        permit.finish(false).map_err(|finish| finish.to_string())?;
+                    }
+                    return Err(error.to_string());
+                }
+            }
+        }
+        NetworkCommands::Disconnect {
+            network,
+            container,
+            force,
+        } => {
+            let id = resolve_container_id(runtime, &container)?;
+            let config = docker_named_endpoint_config(runtime_dir, &network)?;
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkDetach,
+                    ResourceKind::Network,
+                    &config.network_name,
+                    config.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            match runtime.disconnect_network(&id, &config.network_name) {
+                Ok(()) => permit.finish(true).map_err(|error| error.to_string())?,
+                Err(error) if force && error.to_string().contains("not connected") => {
+                    permit.finish(true).map_err(|finish| finish.to_string())?;
+                }
+                Err(error) => {
+                    if matches!(
+                        error,
+                        ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                    ) {
+                        permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                    } else {
+                        permit.finish(false).map_err(|finish| finish.to_string())?;
+                    }
+                    return Err(error.to_string());
+                }
+            }
         }
         NetworkCommands::Prune { filters } => {
             let filters = parse_cli_filters(&filters)?;
@@ -30991,6 +31120,133 @@ volumes:
         super::reset_network_kernel_effect_count();
         create_and_remove_named_network(temp.path(), "shadow-net");
         assert!(super::network_kernel_effect_count() > 0);
+    }
+
+    #[test]
+    fn parses_network_connect_and_disconnect() {
+        let cli = Cli::parse_from(["ferrocrate", "network", "connect", "net1", "web"]);
+        match cli.command {
+            Commands::Network {
+                command:
+                    NetworkCommands::Connect {
+                        network,
+                        container,
+                        aliases,
+                    },
+            } => {
+                assert_eq!(network, "net1");
+                assert_eq!(container, "web");
+                assert!(aliases.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "network",
+            "disconnect",
+            "--force",
+            "net1",
+            "web",
+        ]);
+        match cli.command {
+            Commands::Network {
+                command:
+                    NetworkCommands::Disconnect {
+                        network,
+                        container,
+                        force,
+                    },
+            } => {
+                assert_eq!(network, "net1");
+                assert_eq!(container, "web");
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn network_connect_and_disconnect_enforce_the_docker_contract() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz43-app",
+                "name": "fz43-app",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        store.put(&record).expect("seed running record");
+
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "fz43-net".to_string(),
+                subnet: Some("172.35.0.0/16".to_string()),
+                gateway: Some("172.35.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
+                labels: Vec::new(),
+            },
+            &authorization,
+        )
+        .expect("create network");
+
+        // A connect against a missing network must name the network.
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Connect {
+                network: "fz43-nope".to_string(),
+                container: "fz43-app".to_string(),
+                aliases: Vec::new(),
+            },
+            &authorization,
+        )
+        .expect_err("missing network");
+        assert!(err.contains("network: not found fz43-nope"), "got {err}");
+
+        // Docker refuses to detach a container that is not on the network.
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Disconnect {
+                network: "fz43-net".to_string(),
+                container: "fz43-app".to_string(),
+                force: false,
+            },
+            &authorization,
+        )
+        .expect_err("container is not connected");
+        assert!(err.contains("not connected"), "got {err}");
+
+        // `--force` turns the failed detach into a no-op, matching
+        // `docker network disconnect -f`.
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Disconnect {
+                network: "fz43-net".to_string(),
+                container: "fz43-app".to_string(),
+                force: true,
+            },
+            &authorization,
+        )
+        .expect("forced disconnect is a no-op");
     }
 
     #[test]

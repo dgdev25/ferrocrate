@@ -1,21 +1,21 @@
 # Real-app bench scoreboard
 
-Generated 2026-08-27 00:27Z from the newest result file per app and engine.
+Generated 2026-08-27 00:45Z from the newest result file per app and engine.
 Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.
 
 | App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |
 |---|---|---:|---:|---:|---:|---:|---:|
-| actix-basics | 2026-08-26T23:50Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
+| actix-basics | 2026-08-27T00:29Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
 | battleships | 2026-08-26T23:54Z | 52/57 | 57/57 | 5 | 0 | 0 | 0 |
 | docker-flask | 2026-08-26T23:58Z | 14/52 | 19/52 | 5 | 0 | 33 | 0 |
-| docker-todo | 2026-08-27T00:00Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
+| docker-todo | 2026-08-27T00:34Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
 | fastapi-fullstack | 2026-08-27T00:06Z | 14/47 | 14/47 | 0 | 0 | 33 | 0 |
 | flask-tutorial | 2026-08-27T00:06Z | 48/57 | 57/57 | 9 | 0 | 0 | 0 |
-| gin-basic | 2026-08-27T00:11Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
+| gin-basic | 2026-08-27T00:37Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
 | kutt | 2026-08-27T00:14Z | 17/52 | 19/52 | 2 | 0 | 33 | 0 |
 | mdn-static | 2026-08-27T00:16Z | 26/52 | 52/52 | 26 | 0 | 0 | 0 |
 | microblog | 2026-08-27T00:19Z | 14/47 | 16/47 | 0 | 1 | 32 | 0 |
-| node-getting-started | 2026-08-27T00:19Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
+| node-getting-started | 2026-08-27T00:42Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
 | scratch | 2026-08-27T00:22Z | 16/47 | 16/47 | 0 | 0 | 31 | 0 |
 | spring-petclinic | 2026-08-27T00:22Z | 19/52 | 51/52 | 32 | 0 | 1 | 0 |
 | uptime-kuma | 2026-08-27T00:24Z | 17/57 | 19/57 | 2 | 0 | 38 | 0 |
@@ -38,67 +38,67 @@ Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Bounda
 
 | App | Step | Exit | Ferrocrate stderr (tail) |
 |---|---|---:|---|
-| actix-basics | build | 1 | `[2m2026-08-26T23:51:26.763409Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (1487722496 bytes)
+| actix-basics | build | 1 | `[2m2026-08-27T00:30:45.764504Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (4444777984 bytes)
 error: layer size exceeds` |
-| actix-basics | image-inspect | 1 | `[2m2026-08-26T23:51:26.946834Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/actix-basics:latest` |
-| actix-basics | history | 1 | `[2m2026-08-26T23:51:27.074995Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/actix-basics:latest
+| actix-basics | image-inspect | 1 | `[2m2026-08-27T00:30:45.976665Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/actix-basics:latest` |
+| actix-basics | history | 1 | `[2m2026-08-27T00:30:46.096476Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/actix-basics:latest
 error` |
-| actix-basics | tag | 1 | `[2m2026-08-26T23:51:27.193173Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/actix-basics:latest
+| actix-basics | tag | 1 | `[2m2026-08-27T00:30:46.214783Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/actix-basics:latest
 ` |
-| actix-basics | save | 1 | `[2m2026-08-26T23:51:27.312725Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/actix-basics:latest
+| actix-basics | save | 1 | `[2m2026-08-27T00:30:46.336850Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/actix-basics:latest
 error: docker: unknown ` |
 | actix-basics | rmi-tag | 1 | `rmi: bench/actix-basics:bench-tag: rmi: not found registry-1.docker.io/bench/actix-basics:bench-tag
-[2m2026-08-26T23:51:27.429729Z[0m [31mERROR[0m [2mferro` |
-| actix-basics | load | 1 | `[2m2026-08-26T23:51:27.552947Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
+[2m2026-08-27T00:30:46.455304Z[0m [31mERROR[0m [2mferro` |
+| actix-basics | load | 1 | `[2m2026-08-27T00:30:46.576926Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
 error:` |
 | actix-basics | run-detached | 1 | `uthentication required","detail":[{"Type":"repository","Class":"","Name":"bench/actix-basics","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/` |
 | actix-basics | health | 1 | `` |
-| actix-basics | logs | 1 | `[2m2026-08-26T23:51:58.755490Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | logs | 1 | `[2m2026-08-27T00:31:19.202108Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | inspect | 1 | `[2m2026-08-26T23:51:58.890362Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | inspect | 1 | `[2m2026-08-27T00:31:19.329125Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | top | 1 | `[2m2026-08-26T23:51:59.022257Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | top | 1 | `[2m2026-08-27T00:31:19.464512Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | stats | 1 | `[2m2026-08-26T23:51:59.137014Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | stats | 1 | `[2m2026-08-27T00:31:19.585102Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | exec | 1 | `[2m2026-08-26T23:51:59.257809Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | exec | 1 | `[2m2026-08-27T00:31:19.705908Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | cp-out | 1 | `[2m2026-08-26T23:51:59.375719Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | cp-out | 1 | `[2m2026-08-27T00:31:19.842748Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | cp-in | 1 | `[2m2026-08-26T23:51:59.494908Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | cp-in | 1 | `[2m2026-08-27T00:31:19.977942Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | diff | 1 | `[2m2026-08-26T23:51:59.612202Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+| actix-basics | diff | 1 | `[2m2026-08-27T00:31:20.110795Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
 | actix-basics | pause | 1 | `pause: bench-actix-basics: container not found: bench-actix-basics
-[2m2026-08-26T23:51:59.734392Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m paus` |
+[2m2026-08-27T00:31:20.233630Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m paus` |
 | actix-basics | unpause | 1 | `unpause: bench-actix-basics: container not found: bench-actix-basics
-[2m2026-08-26T23:51:59.851433Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m un` |
+[2m2026-08-27T00:31:20.357012Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m un` |
 | actix-basics | restart | 1 | `restart: bench-actix-basics: container not found: bench-actix-basics
-[2m2026-08-26T23:51:59.975127Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m re` |
+[2m2026-08-27T00:31:20.486247Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m re` |
 | actix-basics | stop | 1 | `stop: bench-actix-basics: container not found: bench-actix-basics
-[2m2026-08-26T23:52:00.096151Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop:` |
+[2m2026-08-27T00:31:20.606916Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop:` |
 | actix-basics | start | 1 | `start: bench-actix-basics: container not found: bench-actix-basics
-[2m2026-08-26T23:52:00.213159Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m star` |
-| actix-basics | rename | 1 | `[2m2026-08-26T23:52:00.339692Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
+[2m2026-08-27T00:31:20.733277Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m star` |
+| actix-basics | rename | 1 | `[2m2026-08-27T00:31:20.858052Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics
 error: container not found: ben` |
-| actix-basics | commit | 1 | `[2m2026-08-26T23:52:00.459850Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-actix-basics-r
+| actix-basics | commit | 1 | `[2m2026-08-27T00:31:20.978885Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-actix-basics-r
 error: commit: contai` |
-| actix-basics | export | 1 | `[2m2026-08-26T23:52:00.581203Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics-r
+| actix-basics | export | 1 | `[2m2026-08-27T00:31:21.103366Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-actix-basics-r
 error: container not found: b` |
 | actix-basics | kill | 1 | `kill: bench-actix-basics-r: container not found: bench-actix-basics-r
-[2m2026-08-26T23:52:00.705725Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m k` |
+[2m2026-08-27T00:31:21.223855Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m k` |
 | actix-basics | wait | 1 | `wait: bench-actix-basics-r: container not found: bench-actix-basics-r
-[2m2026-08-26T23:52:00.822539Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m w` |
+[2m2026-08-27T00:31:21.347033Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m w` |
 | actix-basics | rm | 1 | `rm: bench-actix-basics-r: container not found: bench-actix-basics-r
-[2m2026-08-26T23:52:01.050977Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm:` |
+[2m2026-08-27T00:31:21.580122Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm:` |
 | actix-basics | rmi-committed | 1 | `rmi: bench/actix-basics:committed: rmi: not found registry-1.docker.io/bench/actix-basics:committed
-[2m2026-08-26T23:52:01.169278Z[0m [31mERROR[0m [2mferro` |
+[2m2026-08-27T00:31:21.704893Z[0m [31mERROR[0m [2mferro` |
 | actix-basics | network-run | 1 | `uthentication required","detail":[{"Type":"repository","Class":"","Name":"bench/actix-basics","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/` |
-| actix-basics | compose-up | 1 | `[2m2026-08-26T23:52:35.739998Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
+| actix-basics | compose-up | 1 | `[2m2026-08-27T00:32:11.732115Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
 | actix-basics | compose-health | 1 | `` |
 | actix-basics | err-port-in-use | 1 | `x-basics","Action":"pull"}]}]}
 
@@ -114,68 +114,68 @@ error: run: pull image registry-1.docker.io/bench/actix-basics:latest failed: re
 | docker-flask | compose-ps | 1 | `[2m2026-08-27T00:00:10.469060Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose parse error: services.web.healthcheck.test: invalid type: strin` |
 | docker-flask | compose-logs | 1 | `[2m2026-08-27T00:00:10.586525Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose parse error: services.web.healthcheck.test: invalid type: strin` |
 | docker-flask | compose-down | 1 | `[2m2026-08-27T00:00:10.706481Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose parse error: services.web.healthcheck.test: invalid type: strin` |
-| docker-todo | build | 1 | `[2m2026-08-27T00:01:20.952790Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (1298423296 bytes)
-error: layer size exceeds` |
-| docker-todo | image-inspect | 1 | `[2m2026-08-27T00:01:21.163110Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/docker-todo:latest
+| docker-todo | build | 1 | `[2m2026-08-27T00:34:28.780467Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m io error: Permission denied (os error 13)
+error: io error: Permission d` |
+| docker-todo | image-inspect | 1 | `[2m2026-08-27T00:34:29.069046Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/docker-todo:latest
 ` |
-| docker-todo | history | 1 | `[2m2026-08-27T00:01:21.284269Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/docker-todo:latest
+| docker-todo | history | 1 | `[2m2026-08-27T00:34:29.213452Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/docker-todo:latest
 error:` |
-| docker-todo | tag | 1 | `[2m2026-08-27T00:01:21.400880Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/docker-todo:latest
+| docker-todo | tag | 1 | `[2m2026-08-27T00:34:29.363896Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/docker-todo:latest
 e` |
-| docker-todo | save | 1 | `[2m2026-08-27T00:01:21.523975Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/docker-todo:latest
+| docker-todo | save | 1 | `[2m2026-08-27T00:34:29.509550Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/docker-todo:latest
 error: docker: unknown i` |
 | docker-todo | rmi-tag | 1 | `rmi: bench/docker-todo:bench-tag: rmi: not found registry-1.docker.io/bench/docker-todo:bench-tag
-[2m2026-08-27T00:01:21.638905Z[0m [31mERROR[0m [2mferro_c` |
-| docker-todo | load | 1 | `[2m2026-08-27T00:01:21.760691Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
+[2m2026-08-27T00:34:29.698456Z[0m [31mERROR[0m [2mferro_c` |
+| docker-todo | load | 1 | `[2m2026-08-27T00:34:29.916593Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
 error:` |
 | docker-todo | run-detached | 1 | `:"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/docker-todo","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.i` |
 | docker-todo | health | 1 | `` |
-| docker-todo | logs | 1 | `[2m2026-08-27T00:01:52.980245Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | logs | 1 | `[2m2026-08-27T00:35:01.341385Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | inspect | 1 | `[2m2026-08-27T00:01:53.109035Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | inspect | 1 | `[2m2026-08-27T00:35:01.468180Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | top | 1 | `[2m2026-08-27T00:01:53.223476Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | top | 1 | `[2m2026-08-27T00:35:01.612158Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | stats | 1 | `[2m2026-08-27T00:01:53.341694Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | stats | 1 | `[2m2026-08-27T00:35:01.732351Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | exec | 1 | `[2m2026-08-27T00:01:53.460215Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | exec | 1 | `[2m2026-08-27T00:35:01.864252Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | cp-out | 1 | `[2m2026-08-27T00:01:53.585312Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | cp-out | 1 | `[2m2026-08-27T00:35:01.997964Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | cp-in | 1 | `[2m2026-08-27T00:01:53.706303Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | cp-in | 1 | `[2m2026-08-27T00:35:02.130882Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | diff | 1 | `[2m2026-08-27T00:01:53.819688Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+| docker-todo | diff | 1 | `[2m2026-08-27T00:35:02.264623Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
 | docker-todo | pause | 1 | `pause: bench-docker-todo: container not found: bench-docker-todo
-[2m2026-08-27T00:01:53.943001Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m pause:` |
+[2m2026-08-27T00:35:02.397020Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m pause:` |
 | docker-todo | unpause | 1 | `unpause: bench-docker-todo: container not found: bench-docker-todo
-[2m2026-08-27T00:01:54.065050Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m unpa` |
+[2m2026-08-27T00:35:02.518073Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m unpa` |
 | docker-todo | restart | 1 | `restart: bench-docker-todo: container not found: bench-docker-todo
-[2m2026-08-27T00:01:54.186639Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rest` |
+[2m2026-08-27T00:35:02.656090Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rest` |
 | docker-todo | stop | 1 | `stop: bench-docker-todo: container not found: bench-docker-todo
-[2m2026-08-27T00:01:54.302519Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop: 1` |
+[2m2026-08-27T00:35:02.773016Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop: 1` |
 | docker-todo | start | 1 | `start: bench-docker-todo: container not found: bench-docker-todo
-[2m2026-08-27T00:01:54.424773Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m start:` |
-| docker-todo | rename | 1 | `[2m2026-08-27T00:01:54.545648Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
+[2m2026-08-27T00:35:02.894535Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m start:` |
+| docker-todo | rename | 1 | `[2m2026-08-27T00:35:03.019381Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo
 error: container not found: benc` |
-| docker-todo | commit | 1 | `[2m2026-08-27T00:01:54.663476Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-docker-todo-r
+| docker-todo | commit | 1 | `[2m2026-08-27T00:35:03.155183Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-docker-todo-r
 error: commit: contain` |
-| docker-todo | export | 1 | `[2m2026-08-27T00:01:54.780875Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo-r
+| docker-todo | export | 1 | `[2m2026-08-27T00:35:03.276072Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-docker-todo-r
 error: container not found: be` |
 | docker-todo | kill | 1 | `kill: bench-docker-todo-r: container not found: bench-docker-todo-r
-[2m2026-08-27T00:01:54.901415Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m kil` |
+[2m2026-08-27T00:35:03.404071Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m kil` |
 | docker-todo | wait | 1 | `wait: bench-docker-todo-r: container not found: bench-docker-todo-r
-[2m2026-08-27T00:01:55.034409Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m wai` |
+[2m2026-08-27T00:35:03.524324Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m wai` |
 | docker-todo | rm | 1 | `rm: bench-docker-todo-r: container not found: bench-docker-todo-r
-[2m2026-08-27T00:01:55.252169Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm: 1` |
+[2m2026-08-27T00:35:03.765625Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm: 1` |
 | docker-todo | rmi-committed | 1 | `rmi: bench/docker-todo:committed: rmi: not found registry-1.docker.io/bench/docker-todo:committed
-[2m2026-08-27T00:01:55.372562Z[0m [31mERROR[0m [2mferro_c` |
+[2m2026-08-27T00:35:03.886684Z[0m [31mERROR[0m [2mferro_c` |
 | docker-todo | network-run | 1 | `:"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/docker-todo","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.i` |
-| docker-todo | compose-up | 1 | `ized child; proxy run failed: runtime mutation mediation failed: compose execution request digest does not match authorized child; mysql run failed: runtime mut` |
+| docker-todo | compose-up | 1 | `tation mediation failed: compose execution request digest does not match authorized child; proxy run failed: runtime mutation mediation failed: compose executio` |
 | docker-todo | compose-health | 1 | `` |
 | docker-todo | err-port-in-use | 1 | `docker-todo","Action":"pull"}]}]}
 
@@ -192,68 +192,68 @@ error: run: pull image registry-1.docker.io/bench/docker-todo:latest failed: reg
 [2m2026-08-27T00:08:47.907814Z[0m [31mERROR[0m [2mf` |
 | flask-tutorial | compose-up | 1 | `[2m2026-08-27T00:08:58.865343Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app run failed: runtime mutation mediation fail` |
 | flask-tutorial | compose-health | 1 | `` |
-| gin-basic | build | 1 | `[2m2026-08-27T00:11:44.569951Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (1203896320 bytes)
+| gin-basic | build | 1 | `[2m2026-08-27T00:38:25.561081Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (4446864896 bytes)
 error: layer size exceeds` |
-| gin-basic | image-inspect | 1 | `[2m2026-08-27T00:11:44.746600Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/gin-basic:latest
+| gin-basic | image-inspect | 1 | `[2m2026-08-27T00:38:25.822479Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/gin-basic:latest
 er` |
-| gin-basic | history | 1 | `[2m2026-08-27T00:11:44.865730Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/gin-basic:latest
+| gin-basic | history | 1 | `[2m2026-08-27T00:38:25.953789Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/gin-basic:latest
 error: h` |
-| gin-basic | tag | 1 | `[2m2026-08-27T00:11:44.982985Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/gin-basic:latest
+| gin-basic | tag | 1 | `[2m2026-08-27T00:38:26.090167Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/gin-basic:latest
 err` |
-| gin-basic | save | 1 | `[2m2026-08-27T00:11:45.114010Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/gin-basic:latest
+| gin-basic | save | 1 | `[2m2026-08-27T00:38:26.223566Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/gin-basic:latest
 error: docker: unknown ima` |
 | gin-basic | rmi-tag | 1 | `rmi: bench/gin-basic:bench-tag: rmi: not found registry-1.docker.io/bench/gin-basic:bench-tag
-[2m2026-08-27T00:11:45.241842Z[0m [31mERROR[0m [2mferro_cli::` |
-| gin-basic | load | 1 | `[2m2026-08-27T00:11:45.357751Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
+[2m2026-08-27T00:38:26.355624Z[0m [31mERROR[0m [2mferro_cli::` |
+| gin-basic | load | 1 | `[2m2026-08-27T00:38:26.488173Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
 error:` |
 | gin-basic | run-detached | 1 | `ssage":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gin-basic","Action":"pull"}]}]}
 
 error: run: pull image registry-1.dock` |
 | gin-basic | health | 1 | `` |
-| gin-basic | logs | 1 | `[2m2026-08-27T00:12:16.572705Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | logs | 1 | `[2m2026-08-27T00:38:58.507349Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | inspect | 1 | `[2m2026-08-27T00:12:16.695435Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | inspect | 1 | `[2m2026-08-27T00:38:58.649451Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | top | 1 | `[2m2026-08-27T00:12:16.819151Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | top | 1 | `[2m2026-08-27T00:38:58.774874Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | stats | 1 | `[2m2026-08-27T00:12:16.937574Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | stats | 1 | `[2m2026-08-27T00:38:58.912876Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | exec | 1 | `[2m2026-08-27T00:12:17.060731Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | exec | 1 | `[2m2026-08-27T00:38:59.041148Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | cp-out | 1 | `[2m2026-08-27T00:12:17.193066Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | cp-out | 1 | `[2m2026-08-27T00:38:59.179883Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | cp-in | 1 | `[2m2026-08-27T00:12:17.308555Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | cp-in | 1 | `[2m2026-08-27T00:38:59.322931Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | diff | 1 | `[2m2026-08-27T00:12:17.426224Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+| gin-basic | diff | 1 | `[2m2026-08-27T00:38:59.451734Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
 | gin-basic | pause | 1 | `pause: bench-gin-basic: container not found: bench-gin-basic
-[2m2026-08-27T00:12:17.545881Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m pause: 1 c` |
+[2m2026-08-27T00:38:59.582812Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m pause: 1 c` |
 | gin-basic | unpause | 1 | `unpause: bench-gin-basic: container not found: bench-gin-basic
-[2m2026-08-27T00:12:17.664035Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m unpause:` |
+[2m2026-08-27T00:38:59.724559Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m unpause:` |
 | gin-basic | restart | 1 | `restart: bench-gin-basic: container not found: bench-gin-basic
-[2m2026-08-27T00:12:17.781590Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m restart:` |
+[2m2026-08-27T00:38:59.857963Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m restart:` |
 | gin-basic | stop | 1 | `stop: bench-gin-basic: container not found: bench-gin-basic
-[2m2026-08-27T00:12:17.901929Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop: 1 con` |
+[2m2026-08-27T00:38:59.989279Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m stop: 1 con` |
 | gin-basic | start | 1 | `start: bench-gin-basic: container not found: bench-gin-basic
-[2m2026-08-27T00:12:18.022680Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m start: 1 c` |
-| gin-basic | rename | 1 | `[2m2026-08-27T00:12:18.140747Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
+[2m2026-08-27T00:39:00.128384Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m start: 1 c` |
+| gin-basic | rename | 1 | `[2m2026-08-27T00:39:00.266837Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic
 error: container not found: bench-` |
-| gin-basic | commit | 1 | `[2m2026-08-27T00:12:18.260685Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-gin-basic-r
+| gin-basic | commit | 1 | `[2m2026-08-27T00:39:00.391547Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-gin-basic-r
 error: commit: container` |
-| gin-basic | export | 1 | `[2m2026-08-27T00:12:18.378141Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic-r
+| gin-basic | export | 1 | `[2m2026-08-27T00:39:00.545272Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-gin-basic-r
 error: container not found: benc` |
 | gin-basic | kill | 1 | `kill: bench-gin-basic-r: container not found: bench-gin-basic-r
-[2m2026-08-27T00:12:18.501935Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m kill: 1` |
+[2m2026-08-27T00:39:00.687317Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m kill: 1` |
 | gin-basic | wait | 1 | `wait: bench-gin-basic-r: container not found: bench-gin-basic-r
-[2m2026-08-27T00:12:18.620515Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m wait: 1` |
+[2m2026-08-27T00:39:00.827488Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m wait: 1` |
 | gin-basic | rm | 1 | `rm: bench-gin-basic-r: container not found: bench-gin-basic-r
-[2m2026-08-27T00:12:18.841319Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm: 1 con` |
+[2m2026-08-27T00:39:01.070779Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m rm: 1 con` |
 | gin-basic | rmi-committed | 1 | `rmi: bench/gin-basic:committed: rmi: not found registry-1.docker.io/bench/gin-basic:committed
-[2m2026-08-27T00:12:18.958394Z[0m [31mERROR[0m [2mferro_cli::` |
+[2m2026-08-27T00:39:01.197419Z[0m [31mERROR[0m [2mferro_cli::` |
 | gin-basic | network-run | 1 | `ssage":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gin-basic","Action":"pull"}]}]}
 
 error: run: pull image registry-1.dock` |
-| gin-basic | compose-up | 1 | `[2m2026-08-27T00:12:26.821960Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
+| gin-basic | compose-up | 1 | `[2m2026-08-27T00:39:56.258929Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
 | gin-basic | compose-health | 1 | `` |
 | gin-basic | err-port-in-use | 1 | `:"bench/gin-basic","Action":"pull"}]}]}
 
@@ -309,65 +309,65 @@ error: command is required to run ` |
 | mdn-static | compose-health | 1 | `` |
 | mdn-static | err-port-in-use | 1 | `[2m2026-08-27T00:19:17.566432Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m command is required to run container
 error: command is required to run ` |
-| node-getting-started | build | 1 | `[2m2026-08-27T00:19:28.595517Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (1384673280 bytes)
+| node-getting-started | build | 1 | `[2m2026-08-27T00:43:07.207925Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m layer size exceeds maximum (4444575232 bytes)
 error: layer size exceeds` |
-| node-getting-started | image-inspect | 1 | `[2m2026-08-27T00:19:28.783851Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/node-getting-starte` |
-| node-getting-started | history | 1 | `[2m2026-08-27T00:19:28.907437Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/node-getting-started:late` |
-| node-getting-started | tag | 1 | `[2m2026-08-27T00:19:29.026237Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/node-getting-started` |
-| node-getting-started | save | 1 | `[2m2026-08-27T00:19:29.151932Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/node-getting-started:latest
+| node-getting-started | image-inspect | 1 | `[2m2026-08-27T00:43:07.437725Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m image inspect: not found registry-1.docker.io/bench/node-getting-starte` |
+| node-getting-started | history | 1 | `[2m2026-08-27T00:43:07.555210Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m history: not found registry-1.docker.io/bench/node-getting-started:late` |
+| node-getting-started | tag | 1 | `[2m2026-08-27T00:43:07.677386Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m source image not found: registry-1.docker.io/bench/node-getting-started` |
+| node-getting-started | save | 1 | `[2m2026-08-27T00:43:07.804134Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: unknown image bench/node-getting-started:latest
 error: docker: ` |
 | node-getting-started | rmi-tag | 1 | `rmi: bench/node-getting-started:bench-tag: rmi: not found registry-1.docker.io/bench/node-getting-started:bench-tag
-[2m2026-08-27T00:19:29.280404Z[0m [31mERR` |
-| node-getting-started | load | 1 | `[2m2026-08-27T00:19:29.390840Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
+[2m2026-08-27T00:43:07.924561Z[0m [31mERR` |
+| node-getting-started | load | 1 | `[2m2026-08-27T00:43:08.037956Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m docker: load read failed: No such file or directory (os error 2)
 error:` |
 | node-getting-started | run-detached | 1 | `"detail":[{"Type":"repository","Class":"","Name":"bench/node-getting-started","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/node-getti` |
 | node-getting-started | health | 1 | `` |
-| node-getting-started | logs | 1 | `[2m2026-08-27T00:20:00.604124Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | logs | 1 | `[2m2026-08-27T00:43:39.348917Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | inspect | 1 | `[2m2026-08-27T00:20:00.734735Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | inspect | 1 | `[2m2026-08-27T00:43:39.469852Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | top | 1 | `[2m2026-08-27T00:20:00.858648Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | top | 1 | `[2m2026-08-27T00:43:39.587619Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | stats | 1 | `[2m2026-08-27T00:20:01.019822Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | stats | 1 | `[2m2026-08-27T00:43:39.709489Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | exec | 1 | `[2m2026-08-27T00:20:01.131555Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | exec | 1 | `[2m2026-08-27T00:43:39.846890Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | cp-out | 1 | `[2m2026-08-27T00:20:01.304531Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | cp-out | 1 | `[2m2026-08-27T00:43:39.974084Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | cp-in | 1 | `[2m2026-08-27T00:20:01.432620Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | cp-in | 1 | `[2m2026-08-27T00:43:40.092565Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | diff | 1 | `[2m2026-08-27T00:20:01.556308Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+| node-getting-started | diff | 1 | `[2m2026-08-27T00:43:40.208998Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
 | node-getting-started | pause | 1 | `pause: bench-node-getting-started: container not found: bench-node-getting-started
-[2m2026-08-27T00:20:01.686493Z[0m [31mERROR[0m [2mferro_cli::linux_cli[` |
+[2m2026-08-27T00:43:40.329753Z[0m [31mERROR[0m [2mferro_cli::linux_cli[` |
 | node-getting-started | unpause | 1 | `unpause: bench-node-getting-started: container not found: bench-node-getting-started
-[2m2026-08-27T00:20:01.810281Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
+[2m2026-08-27T00:43:40.447139Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
 | node-getting-started | restart | 1 | `restart: bench-node-getting-started: container not found: bench-node-getting-started
-[2m2026-08-27T00:20:01.939021Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
+[2m2026-08-27T00:43:40.568904Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
 | node-getting-started | stop | 1 | `stop: bench-node-getting-started: container not found: bench-node-getting-started
-[2m2026-08-27T00:20:02.063929Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0` |
+[2m2026-08-27T00:43:40.685979Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0` |
 | node-getting-started | start | 1 | `start: bench-node-getting-started: container not found: bench-node-getting-started
-[2m2026-08-27T00:20:02.186261Z[0m [31mERROR[0m [2mferro_cli::linux_cli[` |
-| node-getting-started | rename | 1 | `[2m2026-08-27T00:20:02.309370Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
+[2m2026-08-27T00:43:40.804806Z[0m [31mERROR[0m [2mferro_cli::linux_cli[` |
+| node-getting-started | rename | 1 | `[2m2026-08-27T00:43:40.926042Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started
 error: container not fo` |
-| node-getting-started | commit | 1 | `[2m2026-08-27T00:20:02.434381Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-node-getting-started-r
+| node-getting-started | commit | 1 | `[2m2026-08-27T00:43:41.042455Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m commit: container not found: bench-node-getting-started-r
 error: commit` |
-| node-getting-started | export | 1 | `[2m2026-08-27T00:20:02.555084Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started-r
+| node-getting-started | export | 1 | `[2m2026-08-27T00:43:41.161522Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m container not found: bench-node-getting-started-r
 error: container not ` |
 | node-getting-started | kill | 1 | `kill: bench-node-getting-started-r: container not found: bench-node-getting-started-r
-[2m2026-08-27T00:20:02.676608Z[0m [31mERROR[0m [2mferro_cli::linux_cl` |
+[2m2026-08-27T00:43:41.280472Z[0m [31mERROR[0m [2mferro_cli::linux_cl` |
 | node-getting-started | wait | 1 | `wait: bench-node-getting-started-r: container not found: bench-node-getting-started-r
-[2m2026-08-27T00:20:02.803346Z[0m [31mERROR[0m [2mferro_cli::linux_cl` |
+[2m2026-08-27T00:43:41.400648Z[0m [31mERROR[0m [2mferro_cli::linux_cl` |
 | node-getting-started | rm | 1 | `rm: bench-node-getting-started-r: container not found: bench-node-getting-started-r
-[2m2026-08-27T00:20:03.024326Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
+[2m2026-08-27T00:43:41.619377Z[0m [31mERROR[0m [2mferro_cli::linux_cli` |
 | node-getting-started | rmi-committed | 1 | `rmi: bench/node-getting-started:committed: rmi: not found registry-1.docker.io/bench/node-getting-started:committed
-[2m2026-08-27T00:20:03.141653Z[0m [31mERR` |
+[2m2026-08-27T00:43:41.741884Z[0m [31mERR` |
 | node-getting-started | network-run | 1 | `"detail":[{"Type":"repository","Class":"","Name":"bench/node-getting-started","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/node-getti` |
-| node-getting-started | compose-up | 1 | `[2m2026-08-27T00:20:07.337451Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
+| node-getting-started | compose-up | 1 | `[2m2026-08-27T00:43:47.468843Z[0m [31mERROR[0m [2mferro_cli::linux_cli[0m[2m:[0m compose partial result: app prerequisite failed: layer size exceeds max` |
 | node-getting-started | compose-health | 1 | `` |
 | node-getting-started | err-port-in-use | 1 | `"}]}]}
 

@@ -75,10 +75,15 @@ if [ "$ENGINE" = ferrocrate ]; then
     DAEMON=$!
     for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
     export DOCKER_HOST="unix://$SOCK"
+    # docker/cli's e2e suite reads TEST_DOCKER_HOST, not DOCKER_HOST, and exits
+    # before it runs anything when that is unset.
+    export TEST_DOCKER_HOST="unix://$SOCK"
     trap 'kill $DAEMON 2>/dev/null; rm -f "$SOCK"' EXIT
   fi
 else
   unset DOCKER_HOST
+  # The oracle run drives the real daemon.
+  export TEST_DOCKER_HOST="${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}"
 fi
 
 # --- skip-list: tests that assert Docker-only behaviour the feature matrix declares
@@ -128,7 +133,8 @@ with open(out, "a") as fh:
         tail = "".join(fails.get(name, []))[-400:] if status == "fail" else ""
         fh.write(json.dumps({"source": suite, "suite": suite, "engine": engine, "step": name,
                              "status": status, "exit": 0 if status != "fail" else 1, "ms": 0,
-                             "stderr_tail": tail, "run": run, "head": head}) + "\n")
+                             "stderr_tail": tail, "run": run, "head": head},
+                            separators=(",", ":")) + "\n")
 print(f"{suite}/{engine}: {sum(1 for a in tests.values() if a=='pass')} pass, "
       f"{sum(1 for a in tests.values() if a=='fail')} fail, {sum(1 for a in tests.values() if a=='skip')} skip")
 if not tests:

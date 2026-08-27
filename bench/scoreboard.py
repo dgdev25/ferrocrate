@@ -29,6 +29,10 @@ def latest():
         app, _, engine = name.rpartition("-")
         if engine not in ("ferrocrate", "docker"):
             continue
+        # Borrowed suites write into the same directory but are not applications.
+        # Counting them here mixed 108 CLI e2e cases into the app totals.
+        if app.startswith("suite-"):
+            continue
         files[(app, engine)] = f
     return files
 

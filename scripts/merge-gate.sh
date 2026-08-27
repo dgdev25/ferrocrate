@@ -26,8 +26,8 @@ shrunk=0
 BASE="HEAD^1"; git rev-parse -q --verify "$BASE" >/dev/null 2>&1 || BASE="HEAD"
 for f in $( { git diff --name-only "$BASE" HEAD 2>/dev/null; git diff --cached --name-only 2>/dev/null; } | grep 'bench/results/.*\.jsonl$' | sort -u || true); do
   [ -f "$f" ] || continue
-  new=$(wc -l < "$f" 2>/dev/null || echo 0)
-  old=$(git show "$BASE:$f" 2>/dev/null | wc -l || echo 0)
+  new=$(wc -l < "$f" 2>/dev/null); new=${new:-0}
+  old=$(git show "$BASE:$f" 2>/dev/null | wc -l); old=${old:-0}
   if [ "$old" -gt 50 ] && [ "$new" -lt $((old / 2)) ]; then
     note "result shrank: $(basename $f)" "$old -> $new records, REFUSED"; shrunk=1
   fi
@@ -43,7 +43,7 @@ f=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{f+=$6} END {print 
 if [ "$f" -eq 0 ]; then
   note "workspace tests" "$p passed, 0 failed"
 elif [ "$f" -eq 1 ]; then
-  name=$(echo "$out" | grep -B1 "^test result: FAILED" | grep "^test .* FAILED" | head -1 | awk '{print $2}')
+  name=$(echo "$out" | grep -E "^test .+ \.\.\. FAILED$" | head -1 | awk '{print $2}')
   note "workspace tests" "$p passed, 1 failed ($name) — known load flake, not blocking"
 else
   note "workspace tests" "$p passed, $f FAILED"; fail=1

@@ -1047,15 +1047,24 @@ fn unsupported_plugin_pull_reports_an_explicit_boundary() {
 }
 
 #[test]
-fn plugin_management_family_reports_explicit_boundaries() {
+fn plugin_list_returns_an_empty_docker_compatible_collection() {
     let harness = DaemonHarness::spawn();
-    let (status, body) = harness.request("GET", "/plugins", "");
-    assert_eq!(status, 404, "list status: {body}");
+    // Moby's environment protection probes the versioned route, so exercise
+    // the API-version normalization layer as well as the endpoint itself.
+    let (status, body) = harness.request("GET", "/v1.45/plugins", "");
+    assert_eq!(status, 200, "list status: {body}");
     assert!(
-        body.contains("plugin listing is unsupported") && body.contains("signed local manifests"),
+        serde_json::from_str::<serde_json::Value>(&body)
+            .expect("plugin list response is JSON")
+            .as_array()
+            .is_some_and(Vec::is_empty),
         "list body={body}"
     );
+}
 
+#[test]
+fn plugin_management_family_reports_explicit_boundaries() {
+    let harness = DaemonHarness::spawn();
     let cases = [
         ("GET", "/plugins/audit-log", "{}"),
         ("POST", "/plugins/audit-log/enable", "{}"),

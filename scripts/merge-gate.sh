@@ -20,10 +20,14 @@ fi
 # 2. Result files must not implausibly shrink. An emptied BuildKit result was
 #    nearly merged on 2026-08-27 after a corrupted run wiped 489 records to 0.
 shrunk=0
-for f in $(git diff --cached --name-only 2>/dev/null | grep 'bench/results/.*\.jsonl$' || true); do
+# Compare against the pre-merge state. This gate runs AFTER `git merge`, so
+# `--cached` saw nothing; compare HEAD to its first parent, plus anything
+# staged but not yet committed.
+BASE="HEAD^1"; git rev-parse -q --verify "$BASE" >/dev/null 2>&1 || BASE="HEAD"
+for f in $( { git diff --name-only "$BASE" HEAD 2>/dev/null; git diff --cached --name-only 2>/dev/null; } | grep 'bench/results/.*\.jsonl$' | sort -u || true); do
   [ -f "$f" ] || continue
   new=$(wc -l < "$f" 2>/dev/null || echo 0)
-  old=$(git show "HEAD:$f" 2>/dev/null | wc -l || echo 0)
+  old=$(git show "$BASE:$f" 2>/dev/null | wc -l || echo 0)
   if [ "$old" -gt 50 ] && [ "$new" -lt $((old / 2)) ]; then
     note "result shrank: $(basename $f)" "$old -> $new records, REFUSED"; shrunk=1
   fi
@@ -50,7 +54,7 @@ if [ "$QUICK" -eq 0 ]; then
   for mode in buildkit classic; do
     if [ "$mode" = classic ]; then export DOCKER_BUILDKIT=0; else unset DOCKER_BUILDKIT; fi
     r=$(timeout 2400 bash scripts/docker-client-conformance.sh 2>&1 | tail -1)
-    if echo "$r" | grep -q "FAIL=0"; then note "conformance ($mode)" "$r"
+    if echo "$r" | grep -qE "FAIL=0( |$)"; then note "conformance ($mode)" "$r"
     else note "conformance ($mode)" "$r  FAILED"; fail=1; fi
   done
   unset DOCKER_BUILDKIT

@@ -570,12 +570,26 @@ PY
     ;;
 esac
 
-PASS_N=$(grep -c '"status":"pass"' "$OUT" 2>/dev/null || echo 0)
-FAIL_N=$(grep -c '"status":"fail"' "$OUT" 2>/dev/null || echo 0)
-SKIP_N=$(grep -c '"status":"skip"' "$OUT" 2>/dev/null || echo 0)
+# grep -c prints "0" AND exits 1 on no match, so `grep -c ... || echo 0` yields
+# two lines ("0\n0"), which corrupted every done-marker written before this
+# was fixed. Take grep's own count and ignore its exit status.
+PASS_N=$(grep -c '"status":"pass"' "$OUT" 2>/dev/null); PASS_N=${PASS_N:-0}
+FAIL_N=$(grep -c '"status":"fail"' "$OUT" 2>/dev/null); FAIL_N=${FAIL_N:-0}
+SKIP_N=$(grep -c '"status":"skip"' "$OUT" 2>/dev/null); SKIP_N=${SKIP_N:-0}
+RECORDS=$(wc -l < "$OUT" 2>/dev/null); RECORDS=${RECORDS:-0}
 echo "-> $OUT  ($PASS_N pass, $FAIL_N fail, $SKIP_N skip)"
 # Done-marker: watchers read this file, never a process-name match. A pgrep
 # loop caught a false gap between two runs on 2026-08-27 and declared a
 # still-running suite finished.
+#
+# A run that collected NO records is a failed run, not a finished one. Writing
+# a done-marker for it made a watcher treat the compose recheck's empty result
+# as complete. Write a .failed marker instead so the distinction is explicit.
 DONEDIR="/path/to/ferrocrate-lab/done"; mkdir -p "$DONEDIR"
-printf '%s\n' "suite=$SUITE engine=$ENGINE out=$OUT pass=$PASS_N fail=$FAIL_N skip=$SKIP_N records=$(wc -l < "$OUT" 2>/dev/null || echo 0) finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DONEDIR/$SUITE-$ENGINE.done"
+rm -f "$DONEDIR/$SUITE-$ENGINE.done" "$DONEDIR/$SUITE-$ENGINE.failed"
+if [ "$RECORDS" -eq 0 ]; then
+  printf '%s\n' "suite=$SUITE engine=$ENGINE out=$OUT records=0 reason=no-records-collected finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DONEDIR/$SUITE-$ENGINE.failed"
+  echo "$SUITE/$ENGINE: collected no records; wrote $DONEDIR/$SUITE-$ENGINE.failed, not .done" >&2
+  exit 2
+fi
+printf '%s\n' "suite=$SUITE engine=$ENGINE out=$OUT pass=$PASS_N fail=$FAIL_N skip=$SKIP_N records=$RECORDS finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DONEDIR/$SUITE-$ENGINE.done"

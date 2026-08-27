@@ -2080,12 +2080,14 @@ impl ContainerRuntime {
             // must retain the regular supervisor's terminal-state semantics:
             // an explicit stop or kill is never a restart trigger, even when
             // the configured policy is `always`.
-            if should_restart(
-                &current.restart_policy,
-                &current.status,
-                current.last_exit_code.unwrap_or(-1),
-                current.restart_count,
-            ) {
+            if !current.user_stopped
+                && should_restart(
+                    &current.restart_policy,
+                    &current.status,
+                    current.last_exit_code.unwrap_or(-1),
+                    current.restart_count,
+                )
+            {
                 match ContainerRuntime::new(&runtime_dir) {
                     Ok(runtime) => {
                         if let Err(error) = runtime.start_from_reconciliation(&current.id) {
@@ -4187,6 +4189,10 @@ impl ContainerRuntime {
             self.persist_user_stopped(proof, id, true)?;
             return Ok(());
         }
+        // Publish the manual-stop intent before the signal lands: the exit
+        // publisher observes the same terminal state as this mutation, so the
+        // restart supervisor needs the flag to hold its place.
+        self.persist_user_stopped(proof, id, true)?;
         // Docker signals the workload's PID 1. Rootless containers record the
         // bubblewrap launcher PID; the workload is its deepest descendant in
         // the host PID namespace. Signaling the launcher instead would kill
@@ -4211,8 +4217,11 @@ impl ContainerRuntime {
         terminate_slirp4netns_helper(&record);
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
+        // Docker's state vocabulary has no `stopped`: both stop and kill
+        // reach the terminal state `exited`. The stop cause stays in the
+        // event/audit log and in `user_stopped`.
         self.persist_effect_status_with_user_stopped(
-            proof, intent, id, "running", "stopped", true,
+            proof, intent, id, "running", "exited", true,
         )?;
         let _ = log_event(
             &self.runtime_dir,
@@ -4280,6 +4289,10 @@ impl ContainerRuntime {
             return Ok(());
         }
         if let Some(signal) = signal {
+            // Real signals mark the manual stop before delivery so the exit
+            // publisher and this mutation agree that no restart may follow.
+            // The signal-0 probe path below stays side-effect free.
+            self.persist_user_stopped(proof, id, true)?;
             // Host-PID-namespace execution makes the container's whole
             // process tree the signal target for SIGKILL (nothing may be
             // orphaned); named signals go to the verified workload PID 1.
@@ -4332,7 +4345,9 @@ impl ContainerRuntime {
         terminate_slirp4netns_helper(&record);
         cleanup_security_ebpf_monitor(&record.id)?;
         cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
-        self.persist_effect_status_with_user_stopped(proof, intent, id, "running", "killed", true)?;
+        // `exited` is Docker's terminal state for a killed container; the
+        // kill cause stays in the event/audit log and in `user_stopped`.
+        self.persist_effect_status_with_user_stopped(proof, intent, id, "running", "exited", true)?;
         let _ = log_event(
             &self.runtime_dir,
             make_event("kill", Some(id), Some(&record.image), Some("killed"), None),
@@ -6457,13 +6472,9 @@ fn recovery_truth_matches(
                 && pid_identity_matches(record)
         }
         "container.stop" | "container.kill" => operation.is_some_and(|operation| {
-            let expected = if action == "container.stop" {
-                "stopped"
-            } else {
-                "killed"
-            };
-            record.status == expected
-                && operation.state_after.as_deref() == Some(expected)
+            // Both stop and kill publish the Docker terminal state `exited`.
+            record.status == "exited"
+                && operation.state_after.as_deref() == Some("exited")
                 && process_start_time_for_pid(operation.pid) != operation.process_start_time
         }),
         "container.restart" => {
@@ -8511,12 +8522,16 @@ fn supervise_child(
             .as_ref()
             .map(|record| &record.restart_policy)
             .unwrap_or(&restart_policy);
-        if !should_restart(
-            effective_restart_policy,
-            &current_status,
-            exit_code,
-            durable_restart_count,
-        ) {
+        // An explicit stop or kill publishes `exited` too, so the manual-stop
+        // flag, not the status string, suppresses the restart loop.
+        if persisted_restart.as_ref().is_some_and(|record| record.user_stopped)
+            || !should_restart(
+                effective_restart_policy,
+                &current_status,
+                exit_code,
+                durable_restart_count,
+            )
+        {
             break;
         }
 

@@ -15537,15 +15537,17 @@ fn handle_compose(
                         let eligibility = restart_eligible.get(name);
                         match record.status.as_str() {
                             // `exited` between restarts: stay attached while
-                            // the policy will relaunch this instance.
-                            "exited" => match eligibility {
+                            // the policy will relaunch this instance. A manual
+                            // stop or kill also publishes `exited`, so the
+                            // user-stop flag decides, not the status alone.
+                            "exited" if !record.user_stopped => match eligibility {
                                 Some(ComposeRestartEligibility::Always) => true,
                                 Some(ComposeRestartEligibility::OnFailure) => {
                                     record.last_exit_code.is_some_and(|code| code != 0)
                                 }
                                 _ => false,
                             },
-                            "stopped" | "killed" => false,
+                            "exited" | "stopped" | "killed" => false,
                             // Any pre-terminal state (created/pending/running/
                             // paused/…) keeps the attached up alive.
                             _ => true,
@@ -31321,6 +31323,85 @@ volumes:
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
         assert!(err.contains("restart: container is required"));
+    }
+
+    fn ps_reports_exited_after_kill_and_stop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        let base: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz41-kill",
+                "name": "fz41-kill",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        store.put(&base).expect("seed running record");
+
+        handle_kill(&runtime, "fz41-kill", "SIGKILL").expect("kill");
+        let killed = runtime.inspect("fz41-kill").expect("inspect killed record");
+        assert_eq!(killed.status, "exited");
+        assert_eq!(
+            super::docker_container_list_entry(&killed, "")["State"], "exited",
+            "docker ps State must be `exited`, never the termination cause"
+        );
+
+        let mut stopped = base.clone();
+        stopped.id = "fz41-stop".to_string();
+        stopped.name = Some("fz41-stop".to_string());
+        stopped.status = "running".to_string();
+        stopped.user_stopped = false;
+        store.put(&stopped).expect("seed second record");
+
+        handle_stop(&runtime, "fz41-stop", 1).expect("stop");
+        let stopped_record = runtime.inspect("fz41-stop").expect("inspect stopped record");
+        assert_eq!(stopped_record.status, "exited");
+        assert_eq!(
+            super::docker_container_list_entry(&stopped_record, "")["State"], "exited",
+            "docker ps State must be `exited` after a graceful stop too"
+        );
+    }
+
+    #[test]
+    fn kill_still_succeeds_on_a_running_container_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fzs-running",
+                "name": "fzs-running",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        handle_kill(&runtime, "fzs-running", "SIGKILL").expect("kill running record");
+        // S41: Docker's state vocabulary has no `killed`; a killed container
+        // is `exited`, in the record and therefore in `ps` and `inspect`.
+        assert_eq!(
+            runtime
+                .inspect("fzs-running")
+                .expect("inspect killed record")
+                .status,
+            "exited"
+        );
     }
 
     // S48: `docker diff` on a freshly started container prints nothing — the

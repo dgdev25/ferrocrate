@@ -7060,6 +7060,24 @@ mod tests {
     use crate::layer_compression::CompressionFormat;
     use std::fs;
 
+    fn stage_root(runtime: &Path, index: usize) -> std::path::PathBuf {
+        let prefix = format!("stage-{index}-");
+        let mut roots = fs::read_dir(runtime.join("build"))
+            .expect("build scratch directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            })
+            .collect::<Vec<_>>();
+        roots.sort();
+        assert_eq!(roots.len(), 1, "one scratch root for stage {index}");
+        roots.pop().expect("stage scratch root")
+    }
+
     #[test]
     fn builds_minimal_dockerfile() {
         let _env = crate::test_support::acquire_env_lock();
@@ -7104,7 +7122,7 @@ mod tests {
         )
         .expect("build");
         assert_eq!(
-            fs::read_to_string(runtime.join("build/stage-0/app/d/value"))
+            fs::read_to_string(stage_root(&runtime, 0).join("app/d/value"))
                 .expect("WORKDIR COPY result"),
             "value"
         );
@@ -7143,7 +7161,7 @@ mod tests {
             )
             .expect("build");
 
-            let stage = runtime.join("build/stage-0/d");
+            let stage = stage_root(&runtime, 0).join("d");
             assert_eq!(
                 fs::read_to_string(stage.join("real.txt")).expect("regular file"),
                 "content"
@@ -7209,10 +7227,9 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
         )
         .expect("build");
-        assert!(runtime.join("build/stage-0/app/package.json").is_file());
-        assert!(runtime
-            .join("build/stage-0/app/package-lock.json")
-            .is_file());
+        let stage = stage_root(&runtime, 0);
+        assert!(stage.join("app/package.json").is_file());
+        assert!(stage.join("app/package-lock.json").is_file());
     }
 
     #[test]
@@ -7236,7 +7253,7 @@ mod tests {
         )
         .expect("glob COPY build");
 
-        let app = runtime.join("build/stage-0/app");
+        let app = stage_root(&runtime, 0).join("app");
         assert_eq!(
             fs::read_to_string(app.join("package.json")).unwrap(),
             "manifest"
@@ -7273,11 +7290,11 @@ mod tests {
         .expect("named stage build");
 
         assert_eq!(
-            fs::read_to_string(runtime.join("build/stage-1/tool")).unwrap(),
+            fs::read_to_string(stage_root(&runtime, 1).join("tool")).unwrap(),
             "compiled"
         );
         assert_eq!(
-            fs::read_to_string(runtime.join("build/stage-1/marker")).unwrap(),
+            fs::read_to_string(stage_root(&runtime, 1).join("marker")).unwrap(),
             "final"
         );
     }
@@ -7338,11 +7355,10 @@ mod tests {
         )
         .expect("COPY . . build");
 
-        assert!(runtime.join("build/stage-0/src/Cargo.toml").is_file());
-        assert!(!runtime.join("build/stage-0/src/src/Cargo.toml").exists());
-        assert!(!runtime
-            .join("build/stage-0/src/generated-checkstyle.java")
-            .exists());
+        let stage = stage_root(&runtime, 0);
+        assert!(stage.join("src/Cargo.toml").is_file());
+        assert!(!stage.join("src/src/Cargo.toml").exists());
+        assert!(!stage.join("src/generated-checkstyle.java").exists());
     }
 
     #[test]
@@ -7540,7 +7556,7 @@ mod tests {
         assert_eq!(checkpoint.len(), 1);
         assert_eq!(checkpoint.get(&0).unwrap().layer_digest, first.layer_digest);
         fs::remove_file(build_cache_path(&runtime)).unwrap();
-        fs::remove_dir_all(runtime.join("build/stage-0")).unwrap();
+        fs::remove_dir_all(stage_root(&runtime, 0)).unwrap();
         let second = build_from_dockerfile_with_store_and_compression(
             &dockerfile,
             Some("local/resume:latest"),
@@ -7551,7 +7567,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.layer_digest, second.layer_digest);
-        assert!(runtime.join("build/stage-0").is_dir());
+        assert!(stage_root(&runtime, 0).is_dir());
     }
 
     #[test]
@@ -8128,7 +8144,12 @@ mod tests {
         // The registry import itself uses build/ as its transfer directory;
         // a cache hit must not add any stage directories to it.
         assert!(
-            !target_runtime.join("build/stage-0").exists(),
+            fs::read_dir(target_runtime.join("build"))
+                .map(|entries| entries.filter_map(Result::ok).all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("stage-0-")))
+                .unwrap_or(true),
             "imported registry cache hit must not rebuild stages"
         );
         assert!(layer_blob_path(&target_runtime, &second.layer_digest).exists());
@@ -8279,9 +8300,9 @@ mod tests {
         )
         .expect("parallel independent stages build");
         assert!(layer_blob_path(&runtime, &result.layer_digest).exists());
-        assert!(runtime.join("build/stage-0").exists());
-        assert!(runtime.join("build/stage-1").exists());
-        assert!(runtime.join("build/stage-2").exists());
+        assert!(stage_root(&runtime, 0).exists());
+        assert!(stage_root(&runtime, 1).exists());
+        assert!(stage_root(&runtime, 2).exists());
     }
 
     fn stage_identity_for(

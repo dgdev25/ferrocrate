@@ -31349,6 +31349,38 @@ volumes:
         assert!(err.contains("restart: container is required"));
     }
 
+    // S40: `docker start` on a running container is a successful no-op, not
+    // an "already running" error and not a second workload.
+    #[test]
+    fn start_on_a_running_container_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz40-app",
+                "name": "fz40-app",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        crate::linux_cli::handle_start(&runtime, "fz40-app")
+            .expect("start on a running container is a no-op");
+        let record = runtime.inspect("fz40-app").expect("inspect");
+        assert_eq!(record.status, "running");
+        assert_eq!(record.pid, 0, "start must not spawn a second workload");
+        assert_eq!(store.list().expect("list").len(), 1);
+    }
+
     // S45: Docker's short flags are accepted: run -u/-w, logs -f,
     // stop/restart -t and kill -s.
     #[test]

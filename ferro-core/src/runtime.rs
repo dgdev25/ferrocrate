@@ -5159,10 +5159,11 @@ impl ContainerRuntime {
         if record.command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
-        if !stop_existing && record.status == "running" {
-            return Err(RuntimeError::InvalidState(
-                "container is already running".into(),
-            ));
+        if !stop_existing && matches!(record.status.as_str(), "running" | "paused") {
+            // Docker's `start` on a running or paused container is a no-op
+            // that reports success. Re-spawning the workload would orphan the
+            // live process and leave two supervisors on one record.
+            return Ok(());
         }
         // Reconciliation restarts do not go through a child supervisor, so
         // they must consume their bounded `on-failure:N` slot as part of the

@@ -21357,11 +21357,11 @@ fn handle_docker_compat_connection(
                     .iter()
                     .map(|record| {
                         surface_authorization
-                            .authorize_named(
+                            .authorize_image_binding(
                                 &origin,
                                 AuthorizationAction::ImageDelete,
-                                ResourceKind::Image,
                                 &record.reference,
+                                &record.digest,
                                 1,
                             )
                             .map_err(|error| error.to_string())

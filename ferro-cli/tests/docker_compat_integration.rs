@@ -1055,6 +1055,44 @@ fn docker_compat_image_search_returns_local_catalog_matches() {
 }
 
 #[test]
+fn docker_api_maintenance_and_event_routes_return_docker_json_shapes() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "maintenance:fixture");
+
+    let (status, body) = harness.request("GET", "/v1.45/system/df");
+    assert_eq!(status, 200, "system df body={body}");
+    let df: serde_json::Value = serde_json::from_str(&body).expect("system df JSON");
+    for key in ["LayersSize", "Images", "Containers", "Volumes", "BuildCache"] {
+        assert!(df.get(key).is_some(), "system df missing {key}: {df}");
+    }
+
+    let (status, body) = harness.request("POST", "/v1.45/containers/prune");
+    assert_eq!(status, 200, "container prune body={body}");
+    let containers: serde_json::Value = serde_json::from_str(&body).expect("container prune JSON");
+    assert!(containers["ContainersDeleted"].is_array(), "{containers}");
+    assert!(containers["SpaceReclaimed"].is_number(), "{containers}");
+
+    let (status, body) = harness.request("GET", "/v1.45/images/search?term=maintenance");
+    assert_eq!(status, 200, "image search body={body}");
+    let search: serde_json::Value = serde_json::from_str(&body).expect("image search JSON");
+    assert!(search.is_array(), "{search}");
+
+    let (status, body) = harness.request("POST", "/v1.45/images/prune");
+    assert_eq!(status, 200, "image prune body={body}");
+    let images: serde_json::Value = serde_json::from_str(&body).expect("image prune JSON");
+    assert!(images["ImagesDeleted"].is_array(), "{images}");
+    assert!(images["SpaceReclaimed"].is_number(), "{images}");
+
+    let (status, body) = harness.request("GET", "/v1.45/events");
+    assert_eq!(status, 200, "events body={body}");
+    for line in body.lines().filter(|line| !line.is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line).expect("event JSON line");
+        assert!(event.get("Type").is_some(), "event missing Type: {event}");
+        assert!(event.get("Action").is_some(), "event missing Action: {event}");
+    }
+}
+
+#[test]
 fn docker_compat_update_changes_pending_resource_limits() {
     let harness = DaemonHarness::spawn();
     let create_body =

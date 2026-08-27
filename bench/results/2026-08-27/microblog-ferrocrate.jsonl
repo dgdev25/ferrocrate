@@ -1,0 +1,47 @@
+{"app":"microblog","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"/home/USER/.ferrocrate/ferrocrate.sock (missing), /home/USER/.ferrocrate/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n\u001b[2m2026-08-27T00:19:18.776715Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m doctor detected compatibility issues\nerror: doctor detected compatibility issues\n","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1605,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"network-run","status":"fail","exit":1,"ms":603,"stderr_tail":"ssage\":\"authentication required\",\"detail\":[{\"Type\":\"repository\",\"Class\":\"\",\"Name\":\"bench/microblog\",\"Action\":\"pull\"}]}]}\n\nerror: run: pull image registry-1.docker.io/bench/microblog:latest failed: registry error: registry returned HTTP 401: {\"errors\":[{\"code\":\"UNAUTHORIZED\",\"message\":\"authentication required\",\"detail\":[{\"Type\":\"repository\",\"Class\":\"\",\"Name\":\"bench/microblog\",\"Action\":\"pull\"}]}]}\n\n","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}
+{"app":"microblog","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:19Z","head":"70de6dba"}

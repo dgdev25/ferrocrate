@@ -194,7 +194,7 @@ impl DaemonHarness {
                 socket_path.to_str().expect("socket path utf8"),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(fs::File::create(runtime_dir.path().join("daemon.stderr")).expect("create daemon stderr capture")))
             .spawn()
             .expect("spawn daemon")
     }
@@ -236,6 +236,10 @@ impl DaemonHarness {
 
     fn runtime_dir(&self) -> &Path {
         self._runtime_dir.path()
+    }
+
+    fn daemon_stderr(&self) -> String {
+        fs::read_to_string(self.runtime_dir().join("daemon.stderr")).expect("read daemon stderr capture")
     }
 
     fn socket_dir(&self) -> &Path {
@@ -3461,6 +3465,52 @@ fn docker_compat_buildkit_control_lists_a_running_worker() {
             platform.os == "linux" && platform.architecture == expected_architecture
         }));
     });
+}
+
+#[test]
+fn docker_compat_buildkit_control_keeps_a_solve_stream_alive_through_status() {
+    use bytes::Bytes;
+    use prost::Message;
+    #[derive(Clone, PartialEq, Message)] struct SolveRequest { #[prost(string, tag = "1")] r#ref: String, #[prost(bool, tag = "11")] internal: bool }
+    #[derive(Clone, PartialEq, Message)] struct StatusRequest { #[prost(string, tag = "1")] r#ref: String }
+    #[derive(Clone, PartialEq, Message)] struct ReturnRequest {}
+    fn grpc_message<M: Message>(message: &M) -> Bytes {
+        let mut payload = Vec::new(); message.encode(&mut payload).expect("encode gRPC request");
+        let mut framed = Vec::with_capacity(payload.len() + 5); framed.push(0);
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes()); framed.extend_from_slice(&payload); Bytes::from(framed)
+    }
+    let harness = DaemonHarness::spawn();
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
+    stream.write_all(b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n").expect("write control request");
+    let mut upgrade = Vec::new();
+    while !upgrade.ends_with(b"\r\n\r\n") { let mut byte = [0_u8; 1]; stream.read_exact(&mut byte).expect("read control upgrade"); upgrade.push(byte[0]); }
+    assert!(String::from_utf8_lossy(&upgrade).starts_with("HTTP/1.1 101"));
+    stream.set_nonblocking(true).expect("nonblocking control");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().expect("control runtime");
+    runtime.block_on(async move {
+        let stream = tokio::net::UnixStream::from_std(stream).expect("tokio control stream");
+        let (mut sender, connection) = h2::client::handshake(stream).await.expect("server must emit SETTINGS after the client preface");
+        tokio::spawn(async move { connection.await.expect("h2 control connection") });
+        let solve_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.Control/Solve").header("content-type", "application/grpc").header("te", "trailers").body(()).expect("solve request");
+        let (solve_response, mut solve_body) = sender.send_request(solve_request, false).expect("start solve stream");
+        solve_body.send_data(grpc_message(&SolveRequest { r#ref: "lifecycle-solve".to_string(), internal: true }), true).expect("send solve request");
+        let return_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.frontend.LLBBridge/Return").header("content-type", "application/grpc").header("te", "trailers").header("buildkit-controlapi-buildid", "lifecycle-solve").body(()).expect("gateway return request");
+        let (return_response, mut return_body) = sender.send_request(return_request, false).expect("start gateway return stream");
+        return_body.send_data(grpc_message(&ReturnRequest {}), true).expect("send gateway return");
+        let mut return_body = return_response.await.expect("gateway return response").into_body(); while let Some(chunk) = return_body.data().await { chunk.expect("gateway return response data"); }
+        assert_eq!(return_body.trailers().await.expect("gateway return trailers").expect("gateway return status")["grpc-status"], "0");
+        let mut solve_body = solve_response.await.expect("solve response").into_body(); while let Some(chunk) = solve_body.data().await { chunk.expect("solve response data"); }
+        assert_eq!(solve_body.trailers().await.expect("solve trailers").expect("solve status")["grpc-status"], "0");
+        let status_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.Control/Status").header("content-type", "application/grpc").header("te", "trailers").body(()).expect("status request");
+        let (status_response, mut status_body) = sender.send_request(status_request, false).expect("start status stream");
+        status_body.send_data(grpc_message(&StatusRequest { r#ref: "lifecycle-solve".to_string() }), true).expect("send status request");
+        let mut status_body = status_response.await.expect("status response").into_body(); while let Some(chunk) = status_body.data().await { chunk.expect("status response data"); }
+        assert_eq!(status_body.trailers().await.expect("status trailers").expect("status completion")["grpc-status"], "0");
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let stderr = harness.daemon_stderr();
+    assert!(!stderr.contains("buildkit control: h2 handshake failed"), "{stderr}");
+    assert!(!stderr.contains("Cannot drop a runtime"), "{stderr}");
 }
 
 #[test]

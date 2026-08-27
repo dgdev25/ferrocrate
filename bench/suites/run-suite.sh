@@ -44,6 +44,14 @@ if [ ! -d "$DIR/.git" ]; then
   echo "cloning $REPO"; git clone -q --depth 50 "$REPO" "$DIR" || { echo "clone failed" >&2; exit 2; }
 fi
 [ "$REFRESH" = 1 ] && git -C "$DIR" fetch -q origin && git -C "$DIR" checkout -q "$PIN" 2>/dev/null
+
+# docker/cli ships its module as vendor.mod, so a plain `go test ./e2e/...`
+# reports "directory prefix e2e does not contain main module" and the run
+# records zero tests, which reads as a clean pass. Link the expected names.
+if [ "$SUITE" = cli-e2e ] && [ -f "$DIR/vendor.mod" ] && [ ! -e "$DIR/go.mod" ]; then
+  ln -sf vendor.mod "$DIR/go.mod"; ln -sf vendor.sum "$DIR/go.sum"
+fi
+
 echo "== $SUITE @ $(git -C "$DIR" rev-parse --short HEAD) on $ENGINE"
 
 # --- engine under test ---
@@ -97,7 +105,7 @@ case "$SUITE" in
       buildkit-dockerfile) PKG=./frontend/dockerfile/...;;
     esac
     echo "go test $PKG (this takes a while)"
-    ( cd "$DIR" && go test -count=1 -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    ( cd "$DIR" && go test -count=1 -mod=vendor -timeout 45m -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
     python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
 import json, re, sys
 src, out, suite, engine, run, head, skip = sys.argv[1:8]
@@ -123,6 +131,9 @@ with open(out, "a") as fh:
                              "stderr_tail": tail, "run": run, "head": head}) + "\n")
 print(f"{suite}/{engine}: {sum(1 for a in tests.values() if a=='pass')} pass, "
       f"{sum(1 for a in tests.values() if a=='fail')} fail, {sum(1 for a in tests.values() if a=='skip')} skip")
+if not tests:
+    print(f"{suite}/{engine}: collected no tests at all; the suite did not run", file=sys.stderr)
+    raise SystemExit(2)
 PY
     ;;
   oci-runtime)

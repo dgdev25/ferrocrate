@@ -137,13 +137,47 @@ record() { # name status ms tail
 
 # --- run and convert ---
 case "$SUITE" in
+  # Suites that spin up a local OCI registry as a process (buildkit's mirror,
+  # moby's plugin tests) need a `registry` binary this host has no package
+  # for. Extract it once from the registry:2 image through the oracle daemon;
+  # every later run reuses the copy.
+  ensure_registry_bin() {
+    REG="$BENCH/suites/buildkit-dockerfile/bin/registry"
+    if [ ! -x "$REG" ]; then
+      echo "extracting registry binary from registry:2 (local test registry needs it)"
+      mkdir -p "$(dirname "$REG")"
+      cid="$(docker create registry:2)" \
+        && docker cp "$cid":/bin/registry "$REG" >/dev/null \
+        && docker rm "$cid" >/dev/null \
+        || { echo "registry extraction failed" >&2; exit 2; }
+      chmod +x "$REG"
+    fi
+  }
   cli-e2e|compose-e2e|moby-integration|buildkit-dockerfile)
     case "$SUITE" in
       cli-e2e)             PKG=./e2e/...;;
       compose-e2e)         PKG=./pkg/e2e/...;;
       # Moby's integration suite is large and restarts the daemon in places; those
       # cases go in skip.txt rather than being worked around. Nightly only.
-      moby-integration)    PKG=./integration/...;;
+      moby-integration)    PKG=./integration/...
+        # TestMain in every integration package pulls "frozen" fixture images
+        # before any test runs, and panics in ~0.1s when it cannot find the
+        # list. The loader reads $DOCKERFILE (joined onto the package's parent
+        # dir, so a relative name resolves nowhere) and scans it for the
+        # RUN download-frozen-image-v2.sh block. Point it at the root
+        # Dockerfile, the only one carrying that block.
+        export DOCKERFILE="$DIR/Dockerfile"
+        # Plugin tests exec a local `registry` binary (no distro package for
+        # it); reuse the copy the buildkit suite extracts from registry:2.
+        ensure_registry_bin
+        export PATH="$(dirname "$REG"):$PATH"
+        # Tests that start extra daemons create their data dirs under
+        # DOCKER_INTEGRATION_DAEMON_DEST; without it they abort in setup.
+        # They spawn the real dockerd, which needs root this host does not
+        # give, so they fail on both engines and the oracle diff files them
+        # as environment, not product.
+        export DOCKER_INTEGRATION_DAEMON_DEST="$WORK/daemon-dest"
+        mkdir -p "$DOCKER_INTEGRATION_DAEMON_DEST";;
       # BuildKit's Dockerfile frontend tests reach us through the Buildx docker driver.
       buildkit-dockerfile) PKG=./frontend/dockerfile/...;;
     esac
@@ -173,16 +207,7 @@ case "$SUITE" in
     #     that speaks the Docker API and BuildKit on one socket.
     PRE=()
     if [ "$SUITE" = buildkit-dockerfile ]; then
-      REG="$BENCH/suites/buildkit-dockerfile/bin/registry"
-      if [ ! -x "$REG" ]; then
-        echo "extracting registry binary from registry:2 (suite's local mirror needs it)"
-        mkdir -p "$(dirname "$REG")"
-        cid="$(docker create registry:2)" \
-          && docker cp "$cid":/bin/registry "$REG" >/dev/null \
-          && docker rm "$cid" >/dev/null \
-          || { echo "registry extraction failed" >&2; exit 2; }
-        chmod +x "$REG"
-      fi
+      ensure_registry_bin
       case "$ENGINE" in
         docker) TARGET="unix:///var/run/docker.sock";;
         *)      TARGET="unix://$SOCK";;

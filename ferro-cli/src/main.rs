@@ -17116,6 +17116,10 @@ struct DockerCreateSpec {
     user: Option<String>,
     name: Option<String>,
     network_mode: String,
+    /// Host IPC is represented by the host shared-memory mount applied when
+    /// the pending container starts.
+    #[serde(default)]
+    ipc_mode_host: bool,
     #[serde(default)]
     network_aliases: Vec<String>,
     #[serde(default)]
@@ -17153,11 +17157,14 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
     // Docker's Binds mixes host-path binds (absolute source) with named
     // volumes. Keep each handle_run argument explicit here: these adjacent
     // string slices are otherwise easy to transpose without a type error.
-    let (path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
+    let (mut path_binds, mut volume_binds): (Vec<String>, Vec<String>) = spec
         .binds
         .iter()
         .cloned()
         .partition(|entry| entry.starts_with('/'));
+    if spec.ipc_mode_host {
+        path_binds.push("/dev/shm:/dev/shm".to_string());
+    }
     volume_binds.extend(spec.image_volumes.iter().cloned());
 
     let mut annotations = spec
@@ -17170,6 +17177,9 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if spec.ipc_mode_host {
+        annotations.push("io.ferrocrate.ipc.mode=host".to_string());
+    }
     if !spec.network_aliases.is_empty() {
         annotations.push(format!(
             "io.ferrocrate.network.aliases={}",
@@ -23079,6 +23089,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         user,
         name,
         network_mode,
+        ipc_mode_host: host_config.ipc_mode.as_deref() == Some("host"),
         network_aliases,
         tty: request.tty,
         log_options,
@@ -23115,9 +23126,7 @@ fn validate_docker_create_request(request: &DockerCreateRequest) -> Result<(), S
     }
     match host_config.ipc_mode.as_deref() {
         None | Some("") => {}
-        Some("host") => {
-            return Err("docker: HostConfig.IpcMode=host is not supported by this runtime".to_string());
-        }
+        Some("host") => {}
         Some(_) => {
             return Err(
                 "docker: unsupported HostConfig field IpcMode is set; this runtime does not implement it"
@@ -23557,6 +23566,8 @@ fn docker_inspect_payload(
             "Healthcheck": record.health.as_ref().map(docker_runtime_healthcheck),
         },
         "HostConfig": {
+            "IpcMode": record.annotations.get("io.ferrocrate.ipc.mode")
+                .map(String::as_str).unwrap_or(""),
             "LogConfig": {
                 "Type": record.annotations
                     .get("io.ferrocrate.log.driver")
@@ -23810,6 +23821,7 @@ fn docker_pending_inspect_payload(
             "Healthcheck": spec.health.as_ref().map(docker_pending_healthcheck),
         },
         "HostConfig": {
+            "IpcMode": if spec.ipc_mode_host { "host" } else { "" },
             "LogConfig": {
                 "Type": spec.log_driver,
                 "Config": spec.log_options,
@@ -32561,14 +32573,17 @@ volumes:
     }
 
     #[test]
-    fn docker_create_ipc_mode_host_reports_an_explicit_feature_boundary() {
-        let error = parse_docker_create_spec(
+    fn docker_create_ipc_mode_host_is_preserved_and_mounts_host_shared_memory() {
+        let spec = parse_docker_create_spec(
             br#"{"Image":"busybox","HostConfig":{"IpcMode":"host"}}"#,
             None,
         )
-        .expect_err("host IPC needs runtime namespace support");
-        assert_eq!(error, "docker: HostConfig.IpcMode=host is not supported by this runtime");
-        assert_eq!(docker_status_for_error(&error), 501);
+        .expect("host IPC is supported");
+        assert!(spec.ipc_mode_host);
+        assert_eq!(
+            docker_start_run_inputs(&spec).path_binds,
+            vec!["/dev/shm:/dev/shm"]
+        );
     }
 
     #[test]
@@ -32678,6 +32693,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
@@ -32907,6 +32923,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                ipc_mode_host: false,
                 network_aliases: Vec::new(),
                 tty: false,
                 log_options: HashMap::new(),
@@ -32986,6 +33003,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),
@@ -33126,6 +33144,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
             log_options: HashMap::new(),

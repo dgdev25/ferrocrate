@@ -26,6 +26,20 @@ if [ "$SUITE" = critest ] && [ "$ENGINE" = docker ]; then
   echo "critest has no Docker oracle: Docker exposes no CRI endpoint" >&2; exit 2
 fi
 
+# One run per suite+engine at a time, enforced by the filesystem, not by
+# convention. On 2026-08-27 two full BuildKit runs raced in the same clone:
+# the second corrupted the first's environment and a watcher then committed an
+# emptied result file. A lock makes that impossible rather than discouraged.
+LOCKDIR="/path/to/ferrocrate-lab/locks"; mkdir -p "$LOCKDIR"
+LOCKFILE="$LOCKDIR/$SUITE-$ENGINE.lock"
+exec 8>"$LOCKFILE"
+if ! flock -n 8; then
+  holder="$(cat "$LOCKFILE" 2>/dev/null || echo unknown)"
+  echo "REFUSED: $SUITE/$ENGINE is already running (pid $holder). Not starting a second run." >&2
+  exit 3
+fi
+echo $$ >&8
+
 SRC="${SUITE_SRC:-/data/dev/bench-suites}"; mkdir -p "$SRC"
 export PATH="$HOME/.local/go-install/go/bin:$PATH"
 DATE="$(date -u +%Y-%m-%d)"; RUN="$(date -u +%Y-%m-%dT%H:%MZ)"
@@ -542,4 +556,12 @@ PY
     ;;
 esac
 
-echo "-> $OUT  ($(grep -c '"status":"pass"' "$OUT") pass, $(grep -c '"status":"fail"' "$OUT") fail, $(grep -c '"status":"skip"' "$OUT") skip)"
+PASS_N=$(grep -c '"status":"pass"' "$OUT" 2>/dev/null || echo 0)
+FAIL_N=$(grep -c '"status":"fail"' "$OUT" 2>/dev/null || echo 0)
+SKIP_N=$(grep -c '"status":"skip"' "$OUT" 2>/dev/null || echo 0)
+echo "-> $OUT  ($PASS_N pass, $FAIL_N fail, $SKIP_N skip)"
+# Done-marker: watchers read this file, never a process-name match. A pgrep
+# loop caught a false gap between two runs on 2026-08-27 and declared a
+# still-running suite finished.
+DONEDIR="/path/to/ferrocrate-lab/done"; mkdir -p "$DONEDIR"
+printf '%s\n' "suite=$SUITE engine=$ENGINE out=$OUT pass=$PASS_N fail=$FAIL_N skip=$SKIP_N records=$(wc -l < "$OUT" 2>/dev/null || echo 0) finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DONEDIR/$SUITE-$ENGINE.done"

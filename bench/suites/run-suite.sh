@@ -93,6 +93,12 @@ if [ "$ENGINE" = ferrocrate ]; then
     CRI_BIN="${FERROCRATE_CRI_BIN:-$BENCH/../target/release/ferro-cri}"
     [ -x "$CRI_BIN" ] || { echo "no ferro-cri at $CRI_BIN; build it first" >&2; exit 2; }
     pkill -f "^$CRI_BIN" 2>/dev/null; rm -f "$CRI_PATH"
+    # ferro-cri has no FERROCRATE_HOME support (verified with strings on the
+    # binary): its store root comes from FERROCRATE_RUNTIME_DIR and defaults to
+    # /var/lib/ferrocrate, which other agents on this host also use. Point it
+    # under the isolated suites store like every other engine here.
+    export FERROCRATE_RUNTIME_DIR="${FERROCRATE_RUNTIME_DIR:-$FERROCRATE_HOME/cri}"
+    mkdir -p "$FERROCRATE_RUNTIME_DIR"
     FERROCRATE_CRI_SOCKET="$CRI_PATH" "$CRI_BIN" > "$WORK/daemon.log" 2>&1 &
     DAEMON=$!
     for _ in $(seq 1 100); do [ -S "$CRI_PATH" ] && break; sleep 0.1; done
@@ -190,8 +196,37 @@ case "$SUITE" in
         while IFS='|' read -r ref tag; do
           if ! docker image inspect "$tag" >/dev/null 2>&1; then
             echo "pre-seeding frozen image $tag"
-            docker pull -q "$ref" >/dev/null 2>&1 || { echo "frozen-image pull failed: $ref" >&2; exit 2; }
-            docker tag "$ref" "$tag" >/dev/null
+            # retry: Docker Hub answers 429 to a cold store's first burst and
+            # one refused pull must not abort a 40-minute run
+            ok=0
+            for try in 1 2 3 4 5; do
+              if [ "$ENGINE" = ferrocrate ]; then
+                # S32: the docker CLI encodes fromImage (docker.io%2Flibrary%2F…)
+                # and the daemon rejects the encoded form, so every CLI pull
+                # fails. The raw API with plain (unencoded) query values works.
+                # Also pull and tag the digest-only form (name@digest): the
+                # daemon answers "not found" to a name:tag@digest tag source.
+                sref="${ref%%:*}@${ref##*@}"
+                curl -sf -X POST --unix-socket "$SOCK" \
+                  "http://localhost/v1.43/images/create?fromImage=$sref" >/dev/null && ok=1
+              else
+                sref="$ref"
+                docker pull -q "$ref" >/dev/null 2>&1 && ok=1
+              fi
+              [ "$ok" = 1 ] && break
+              sleep $((try * 10))
+            done
+            [ "$ok" = 1 ] || { echo "frozen-image pull failed: $ref" >&2; exit 2; }
+            docker tag "$sref" "$tag" >/dev/null
+            # S35: on ferrocrate the compat tag endpoint answers "not found"
+            # for every ref form (tag and digest; refs are stored under
+            # registry-1.docker.io while clients look up docker.io), so the
+            # tag step silently fails and TestMain panics with a 3-test run.
+            # Fail here with the reason instead of recording a fake pass.
+            if [ "$ENGINE" = ferrocrate ] && ! docker image inspect "$tag" >/dev/null 2>&1; then
+              echo "pre-seed incomplete: $tag missing after pull+tag (S35: compat tag endpoint not found; S36: numeric Created breaks image inspect)" >&2
+              exit 2
+            fi
           fi
         done <<'FROZEN'
 busybox:latest@sha256:95cf004f559831017cdf4628aaf1bb30133677be8702a8c5f2994629f637a209|busybox:latest
@@ -433,8 +468,11 @@ PY
     ;;
   critest)
     if ! command -v critest >/dev/null 2>&1; then
-      echo "building critest"; ( cd "$DIR" && make critest ) >"$WORK/build.log" 2>&1 || { echo "critest build failed; see $WORK/build.log" >&2; exit 2; }
-      export PATH="$DIR/build/bin:$PATH"
+      # cri-tools' Makefile writes to build/bin/linux/amd64, not build/bin.
+      if [ ! -x "$DIR/build/bin/linux/amd64/critest" ]; then
+        echo "building critest"; ( cd "$DIR" && PATH="$HOME/.local/go-install/go/bin:$PATH" make critest ) >"$WORK/build.log" 2>&1 || { echo "critest build failed; see $WORK/build.log" >&2; exit 2; }
+      fi
+      export PATH="$DIR/build/bin/linux/amd64:$PATH"
     fi
     CRI_SOCK="unix://$CRI_PATH"
     echo "critest --runtime-endpoint $CRI_SOCK"

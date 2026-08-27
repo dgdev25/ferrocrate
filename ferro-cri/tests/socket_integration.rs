@@ -42,6 +42,33 @@ mod qualification_fixture;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Tests that deliberately exercise the legacy runtime-dir alias must not
+/// inherit the authoritative home directory from the outer test environment.
+/// Production correctly gives `FERROCRATE_HOME` precedence (S60).
+struct WithoutFerrocrateHome(Option<std::ffi::OsString>);
+
+impl WithoutFerrocrateHome {
+    fn new() -> Self {
+        let previous = std::env::var_os("FERROCRATE_HOME");
+        unsafe {
+            std::env::remove_var("FERROCRATE_HOME");
+        }
+        Self(previous)
+    }
+}
+
+impl Drop for WithoutFerrocrateHome {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(home) = &self.0 {
+                std::env::set_var("FERROCRATE_HOME", home);
+            } else {
+                std::env::remove_var("FERROCRATE_HOME");
+            }
+        }
+    }
+}
+
 async fn wait_for_socket(path: &std::path::Path) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
@@ -55,6 +82,7 @@ async fn wait_for_socket(path: &std::path::Path) {
 
 fn spawn_cri_process(runtime: &std::path::Path, socket: &std::path::Path) -> std::process::Child {
     Command::new(env!("CARGO_BIN_EXE_ferro-cri"))
+        .env_remove("FERROCRATE_HOME")
         .env("FERROCRATE_RUNTIME_DIR", runtime)
         .env("FERROCRATE_CRI_SOCKET", socket)
         .stdout(std::process::Stdio::null())
@@ -126,6 +154,7 @@ fn read_cri_state(
 #[allow(clippy::await_holding_lock)]
 async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tampering() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let socket = runtime.path().join("delegated-cri.sock");
@@ -357,6 +386,7 @@ async fn cri_wire_delegation_accepts_once_and_rejects_replay_expiry_and_tamperin
 #[allow(clippy::await_holding_lock)]
 async fn public_cri_pull_preserves_disabled_shadow_and_enforce_contracts() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let running_as_root = Command::new("id")
         .arg("-u")
         .output()
@@ -472,6 +502,7 @@ async fn connect_channel(socket_path: std::path::PathBuf) -> Channel {
 #[allow(clippy::await_holding_lock)]
 async fn cri_socket_serves_runtime_and_image_requests() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let socket = runtime.path().join("cri.sock");
 
@@ -556,6 +587,7 @@ async fn cri_process_image_service_list_images_is_valid_protobuf() {
 #[allow(clippy::await_holding_lock)]
 async fn cri_socket_serves_durable_sandbox_and_container_lifecycle() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let socket = runtime.path().join("cri-lifecycle.sock");
 
@@ -2295,6 +2327,7 @@ async fn cri_remove_container_runtime_crash_rebinds_cleared_binding() {
 #[allow(clippy::await_holding_lock)]
 async fn cri_journal_pending_network_without_kernel_effects_is_reclaimed() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let pending = serde_json::json!({
         "cri-sandbox-journal": {
@@ -2386,6 +2419,7 @@ async fn cri_journal_pending_network_without_kernel_effects_is_reclaimed() {
 #[allow(clippy::await_holding_lock)]
 async fn cri_journal_stale_container_runtime_binding_is_cleared_on_recovery() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let containers = serde_json::json!({
         "cri-container-stale": {
@@ -2466,6 +2500,7 @@ async fn cri_journal_stale_container_runtime_binding_is_cleared_on_recovery() {
 #[allow(clippy::await_holding_lock)]
 async fn cri_journal_sandbox_with_missing_netns_reports_notready_and_retains_record() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let sandboxes = serde_json::json!({
         "cri-sandbox-journal-missing": {
@@ -2837,6 +2872,7 @@ fn seed_runnable_fixture_image(runtime_dir: &Path) {
 #[allow(clippy::await_holding_lock)]
 async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let running_as_root = Command::new("id")
         .arg("-u")
         .output()
@@ -3031,6 +3067,7 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
 #[allow(clippy::await_holding_lock)]
 async fn cri_socket_rejects_malformed_and_repeated_lifecycle_requests() {
     let _env_guard = ENV_LOCK.lock().expect("lock env");
+    let _home_guard = WithoutFerrocrateHome::new();
     let runtime = tempfile::tempdir().expect("runtime tempdir");
     let socket = runtime.path().join("cri-errors.sock");
     unsafe {

@@ -1,57 +1,57 @@
-{"app":"uptime-kuma","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"/home/USER/.ferrocrate/ferrocrate.sock (missing), /home/USER/.ferrocrate/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n\u001b[2m2026-08-27T00:24:32.064567Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m doctor detected compatibility issues\nerror: doctor detected compatibility issues\n","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1704,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"data-write","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"data-read","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-ls","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-up","status":"fail","exit":1,"ms":59239,"stderr_tail":"rified)\n\u001b[2m2026-08-27T00:25:33.488187Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m compose partial result: uptime-kuma run failed: runtime mutation mediation failed: compose execution request digest does not match authorized child\nerror: compose partial result: uptime-kuma run failed: runtime mutation mediation failed: compose execution request digest does not match authorized child\n","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":120907,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
-{"app":"uptime-kuma","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T00:24Z","head":"70de6dba"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"te-lab/runtimes/apptriage/run/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/apptriage/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/apptriage/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/apptriage/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":2104,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/node:22-bookworm-slim\npull: image=registry-1.docker.io/library/node:22-bookworm-slim\n","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"data-write","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"data-read","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-ls","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"volume-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-up","status":"fail","exit":1,"ms":31729,"stderr_tail":"2026-08-27T19:48:27.643265Z ERROR ferro_cli::linux_cli: compose partial result: uptime-kuma run failed: network error: slirp4netns API socket did not become ready: path must be shorter than SUN_LEN\nerror: compose partial result: uptime-kuma run failed: network error: slirp4netns API socket did not become ready: path must be shorter than SUN_LEN\n","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":122777,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":305,"stderr_tail":"2026-08-27T19:50:30.984503Z  WARN ferro_core::runtime: [cleanup] failed to remove container dir for 162ba8b860ffcee2894739932e09778d11833d5bbf41788ac93c4ea612c87a48: No such file or directory (os error 2)\n","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":205,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":106,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}
+{"app":"uptime-kuma","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-27T19:47Z","head":"14fd9e5a"}

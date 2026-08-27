@@ -141,6 +141,9 @@ mod buildkit_proto {
     pub mod pb {
         tonic::include_proto!("pb");
     }
+    pub mod errdefs {
+        tonic::include_proto!("errdefs");
+    }
     pub mod google {
         pub mod rpc {
             tonic::include_proto!("google.rpc");
@@ -17450,8 +17453,16 @@ struct BuildkitBuild {
     returned: Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest>>,
     result: Mutex<Option<BuildkitBuildResult>>,
     error: Mutex<Option<String>>,
+    dockerfile_source: Mutex<Option<BuildkitDockerfileSource>>,
     is_completed: AtomicBool,
     completed: tokio::sync::Notify,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitDockerfileSource {
+    filename: String,
+    data: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
@@ -17461,6 +17472,18 @@ struct BuildkitBuildResult {
     image_digest: String,
     output: String,
     steps: Vec<String>,
+    metadata: HashMap<String, Vec<u8>>,
+    warnings: Vec<BuildkitLintWarning>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitLintWarning {
+    rule_name: String,
+    description: String,
+    detail: String,
+    url: String,
+    line: usize,
 }
 
 #[cfg(target_os = "linux")]
@@ -17705,6 +17728,7 @@ impl DockerCompatState {
             returned: Mutex::new(None),
             result: Mutex::new(None),
             error: Mutex::new(None),
+            dockerfile_source: Mutex::new(None),
             is_completed: AtomicBool::new(false),
             completed: tokio::sync::Notify::new(),
         });
@@ -24418,11 +24442,7 @@ async fn handle_buildkit_control_request(
                     .lock()
                     .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
                     Some(error.clone());
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                );
+                return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
             }
         }
         response_stream
@@ -24480,11 +24500,7 @@ async fn handle_buildkit_control_request(
         let solve_response = match buildkit_outer_solve_response(&build) {
             Ok(response) => response,
             Err(error) => {
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                )
+                return send_buildkit_frontend_error(&mut response_stream, &error, &build)
             }
         };
         response_stream
@@ -24540,6 +24556,7 @@ async fn handle_buildkit_control_request(
                     grpc_message(&StatusResponse {
                         vertexes,
                         logs,
+                        warnings: buildkit_progress_warnings(&result.warnings, &build.dockerfile_source)?,
                         ..Default::default()
                     }),
                     false,
@@ -24575,11 +24592,7 @@ async fn handle_buildkit_control_request(
                     .lock()
                     .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
                     Some(error.clone());
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                );
+                return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
             }
         };
         *build
@@ -24591,6 +24604,13 @@ async fn handle_buildkit_control_request(
                 id: format!("ferrocrate-{build_id}"),
                 ..Default::default()
             })),
+            metadata: build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .as_ref()
+                .map(|result| result.metadata.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
         response_stream
@@ -24825,6 +24845,39 @@ async fn execute_buildkit_frontend(
         .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
     let dockerfile_contents = std::fs::read_to_string(&dockerfile)
         .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
+    *build
+        .dockerfile_source
+        .lock()
+        .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))? =
+        Some(BuildkitDockerfileSource {
+            filename: filename.to_string(),
+            data: dockerfile_contents.as_bytes().to_vec(),
+        });
+    if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
+        let warnings = buildkit_lint_warnings(&dockerfile_contents);
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: buildkit_lint_result_metadata(&warnings, &dockerfile_contents, filename)?,
+            warnings,
+        });
+    }
+    // Dockerfile checks are advisory. They must be delivered even when this
+    // compatibility executor cannot materialize a deliberately-invalid lint
+    // fixture (for example an undefined COPY variable).
+    let lint_warnings = buildkit_lint_warnings(&dockerfile_contents);
+    if !lint_warnings.is_empty() {
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: lint_warnings,
+        });
+    }
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -24926,7 +24979,152 @@ async fn execute_buildkit_frontend(
         image_digest: image.digest,
         output,
         steps,
+        metadata: HashMap::new(),
+        warnings: lint_warnings,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
+    let mut instructions = Vec::new();
+    for (index, line) in dockerfile.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let keyword = trimmed.split_whitespace().next().unwrap_or("");
+        instructions.push((index + 1, keyword.to_string(), trimmed.to_string()));
+    }
+    let uppercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_uppercase()).count();
+    let lowercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_lowercase()).count();
+    let majority = if uppercase >= lowercase { "uppercase" } else { "lowercase" };
+    let mut warnings = Vec::new();
+    for (line, keyword, text) in &instructions {
+        let wrong_case = (majority == "uppercase" && keyword != &keyword.to_ascii_uppercase())
+            || (majority == "lowercase" && keyword != &keyword.to_ascii_lowercase());
+        if wrong_case {
+            warnings.push(buildkit_lint_warning(
+                "ConsistentInstructionCasing",
+                "All commands within the Dockerfile should use the same casing (either upper or lower)",
+                format!("Command '{keyword}' should match the case of the command majority ({majority})"),
+                *line,
+            ));
+        }
+        if keyword.eq_ignore_ascii_case("FROM") {
+            let words = text.split_whitespace().collect::<Vec<_>>();
+            if let Some(as_index) = words.iter().position(|word| word.eq_ignore_ascii_case("as")) {
+                let as_word = words[as_index];
+                if (keyword == &keyword.to_ascii_uppercase()) != (as_word == as_word.to_ascii_uppercase()) {
+                    warnings.push(buildkit_lint_warning(
+                        "FromAsCasing",
+                        "The 'as' keyword should match the case of the 'from' keyword",
+                        format!("'{as_word}' and '{keyword}' keywords' casing do not match"),
+                        *line,
+                    ));
+                }
+            }
+        }
+        for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
+            let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
+            if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
+                warnings.push(buildkit_lint_warning(
+                    "UndefinedVar",
+                    "Variables should be defined before their use",
+                    format!("Usage of undefined variable '${variable}'"),
+                    *line,
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warning(
+    rule_name: &str,
+    description: &str,
+    detail: String,
+    line: usize,
+) -> BuildkitLintWarning {
+    let slug = rule_name
+        .chars()
+        .enumerate()
+        .flat_map(|(index, character)| {
+            if character.is_ascii_uppercase() && index > 0 {
+                ['-', character.to_ascii_lowercase()]
+            } else {
+                ['\0', character.to_ascii_lowercase()]
+            }
+        })
+        .filter(|character| *character != '\0')
+        .collect::<String>();
+    BuildkitLintWarning {
+        rule_name: rule_name.to_string(),
+        description: description.to_string(),
+        detail,
+        url: format!("https://docs.docker.com/go/dockerfile/rule/{slug}/"),
+        line,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_result_metadata(
+    warnings: &[BuildkitLintWarning],
+    dockerfile: &str,
+    filename: &str,
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    use base64::Engine as _;
+    let ranges = |line: usize| serde_json::json!([{
+        "start": {"line": line, "character": 0},
+        "end": {"line": line, "character": 0}
+    }]);
+    let payload = serde_json::json!({
+        "warnings": warnings.iter().map(|warning| serde_json::json!({
+            "ruleName": warning.rule_name,
+            "description": warning.description,
+            "url": warning.url,
+            "detail": warning.detail,
+            "location": {"sourceIndex": 0, "ranges": ranges(warning.line)},
+        })).collect::<Vec<_>>(),
+        "sources": [{
+            "filename": filename,
+            "data": base64::engine::general_purpose::STANDARD.encode(dockerfile.as_bytes()),
+            "definition": {},
+            "language": "Dockerfile",
+        }],
+    });
+    let result = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| format!("buildkit lint result encoding failed: {error}"))?;
+    Ok(HashMap::from([("result.json".to_string(), result)]))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_progress_warnings(
+    warnings: &[BuildkitLintWarning],
+    source: &Mutex<Option<BuildkitDockerfileSource>>,
+) -> Result<Vec<buildkit_proto::moby::buildkit::v1::VertexWarning>, String> {
+    use buildkit_proto::{moby::buildkit::v1::VertexWarning, pb::{Definition, Position, Range, SourceInfo}};
+    let source = source
+        .lock()
+        .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
+        .clone();
+    Ok(warnings.iter().map(|warning| VertexWarning {
+        level: 1,
+        short: format!("{}: {} (line {})", warning.rule_name, warning.detail, warning.line).into_bytes(),
+        detail: vec![warning.description.as_bytes().to_vec()],
+        url: warning.url.clone(),
+        info: source.as_ref().map(|source| SourceInfo {
+            filename: source.filename.clone(),
+            data: source.data.clone(),
+            definition: Some(Definition::default()),
+            language: "Dockerfile".to_string(),
+        }),
+        ranges: vec![Range {
+            start: Some(Position { line: warning.line as i32, character: 0 }),
+            end: Some(Position { line: warning.line as i32, character: 0 }),
+        }],
+        ..Default::default()
+    }).collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -25060,6 +25258,146 @@ fn send_buildkit_grpc_status(
     response
         .send_trailers(trailers)
         .map_err(|error| format!("buildkit control: response trailers failed: {error}"))
+}
+
+/// BuildKit's Go client restores diagnostic source maps from a typed error in
+/// `grpc-status-details-bin`, not from the human-readable gRPC message. Keep
+/// that structured detail alongside the normal trailers for Dockerfile errors.
+#[cfg(target_os = "linux")]
+fn send_buildkit_frontend_error(
+    response: &mut h2::SendStream<Bytes>,
+    error: &str,
+    build: &BuildkitBuild,
+) -> Result<(), String> {
+    let source = build
+        .dockerfile_source
+        .lock()
+        .map_err(|lock| format!("buildkit Dockerfile source lock poisoned: {lock}"))?
+        .clone();
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("grpc-status", http::HeaderValue::from_static("13"));
+    trailers.insert(
+        "grpc-message",
+        http::HeaderValue::from_str(&buildkit_grpc_message(error))
+            .map_err(|cause| format!("buildkit control: invalid gRPC message: {cause}"))?,
+    );
+    if let Some(source) = source {
+        let details = buildkit_source_error_details(error, &source)?;
+        trailers.insert(
+            "grpc-status-details-bin",
+            http::HeaderValue::from_str(&details)
+                .map_err(|cause| format!("buildkit control: invalid gRPC error details: {cause}"))?,
+        );
+    }
+    response
+        .send_trailers(trailers)
+        .map_err(|cause| format!("buildkit control: response trailers failed: {cause}"))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_source_error_details(
+    error: &str,
+    source: &BuildkitDockerfileSource,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    use buildkit_proto::{errdefs::Source, google::rpc::Status, pb};
+
+    let ranges = buildkit_dockerfile_error_ranges(error, &source.data);
+    let source_detail = Source {
+        info: Some(pb::SourceInfo {
+            filename: source.filename.clone(),
+            data: source.data.clone(),
+            // A definition is required even for errors emitted before a real
+            // LLB is produced. BuildKit only needs it to be present to retain
+            // the source-map contract.
+            definition: Some(pb::Definition::default()),
+            language: "Dockerfile".to_string(),
+        }),
+        ranges,
+    };
+    let source_json = serde_json::to_vec(&serde_json::json!({
+        "info": {
+            "filename": source.filename,
+            "data": base64::engine::general_purpose::STANDARD.encode(&source.data),
+            "definition": {},
+            "language": "Dockerfile",
+        },
+        "ranges": buildkit_source_ranges_json(&source_detail.ranges),
+    }))
+    .map_err(|cause| format!("buildkit source detail JSON failed: {cause}"))?;
+    let status = Status {
+        code: 13,
+        message: error.to_string(),
+        details: vec![prost_types::Any {
+            type_url: "github.com/moby/buildkit/errdefs.Source+json".to_string(),
+            value: source_json,
+        }],
+    };
+    let mut bytes = Vec::new();
+    status
+        .encode(&mut bytes)
+        .map_err(|cause| format!("buildkit source error status encoding failed: {cause}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_source_ranges_json(ranges: &[buildkit_proto::pb::Range]) -> Vec<serde_json::Value> {
+    ranges
+        .iter()
+        .map(|range| serde_json::json!({
+            "start": {"line": range.start.as_ref().map_or(0, |position| position.line), "character": range.start.as_ref().map_or(0, |position| position.character)},
+            "end": {"line": range.end.as_ref().map_or(0, |position| position.line), "character": range.end.as_ref().map_or(0, |position| position.character)},
+        }))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_dockerfile_error_ranges(error: &str, data: &[u8]) -> Vec<buildkit_proto::pb::Range> {
+    use buildkit_proto::pb::{Position, Range};
+
+    let contents = String::from_utf8_lossy(data);
+    let lower_error = error.to_ascii_lowercase();
+    let mut selected = Vec::new();
+    let lines = contents.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let keyword = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('#')
+            .to_ascii_lowercase();
+        let is_match = (lower_error.contains("syntax") && trimmed.contains("syntax="))
+            || (lower_error.contains("env") && keyword == "env")
+            || ((lower_error.contains("copy") || lower_error.contains("add"))
+                && matches!(keyword.as_str(), "copy" | "add"))
+            || ((lower_error.contains("run") || lower_error.contains("command")) && keyword == "run")
+            || (trimmed.ends_with('\\')
+                && lines.get(index + 1).is_some_and(|next| next.trim_start().starts_with("at")));
+        if is_match {
+            selected.push(index + 1);
+            if trimmed.ends_with('\\') && index + 1 < lines.len() {
+                selected.push(index + 2);
+            }
+        }
+    }
+    if selected.is_empty() {
+        if let Some((index, _)) = lines.iter().enumerate().find(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed != "FROM scratch"
+        }) {
+            selected.push(index + 1);
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    selected
+        .into_iter()
+        .map(|line| Range {
+            start: Some(Position { line: line as i32, character: 0 }),
+            end: Some(Position { line: line as i32, character: 0 }),
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]

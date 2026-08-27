@@ -12413,6 +12413,49 @@ fn docker_get_container_archive(runtime_dir: &Path, runtime: &ContainerRuntime, 
 }
 
 #[cfg(target_os = "linux")]
+fn docker_materialize_pending_rootfs(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    id: &str,
+    spec: &DockerCreateSpec,
+) -> Result<(), String> {
+    let rootfs = runtime_dir.join("containers").join(id).join("rootfs");
+    if rootfs.is_dir() {
+        return Ok(());
+    }
+    let layers = ferro_core::image_fetch::resolve_layer_paths_with_store(runtime_dir, &spec.image, store)
+        .map_err(|error| format!("docker: materialize created container image: {error}"))?;
+    let images = runtime_dir.join("images");
+    ferro_core::layer_cache::construct_rootfs_cached(
+        &rootfs,
+        &layers,
+        &images.join("file-cas").join("shake256"),
+        &images.join("layer-cache"),
+    )
+    .map_err(|error| format!("docker: materialize created container rootfs: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_get_created_container_archive(
+    runtime_dir: &Path,
+    id: &str,
+    archive_path: &str,
+) -> Result<Vec<u8>, String> {
+    let rootfs = runtime_dir.join("containers").join(id).join("rootfs");
+    let selected = rootfs.join(archive_path.trim_start_matches('/')).canonicalize()
+        .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+    if !selected.starts_with(&rootfs) { return Err("docker: archive path escapes the container rootfs".to_string()); }
+    let mut archive = Vec::new();
+    let mut builder = tar::Builder::new(&mut archive);
+    append_export_archive_path(&mut builder, &rootfs, &selected, &[])
+        .map_err(|error| format!("docker: archive path: {error}"))?;
+    builder.finish().map_err(|error| format!("docker: finish archive: {error}"))?;
+    drop(builder);
+    Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
 fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, source: &str, destination: &str) -> Result<(), String> {
     let source_container = source.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
     let destination_container = destination.split_once(':').filter(|(container, path)| !container.is_empty() && path.starts_with('/'));
@@ -19476,12 +19519,16 @@ fn handle_docker_compat_connection(
                 let archive_path = query
                     .get("path")
                     .ok_or_else(|| "docker: archive path is required".to_string())?;
-                let id = resolve_container_id(&runtime, id)?;
-                let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
-                let rootfs = runtime_dir
-                    .join("containers")
-                    .join(&record.id)
-                    .join("rootfs");
+                let pending = state.pending.lock()
+                    .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                let id = docker_resolve_id(&runtime, &pending, id)?;
+                let created = runtime.inspect(&id).is_err();
+                if created {
+                    let spec = pending.get(&id)
+                        .ok_or_else(|| format!("docker: container not found: {id}"))?;
+                    docker_materialize_pending_rootfs(runtime_dir.as_ref(), &store, &id, spec)?;
+                }
+                let rootfs = runtime_dir.join("containers").join(&id).join("rootfs");
                 if !rootfs.is_dir() {
                     return Err(format!(
                         "docker: container rootfs is unavailable: {}",
@@ -19495,7 +19542,11 @@ fn handle_docker_compat_connection(
                 if !selected.starts_with(&rootfs) {
                     return Err("docker: archive path escapes the container rootfs".to_string());
                 }
-                let archive = docker_get_container_archive(runtime_dir.as_ref(), &runtime, &id, archive_path)?;
+                let archive = if created {
+                    docker_get_created_container_archive(runtime_dir.as_ref(), &id, archive_path)?
+                } else {
+                    docker_get_container_archive(runtime_dir.as_ref(), &runtime, &id, archive_path)?
+                };
                 let stat = docker_archive_path_stat(&selected, archive_path)?;
                 if request.method == "HEAD" {
                     http_response_with_headers(

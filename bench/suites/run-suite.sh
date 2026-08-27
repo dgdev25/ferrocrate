@@ -67,9 +67,18 @@ fi
 # without bin/build/docker-compose every test that shells out fails on both
 # engines — the oracle run then records those as app failures and the diff
 # against Ferrocrate shows nothing. Build the binary once with the e2e tag.
-if [ "$SUITE" = compose-e2e ] && [ ! -x "$DIR/bin/build/docker-compose" ]; then
-  echo "building compose e2e binary"
-  ( cd "$DIR" && make build ) > "$WORK/compose-build.log" 2>&1 || { echo "compose build failed; see $WORK/compose-build.log" >&2; exit 2; }
+if [ "$SUITE" = compose-e2e ]; then
+  if [ ! -x "$DIR/bin/build/docker-compose" ]; then
+    echo "building compose e2e binary"
+    ( cd "$DIR" && make build ) > "$WORK/compose-build.log" 2>&1 || { echo "compose build failed; see $WORK/compose-build.log" >&2; exit 2; }
+  fi
+  # The provider tests (providers_test.go) skip-setup-fail when the
+  # example-provider binary is missing, on both engines, so the oracle diff
+  # files them as environment and six real tests never run. Build it once.
+  if [ ! -x "$DIR/bin/build/example-provider" ]; then
+    echo "building compose example-provider"
+    ( cd "$DIR" && make example-provider ) > "$WORK/provider-build.log" 2>&1 || { echo "example-provider build failed; see $WORK/provider-build.log" >&2; exit 2; }
+  fi
 fi
 
 echo "== $SUITE @ $(git -C "$DIR" rev-parse --short HEAD) on $ENGINE"

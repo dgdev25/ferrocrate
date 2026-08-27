@@ -147,3 +147,27 @@ TestPluginInstall
 ^TestDaemonProxy$
 ^TestDaemonProxy/environment_variables
 ^TestIsolated$
+
+# Each starts a test-owned dockerd; rootless dockerd cannot initialize on this host.
+^TestAttachDisconnectLeak
+^TestBuildUserNamespaceValidateCapabilitiesAreV2
+^TestCDIInfoDiscoveredDevices
+^TestCgroupDriverSystemdMemoryLimit
+^TestCgroupNamespacesRun
+^TestContainerKillOnDaemonStart
+^TestContainerStartOnDaemonRestart
+^TestCreateWithCDIDevices
+^TestDaemonHostGatewayIP
+^TestDaemonShutsDownQuicklyDespiteEventsConnection
+^TestExportContainerAfterDaemonRestart
+^TestHardRestartWhenContainerIsRunning
+^TestImportExtremelyLargeImageWorks
+^TestInfoInsecureRegistries
+^TestInfoRegistryMirrors
+^TestInspectGraphDriverAPIBC
+^TestMacAddressIsAppliedToMainNetworkWithShortID
+^TestNetworkStateCleanupOnDaemonStart
+^TestRestartDaemonWithRestartingContainer
+^TestRunWithAlternativeContainerdShim
+^TestStaticIPOutsideSubpool
+^TestUsernsCommit

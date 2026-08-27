@@ -4527,6 +4527,29 @@ fn docker_compat_image_archive_round_trip_preserves_layers_and_config() {
 }
 
 #[test]
+fn docker_compat_image_inspect_created_is_an_rfc3339_string() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "created-format:latest");
+
+    let (status, body) = harness.request(
+        "GET",
+        "/v1.45/images/created-format%3Alatest/json",
+    );
+    assert_eq!(status, 200, "image inspect response={body}");
+    let created = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("image inspect JSON")["Created"]
+        .as_str()
+        .expect("Docker image inspect Created must be a string")
+        .to_string();
+    assert!(
+        created.len() == "1970-01-01T00:00:01.000000000Z".len()
+            && created.as_bytes()[10] == b'T'
+            && created.ends_with('Z'),
+        "Created must use Docker's RFC3339 UTC wire format, got {created:?}"
+    );
+}
+
+#[test]
 fn docker_compat_image_load_rejects_malformed_archives() {
     let harness = DaemonHarness::spawn();
 

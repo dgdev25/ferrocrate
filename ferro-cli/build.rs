@@ -34,8 +34,14 @@ fn prepare_dashboard_assets() -> Result<(), Box<dyn std::error::Error>> {
     let frontend_dir = manifest_dir.join("../apps/ferro-desktop-ui");
     let source_dist = frontend_dir.join("dist");
     let output_dist = Path::new(&env::var("OUT_DIR")?).join("ferrocrate-dashboard-dist");
-    println!("cargo:rerun-if-changed={}", frontend_dir.join("package.json").display());
-    println!("cargo:rerun-if-changed={}", frontend_dir.join("package-lock.json").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        frontend_dir.join("package.json").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        frontend_dir.join("package-lock.json").display()
+    );
     println!("cargo:rerun-if-changed={}", source_dist.display());
 
     if !source_dist.is_dir()
@@ -88,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 format!("{proto_root}/github.com/moby/buildkit/api/services/control/control.proto"),
                 format!("{proto_root}/github.com/moby/buildkit/frontend/gateway/pb/gateway.proto"),
+                format!("{proto_root}/github.com/moby/buildkit/solver/errdefs/errdefs.proto"),
                 format!("{proto_root}/github.com/moby/buildkit/util/apicaps/pb/caps.proto"),
             ],
             &[proto_root.to_string()],

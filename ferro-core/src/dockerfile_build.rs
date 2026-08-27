@@ -4396,7 +4396,9 @@ fn split_dockerfile_tokens(raw: &str) -> Result<Vec<String>, DockerfileBuildErro
 fn parse_env(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        return Err(DockerfileBuildError::Invalid(
+            "ENV requires key and value".to_string(),
+        ));
     }
     let tokens = split_dockerfile_tokens(trimmed)?;
     if tokens.iter().any(|entry| entry.contains('=')) {

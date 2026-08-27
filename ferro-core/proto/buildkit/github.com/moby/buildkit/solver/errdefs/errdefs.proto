@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package errdefs;
+
+option go_package = "github.com/moby/buildkit/solver/errdefs";
+
+import "github.com/moby/buildkit/solver/pb/ops.proto";
+
+message Source {
+	pb.SourceInfo info = 1;
+	repeated pb.Range ranges = 2;
+}

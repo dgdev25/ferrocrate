@@ -141,6 +141,9 @@ mod buildkit_proto {
     pub mod pb {
         tonic::include_proto!("pb");
     }
+    pub mod errdefs {
+        tonic::include_proto!("errdefs");
+    }
     pub mod google {
         pub mod rpc {
             tonic::include_proto!("google.rpc");
@@ -17436,8 +17439,16 @@ struct BuildkitBuild {
     returned: Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest>>,
     result: Mutex<Option<BuildkitBuildResult>>,
     error: Mutex<Option<String>>,
+    dockerfile_source: Mutex<Option<BuildkitDockerfileSource>>,
     is_completed: AtomicBool,
     completed: tokio::sync::Notify,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitDockerfileSource {
+    filename: String,
+    data: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
@@ -17691,6 +17702,7 @@ impl DockerCompatState {
             returned: Mutex::new(None),
             result: Mutex::new(None),
             error: Mutex::new(None),
+            dockerfile_source: Mutex::new(None),
             is_completed: AtomicBool::new(false),
             completed: tokio::sync::Notify::new(),
         });
@@ -24323,11 +24335,7 @@ async fn handle_buildkit_control_request(
                     .lock()
                     .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
                     Some(error.clone());
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                );
+                return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
             }
         }
         response_stream
@@ -24385,11 +24393,7 @@ async fn handle_buildkit_control_request(
         let solve_response = match buildkit_outer_solve_response(&build) {
             Ok(response) => response,
             Err(error) => {
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                )
+                return send_buildkit_frontend_error(&mut response_stream, &error, &build)
             }
         };
         response_stream
@@ -24480,11 +24484,7 @@ async fn handle_buildkit_control_request(
                     .lock()
                     .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
                     Some(error.clone());
-                return send_buildkit_grpc_status(
-                    &mut response_stream,
-                    13,
-                    Some(&buildkit_grpc_message(&error)),
-                );
+                return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
             }
         };
         *build
@@ -24730,6 +24730,14 @@ async fn execute_buildkit_frontend(
         .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
     let dockerfile_contents = std::fs::read_to_string(&dockerfile)
         .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
+    *build
+        .dockerfile_source
+        .lock()
+        .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))? =
+        Some(BuildkitDockerfileSource {
+            filename: filename.to_string(),
+            data: dockerfile_contents.as_bytes().to_vec(),
+        });
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -24965,6 +24973,146 @@ fn send_buildkit_grpc_status(
     response
         .send_trailers(trailers)
         .map_err(|error| format!("buildkit control: response trailers failed: {error}"))
+}
+
+/// BuildKit's Go client restores diagnostic source maps from a typed error in
+/// `grpc-status-details-bin`, not from the human-readable gRPC message. Keep
+/// that structured detail alongside the normal trailers for Dockerfile errors.
+#[cfg(target_os = "linux")]
+fn send_buildkit_frontend_error(
+    response: &mut h2::SendStream<Bytes>,
+    error: &str,
+    build: &BuildkitBuild,
+) -> Result<(), String> {
+    let source = build
+        .dockerfile_source
+        .lock()
+        .map_err(|lock| format!("buildkit Dockerfile source lock poisoned: {lock}"))?
+        .clone();
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("grpc-status", http::HeaderValue::from_static("13"));
+    trailers.insert(
+        "grpc-message",
+        http::HeaderValue::from_str(&buildkit_grpc_message(error))
+            .map_err(|cause| format!("buildkit control: invalid gRPC message: {cause}"))?,
+    );
+    if let Some(source) = source {
+        let details = buildkit_source_error_details(error, &source)?;
+        trailers.insert(
+            "grpc-status-details-bin",
+            http::HeaderValue::from_str(&details)
+                .map_err(|cause| format!("buildkit control: invalid gRPC error details: {cause}"))?,
+        );
+    }
+    response
+        .send_trailers(trailers)
+        .map_err(|cause| format!("buildkit control: response trailers failed: {cause}"))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_source_error_details(
+    error: &str,
+    source: &BuildkitDockerfileSource,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    use buildkit_proto::{errdefs::Source, google::rpc::Status, pb};
+
+    let ranges = buildkit_dockerfile_error_ranges(error, &source.data);
+    let source_detail = Source {
+        info: Some(pb::SourceInfo {
+            filename: source.filename.clone(),
+            data: source.data.clone(),
+            // A definition is required even for errors emitted before a real
+            // LLB is produced. BuildKit only needs it to be present to retain
+            // the source-map contract.
+            definition: Some(pb::Definition::default()),
+            language: "Dockerfile".to_string(),
+        }),
+        ranges,
+    };
+    let source_json = serde_json::to_vec(&serde_json::json!({
+        "info": {
+            "filename": source.filename,
+            "data": base64::engine::general_purpose::STANDARD.encode(&source.data),
+            "definition": {},
+            "language": "Dockerfile",
+        },
+        "ranges": buildkit_source_ranges_json(&source_detail.ranges),
+    }))
+    .map_err(|cause| format!("buildkit source detail JSON failed: {cause}"))?;
+    let status = Status {
+        code: 13,
+        message: error.to_string(),
+        details: vec![prost_types::Any {
+            type_url: "github.com/moby/buildkit/errdefs.Source+json".to_string(),
+            value: source_json,
+        }],
+    };
+    let mut bytes = Vec::new();
+    status
+        .encode(&mut bytes)
+        .map_err(|cause| format!("buildkit source error status encoding failed: {cause}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_source_ranges_json(ranges: &[buildkit_proto::pb::Range]) -> Vec<serde_json::Value> {
+    ranges
+        .iter()
+        .map(|range| serde_json::json!({
+            "start": {"line": range.start.as_ref().map_or(0, |position| position.line), "character": range.start.as_ref().map_or(0, |position| position.character)},
+            "end": {"line": range.end.as_ref().map_or(0, |position| position.line), "character": range.end.as_ref().map_or(0, |position| position.character)},
+        }))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_dockerfile_error_ranges(error: &str, data: &[u8]) -> Vec<buildkit_proto::pb::Range> {
+    use buildkit_proto::pb::{Position, Range};
+
+    let contents = String::from_utf8_lossy(data);
+    let lower_error = error.to_ascii_lowercase();
+    let mut selected = Vec::new();
+    let lines = contents.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let keyword = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('#')
+            .to_ascii_lowercase();
+        let is_match = (lower_error.contains("syntax") && trimmed.contains("syntax="))
+            || (lower_error.contains("env") && keyword == "env")
+            || ((lower_error.contains("copy") || lower_error.contains("add"))
+                && matches!(keyword.as_str(), "copy" | "add"))
+            || ((lower_error.contains("run") || lower_error.contains("command")) && keyword == "run")
+            || (trimmed.ends_with('\\')
+                && lines.get(index + 1).is_some_and(|next| next.trim_start().starts_with("at")));
+        if is_match {
+            selected.push(index + 1);
+            if trimmed.ends_with('\\') && index + 1 < lines.len() {
+                selected.push(index + 2);
+            }
+        }
+    }
+    if selected.is_empty() {
+        if let Some((index, _)) = lines.iter().enumerate().find(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed != "FROM scratch"
+        }) {
+            selected.push(index + 1);
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    selected
+        .into_iter()
+        .map(|line| Range {
+            start: Some(Position { line: line as i32, character: 0 }),
+            end: Some(Position { line: line as i32, character: 0 }),
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]

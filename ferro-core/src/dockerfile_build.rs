@@ -653,15 +653,6 @@ fn build_one_stage(
     } else {
         fs::create_dir_all(&stage_root)?;
     }
-    // The final stage descriptor is a single layer in this builder. Snapshot
-    // before applying COPY as well as RUN so that descriptor includes the
-    // context change set without re-emitting the base filesystem.
-    let stage_baseline = if stage.run.is_empty() {
-        None
-    } else {
-        Some(snapshot_stage_root(&stage_root)?)
-    };
-
     let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
     if stage.copy_paths.is_empty() {
         copy_context_dir(
@@ -719,6 +710,10 @@ fn build_one_stage(
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
 
     if !stage.run.is_empty() {
+        // The context layer has already been applied to the rootfs.  RUN must
+        // produce its own change set, not repeat that context layer (and never
+        // repeat the base filesystem).
+        let stage_baseline = snapshot_stage_root(&stage_root)?;
         apply_stage_workdir(&stage_root, stage.workdir.as_deref())?;
         run_stage_commands(
             &stage_root,
@@ -734,15 +729,18 @@ fn build_one_stage(
             context_dir,
             control,
         )?;
-        let layer_temp = runtime_dir.join("build").join(format!("stage-{idx}.layer"));
+        // Parallel build attempts share the runtime directory. Allocate the
+        // streamed layer's scratch file too, rather than using a fixed name.
+        let layer_dir = create_build_dir(runtime_dir, &format!("stage-layer-{idx}"))?;
+        let layer_temp = layer_dir.join("layer");
         layer_media_type = build_layer_from_snapshot_to_file(
             &stage_root,
-            stage_baseline.as_ref().expect("RUN stage baseline"),
+            &stage_baseline,
             compression,
             &layer_temp,
         )?;
         let (digest, size) = write_blob_from_file(runtime_dir, &layer_temp)?;
-        let _ = fs::remove_file(layer_temp);
+        let _ = fs::remove_dir_all(layer_dir);
         layer_digest = digest;
         layer_size = size as i64;
     }
@@ -7296,6 +7294,35 @@ mod tests {
         assert_eq!(
             fs::read_to_string(stage_root(&runtime, 1).join("marker")).unwrap(),
             "final"
+        );
+    }
+
+    #[test]
+    fn copy_from_named_stage_uses_its_uniquely_allocated_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS source\nCOPY artifact /out/artifact\nFROM scratch\nCOPY --from=source /out/artifact /artifact\n",
+        )
+        .expect("dockerfile");
+        fs::write(temp.path().join("artifact"), "compiled").expect("artifact");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-named-stage:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("COPY --from named stage build");
+
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 1).join("artifact")).unwrap(),
+            "compiled"
         );
     }
 

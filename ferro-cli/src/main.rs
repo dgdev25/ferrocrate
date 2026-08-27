@@ -5207,6 +5207,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     ai_model.as_deref(),
                     None,
                     None,
+                    None,
                 )?;
                 trace_attached_run_phase(
                     attached_run_trace_started,
@@ -6763,6 +6764,7 @@ fn handle_run(
     ai_model: Option<&str>,
     ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig>,
     forced_id: Option<&str>,
+    resolved_command: Option<&[String]>,
 ) -> Result<String, String> {
     let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
     let effective_network = binding.mode;
@@ -6876,7 +6878,10 @@ fn handle_run(
         )?,
     };
     let restart_policy = parse_restart_policy(restart_policy)?;
-    let effective_cmd = resolve_run_command(&image_config, entrypoint, cmd)?;
+    let effective_cmd = match resolved_command {
+        Some(command) => command.to_vec(),
+        None => resolve_run_command(&image_config, entrypoint, cmd)?,
+    };
 
     let run = |container_id: Option<&str>| {
         if let Some(container_id) = container_id {
@@ -11487,6 +11492,40 @@ fn resolve_run_command(
 }
 
 #[cfg(target_os = "linux")]
+fn resolve_compose_image_execution(
+    store: &LocalImageStore,
+    image: &str,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+) -> Result<ResolvedComposeImageExecution, String> {
+    let reference = resolve_reference(store, image)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("compose: image config is unavailable for {image}"))?;
+    let (config, _) = docker_image_metadata(&runtime_dir(), store, &reference)?;
+    resolve_compose_image_execution_from_config(&config, entrypoint, cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_compose_image_execution_from_config(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+) -> Result<ResolvedComposeImageExecution, String> {
+    let config = image_config.get("config").unwrap_or(image_config);
+    Ok(ResolvedComposeImageExecution {
+        command: resolve_run_command(image_config, entrypoint, cmd)?,
+        workdir: config
+            .get("WorkingDir")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        user: config
+            .get("User")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn image_config_command(config: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {
     let Some(value) = config.get(field) else {
         return Ok(Vec::new());
@@ -14418,6 +14457,16 @@ struct PreparedComposeService {
     prerequisites: Vec<ComposePrerequisite>,
 }
 
+/// Image-derived inputs that compose binds into a child run authorization.
+/// They are resolved before the child is authorized and then supplied to the
+/// launcher so the authorized request is the request that executes.
+#[cfg(target_os = "linux")]
+struct ResolvedComposeImageExecution {
+    command: Vec<String>,
+    workdir: Option<String>,
+    user: Option<String>,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct ComposeNetworkOwnership {
@@ -14978,6 +15027,16 @@ fn handle_compose(
                     .iter()
                     .map(ComposePrerequisite::mutation)
                     .collect::<Vec<_>>();
+                let image_execution = if mutations.is_empty() {
+                    Some(resolve_compose_image_execution(
+                        store,
+                        &prepared.image,
+                        service.entrypoint.as_deref(),
+                        &compose_service_command(service),
+                    )?)
+                } else {
+                    None
+                };
                 let initial_run_digest = if mutations.is_empty() {
                     compose_service_execution_digest(
                         runtime,
@@ -14991,6 +15050,9 @@ fn handle_compose(
                         &prepared.instance,
                         &prepared.image,
                         Some(&effective_compose_network),
+                        image_execution
+                            .as_ref()
+                            .expect("image execution is resolved without prerequisites"),
                     )?
                     .1
                 } else {
@@ -15060,6 +15122,12 @@ fn handle_compose(
                     wait_for_compose_dependencies(runtime, depends_on)
                         .map_err(|error| format!("compose partial result: {error}"))?;
                 }
+                let image_execution = image_execution.unwrap_or(resolve_compose_image_execution(
+                    store,
+                    &prepared.image,
+                    service.entrypoint.as_deref(),
+                    &compose_service_command(service),
+                )?);
                 let run_digest = compose_service_execution_digest(
                     runtime,
                     store,
@@ -15072,6 +15140,7 @@ fn handle_compose(
                     &prepared.instance,
                     &prepared.image,
                     Some(&effective_compose_network),
+                    &image_execution,
                 )?
                 .1;
                 let run_child = if let Some(previous) = predecessor.as_ref() {
@@ -15126,6 +15195,7 @@ fn handle_compose(
                     Some(&prepared.instance),
                     Some(&prepared.image),
                     Some(&effective_compose_network),
+                    &image_execution,
                 ) {
                     failures.push(format!("{} run failed: {error}", prepared.instance));
                 } else if let Err(error) = connect_compose_secondary_networks(
@@ -16081,6 +16151,7 @@ fn run_compose_service(
     instance_override: Option<&str>,
     prepared_image: Option<&str>,
     network_override: Option<&str>,
+    image_execution: &ResolvedComposeImageExecution,
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
         image.to_owned()
@@ -16146,8 +16217,8 @@ fn run_compose_service(
             &[],
             &[],
             service.entrypoint.as_deref(),
-            None,
-            None,
+            image_execution.workdir.as_deref(),
+            image_execution.user.as_deref(),
             Some(&instance_name),
             &publish,
             None,
@@ -16169,6 +16240,7 @@ fn run_compose_service(
             None,
             None,
             None,
+            Some(&image_execution.command),
         )?;
     }
     Ok(())
@@ -16188,8 +16260,8 @@ fn compose_service_execution_digest(
     instance: &str,
     image: &str,
     network_override: Option<&str>,
+    image_execution: &ResolvedComposeImageExecution,
 ) -> Result<(String, [u8; 32]), String> {
-    let cmd = compose_service_command(service);
     let env_entries = compose_service_env(project_dir, service)?;
     let env = parse_env_entries(&env_entries)?;
     let label_entries = compose_service_labels(service);
@@ -16216,13 +16288,6 @@ fn compose_service_execution_digest(
     } else {
         "bridge".to_string()
     };
-    let effective_cmd = if let Some(entrypoint) = service.entrypoint.as_deref() {
-        let mut value = parse_entrypoint(entrypoint)?;
-        value.extend_from_slice(&cmd);
-        value
-    } else {
-        cmd
-    };
     let (cpu_quota, cpu_period) = match compose_cpu_quota(service) {
         Some((quota, period)) => (Some(quota), Some(period)),
         None => (None, None),
@@ -16237,7 +16302,7 @@ fn compose_service_execution_digest(
         .normalized_run_execution_digest(
             store,
             image,
-            &effective_cmd,
+            &image_execution.command,
             &env,
             &labels,
             &HashMap::new(),
@@ -16249,8 +16314,8 @@ fn compose_service_execution_digest(
             &[],
             service.read_only,
             false,
-            None,
-            None,
+            image_execution.workdir.as_deref(),
+            image_execution.user.as_deref(),
             Some(instance),
             &ports,
             &network,
@@ -20249,6 +20314,7 @@ fn handle_docker_compat_connection(
                     None,
                     None,
                     Some(&id),
+                    None,
                 );
                 if let Err(error) = start_result {
                     if let Ok(mut starting) = state.starting.lock() {
@@ -30680,6 +30746,26 @@ volumes:
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_resolves_image_command_workdir_and_user_before_authorization() {
+        let config = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/usr/local/bin/server"],
+                "Cmd": ["--listen", "8080"],
+                "WorkingDir": "/srv/app",
+                "User": "1001:1001"
+            }
+        });
+
+        let resolved = super::resolve_compose_image_execution_from_config(&config, None, &[])
+            .expect("compose resolves image execution inputs");
+
+        assert_eq!(resolved.command, ["/usr/local/bin/server", "--listen", "8080"]);
+        assert_eq!(resolved.workdir.as_deref(), Some("/srv/app"));
+        assert_eq!(resolved.user.as_deref(), Some("1001:1001"));
+    }
+
     #[test]
     fn run_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -30718,6 +30804,7 @@ volumes:
             None,
             "no",
             false,
+            None,
             None,
             None,
             None,

@@ -15165,7 +15165,30 @@ mod tests {
         let parent = RequestOrigin::cli_current().unwrap();
         let parent_id = [7; 16];
         let plan_digest = [8; 32];
-        let request_digest = [9; 32];
+        let request_digest = runtime
+            .normalized_run_execution_digest(
+                &images,
+                "example/app:latest",
+                &["true".into()],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                &RestartPolicy::No,
+                &[],
+                None,
+                &[],
+                &[],
+                false,
+                true,
+                None,
+                None,
+                Some("web"),
+                &[],
+                "bridge",
+                NetworkBackend::Ebpf,
+            )
+            .unwrap();
         let mut idem = sha2::Sha256::new();
         idem.update(b"ferrocrate/compose-idempotency/v1");
         idem.update(parent_id);
@@ -15203,7 +15226,7 @@ mod tests {
             .run_with_store(
                 &images,
                 "example/app:latest",
-                &["true".into()],
+                &["false".into()],
                 &[],
                 &HashMap::new(),
                 &HashMap::new(),

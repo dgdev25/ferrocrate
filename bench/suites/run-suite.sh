@@ -476,11 +476,43 @@ PY
     fi
     CRI_SOCK="unix://$CRI_PATH"
     echo "critest --runtime-endpoint $CRI_SOCK"
-    critest --runtime-endpoint "$CRI_SOCK" --ginkgo.noColor > "$WORK/critest.out" 2>&1 || true
-    grep -oE "^(•|S|F).*|^ *[0-9]+ (Passed|Failed|Pending|Skipped)" "$WORK/critest.out" | tail -5
+    critest --runtime-endpoint "$CRI_SOCK" --ginkgo.noColor \
+      --ginkgo.json-report="$WORK/critest.json" > "$WORK/critest.out" 2>&1 || true
+    grep -oE "^ *[0-9]+ (Passed|Failed|Pending|Skipped)" "$WORK/critest.out" | tail -4
     total_pass=$(grep -oE "[0-9]+ Passed" "$WORK/critest.out" | head -1 | grep -oE "[0-9]+" || echo 0)
     total_fail=$(grep -oE "[0-9]+ Failed" "$WORK/critest.out" | head -1 | grep -oE "[0-9]+" || echo 0)
-    record "critest-summary" "$([ "${total_fail:-1}" = 0 ] && echo pass || echo fail)" 0 "$(tail -c 400 "$WORK/critest.out")" "${total_fail:-1}"
+    # record one line per spec from the ginkgo JSON report (no Docker oracle
+    # here by design: the CRI API is the contract, so a fail is a fail)
+    critest_py_status=critest
+    python3 - "$WORK/critest.json" "$OUT" "$RUN" "$HEAD" "$SUITE" "$ENGINE" <<'PY' || critest_py_status=fallback
+import json, sys
+rep, out, run, head, suite, engine = sys.argv[1:7]
+try:
+    with open(rep) as fh: r = json.load(fh)
+except Exception:
+    sys.exit(1)
+def walk(node):
+    for s in node.get("SpecReports", []):
+        st = s["State"]
+        status = {"passed": "pass", "failed": "fail", "skipped": "skip", "pending": "skip"}.get(st, "fail")
+        # BeforeSuite/AfterSuite nodes carry null ContainerHierarchyTexts/LeafNodeText
+        name = " / ".join(c for c in (s.get("ContainerHierarchyTexts") or []) if c) + " " + (s.get("LeafNodeText") or "")
+        tail = ""
+        if status == "fail":
+            fl = s.get("Failures") or ([s["Failure"]] if s.get("Failure") else [])
+            tail = " | ".join((f.get("Message") or "") for f in fl)[:800]
+        with open(out, "a") as fh:
+            fh.write(json.dumps({"source": suite, "suite": suite, "engine": engine, "step": name.strip(),
+                                 "status": status, "exit": 0 if status != "fail" else 1, "ms": 0,
+                                 "stderr_tail": tail, "run": run, "head": head},
+                                separators=(",", ":")) + "\n")
+# the report is a list of suite reports; specs live in SpecReports
+for suite_report in r if isinstance(r, list) else [r]:
+    walk(suite_report)
+PY
+    if [ "$critest_py_status" = fallback ]; then
+      record "critest-summary" "$([ "${total_fail:-1}" = 0 ] && echo pass || echo fail)" 0 "$(tail -c 400 "$WORK/critest.out")" "${total_fail:-1}"
+    fi
     echo "critest/$ENGINE: $total_pass passed, $total_fail failed (detail in $WORK/critest.out)"
     ;;
 esac

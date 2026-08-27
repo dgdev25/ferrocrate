@@ -159,9 +159,13 @@ ensure_registry_bin() {
   if [ ! -x "$REG" ]; then
     echo "extracting registry binary from registry:2 (local test registry needs it)"
     mkdir -p "$(dirname "$REG")"
-    cid="$(docker create registry:2)" \
-      && docker cp "$cid":/bin/registry "$REG" >/dev/null \
-      && docker rm "$cid" >/dev/null \
+    # Setup must not run against the engine under test: extracting this helper
+    # is not a measurement, and Ferrocrate's archive endpoint currently returns
+    # 404 for a container id that inspect resolves (S62), which made the whole
+    # suite unrunnable. Always use the real Docker daemon for it.
+    cid="$(DOCKER_HOST= DOCKER_CONTEXT=default docker create registry:2)" \
+      && DOCKER_HOST= DOCKER_CONTEXT=default docker cp "$cid":/bin/registry "$REG" >/dev/null \
+      && DOCKER_HOST= DOCKER_CONTEXT=default docker rm "$cid" >/dev/null \
       || { echo "registry extraction failed" >&2; exit 2; }
     chmod +x "$REG"
   fi

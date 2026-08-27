@@ -172,6 +172,27 @@ case "$SUITE" in
           pd="$(dirname "$(dirname "$tf")")"
           [ -e "$pd/Dockerfile" ] || ln -s "$(realpath --relative-to="$pd" "$DIR/Dockerfile")" "$pd/Dockerfile"
         done
+        # Every package's TestMain runs the frozen-image ensure concurrently;
+        # when two packages race, the loser's pull-tag-remove step hits
+        # NotFound and panics the whole package. Pre-seed the frozen names
+        # (digest refs from the root Dockerfile's download-frozen-image block)
+        # so imageExists() short-circuits in every TestMain. The engine's
+        # store caches them, so this pulls once per engine, not per run.
+        while IFS='|' read -r ref tag; do
+          if ! docker image inspect "$tag" >/dev/null 2>&1; then
+            echo "pre-seeding frozen image $tag"
+            docker pull -q "$ref" >/dev/null 2>&1 || { echo "frozen-image pull failed: $ref" >&2; exit 2; }
+            docker tag "$ref" "$tag" >/dev/null
+          fi
+        done <<'FROZEN'
+busybox:latest@sha256:95cf004f559831017cdf4628aaf1bb30133677be8702a8c5f2994629f637a209|busybox:latest
+busybox:glibc@sha256:1f81263701cddf6402afe9f33fca0266d9fff379e59b1748f33d3072da71ee85|busybox:glibc
+debian:trixie-slim@sha256:c85a2732e97694ea77237c61304b3bb410e0e961dd6ee945997a06c788c545bb|debian:trixie-slim
+hello-world:latest@sha256:d58e752213a51785838f9eed2b7a498ffa1cb3aa7f946dda11af39286c3db9a9|hello-world:frozen
+hello-world:latest@sha256:d58e752213a51785838f9eed2b7a498ffa1cb3aa7f946dda11af39286c3db9a9|hello-world:latest
+hello-world:amd64@sha256:90659bf80b44ce6be8234e6ff90a1ac34acbeb826903b02cfa0da11c82cbc042|hello-world:amd64
+hello-world:arm64@sha256:963612c5503f3f1674f315c67089dee577d8cc6afc18565e0b4183ae355fb343|hello-world:arm64
+FROZEN
         # Plugin tests exec a local `registry` binary (no distro package for
         # it); reuse the copy the buildkit suite extracts from registry:2.
         ensure_registry_bin

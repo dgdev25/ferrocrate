@@ -1,0 +1,4 @@
+# extracted at run time from the registry:2 image by run-suite.sh; not committed
+bin/
+# persistent local mirror storage for the suite's registry (BUILDKIT_REGISTRY_MIRROR_DIR)
+mirror/

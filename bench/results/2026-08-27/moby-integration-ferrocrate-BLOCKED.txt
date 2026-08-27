@@ -1,0 +1,25 @@
+moby-integration @ ferrocrate — BLOCKED, 2026-08-27 (run 11:16Z, head ff9823be)
+
+Recorded reason (per bench rule: numbers or a recorded reason):
+The suite cannot seed its frozen fixture images through the Docker-compat
+API, so every integration package's TestMain panics and a run records 3
+tests (TestStripANSICommands only) — a harness-level failure, not a pass.
+
+Blockers, all verified against release-artifacts/ferro-cli with an isolated
+store (FERROCRATE_HOME=/path/to/ferrocrate-lab/runtimes/suites):
+- S32 (open): every docker-CLI pull fails — the CLI sends fromImage
+  URL-encoded and the daemon rejects the encoded form.
+- S35 (new): POST /images/{name}/tag answers "not found" for every ref
+  form; pulled images are stored under registry-1.docker.io while clients
+  canonicalize to docker.io, and digest lookups fail too. Pre-seeding
+  busybox:latest/glibc, debian:trixie-slim, hello-world:frozen/latest/
+  amd64/arm64 is therefore impossible through the compat API.
+- S36 (new): image inspect emits Created as a JSON number; docker image
+  inspect fails client-side with an unmarshal error.
+- Native `ferro-cli pull` (tag and digest) works when the daemon is
+  stopped, but the daemon holds the store lock (S33 family) and native
+  pulls cannot be retagged through the compat API afterwards.
+
+Docker oracle leg (complete, skip list applied): 410 pass / 106 fail / 329
+skip of 845 recorded tests. Ferrocrate-only comparison is not meaningful
+until S32+S35 are fixed; rerun this leg after those tickets close.

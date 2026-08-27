@@ -276,6 +276,7 @@ pub struct DependsCondition {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HealthCheck {
     /// Command to run for health check (e.g., ["CMD", "curl", "-f", "http://localhost/"]).
+    #[serde(default, deserialize_with = "deserialize_healthcheck_test")]
     pub test: Option<Vec<String>>,
 
     /// Time between health checks (e.g., "30s").
@@ -289,6 +290,27 @@ pub struct HealthCheck {
 
     /// Initial delay before starting health checks (e.g., "40s").
     pub start_period: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum HealthcheckTest {
+    Shell(String),
+    List(Vec<String>),
+}
+
+/// Compose accepts both the explicit list form and a scalar shell command.
+/// Normalize the latter to Docker's `CMD-SHELL` representation so downstream
+/// validation has one unambiguous form to process.
+fn deserialize_healthcheck_test<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<HealthcheckTest>::deserialize(deserializer)?;
+    Ok(value.map(|value| match value {
+        HealthcheckTest::Shell(command) => vec!["CMD-SHELL".to_string(), command],
+        HealthcheckTest::List(command) => command,
+    }))
 }
 
 /// Deployment configuration for service scaling and resources.
@@ -606,13 +628,27 @@ services:
         )
         .expect("Compose short and mapping forms must parse");
         let short = &compose.services["short"];
-        assert_eq!(short.build.as_ref().and_then(|build| build.context.as_deref()), Some("."));
+        assert_eq!(
+            short
+                .build
+                .as_ref()
+                .and_then(|build| build.context.as_deref()),
+            Some(".")
+        );
         assert!(matches!(short.command, Some(super::Command::String(_))));
-        assert!(matches!(short.environment, Some(super::Environment::List(_))));
+        assert!(matches!(
+            short.environment,
+            Some(super::Environment::List(_))
+        ));
         assert_eq!(short.ports, Some(vec!["8080:80".to_string()]));
         assert_eq!(short.volumes, Some(vec!["data:/var/lib/data".to_string()]));
         let long = &compose.services["long"];
-        assert_eq!(long.build.as_ref().and_then(|build| build.context.as_deref()), Some("./app"));
+        assert_eq!(
+            long.build
+                .as_ref()
+                .and_then(|build| build.context.as_deref()),
+            Some("./app")
+        );
         assert!(matches!(long.command, Some(super::Command::List(_))));
         assert!(matches!(long.environment, Some(super::Environment::Map(_))));
         assert_eq!(long.ports, Some(vec!["8081:81".to_string()]));
@@ -745,6 +781,37 @@ configs:
         )
         .expect("read-only compose");
         assert!(readonly.services["api"].read_only);
+    }
+
+    #[test]
+    fn parses_scalar_and_list_healthcheck_tests() {
+        let scalar = ComposeFile::parse(
+            "services:\n  web:\n    image: example\n    healthcheck:\n      test: curl localhost:8000/up\n",
+            &HashMap::new(),
+        )
+        .expect("scalar healthcheck parses");
+        assert_eq!(
+            scalar.services["web"].healthcheck.as_ref().unwrap().test,
+            Some(vec![
+                "CMD-SHELL".to_string(),
+                "curl localhost:8000/up".to_string()
+            ])
+        );
+
+        let list = ComposeFile::parse(
+            "services:\n  web:\n    image: example\n    healthcheck:\n      test: [CMD, curl, -f, http://localhost/up]\n",
+            &HashMap::new(),
+        )
+        .expect("list healthcheck parses");
+        assert_eq!(
+            list.services["web"].healthcheck.as_ref().unwrap().test,
+            Some(vec![
+                "CMD".to_string(),
+                "curl".to_string(),
+                "-f".to_string(),
+                "http://localhost/up".to_string()
+            ])
+        );
     }
 
     #[test]

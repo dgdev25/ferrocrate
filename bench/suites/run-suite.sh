@@ -180,14 +180,25 @@ PY
   critest)
     if ! command -v critest >/dev/null 2>&1; then
       echo "building critest"; ( cd "$DIR" && make critest ) >"$WORK/build.log" 2>&1 || { echo "critest build failed; see $WORK/build.log" >&2; exit 2; }
-      export PATH="$DIR/build/bin:$PATH"
+      # cri-tools puts the binary under build/bin/<os>/<arch>, not build/bin.
+      CRITEST_BIN="$(find "$DIR/build" -type f -name critest -perm -u+x 2>/dev/null | head -1)"
+      [ -n "$CRITEST_BIN" ] || { echo "critest built but no binary found under $DIR/build" >&2; exit 2; }
+      export PATH="$(dirname "$CRITEST_BIN"):$PATH"
     fi
+    command -v critest >/dev/null 2>&1 || { echo "critest is not runnable" >&2; exit 2; }
     CRI_SOCK="unix://$CRI_PATH"
     echo "critest --runtime-endpoint $CRI_SOCK"
     critest --runtime-endpoint "$CRI_SOCK" --ginkgo.noColor > "$WORK/critest.out" 2>&1 || true
     grep -oE "^(•|S|F).*|^ *[0-9]+ (Passed|Failed|Pending|Skipped)" "$WORK/critest.out" | tail -5
     total_pass=$(grep -oE "[0-9]+ Passed" "$WORK/critest.out" | head -1 | grep -oE "[0-9]+" || echo 0)
     total_fail=$(grep -oE "[0-9]+ Failed" "$WORK/critest.out" | head -1 | grep -oE "[0-9]+" || echo 0)
+    # No summary at all means critest never ran. Recording that as a pass is how
+    # a suite that never started reads as a clean result.
+    if ! grep -qE "[0-9]+ (Passed|Failed)" "$WORK/critest.out"; then
+      record "critest-summary" fail 0 "critest produced no summary; it did not run. $(tail -c 300 "$WORK/critest.out")" 2
+      echo "critest/$ENGINE: did not run; see $WORK/critest.out" >&2
+      echo "-> $OUT"; exit 2
+    fi
     record "critest-summary" "$([ "${total_fail:-1}" = 0 ] && echo pass || echo fail)" 0 "$(tail -c 400 "$WORK/critest.out")" "${total_fail:-1}"
     echo "critest/$ENGINE: $total_pass passed, $total_fail failed (detail in $WORK/critest.out)"
     ;;

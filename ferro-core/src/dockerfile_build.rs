@@ -650,6 +650,7 @@ fn build_one_stage(
     stage_roots: &[PathBuf],
     stage_names: &HashMap<String, PathBuf>,
     inherited_root: Option<&Path>,
+    inherited_workdir: Option<&str>,
     control: &BuildControl,
 ) -> Result<BuiltStage, DockerfileBuildError> {
     // Stage roots are mutable during COPY and RUN. A fixed `stage-{idx}`
@@ -665,6 +666,11 @@ fn build_one_stage(
     } else {
         fs::create_dir_all(&stage_root)?;
     }
+    let workdir = stage
+        .workdir
+        .as_deref()
+        .or(inherited_workdir)
+        .or(base_info.config.workdir.as_deref());
     let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
     if stage.copy_paths.is_empty() {
         copy_context_dir(
@@ -688,7 +694,7 @@ fn build_one_stage(
         )?;
         let mut copy_paths = stage.copy_paths.clone();
         for spec in &mut copy_paths {
-            spec.dest = resolve_copy_destination(stage.workdir.as_deref(), &spec.dest);
+            spec.dest = resolve_copy_destination(workdir, &spec.dest);
             if let Some(owner) = spec.owner.as_ref() {
                 let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
                 spec.owner = Some(CopyOwner::Numeric(uid, gid));
@@ -702,7 +708,7 @@ fn build_one_stage(
                 DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
             })?;
         let source = safe_context_source(&source_root, &copy.src)?;
-        let destination = resolve_copy_destination(stage.workdir.as_deref(), &copy.dest);
+        let destination = resolve_copy_destination(workdir, &copy.dest);
         let dest = safe_context_destination(&context_root, &destination)?;
         copy_path_recursive(&source, &dest)?;
         if let Some(owner) = copy.owner.as_ref() {
@@ -736,12 +742,12 @@ fn build_one_stage(
         // produce its own change set, not repeat that context layer (and never
         // repeat the base filesystem).
         let stage_baseline = snapshot_stage_root(&stage_root)?;
-        apply_stage_workdir(&stage_root, stage.workdir.as_deref())?;
+        apply_stage_workdir(&stage_root, workdir)?;
         run_stage_commands(
             &stage_root,
             &stage.run,
             &stage_environment(base_info, &stage.env),
-            stage.workdir.as_deref(),
+            workdir,
             stage.user.as_deref(),
             &runtime_dir
                 .join("build")
@@ -1115,6 +1121,26 @@ fn execute_stages_and_publish(
 
     let dependency_graph = build_stage_dependency_graph(stages, named_contexts)?;
     let batches = build_stage_execution_batches(&dependency_graph)?;
+    let mut stage_workdirs: Vec<Option<String>> = Vec::with_capacity(stages.len());
+    for (idx, stage) in stages.iter().enumerate() {
+        let inherited = stages[..idx]
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| {
+                candidate
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&stage.base))
+            })
+            .and_then(|(parent, _)| stage_workdirs[parent].clone());
+        stage_workdirs.push(
+            stage
+                .workdir
+                .clone()
+                .or(inherited)
+                .or_else(|| base_infos[idx].config.workdir.clone()),
+        );
+    }
     let stage_identities = stage_content_identities(
         stages,
         base_digests,
@@ -1179,6 +1205,7 @@ fn execute_stages_and_publish(
                             &roots_snapshot,
                             &names_snapshot,
                             inherited_root.as_deref(),
+                            stage_workdirs[idx].as_deref(),
                             control,
                         ),
                         Err(error) => Err(error),
@@ -1198,6 +1225,7 @@ fn execute_stages_and_publish(
                     &roots_snapshot,
                     &names_snapshot,
                     inherited_root.as_deref(),
+                    stage_workdirs[idx].as_deref(),
                     control,
                 ),
             };
@@ -7337,7 +7365,7 @@ mod tests {
         let dockerfile = temp.path().join("Dockerfile");
         fs::write(
             &dockerfile,
-            "FROM scratch AS source\nCOPY artifact /out/artifact\nFROM scratch\nCOPY --from=source /out/artifact /artifact\n",
+            "FROM scratch AS seed\nWORKDIR /out\nFROM seed AS source\nCOPY artifact artifact\nFROM scratch\nCOPY --from=source /out/artifact /artifact\n",
         )
         .expect("dockerfile");
         fs::write(temp.path().join("artifact"), "compiled").expect("artifact");
@@ -7355,7 +7383,7 @@ mod tests {
         .expect("COPY --from named stage build");
 
         assert_eq!(
-            fs::read_to_string(stage_root(&runtime, 1).join("artifact")).unwrap(),
+            fs::read_to_string(stage_root(&runtime, 2).join("artifact")).unwrap(),
             "compiled"
         );
     }

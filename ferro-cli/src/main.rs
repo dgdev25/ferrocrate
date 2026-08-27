@@ -24179,6 +24179,49 @@ async fn handle_buildkit_control_request(
             .map_err(|error| format!("buildkit control: gateway ping failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
+    if method == BuildkitControlMethod::GatewayInputs {
+        use buildkit_proto::moby::buildkit::v1::frontend::{InputsRequest, InputsResponse};
+
+        let build_id = build_id
+            .as_deref()
+            .ok_or_else(|| "buildkit gateway: missing build id".to_string())?;
+        let _ = receive_buildkit_unary::<InputsRequest>(request.into_body()).await?;
+        let build = state
+            .wait_for_buildkit_build(build_id, Duration::from_secs(3))
+            .await?;
+        let frontend = buildkit_proto::moby::buildkit::v1::frontend::SolveRequest {
+            frontend: "dockerfile.v0".to_string(),
+            frontend_opt: build.request.frontend_attrs.clone(),
+            ..Default::default()
+        };
+        let result = execute_buildkit_frontend(state.as_ref(), execution, build.as_ref(), &frontend)
+            .await;
+        match result {
+            Ok(result) => {
+                *build
+                    .result
+                    .lock()
+                    .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
+                    Some(result);
+            }
+            Err(error) => {
+                *build
+                    .error
+                    .lock()
+                    .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                    Some(error.clone());
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    13,
+                    Some(&buildkit_grpc_message(&error)),
+                );
+            }
+        }
+        response_stream
+            .send_data(grpc_message(&InputsResponse::default()), false)
+            .map_err(|error| format!("buildkit gateway inputs: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
     if method == BuildkitControlMethod::Solve {
         use buildkit_proto::moby::buildkit::v1::SolveRequest;
         let solve = receive_buildkit_unary::<SolveRequest>(request.into_body()).await?;
@@ -24766,6 +24809,7 @@ enum BuildkitControlMethod {
     Solve,
     Status,
     GatewayPing,
+    GatewayInputs,
     GatewaySolve,
     GatewayReturn,
     Other,
@@ -24779,6 +24823,7 @@ fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
         "/moby.buildkit.v1.Control/Solve" => BuildkitControlMethod::Solve,
         "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
         "/moby.buildkit.v1.frontend.LLBBridge/Ping" => BuildkitControlMethod::GatewayPing,
+        "/moby.buildkit.v1.frontend.LLBBridge/Inputs" => BuildkitControlMethod::GatewayInputs,
         "/moby.buildkit.v1.frontend.LLBBridge/Solve" => BuildkitControlMethod::GatewaySolve,
         "/moby.buildkit.v1.frontend.LLBBridge/Return" => BuildkitControlMethod::GatewayReturn,
         _ => BuildkitControlMethod::Other,
@@ -33314,6 +33359,10 @@ volumes:
         assert_eq!(
             super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Ping"),
             super::BuildkitControlMethod::GatewayPing
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Inputs"),
+            super::BuildkitControlMethod::GatewayInputs
         );
         assert_eq!(
             super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Solve"),

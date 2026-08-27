@@ -46,6 +46,9 @@ message InTotoSubject { int32 kind = 1; repeated string digest = 2; string name 
 message ReturnRequest { Result result = 1; google.rpc.Status error = 2; }
 message ReturnResponse {}
 
+message InputsRequest {}
+message InputsResponse { map<string, pb.Definition> Definitions = 1; }
+
 message SolveRequest {
   pb.Definition Definition = 1;
   string Frontend = 2;

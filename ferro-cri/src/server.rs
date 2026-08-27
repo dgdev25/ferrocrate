@@ -4,8 +4,8 @@ use crate::runtime::{
     Container, ContainerMetadata, ContainerState, ContainerStats, ContainerStatsRequest,
     ContainerStatsResponse, ContainerStatus, ContainerStatusRequest, ContainerStatusResponse,
     CpuUsage, CreateContainerRequest, CreateContainerResponse, ExecSyncRequest, ExecSyncResponse,
-    FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse, ImageStatusRequest,
-    ImageStatusResponse, ListContainerStatsRequest, ListContainerStatsResponse,
+    FilesystemIdentifier, FilesystemUsage, Image, ImageFsInfoRequest, ImageFsInfoResponse,
+    ImageStatusRequest, ImageStatusResponse, ListContainerStatsRequest, ListContainerStatsResponse,
     ListContainersRequest, ListContainersResponse, ListImagesRequest, ListImagesResponse,
     ListPodSandboxRequest, ListPodSandboxResponse, MemoryUsage, PodSandbox, PodSandboxState,
     PodSandboxStatus, PodSandboxStatusRequest, PodSandboxStatusResponse, PullImageRequest,
@@ -13,8 +13,8 @@ use crate::runtime::{
     RemoveImageResponse, RemovePodSandboxRequest, RemovePodSandboxResponse, RunPodSandboxRequest,
     RunPodSandboxResponse, RuntimeCondition, RuntimeStatus, StartContainerRequest,
     StartContainerResponse, StatusRequest, StatusResponse, StopContainerRequest,
-    StopContainerResponse, StopPodSandboxRequest, StopPodSandboxResponse, VersionRequest,
-    VersionResponse,
+    StopContainerResponse, StopPodSandboxRequest, StopPodSandboxResponse, UInt64Value,
+    VersionRequest, VersionResponse,
 };
 pub use ferro_core::authorization::cri_delegation::{
     CriDelegationClaims, CriDelegationVerifier, DelegationAssertion, DelegationError,
@@ -1991,6 +1991,7 @@ impl ImageService for CriRuntime {
         let usage = collect_fs_usage(&images_dir)?;
         Ok(Response::new(ImageFsInfoResponse {
             image_filesystems: vec![usage],
+            container_filesystems: vec![],
         }))
     }
 }
@@ -2017,11 +2018,12 @@ fn collect_fs_usage(path: &Path) -> Result<FilesystemUsage, Status> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     Ok(FilesystemUsage {
-        timestamp,
-        fs_id: path.display().to_string(),
-        mountpoint: path.display().to_string(),
-        used_bytes,
-        inodes_used,
+        timestamp: timestamp.try_into().unwrap_or(i64::MAX),
+        fs_id: Some(FilesystemIdentifier {
+            mountpoint: path.display().to_string(),
+        }),
+        used_bytes: Some(UInt64Value { value: used_bytes }),
+        inodes_used: Some(UInt64Value { value: inodes_used }),
     })
 }
 
@@ -3482,9 +3484,15 @@ mod tests {
         let inner = response.into_inner();
         assert_eq!(inner.image_filesystems.len(), 1);
         let fs_usage = &inner.image_filesystems[0];
-        assert_eq!(fs_usage.mountpoint, images_root.display().to_string());
-        assert_eq!(fs_usage.fs_id, images_root.display().to_string());
-        assert!(fs_usage.used_bytes >= 10);
-        assert!(fs_usage.inodes_used > 0);
+        assert_eq!(
+            fs_usage
+                .fs_id
+                .as_ref()
+                .expect("filesystem identifier")
+                .mountpoint,
+            images_root.display().to_string()
+        );
+        assert!(fs_usage.used_bytes.as_ref().expect("used bytes").value >= 10);
+        assert!(fs_usage.inodes_used.as_ref().expect("used inodes").value > 0);
     }
 }

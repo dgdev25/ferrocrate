@@ -270,14 +270,22 @@ message RemoveImageResponse {}
 
 message ImageFsInfoRequest {}
 
+message UInt64Value {
+  uint64 value = 1;
+}
+
+message FilesystemIdentifier {
+  string mountpoint = 1;
+}
+
 message FilesystemUsage {
-  uint64 timestamp = 1;
-  string fs_id = 2;
-  string mountpoint = 3;
-  uint64 used_bytes = 4;
-  uint64 inodes_used = 5;
+  int64 timestamp = 1;
+  FilesystemIdentifier fs_id = 2;
+  UInt64Value used_bytes = 3;
+  UInt64Value inodes_used = 4;
 }
 
 message ImageFsInfoResponse {
   repeated FilesystemUsage image_filesystems = 1;
+  repeated FilesystemUsage container_filesystems = 2;
 }

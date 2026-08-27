@@ -242,6 +242,18 @@ def cleanup(tag: str) -> None:
         engine.run(["volume", "rm", f"fzv-{tag}"], timeout=30)
         engine.run(["rmi", f"fzimg-{tag}:latest"], timeout=30)
         engine.run(["rmi", f"fzimg2-{tag}:copy"], timeout=30)
+    # docker's `rm -f` on a container whose process just died can return before
+    # the name is released (the container lingers in "dead" state); the next
+    # `run --name` then conflicts on docker only and reads as a divergence.
+    # Poll until the name is actually gone on both engines before continuing.
+    for _ in range(5):
+        left = [c for e in (DOCKER, FERROCRATE) for c in e.state(tag)["containers"]]
+        if not left:
+            break
+        time.sleep(2)
+        for engine in (DOCKER, FERROCRATE):
+            for name in (f"fz-{tag}", f"fz-{tag}-r", f"fz2-{tag}"):
+                engine.run(["rm", "-f", name], timeout=30)
     ensure_base_image()
     shutil.rmtree(scratch_dir(tag), ignore_errors=True)
 

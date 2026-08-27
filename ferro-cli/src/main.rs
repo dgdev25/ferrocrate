@@ -283,9 +283,10 @@ pub enum Commands {
         annotations: Vec<String>,
         #[arg(long = "log-driver", default_value = "json-file")]
         log_driver: String,
-        #[arg(long)]
+        #[arg(short = 'u', long)]
         user: Option<String>,
-        #[arg(long)]
+        /// Docker documents -w as the short form of --workdir.
+        #[arg(short = 'w', long)]
         workdir: Option<String>,
         #[arg(long)]
         entrypoint: Option<String>,
@@ -582,7 +583,7 @@ pub enum Commands {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
-        #[arg(long)]
+        #[arg(short = 'f', long)]
         follow: bool,
     },
     #[cfg(target_os = "linux")]
@@ -640,7 +641,7 @@ pub enum Commands {
     Stop {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "10")]
+        #[arg(short = 't', long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
@@ -648,7 +649,7 @@ pub enum Commands {
     Kill {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "SIGKILL")]
+        #[arg(short = 's', long, default_value = "SIGKILL")]
         signal: String,
     },
     #[cfg(target_os = "linux")]
@@ -679,7 +680,7 @@ pub enum Commands {
     Restart {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "10")]
+        #[arg(short = 't', long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
@@ -31346,6 +31347,63 @@ volumes:
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
         assert!(err.contains("restart: container is required"));
+    }
+
+    // S45: Docker's short flags are accepted: run -u/-w, logs -f,
+    // stop/restart -t and kill -s.
+    #[test]
+    fn parses_the_docker_short_flags() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "-u",
+            "1000:1000",
+            "-w",
+            "/srv",
+            "alpine:3.20",
+            "id",
+        ])
+        .expect("run -u/-w parse");
+        match cli.command {
+            Commands::Run { user, workdir, .. } => {
+                assert_eq!(user.as_deref(), Some("1000:1000"));
+                assert_eq!(workdir.as_deref(), Some("/srv"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["ferrocrate", "logs", "-f", "web"]).expect("logs -f parse");
+        match cli.command {
+            Commands::Logs { follow, .. } => assert!(follow),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["ferrocrate", "stop", "-t", "3", "web"]).expect("stop -t parse");
+        match cli.command {
+            Commands::Stop { timeout, .. } => assert_eq!(timeout, 3),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "kill",
+            "-s",
+            "SIGTERM",
+            "web",
+        ])
+        .expect("kill -s parse");
+        match cli.command {
+            Commands::Kill { signal, .. } => assert_eq!(signal, "SIGTERM"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["ferrocrate", "restart", "-t", "5", "web"])
+            .expect("restart -t parse");
+        match cli.command {
+            Commands::Restart { timeout, .. } => assert_eq!(timeout, 5),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     // S46: `docker rm -f` of a name that does not exist exits 0 as a no-op,

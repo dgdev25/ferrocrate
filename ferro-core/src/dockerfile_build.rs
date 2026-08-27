@@ -537,9 +537,9 @@ fn load_build_journal(runtime_dir: &Path) -> Result<Option<BuildJournal>, Docker
         return Ok(None);
     }
     let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+    if !metadata.file_type().is_file() {
         return Err(DockerfileBuildError::Invalid(
-            "build journal must be a bounded regular file".to_string(),
+            "build journal must be a regular file".to_string(),
         ));
     }
     serde_json::from_slice(&fs::read(&path)?)
@@ -1588,7 +1588,15 @@ fn build_layer_from_snapshot_to_file(
     };
     let mut builder = Builder::new(writer);
     // A whiteout is a zero-length regular file next to the removed name.
-    for path in before.keys().filter(|path| !after.contains_key(*path)) {
+    // Whiteouting a directory removes its descendants too. Emitting child
+    // whiteouts after the directory has gone could recreate that directory
+    // while a runtime applies the layer, so retain only top-level deletions.
+    for path in before.keys().filter(|path| {
+        !after.contains_key(*path)
+            && !before.keys().any(|ancestor| {
+                ancestor != *path && path.starts_with(ancestor) && !after.contains_key(ancestor)
+            })
+    }) {
         append_whiteout(&mut builder, path)?;
     }
     for (path, state) in &after {
@@ -6706,6 +6714,66 @@ mod tests {
         assert!(names.contains(&std::path::PathBuf::from("marker")));
         assert!(names.contains(&std::path::PathBuf::from(".wh.removed")));
         assert!(!names.contains(&std::path::PathBuf::from("bin/sh")));
+    }
+
+    #[test]
+    fn run_layer_whiteouts_a_removed_directory_once_and_removes_it_when_applied() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join("removed/nested")).unwrap();
+        std::fs::write(root.join("removed/nested/base-file"), "base").unwrap();
+        let before = super::snapshot_stage_root(&root).unwrap();
+        std::fs::remove_dir_all(root.join("removed")).unwrap();
+
+        let layer = temp.path().join("layer.gz");
+        super::build_layer_from_snapshot_to_file(
+            &root,
+            &before,
+            crate::layer_compression::CompressionFormat::Gzip,
+            &layer,
+        )
+        .unwrap();
+
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(&layer).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let names = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![std::path::PathBuf::from(".wh.removed")]);
+
+        let runtime_root = temp.path().join("runtime-root");
+        std::fs::create_dir_all(runtime_root.join("removed/nested")).unwrap();
+        std::fs::write(runtime_root.join("removed/nested/base-file"), "base").unwrap();
+        crate::rootfs::apply_layer_tar(&runtime_root, &layer).unwrap();
+        assert!(!runtime_root.join("removed").exists());
+    }
+
+    #[test]
+    fn build_journal_retains_failure_output_larger_than_one_mebibyte() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = "maven-checkstyle-output\n".repeat(60_000);
+        assert!(output.len() > 1024 * 1024);
+        let journal = super::BuildJournal {
+            cache_key: "cache".to_string(),
+            context_digest: "context".to_string(),
+            dockerfile_digest: "dockerfile".to_string(),
+            base_digests: Vec::new(),
+            image_reference: "local/failure:latest".to_string(),
+            authorization_plan_digest: None,
+            state: super::BuildJournalState::Failed,
+            completed_stages: Vec::new(),
+            failure_output: Some(output.clone()),
+        };
+        super::save_build_journal(temp.path(), &journal).unwrap();
+        assert_eq!(
+            super::load_build_journal(temp.path())
+                .unwrap()
+                .unwrap()
+                .failure_output,
+            Some(output)
+        );
     }
 
     use super::{

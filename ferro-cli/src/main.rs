@@ -5358,13 +5358,15 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 handle_rmi(&image_store, image, &surface_authorization)
             }),
             Commands::ImagePrune { filters, .. } => {
-                handle_image_prune(&image_store, &surface_authorization, &filters)
+                let container_keys = docker_image_container_references(&runtime);
+                handle_image_prune(&image_store, &surface_authorization, &filters, &container_keys)
             }
             Commands::Image { command: ImageCommands::Rm { images, .. } } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image, &surface_authorization)
             }),
             Commands::Image { command: ImageCommands::Prune { filters, .. } } => {
-                handle_image_prune(&image_store, &surface_authorization, &filters)
+                let container_keys = docker_image_container_references(&runtime);
+                handle_image_prune(&image_store, &surface_authorization, &filters, &container_keys)
             }
             Commands::Login {
                 registry,
@@ -12425,6 +12427,7 @@ fn handle_image_prune(
     store: &LocalImageStore,
     authorization: &SurfaceAuthorization,
     filter_values: &[String],
+    container_keys: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     let filters = parse_cli_filters(filter_values)?;
@@ -12434,6 +12437,7 @@ fn handle_image_prune(
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|record| docker_image_prune_matches_filters(record, &filters))
+        .filter(|record| !docker_image_is_referenced_by_container(record, container_keys))
         .collect::<Vec<_>>();
     let permits = records
         .iter()
@@ -12558,10 +12562,11 @@ fn handle_system_prune(
         // The existing image pruner deliberately scopes each pass to one
         // Docker dangling selector.  Run both selectors to make `-a` cover
         // tagged and dangling local references.
-        handle_image_prune(image_store, authorization, &["dangling=true".to_string()])?;
-        handle_image_prune(image_store, authorization, &["dangling=false".to_string()])?;
+        let container_keys = docker_image_container_references(runtime);
+        handle_image_prune(image_store, authorization, &["dangling=true".to_string()], &container_keys)?;
+        handle_image_prune(image_store, authorization, &["dangling=false".to_string()], &container_keys)?;
     } else {
-        handle_image_prune(image_store, authorization, &[])?;
+        handle_image_prune(image_store, authorization, &[], &docker_image_container_references(runtime))?;
     }
     println!("Build cache:");
     handle_build_cache_prune(runtime_dir, 0, "text")?;
@@ -21062,11 +21067,13 @@ fn handle_docker_compat_connection(
             ("POST", "/images/prune") => {
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_image_prune_filters(&filters)?;
+                let container_keys = docker_image_container_references(&runtime);
                 let records = store
                     .list_references()
                     .map_err(|error| error.to_string())?
                     .into_iter()
                     .filter(|record| docker_image_prune_matches_filters(record, &filters))
+                    .filter(|record| !docker_image_is_referenced_by_container(record, &container_keys))
                     .collect::<Vec<_>>();
                 let deleted = records
                     .iter()
@@ -22094,6 +22101,56 @@ fn docker_image_matches_filters(
 #[cfg(target_os = "linux")]
 fn docker_image_is_dangling(record: &ferro_core::image_store::ImageRecord) -> bool {
     record.reference.starts_with("sha256:") || record.reference.contains("@sha256:")
+}
+
+/// Strip the registry host from an image reference. Containers record the
+/// image string the operator typed (`alpine:3.20`), the image store records
+/// the canonical pull reference (`registry.example/library/alpine:3.20`);
+/// both reduce to `library/alpine:3.20` so the two forms compare.
+fn docker_image_repository_key(reference: &str) -> String {
+    match reference.split_once('/') {
+        Some((host, rest))
+            if host.contains('.') || host.contains(':') || host == "localhost" =>
+        {
+            rest.to_string()
+        }
+        _ => reference.to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_image_container_references(runtime: &ContainerRuntime) -> std::collections::HashSet<String> {
+    runtime
+        .list()
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| docker_image_repository_key(&record.image))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Docker never prunes an image that any container — running or stopped —
+/// references. A container may reference the image by tag or by digest, so
+/// match the reference key and the `repository@digest` form.
+#[cfg(target_os = "linux")]
+fn docker_image_is_referenced_by_container(
+    record: &ferro_core::image_store::ImageRecord,
+    container_keys: &std::collections::HashSet<String>,
+) -> bool {
+    let reference = docker_image_repository_key(&record.reference);
+    if container_keys.contains(&reference) {
+        return true;
+    }
+    let repository = match reference.split_once('@') {
+        Some((repository, _)) => repository.to_string(),
+        None => reference
+            .rsplit_once(':')
+            .map(|(repository, _)| repository.to_string())
+            .unwrap_or(reference),
+    };
+    container_keys.contains(&format!("{repository}@{}", record.digest))
 }
 
 #[cfg(target_os = "linux")]
@@ -25912,6 +25969,11 @@ mod tests {
         VolumeCommands, WitnessCommands, CommandOwnership, EngineAccess, EngineEndpoint,
         EngineLockGuard,
     };
+    #[cfg(target_os = "linux")]
+    use super::{
+        docker_image_container_references, docker_image_is_referenced_by_container,
+        docker_image_repository_key,
+    };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
     use ferro_core::image_store::LocalImageStore;
@@ -28358,7 +28420,120 @@ volumes:
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         let authorization = test_surface_authorization(temp.path());
-        handle_image_prune(&store, &authorization, &[]).expect("prune");
+        handle_image_prune(&store, &authorization, &[], &std::collections::HashSet::new()).expect("prune");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_image_store_put(
+        store: &LocalImageStore,
+        authorization: &SurfaceAuthorization,
+        reference: &str,
+        digest: &str,
+    ) {
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":2}},"layers":[]}}"#
+        );
+        let plan = store
+            .prepare_reference_write(
+                reference,
+                digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .expect("reference write plan");
+        let permit = authorization
+            .authorize_image_reference_write_plan(&origin, &plan)
+            .expect("reference write permit");
+        store
+            .put_reference_authorized(plan, permit)
+            .expect("store reference");
+    }
+
+    // S50: `image prune` removed the image a running container was using.
+    // Docker never prunes an image any container references, running or stopped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_prune_keeps_images_referenced_by_containers() {
+        use ferro_core::sqlite_container_store::SqliteContainerStore;
+
+        let temp = configured_cli_runtime("disabled");
+        let store = LocalImageStore::open(temp.path().join("images")).expect("store");
+        let authorization = test_surface_authorization(temp.path());
+        let base_digest = format!("sha256:{}", "a".repeat(64));
+        let committed_digest = format!("sha256:{}", "b".repeat(64));
+        test_image_store_put(&store, &authorization, "registry.example/library/base:3.20", &base_digest);
+        test_image_store_put(&store, &authorization, "registry.example/library/committed:latest", &committed_digest);
+
+        let containers = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
+        let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "prune-victim",
+            "pid": 0,
+            "image": "registry.example/library/base:3.20",
+            "command": ["sleep", "300"],
+            "created_at_unix": 1,
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "running"
+        }))
+        .expect("container record");
+        containers.put(&record).expect("store container");
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let container_keys = docker_image_container_references(&runtime);
+        // `dangling=false` selects every unused image, so this exercises the
+        // reference guard whatever the default (dangling-only) selection is.
+        handle_image_prune(&store, &authorization, &["dangling=false".to_string()], &container_keys)
+            .expect("prune");
+        assert!(
+            store.resolve_reference("registry.example/library/base:3.20").expect("resolve").is_some(),
+            "the image a running container uses must survive prune"
+        );
+        assert!(
+            store.resolve_reference("registry.example/library/committed:latest").expect("resolve").is_none(),
+            "an unreferenced image still follows the prune filter rules"
+        );
+
+        // Without the container reference the same prune removes both records.
+        // `dangling=false` selects every unused image, so this holds whatever the
+        // default (dangling-only) selection is.
+        containers.remove("prune-victim").expect("remove container");
+        let container_keys = docker_image_container_references(&runtime);
+        handle_image_prune(&store, &authorization, &["dangling=false".to_string()], &container_keys)
+            .expect("prune");
+        assert!(
+            store.resolve_reference("registry.example/library/base:3.20").expect("resolve").is_none(),
+            "with no container reference the prune removes the image"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_container_references_match_tag_and_digest_forms() {
+        let record = ferro_core::image_store::ImageRecord {
+            reference: "registry.example/library/base:3.20".to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 1,
+        };
+        // The operator typed the short form; the store holds the registry-qualified one.
+        let keys: std::collections::HashSet<String> =
+            ["library/base:3.20".to_string()].into_iter().collect();
+        assert!(docker_image_is_referenced_by_container(&record, &keys));
+        // A container created by digest also pins the image.
+        let by_digest: std::collections::HashSet<String> =
+            [format!("library/base@{}", record.digest)].into_iter().collect();
+        assert!(docker_image_is_referenced_by_container(&record, &by_digest));
+        // An unrelated reference does not protect the image.
+        let other: std::collections::HashSet<String> =
+            ["library/other:3.20".to_string()].into_iter().collect();
+        assert!(!docker_image_is_referenced_by_container(&record, &other));
+        assert_eq!(
+            docker_image_repository_key("registry.example/library/base:3.20"),
+            "library/base:3.20"
+        );
+        assert_eq!(docker_image_repository_key("library/base:3.20"), "library/base:3.20");
     }
 
     #[test]

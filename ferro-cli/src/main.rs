@@ -13453,6 +13453,12 @@ fn handle_volume_authorized(
         .map_err(|err| err.to_string())?;
     match command {
         VolumeCommands::Create { name, driver, opts } => {
+            // Docker's `volume create` is idempotent: an existing name returns
+            // the stored volume and exits 0 instead of reporting an error.
+            if let Some(record) = store.get(&name).map_err(|error| error.to_string())? {
+                println!("volume create: {} {}", record.name, record.path);
+                return Ok(());
+            }
             let driver_opts = parse_driver_opts(&opts)?;
             let plan = store
                 .prepare_create(&name, &driver, driver_opts)
@@ -21783,6 +21789,15 @@ fn handle_docker_compat_connection(
                     })
                     .unwrap_or_default();
                 let driver_opts = parse_driver_opts(&opts)?;
+                // Docker's `volume create` is idempotent: an existing name
+                // returns the stored volume instead of a conflict error.
+                if let Some(record) = volume_store
+                    .get(name)
+                    .map_err(|error| error.to_string())?
+                {
+                    let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path, "Labels": record.labels});
+                    return Ok(http_response(201, body.to_string().as_bytes(), "application/json"));
+                }
                 let plan = volume_store
                     .prepare_create(name, driver, driver_opts)
                     .map_err(|error| error.to_string())?;
@@ -30818,6 +30833,31 @@ volumes:
         assert!(
             err.contains("fzv-missing") && err.contains("no such volume"),
             "error must name the volume, got {err}"
+        );
+    }
+
+    // S53: `volume create` on an existing name is idempotent and exits 0,
+    // matching `docker volume create`.
+    #[test]
+    fn volume_create_existing_name_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().to_path_buf();
+        let authorization = test_surface_authorization(&runtime_dir);
+        let command = || VolumeCommands::Create {
+            name: "fzv-twice".to_string(),
+            driver: "local".to_string(),
+            opts: Vec::new(),
+        };
+
+        handle_volume(&runtime_dir, command(), &authorization).expect("first create");
+        handle_volume(&runtime_dir, command(), &authorization).expect("second create");
+
+        let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+            .expect("store");
+        assert_eq!(
+            store.list().expect("list").len(),
+            1,
+            "idempotent create must not duplicate the volume"
         );
     }
 

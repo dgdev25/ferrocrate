@@ -6821,7 +6821,18 @@ fn handle_run(
         .chain(volume_mounts.iter())
         .map(|mount| mount.target.to_string_lossy().into_owned())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut image_execution = match resolved_image_execution {
+    let env = parse_env_entries(env)?;
+    let health = match health_override {
+        Some(health) => Some(health),
+        None => build_health_config(
+            health_cmd,
+            health_interval,
+            health_timeout,
+            health_retries,
+            health_start_period,
+        )?,
+    };
+    let image_execution = match resolved_image_execution {
         Some(execution) => execution.clone(),
         None => resolve_run_image_execution(
             runtime_dir,
@@ -6831,6 +6842,8 @@ fn handle_run(
             cmd,
             workdir,
             user,
+            &env,
+            health,
         )?,
     };
     let image_volume_entries = if resolved_image_execution.is_some() {
@@ -6853,7 +6866,6 @@ fn handle_run(
     mounts.extend(volume_mounts);
     mounts.extend(image_volume_mounts);
     let tmpfs = parse_tmpfs_mounts(tmpfs_mounts)?;
-    let env = parse_env_entries(env)?;
     // Resolve ai_runtime config: caller-supplied takes precedence over ferrofile.toml.
     let ferrofile_ai_config;
     let effective_ai_config: Option<&ferro_core::ai_runtime::AiRuntimeConfig> =
@@ -6881,19 +6893,6 @@ fn handle_run(
     }
     let caps = parse_capabilities(cap_add)?;
     let port_mappings = parse_publish(publish)?;
-    let health = match health_override {
-        Some(health) => Some(health),
-        None => build_health_config(
-            health_cmd,
-            health_interval,
-            health_timeout,
-            health_retries,
-            health_start_period,
-        )?,
-    };
-    if resolved_image_execution.is_none() {
-        apply_run_execution_overrides(&mut image_execution, &env, health);
-    }
     let restart_policy = parse_restart_policy(restart_policy)?;
     let effective_health = image_execution.health.clone();
     let effective_cmd = image_execution.command;
@@ -11516,12 +11515,16 @@ fn resolve_run_image_execution(
     cmd: &[String],
     workdir: Option<&str>,
     user: Option<&str>,
+    env: &[String],
+    health: Option<ferro_core::container_store::HealthConfig>,
 ) -> Result<ResolvedRunImageExecution, String> {
     let reference = resolve_reference(store, image)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("run: image config is unavailable for {image}"))?;
     let (config, _) = docker_image_metadata(runtime_dir, store, &reference)?;
-    resolve_run_image_execution_from_config(&config, entrypoint, cmd, workdir, user)
+    resolve_run_image_execution_from_config_with_overrides(
+        &config, entrypoint, cmd, workdir, user, env, health,
+    )
 }
 
 /// Resolve the image-derived inputs once, then overlay Compose's explicit
@@ -11537,7 +11540,8 @@ fn resolve_compose_run_image_execution(
     entrypoint: Option<&str>,
     cmd: &[String],
 ) -> Result<ResolvedRunImageExecution, String> {
-    let mut execution = resolve_run_image_execution(
+    let env = compose_service_env(project_dir, service)?;
+    resolve_run_image_execution(
         runtime_dir,
         store,
         image,
@@ -11545,13 +11549,27 @@ fn resolve_compose_run_image_execution(
         cmd,
         None,
         None,
-    )?;
-    let env = compose_service_env(project_dir, service)?;
-    apply_run_execution_overrides(
-        &mut execution,
         &env,
         compose_service_health_config(service)?,
-    );
+    )
+}
+
+/// The one image-resolution path used by direct runs, Docker starts, and
+/// Compose authorization. It combines image configuration with all caller
+/// overrides before either the digest or launcher sees the request.
+#[cfg(target_os = "linux")]
+fn resolve_run_image_execution_from_config_with_overrides(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&str>,
+    cmd: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+    env: &[String],
+    health: Option<ferro_core::container_store::HealthConfig>,
+) -> Result<ResolvedRunImageExecution, String> {
+    let mut execution =
+        resolve_run_image_execution_from_config(image_config, entrypoint, cmd, workdir, user)?;
+    apply_run_execution_overrides(&mut execution, env, health);
     Ok(execution)
 }
 
@@ -30944,6 +30962,47 @@ volumes:
         assert_eq!(resolved.workdir.as_deref(), Some("/srv/app"));
         assert_eq!(resolved.user.as_deref(), Some("1001:1001"));
         assert_eq!(resolved.volume_targets, ["/var/lib/app"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_run_image_resolver_applies_defaults_and_caller_overrides() {
+        let config = serde_json::json!({
+            "config": {
+                "Entrypoint": ["/image-entrypoint"],
+                "Cmd": ["--serve"],
+                "Env": ["IMAGE_ONLY=1", "OVERRIDE=image"],
+                "WorkingDir": "/image-workdir",
+                "User": "1001:1001",
+                "Healthcheck": { "Test": ["CMD", "echo", "healthy"] }
+            }
+        });
+
+        let resolved = super::resolve_run_image_execution_from_config_with_overrides(
+            &config,
+            None,
+            &[],
+            None,
+            None,
+            &["OVERRIDE=caller".to_string(), "CALLER_ONLY=1".to_string()],
+            Some(ferro_core::container_store::HealthConfig {
+                cmd: vec!["/bin/true".to_string()],
+                interval_secs: 1,
+                timeout_secs: 1,
+                retries: 1,
+                start_period_secs: 0,
+            }),
+        )
+        .expect("shared resolver succeeds");
+
+        assert_eq!(resolved.command, ["/image-entrypoint", "--serve"]);
+        assert_eq!(resolved.workdir.as_deref(), Some("/image-workdir"));
+        assert_eq!(resolved.user.as_deref(), Some("1001:1001"));
+        assert_eq!(resolved.env, ["IMAGE_ONLY=1", "OVERRIDE=caller", "CALLER_ONLY=1"]);
+        assert_eq!(
+            resolved.health.as_ref().map(|health| health.cmd.as_slice()),
+            Some(["/bin/true".to_string()].as_slice())
+        );
     }
 
     #[cfg(target_os = "linux")]

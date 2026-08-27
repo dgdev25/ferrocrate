@@ -1332,6 +1332,15 @@ fn docker_create_identity_is_inspectable_before_start() {
         .as_array()
         .is_some_and(|names| names.is_empty()));
 
+    assert_eq!(id.len(), 64, "Docker container ids must have 64 hexadecimal characters");
+    assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    let (status, body) = harness.request("GET", &format!("/containers/{}/json", &id[..12]), "");
+    assert_eq!(status, 200, "short-id inspect response: {body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("short-id inspect JSON")["Id"],
+        id
+    );
+
     let (status, body) = harness.request("GET", "/containers/json?all=1", "");
     assert_eq!(status, 200, "list response: {body}");
     let listed = serde_json::from_str::<serde_json::Value>(&body).expect("list JSON");

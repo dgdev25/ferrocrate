@@ -14302,7 +14302,9 @@ fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<S
     let records = runtime.list().map_err(|err| err.to_string())?;
     let matches = records
         .into_iter()
-        .filter(|record| record.name.as_deref() == Some(container))
+        .filter(|record| {
+            record.id.starts_with(container) || record.name.as_deref() == Some(container)
+        })
         .map(|record| record.id)
         .collect::<Vec<_>>();
     match matches.len() {
@@ -17109,14 +17111,15 @@ fn docker_pending_id(
     pending: &std::collections::HashMap<String, DockerCreateSpec>,
     requested: &str,
 ) -> Option<String> {
-    pending
-        .get_key_value(requested)
-        .or_else(|| {
-            pending
-                .iter()
-                .find(|(_, spec)| spec.name.as_deref() == Some(requested))
-        })
+    if pending.contains_key(requested) {
+        return Some(requested.to_string());
+    }
+    let matches = pending
+        .iter()
+        .filter(|(id, spec)| id.starts_with(requested) || spec.name.as_deref() == Some(requested))
         .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches.into_iter().next().expect("one pending match"))
 }
 
 #[cfg(target_os = "linux")]
@@ -17541,15 +17544,8 @@ struct DockerCompatState {
 }
 
 #[cfg(target_os = "linux")]
-fn docker_compat_id(prefix: &str, sequence: &AtomicU64) -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!(
-        "{prefix}{timestamp:x}-{}",
-        sequence.fetch_add(1, Ordering::SeqCst)
-    )
+fn docker_compat_id(_prefix: &str, _sequence: &AtomicU64) -> String {
+    ferro_core::runtime::generate_container_id()
 }
 
 #[cfg(target_os = "linux")]
@@ -19437,21 +19433,14 @@ fn handle_docker_compat_connection(
                     .pending
                     .lock()
                     .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                let body = if let Ok(record) = runtime.inspect(requested_id) {
-                    docker_inspect_payload(&record, include_size)
-                } else if let Ok(id) = resolve_container_id(&runtime, requested_id) {
-                    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                let id = docker_resolve_id(&runtime, &pending, requested_id)?;
+                let body = if let Ok(record) = runtime.inspect(&id) {
                     docker_inspect_payload(&record, include_size)
                 } else {
-                    let (pending_id, spec) = pending
-                        .get_key_value(requested_id)
-                        .or_else(|| {
-                            pending
-                                .iter()
-                                .find(|(_, spec)| spec.name.as_deref() == Some(requested_id))
-                        })
+                    let spec = pending
+                        .get(&id)
                         .ok_or_else(|| format!("container not found: {requested_id}"))?;
-                    docker_pending_inspect_payload(pending_id, spec, include_size)
+                    docker_pending_inspect_payload(&id, spec, include_size)
                 };
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -31926,6 +31915,14 @@ volumes:
         assert!(validate_docker_container_name("../escape").is_err());
         assert!(validate_docker_container_name("name/with/slash").is_err());
         assert!(validate_docker_container_name(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn docker_compat_container_ids_are_64_lowercase_hexadecimal_characters() {
+        let next_id = std::sync::atomic::AtomicU64::new(0);
+        let id = super::docker_compat_id("d", &next_id);
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 
     #[test]

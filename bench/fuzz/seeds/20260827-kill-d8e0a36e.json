@@ -1,0 +1,70 @@
+{
+ "run": "2026-08-27T08:42Z",
+ "source": "fuzz",
+ "reason": "state",
+ "label": "kill",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-d8e0a36e",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "start",
+   "args": [
+    "start",
+    "fz-d8e0a36e"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-d8e0a36e"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 3,
+  "label": "kill",
+  "args": [
+   "kill",
+   "fz-d8e0a36e"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "fz-d8e0a36e\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-d8e0a36e exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "kill: 53973b756134d5b9b81a66642d71a9d5\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-d8e0a36e killed"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "state"
+ }
+}

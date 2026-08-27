@@ -1,6 +1,6 @@
 # Real-app bench scoreboard
 
-Generated 2026-08-27 08:24Z from the newest result file per app and engine.
+Generated 2026-08-27 19:00Z from the newest result file per app and engine.
 Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.
 
 | App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |

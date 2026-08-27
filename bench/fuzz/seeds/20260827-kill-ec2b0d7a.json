@@ -1,0 +1,77 @@
+{
+ "run": "2026-08-27T09:24Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "kill",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-ec2b0d7a",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "kill",
+   "args": [
+    "kill",
+    "fz-ec2b0d7a"
+   ]
+  },
+  {
+   "label": "kill",
+   "args": [
+    "kill",
+    "fz-ec2b0d7a"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-ec2b0d7a"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 2,
+  "label": "kill",
+  "args": [
+   "kill",
+   "fz-ec2b0d7a"
+  ],
+  "docker": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Error response from daemon: cannot kill container: fz-ec2b0d7a: container cea2c58b687e2991fabac2177a0cafdf00a4aaa7d5a543e9ef6caeaca785a621 is not running\n",
+   "state": {
+    "containers": [
+     "fz-ec2b0d7a exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "kill: 65d0c87dfaed66ea7f4f8aebe2087017\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-ec2b0d7a exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

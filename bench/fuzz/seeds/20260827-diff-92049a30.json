@@ -1,0 +1,70 @@
+{
+ "run": "2026-08-27T09:14Z",
+ "source": "fuzz",
+ "reason": "stdout",
+ "label": "diff",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-92049a30",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "diff",
+   "args": [
+    "diff",
+    "fz-92049a30"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-92049a30"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 1,
+  "label": "diff",
+  "args": [
+   "diff",
+   "fz-92049a30"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-92049a30 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "A etc/resolv.conf\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-92049a30 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "stdout"
+ }
+}

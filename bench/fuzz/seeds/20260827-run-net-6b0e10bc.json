@@ -1,0 +1,85 @@
+{
+ "run": "2026-08-27T09:26Z",
+ "source": "fuzz",
+ "reason": "state",
+ "label": "run-net",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-6b0e10bc",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "run-net",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz2-6b0e10bc",
+    "--network",
+    "fzn-6b0e10bc",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-6b0e10bc"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 1,
+  "label": "run-net",
+  "args": [
+   "run",
+   "-d",
+   "--name",
+   "fz2-6b0e10bc",
+   "--network",
+   "fzn-6b0e10bc",
+   "alpine:3.20",
+   "sleep",
+   "300"
+  ],
+  "docker": {
+   "exit": 125,
+   "stdout": "1fd528f55d5defb3d2b215eaba931a9c90062c739e201f27a039d610a385c41b\n",
+   "stderr": "docker: Error response from daemon: failed to set up container networking: network fzn-6b0e10bc not found\n\nRun 'docker run --help' for more information\n",
+   "state": {
+    "containers": [
+     "fz-6b0e10bc running",
+     "fz2-6b0e10bc created"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "\u001b[2m2026-08-27T09:26:02.075882Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m network: not found fzn-6b0e10bc\nerror: network: not found fzn-6b0e10bc\n",
+   "state": {
+    "containers": [
+     "fz-6b0e10bc running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "state"
+ }
+}

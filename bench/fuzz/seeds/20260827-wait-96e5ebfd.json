@@ -1,0 +1,77 @@
+{
+ "run": "2026-08-27T09:04Z",
+ "source": "fuzz",
+ "reason": "stdout",
+ "label": "wait",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-96e5ebfd",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "kill",
+   "args": [
+    "kill",
+    "fz-96e5ebfd"
+   ]
+  },
+  {
+   "label": "wait",
+   "args": [
+    "wait",
+    "fz-96e5ebfd"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-96e5ebfd"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 2,
+  "label": "wait",
+  "args": [
+   "wait",
+   "fz-96e5ebfd"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "137\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-96e5ebfd exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "wait: container=42ebe4fd4adcd5ed962e43a341383abb status_code=0\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-96e5ebfd exited"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "stdout"
+ }
+}

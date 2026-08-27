@@ -1,0 +1,71 @@
+{
+ "run": "2026-08-27T08:44Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "volume-rm",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-01d0b9b9",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "kill",
+   "args": [
+    "kill",
+    "fz-01d0b9b9"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-01d0b9b9"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 3,
+  "label": "volume-rm",
+  "args": [
+   "volume",
+   "rm",
+   "fzv-01d0b9b9"
+  ],
+  "docker": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "Error response from daemon: get fzv-01d0b9b9: no such volume\n",
+   "state": {
+    "containers": [
+     "fz-01d0b9b9 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "volume rm: not found fzv-01d0b9b9\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-01d0b9b9 running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

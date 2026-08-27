@@ -1,0 +1,86 @@
+{
+ "run": "2026-08-27T09:30Z",
+ "source": "fuzz",
+ "reason": "state",
+ "label": "image-prune",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-dd1f888e",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "commit",
+   "args": [
+    "commit",
+    "fz-dd1f888e",
+    "fzimg-dd1f888e:latest"
+   ]
+  },
+  {
+   "label": "image-prune",
+   "args": [
+    "image",
+    "prune",
+    "--filter",
+    "label=fz-dd1f888e",
+    "-f"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-dd1f888e"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 2,
+  "label": "image-prune",
+  "args": [
+   "image",
+   "prune",
+   "--filter",
+   "label=fz-dd1f888e",
+   "-f"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "Total reclaimed space: 0B\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-dd1f888e running"
+    ],
+    "images": [
+     "fzimg-dd1f888e:latest"
+    ],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "image prune: removed=2\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-dd1f888e running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "state"
+ }
+}

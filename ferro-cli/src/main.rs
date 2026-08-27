@@ -478,21 +478,25 @@ pub enum Commands {
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
     },
+    /// Remove dangling images, or all unused images with --all.
+    ImagePrune {
+        /// Docker image-prune selector (`dangling=true|false`, `until=UNIX_SECONDS`,
+        /// `label=<key>[=<value>]`, or `label!=<key>[=<value>]`).
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        /// Docker clients pass -f; pruning is always immediate here.
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// Docker's -a: prune every unused image, not just dangling ones.
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
     /// Remove a stored image by reference.
     Rmi {
         #[arg(short = 'f', long)]
         force: bool,
         #[arg(required = true)]
         images: Vec<String>,
-    },
-    /// Remove dangling or time-filtered images.
-    ImagePrune {
-        /// Docker image-prune selector (`dangling=true|false` or `until=UNIX_SECONDS`).
-        #[arg(long = "filter")]
-        filters: Vec<String>,
-        /// Docker clients pass -f; pruning is always immediate here.
-        #[arg(short = 'f', long)]
-        force: bool,
     },
     /// Docker-compatible grouped image operations.
     Image {
@@ -1192,12 +1196,18 @@ pub enum ImageCommands {
         #[arg(required = true)]
         images: Vec<String>,
     },
-    /// Remove dangling or time-filtered images.
+    /// Remove dangling images, or all unused images with --all.
     Prune {
+        /// Docker image-prune selector (`dangling=true|false`, `until=UNIX_SECONDS`,
+        /// `label=<key>[=<value>]`, or `label!=<key>[=<value>]`).
         #[arg(long = "filter")]
         filters: Vec<String>,
+        /// Docker clients pass -f; pruning is always immediate here.
         #[arg(short = 'f', long)]
         force: bool,
+        /// Docker's -a: prune every unused image, not just dangling ones.
+        #[arg(short = 'a', long)]
+        all: bool,
     },
 }
 
@@ -5358,14 +5368,25 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image, &surface_authorization)
             }),
-            Commands::ImagePrune { filters, .. } => {
-                handle_image_prune(&image_store, &surface_authorization, &filters)
+            Commands::ImagePrune { filters, all, .. } => {
+                // `-a` is Docker's sugar for the dangling=false selector.
+                let mut filters = filters.clone();
+                if all {
+                    filters.push("dangling=false".to_string());
+                }
+                let container_keys = docker_image_container_references(&runtime);
+                handle_image_prune(&image_store, &surface_authorization, &filters, &container_keys)
             }
             Commands::Image { command: ImageCommands::Rm { images, .. } } => handle_multiple_containers(&images, "rmi", |image| {
                 handle_rmi(&image_store, image, &surface_authorization)
             }),
-            Commands::Image { command: ImageCommands::Prune { filters, .. } } => {
-                handle_image_prune(&image_store, &surface_authorization, &filters)
+            Commands::Image { command: ImageCommands::Prune { filters, all, .. } } => {
+                let mut filters = filters.clone();
+                if all {
+                    filters.push("dangling=false".to_string());
+                }
+                let container_keys = docker_image_container_references(&runtime);
+                handle_image_prune(&image_store, &surface_authorization, &filters, &container_keys)
             }
             Commands::Login {
                 registry,
@@ -8629,9 +8650,14 @@ fn dispatch_remote_socket(
             )
             .map(|_| ())
         }),
-        Commands::ImagePrune { filters, .. } => (|| -> Result<(), String> {
-            let parsed = parse_cli_filters(filters)?;
+        Commands::ImagePrune { filters, all, .. } => (|| -> Result<(), String> {
+            let mut parsed = parse_cli_filters(filters)?;
             validate_docker_image_prune_filters(&parsed)?;
+            if *all {
+                parsed
+                    .entry("dangling".to_string())
+                    .or_insert_with(|| vec!["false".to_string()]);
+            }
             let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
             let path = format!(
                 "/images/prune?filters={}",
@@ -8650,9 +8676,14 @@ fn dispatch_remote_socket(
             )
             .map(|_| ())
         }),
-        Commands::Image { command: ImageCommands::Prune { filters, .. } } => (|| -> Result<(), String> {
-            let parsed = parse_cli_filters(filters)?;
+        Commands::Image { command: ImageCommands::Prune { filters, all, .. } } => (|| -> Result<(), String> {
+            let mut parsed = parse_cli_filters(filters)?;
             validate_docker_image_prune_filters(&parsed)?;
+            if *all {
+                parsed
+                    .entry("dangling".to_string())
+                    .or_insert_with(|| vec!["false".to_string()]);
+            }
             let encoded = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
             request("POST", format!("/images/prune?filters={}", percent_encode_path_component(&encoded)))
                 .and_then(|body| print_json(body, "text"))
@@ -12628,6 +12659,7 @@ fn handle_image_prune(
     store: &LocalImageStore,
     authorization: &SurfaceAuthorization,
     filter_values: &[String],
+    container_keys: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     let filters = parse_cli_filters(filter_values)?;
@@ -12637,6 +12669,7 @@ fn handle_image_prune(
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|record| docker_image_prune_matches_filters(record, &filters))
+        .filter(|record| !docker_image_is_referenced_by_container(record, container_keys))
         .collect::<Vec<_>>();
     let permits = records
         .iter()
@@ -12757,14 +12790,17 @@ fn handle_system_prune(
     println!("Containers:");
     handle_container_prune(runtime, &[])?;
     println!("Images:");
-    if all {
-        // The existing image pruner deliberately scopes each pass to one
-        // Docker dangling selector.  Run both selectors to make `-a` cover
-        // tagged and dangling local references.
-        handle_image_prune(image_store, authorization, &["dangling=true".to_string()])?;
-        handle_image_prune(image_store, authorization, &["dangling=false".to_string()])?;
-    } else {
-        handle_image_prune(image_store, authorization, &[])?;
+    {
+        // `docker system prune` keeps tagged images; `-a` removes every unused
+        // reference.  The pruner defaults to dangling-only, so `-a` only needs
+        // the dangling=false selector.
+        let container_keys = docker_image_container_references(runtime);
+        let filters: &[String] = if all {
+            &["dangling=false".to_string()]
+        } else {
+            &[]
+        };
+        handle_image_prune(image_store, authorization, filters, &container_keys)?;
     }
     println!("Build cache:");
     handle_build_cache_prune(runtime_dir, 0, "text")?;
@@ -21390,11 +21426,13 @@ fn handle_docker_compat_connection(
             ("POST", "/images/prune") => {
                 let filters = parse_docker_filters(&query)?;
                 validate_docker_image_prune_filters(&filters)?;
+                let container_keys = docker_image_container_references(&runtime);
                 let records = store
                     .list_references()
                     .map_err(|error| error.to_string())?
                     .into_iter()
                     .filter(|record| docker_image_prune_matches_filters(record, &filters))
+                    .filter(|record| !docker_image_is_referenced_by_container(record, &container_keys))
                     .collect::<Vec<_>>();
                 let deleted = records
                     .iter()
@@ -22429,6 +22467,56 @@ fn docker_image_is_dangling(record: &ferro_core::image_store::ImageRecord) -> bo
     record.reference.starts_with("sha256:") || record.reference.contains("@sha256:")
 }
 
+/// Strip the registry host from an image reference. Containers record the
+/// image string the operator typed (`alpine:3.20`), the image store records
+/// the canonical pull reference (`registry.example/library/alpine:3.20`);
+/// both reduce to `library/alpine:3.20` so the two forms compare.
+fn docker_image_repository_key(reference: &str) -> String {
+    match reference.split_once('/') {
+        Some((host, rest))
+            if host.contains('.') || host.contains(':') || host == "localhost" =>
+        {
+            rest.to_string()
+        }
+        _ => reference.to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_image_container_references(runtime: &ContainerRuntime) -> std::collections::HashSet<String> {
+    runtime
+        .list()
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| docker_image_repository_key(&record.image))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Docker never prunes an image that any container — running or stopped —
+/// references. A container may reference the image by tag or by digest, so
+/// match the reference key and the `repository@digest` form.
+#[cfg(target_os = "linux")]
+fn docker_image_is_referenced_by_container(
+    record: &ferro_core::image_store::ImageRecord,
+    container_keys: &std::collections::HashSet<String>,
+) -> bool {
+    let reference = docker_image_repository_key(&record.reference);
+    if container_keys.contains(&reference) {
+        return true;
+    }
+    let repository = match reference.split_once('@') {
+        Some((repository, _)) => repository.to_string(),
+        None => reference
+            .rsplit_once(':')
+            .map(|(repository, _)| repository.to_string())
+            .unwrap_or(reference),
+    };
+    container_keys.contains(&format!("{repository}@{}", record.digest))
+}
+
 #[cfg(target_os = "linux")]
 fn docker_image_repo_digests(record: &ferro_core::image_store::ImageRecord) -> Vec<String> {
     if docker_image_is_dangling(record) {
@@ -22613,9 +22701,9 @@ fn validate_docker_image_prune_filters(
     filters: &HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
     for key in filters.keys() {
-        if !matches!(key.as_str(), "dangling" | "until") {
+        if !matches!(key.as_str(), "dangling" | "until" | "label" | "label!") {
             return Err(format!(
-                "docker: image prune filter `{key}` is unsupported; supported filters: dangling, until"
+                "docker: image prune filter `{key}` is unsupported; supported filters: dangling, until, label, label!"
             ));
         }
     }
@@ -22647,11 +22735,22 @@ fn docker_image_prune_matches_filters(
     record: &ferro_core::image_store::ImageRecord,
     filters: &HashMap<String, Vec<String>>,
 ) -> bool {
-    if let Some(value) = filters.get("dangling").and_then(|values| values.first()) {
-        let dangling = docker_image_is_dangling(record);
-        if dangling != (value == "true") {
-            return false;
-        }
+    // Docker prunes dangling images unless the client passes dangling=false
+    // (the `-a` selector) or an explicit filter overrides the default.
+    let dangling = docker_image_is_dangling(record);
+    let wanted_dangling = filters
+        .get("dangling")
+        .and_then(|values| values.first())
+        .map(|value| value == "true")
+        .unwrap_or(true);
+    if dangling != wanted_dangling {
+        return false;
+    }
+    // Ferrocrate image records carry no labels, so a positive label selector
+    // matches nothing and a negative selector keeps every record; that is the
+    // same outcome as a store that holds no labelled image.
+    if filters.get("label").is_some_and(|selectors| !selectors.is_empty()) {
+        return false;
     }
     if let Some(value) = filters.get("until").and_then(|values| values.first()) {
         let Ok(until) = value.parse::<u64>() else {
@@ -26307,6 +26406,11 @@ mod tests {
         VolumeCommands, WitnessCommands, CommandOwnership, EngineAccess, EngineEndpoint,
         EngineLockGuard,
     };
+    #[cfg(target_os = "linux")]
+    use super::{
+        docker_image_container_references, docker_image_is_referenced_by_container,
+        docker_image_repository_key,
+    };
     use clap::Parser;
     use ferro_core::authorization::surface::SurfaceAuthorization;
     use ferro_core::image_store::LocalImageStore;
@@ -28753,7 +28857,169 @@ volumes:
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         let authorization = test_surface_authorization(temp.path());
-        handle_image_prune(&store, &authorization, &[]).expect("prune");
+        handle_image_prune(&store, &authorization, &[], &std::collections::HashSet::new()).expect("prune");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_image_store_put(
+        store: &LocalImageStore,
+        authorization: &SurfaceAuthorization,
+        reference: &str,
+        digest: &str,
+    ) {
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{digest}","size":2}},"layers":[]}}"#
+        );
+        let plan = store
+            .prepare_reference_write(
+                reference,
+                digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .expect("reference write plan");
+        let permit = authorization
+            .authorize_image_reference_write_plan(&origin, &plan)
+            .expect("reference write permit");
+        store
+            .put_reference_authorized(plan, permit)
+            .expect("store reference");
+    }
+
+    // S50: `image prune` removed the image a running container was using.
+    // Docker never prunes an image any container references, running or stopped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_prune_keeps_images_referenced_by_containers() {
+        use ferro_core::sqlite_container_store::SqliteContainerStore;
+
+        let temp = configured_cli_runtime("disabled");
+        let store = LocalImageStore::open(temp.path().join("images")).expect("store");
+        let authorization = test_surface_authorization(temp.path());
+        let base_digest = format!("sha256:{}", "a".repeat(64));
+        let committed_digest = format!("sha256:{}", "b".repeat(64));
+        test_image_store_put(&store, &authorization, "registry.example/library/base:3.20", &base_digest);
+        test_image_store_put(&store, &authorization, "registry.example/library/committed:latest", &committed_digest);
+
+        let containers = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
+        let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "prune-victim",
+            "pid": 0,
+            "image": "registry.example/library/base:3.20",
+            "command": ["sleep", "300"],
+            "created_at_unix": 1,
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "running"
+        }))
+        .expect("container record");
+        containers.put(&record).expect("store container");
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let container_keys = docker_image_container_references(&runtime);
+        // `dangling=false` selects every unused image, so this exercises the
+        // reference guard whatever the default (dangling-only) selection is.
+        handle_image_prune(&store, &authorization, &["dangling=false".to_string()], &container_keys)
+            .expect("prune");
+        assert!(
+            store.resolve_reference("registry.example/library/base:3.20").expect("resolve").is_some(),
+            "the image a running container uses must survive prune"
+        );
+        assert!(
+            store.resolve_reference("registry.example/library/committed:latest").expect("resolve").is_none(),
+            "an unreferenced image still follows the prune filter rules"
+        );
+
+        // Without the container reference the same prune removes both records.
+        // `dangling=false` selects every unused image, so this holds whatever the
+        // default (dangling-only) selection is.
+        containers.remove("prune-victim").expect("remove container");
+        let container_keys = docker_image_container_references(&runtime);
+        handle_image_prune(&store, &authorization, &["dangling=false".to_string()], &container_keys)
+            .expect("prune");
+        assert!(
+            store.resolve_reference("registry.example/library/base:3.20").expect("resolve").is_none(),
+            "with no container reference the prune removes the image"
+        );
+    }
+
+    // S49: `image prune` removed tagged images.  Docker prunes dangling images
+    // only unless the client passes -a, and keeps every tagged reference.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_prune_default_removes_dangling_images_only() {
+        let temp = configured_cli_runtime("disabled");
+        let store = LocalImageStore::open(temp.path().join("images")).expect("store");
+        let authorization = test_surface_authorization(temp.path());
+        let tagged = "registry.example/library/base:3.20";
+        let dangling = format!("registry.example/library/orphan@sha256:{}", "d".repeat(64));
+        let dangling_digest = format!("sha256:{}", "d".repeat(64));
+        let base_digest = format!("sha256:{}", "c".repeat(64));
+        test_image_store_put(&store, &authorization, tagged, &base_digest);
+        test_image_store_put(&store, &authorization, &dangling, &dangling_digest);
+
+        let references = || {
+            store
+                .list_references()
+                .expect("list references")
+                .into_iter()
+                .map(|record| record.reference)
+                .collect::<std::collections::HashSet<String>>()
+        };
+
+        // The fuzzer's label selector removes nothing: ferro records carry no
+        // labels, and Docker reports the same empty prune for an unlabelled store.
+        handle_image_prune(&store, &authorization, &["label=fz-tag=1".to_string()], &std::collections::HashSet::new())
+            .expect("label prune");
+        assert!(references().contains(tagged));
+        assert!(references().contains(&dangling));
+
+        // The default prune (no selector) keeps the tagged image.
+        handle_image_prune(&store, &authorization, &[], &std::collections::HashSet::new())
+            .expect("default prune");
+        assert!(
+            references().contains(tagged),
+            "a tagged image must survive a default `image prune`"
+        );
+        assert!(
+            !references().contains(&dangling),
+            "a dangling reference is what the default prune removes"
+        );
+
+        // `-a` maps to dangling=false and removes the tagged image as well.
+        handle_image_prune(&store, &authorization, &["dangling=false".to_string()], &std::collections::HashSet::new())
+            .expect("all prune");
+        assert!(!references().contains(tagged));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_container_references_match_tag_and_digest_forms() {
+        let record = ferro_core::image_store::ImageRecord {
+            reference: "registry.example/library/base:3.20".to_string(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            manifest_json: "{}".to_string(),
+            created_at_unix: 1,
+        };
+        // The operator typed the short form; the store holds the registry-qualified one.
+        let keys: std::collections::HashSet<String> =
+            ["library/base:3.20".to_string()].into_iter().collect();
+        assert!(docker_image_is_referenced_by_container(&record, &keys));
+        // A container created by digest also pins the image.
+        let by_digest: std::collections::HashSet<String> =
+            [format!("library/base@{}", record.digest)].into_iter().collect();
+        assert!(docker_image_is_referenced_by_container(&record, &by_digest));
+        // An unrelated reference does not protect the image.
+        let other: std::collections::HashSet<String> =
+            ["library/other:3.20".to_string()].into_iter().collect();
+        assert!(!docker_image_is_referenced_by_container(&record, &other));
+        assert_eq!(
+            docker_image_repository_key("registry.example/library/base:3.20"),
+            "library/base:3.20"
+        );
+        assert_eq!(docker_image_repository_key("library/base:3.20"), "library/base:3.20");
     }
 
     #[test]
@@ -33115,15 +33381,28 @@ volumes:
         };
         let tagged = make("alpine:latest", 10);
         let dangling = make("sha256:orphan", 10);
+        // No selector at all keeps Docker's default: dangling images only.
+        assert!(!docker_image_prune_matches_filters(&tagged, &HashMap::new()));
+        assert!(docker_image_prune_matches_filters(&dangling, &HashMap::new()));
         let mut filters = HashMap::new();
         filters.insert("dangling".to_string(), vec!["true".to_string()]);
         assert!(!docker_image_prune_matches_filters(&tagged, &filters));
         assert!(docker_image_prune_matches_filters(&dangling, &filters));
         filters.insert("until".to_string(), vec!["10".to_string()]);
         assert!(!docker_image_prune_matches_filters(&dangling, &filters));
+        // `-a` maps to dangling=false and covers tagged references too.
+        let mut all = HashMap::new();
+        all.insert("dangling".to_string(), vec!["false".to_string()]);
+        assert!(docker_image_prune_matches_filters(&tagged, &all));
+        assert!(!docker_image_prune_matches_filters(&dangling, &all));
         let unsupported =
-            serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
+            serde_json::from_value(serde_json::json!({"since": ["alpine:latest"]})).expect("filters");
         assert!(validate_docker_image_prune_filters(&unsupported).is_err());
+        let labelled =
+            serde_json::from_value(serde_json::json!({"label": ["x=y"]})).expect("filters");
+        assert!(validate_docker_image_prune_filters(&labelled).is_ok());
+        // No record carries labels, so a positive selector matches nothing.
+        assert!(!docker_image_prune_matches_filters(&tagged, &labelled));
     }
 
     #[test]

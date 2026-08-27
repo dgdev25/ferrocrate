@@ -1,0 +1,72 @@
+{
+ "run": "2026-08-27T09:09Z",
+ "source": "fuzz",
+ "reason": "status",
+ "label": "rm-force",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-c72c3f44",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "rename",
+   "args": [
+    "rename",
+    "fz-c72c3f44",
+    "fz-c72c3f44-r"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-c72c3f44"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 2,
+  "label": "rm-force",
+  "args": [
+   "rm",
+   "-f",
+   "fz-c72c3f44"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-c72c3f44-r running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 1,
+   "stdout": "",
+   "stderr": "rm: fz-c72c3f44: container not found: fz-c72c3f44\n\u001b[2m2026-08-27T09:09:14.322383Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mferro_cli::linux_cli\u001b[0m\u001b[2m:\u001b[0m rm: 1 container operation(s) failed\nerror: rm: 1 container operation(s) failed\n",
+   "state": {
+    "containers": [
+     "fz-c72c3f44-r running"
+    ],
+    "images": [],
+    "volumes": [],
+    "networks": []
+   }
+  },
+  "reason": "status"
+ }
+}

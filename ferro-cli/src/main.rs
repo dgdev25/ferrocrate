@@ -16978,6 +16978,8 @@ struct DockerHostConfig {
     port_bindings: Option<HashMap<String, Vec<DockerPortBinding>>>,
     #[serde(rename = "NetworkMode")]
     network_mode: Option<String>,
+    #[serde(rename = "IpcMode")]
+    ipc_mode: Option<String>,
     #[serde(rename = "AutoRemove", default)]
     auto_remove: bool,
     #[serde(rename = "Memory")]
@@ -21948,6 +21950,9 @@ fn docker_status_for_error(err: &str) -> u16 {
     if lowered.contains("docker hub search unavailable") {
         return 503;
     }
+    if lowered.contains("hostconfig.ipcmode=host is not supported") {
+        return 501;
+    }
     if lowered.contains("still running") {
         return 409;
     }
@@ -23012,6 +23017,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         binds: None,
         port_bindings: None,
         network_mode: None,
+        ipc_mode: None,
         auto_remove: false,
         memory: None,
         cpu_quota: None,
@@ -23106,6 +23112,18 @@ fn validate_docker_create_request(request: &DockerCreateRequest) -> Result<(), S
     };
     if host_config.memory.is_some_and(|memory| memory > 0 && memory < 6 * 1024 * 1024) {
         return Err("Minimum memory limit allowed is 6MB".to_string());
+    }
+    match host_config.ipc_mode.as_deref() {
+        None | Some("") => {}
+        Some("host") => {
+            return Err("docker: HostConfig.IpcMode=host is not supported by this runtime".to_string());
+        }
+        Some(_) => {
+            return Err(
+                "docker: unsupported HostConfig field IpcMode is set; this runtime does not implement it"
+                    .to_string(),
+            );
+        }
     }
     if let Some(policy) = host_config.restart_policy.as_ref() {
         validate_docker_restart_policy(policy)?;
@@ -32540,6 +32558,17 @@ volumes:
         )
         .expect("on-failure with zero retries is valid");
         assert_eq!(spec.restart_policy, "on-failure");
+    }
+
+    #[test]
+    fn docker_create_ipc_mode_host_reports_an_explicit_feature_boundary() {
+        let error = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"IpcMode":"host"}}"#,
+            None,
+        )
+        .expect_err("host IPC needs runtime namespace support");
+        assert_eq!(error, "docker: HostConfig.IpcMode=host is not supported by this runtime");
+        assert_eq!(docker_status_for_error(&error), 501);
     }
 
     #[test]

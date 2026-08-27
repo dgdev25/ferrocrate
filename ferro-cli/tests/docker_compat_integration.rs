@@ -4527,6 +4527,43 @@ fn docker_compat_image_archive_round_trip_preserves_layers_and_config() {
 }
 
 #[test]
+fn docker_compat_tag_resolves_docker_hub_aliases_and_digest_sources() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "tag-source:latest");
+
+    let (status, body) = harness.request(
+        "GET",
+        "/v1.45/images/tag-source%3Alatest/json",
+    );
+    assert_eq!(status, 200, "source inspect response={body}");
+    let digest = serde_json::from_str::<serde_json::Value>(&body)
+        .expect("source inspect JSON")["Id"]
+        .as_str()
+        .expect("source image digest")
+        .to_string();
+
+    let (status, body) = harness.request(
+        "POST",
+        "/v1.45/images/docker.io/library/tag-source:latest/tag?repo=tag/alias&tag=latest",
+    );
+    assert_eq!(status, 201, "Docker Hub alias tag response={body}");
+
+    let encoded_digest_source = format!("tag-source%40{digest}");
+    let (status, body) = harness.request(
+        "POST",
+        &format!(
+            "/v1.45/images/{encoded_digest_source}/tag?repo=tag/digest&tag=latest"
+        ),
+    );
+    assert_eq!(status, 201, "digest source tag response={body}");
+
+    for tag in ["tag%2Falias%3Alatest", "tag%2Fdigest%3Alatest"] {
+        let (status, body) = harness.request("GET", &format!("/v1.45/images/{tag}/json"));
+        assert_eq!(status, 200, "tagged image inspect response={body}");
+    }
+}
+
+#[test]
 fn docker_compat_image_inspect_created_is_an_rfc3339_string() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "created-format:latest");

@@ -21498,7 +21498,9 @@ fn handle_docker_compat_connection(
                         1,
                     )
                     .map_err(|error| error.to_string())?;
-                execute_volume_remove(&volume_store, name, proof)?;
+                if !execute_volume_remove(&volume_store, name, proof)? {
+                    return Err(format!("no such volume: {name}"));
+                }
                 http_response(204, &[], "text/plain")
             }
             ("GET", "/volumes") => {
@@ -21532,7 +21534,7 @@ fn handle_docker_compat_connection(
                 let record = volume_store
                     .get(name)
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("docker: volume not found: {name}"))?;
+                    .ok_or_else(|| format!("no such volume: {name}"))?;
                 let body = serde_json::json!({
                     "Name": record.name,
                     "Driver": record.driver,
@@ -21864,6 +21866,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         return 409;
     }
     if lowered.contains("not found")
+        || lowered.contains("no such volume")
         || lowered.contains("unknown image")
         || lowered.contains("unknown container")
     {

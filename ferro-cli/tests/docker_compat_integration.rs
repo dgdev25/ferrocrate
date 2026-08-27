@@ -4159,6 +4159,13 @@ fn docker_compat_volume_create_delete_routes_are_mediated() {
 
     let (status, response) = harness.request("DELETE", "/v1.45/volumes/compat-volume");
     assert_eq!(status, 204, "delete body={response}");
+
+    let (status, response) = harness.request("GET", "/v1.45/volumes/compat-volume");
+    assert_eq!(status, 404, "deleted volume inspection body={response}");
+    assert!(
+        response.contains("no such volume"),
+        "deleted volume must identify the missing object: {response}"
+    );
 }
 
 #[test]

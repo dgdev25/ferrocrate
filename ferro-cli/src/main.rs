@@ -13614,11 +13614,12 @@ fn handle_volume_authorized(
                 )
                 .map_err(|error| error.to_string())?;
             let removed = execute_volume_remove(&store, &name, proof)?;
-            if removed {
-                println!("volume rm: {name}");
-            } else {
-                println!("volume rm: not found {name}");
+            if !removed {
+                // Docker reports a missing volume as a daemon error, not as a
+                // silent success: `get <name>: no such volume`, exit 1.
+                return Err(format!("volume rm: get {name}: no such volume"));
             }
+            println!("volume rm: {name}");
         }
     }
     Ok(())
@@ -30796,6 +30797,28 @@ volumes:
             &authorization,
         )
         .expect("rm volume");
+    }
+
+    // S44: `volume rm` of a name that was never created is a daemon error
+    // with exit 1, matching `docker volume rm` on a missing volume.
+    #[test]
+    fn volume_rm_missing_volume_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().to_path_buf();
+        let authorization = test_surface_authorization(&runtime_dir);
+
+        let err = handle_volume(
+            &runtime_dir,
+            VolumeCommands::Rm {
+                name: "fzv-missing".to_string(),
+            },
+            &authorization,
+        )
+        .expect_err("missing volume must not succeed");
+        assert!(
+            err.contains("fzv-missing") && err.contains("no such volume"),
+            "error must name the volume, got {err}"
+        );
     }
 
     #[test]

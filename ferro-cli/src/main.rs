@@ -5440,8 +5440,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Diff { container } => {
                 for change in docker_container_changes(&runtime_dir, &runtime, &container)? {
-                    let kind = match change.kind { 0 => "C", 1 => "A", 2 => "D", _ => "C" };
-                    println!("{kind} {}", change.path);
+                    println!("{}", format_diff_text_line(&change));
                 }
                 Ok(())
             }
@@ -12409,16 +12408,59 @@ fn docker_export_container_archive(runtime_dir: &Path, runtime: &ContainerRuntim
 }
 
 #[cfg(target_os = "linux")]
+/// `docker diff` prints one "<kind> <absolute-path>" line per change.
+fn format_diff_text_line(change: &rootfs_diff::RootfsChange) -> String {
+    let kind = match change.kind { 0 => "C", 1 => "A", 2 => "D", _ => "C" };
+    if change.path.starts_with('/') {
+        format!("{kind} {}", change.path)
+    } else {
+        format!("{kind} /{}", change.path)
+    }
+}
+
 fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requested_id: &str) -> Result<Vec<rootfs_diff::RootfsChange>, String> {
     let id = resolve_container_id(runtime, requested_id)?;
     let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
     let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
     let baseline = runtime_dir.join("containers").join(&record.id).join("rootfs-baseline.json");
+    // Docker injects /etc/resolv.conf, /etc/hostname and /etc/hosts into the
+    // container at start and `docker diff` never reports them. Ferrocrate
+    // writes the same files after the create-time baseline was captured, so
+    // exclude them here or every diff would list resolver noise.
     let excluded = record.mounts.iter().map(|mount| rootfs.join(&mount.target))
-        .chain(record.tmpfs_mounts.iter().map(|mount| rootfs.join(&mount.target))).collect::<Vec<_>>();
+        .chain(record.tmpfs_mounts.iter().map(|mount| rootfs.join(&mount.target)))
+        .chain([
+            rootfs.join("etc/resolv.conf"),
+            rootfs.join("etc/hostname"),
+            rootfs.join("etc/hosts"),
+        ])
+        .collect::<Vec<_>>();
     if rootfs.is_dir() && baseline.is_file() {
-        rootfs_diff::diff(&rootfs, &baseline, &excluded).map_err(|error| format!("docker: container diff failed: {error}"))
+        let mut changes = rootfs_diff::diff(&rootfs, &baseline, &excluded)
+            .map_err(|error| format!("docker: container diff failed: {error}"))?;
+        drop_runtime_injected_changes(&mut changes);
+        Ok(changes)
     } else { Ok(Vec::new()) }
+}
+
+/// Drop the changes the runtime's own start-time writes produce.
+///
+/// Docker binds the resolver, hostname and hosts files into the container at
+/// start, so they live outside the image layer and `docker diff` never reports
+/// them. Ferrocrate writes the same files into the rootfs after the
+/// create-time baseline, which would otherwise surface as resolver noise on
+/// every started container, including a fresh one.
+fn drop_runtime_injected_changes(changes: &mut Vec<rootfs_diff::RootfsChange>) {
+    const INJECTED: [&str; 3] = ["etc/resolv.conf", "etc/hostname", "etc/hosts"];
+    changes.retain(|change| !INJECTED.contains(&change.path.as_str()));
+    // Writing into /etc also bumps the directory's own mtime. Report that
+    // modification only when user content under /etc changed as well.
+    let etc_has_user_changes = changes
+        .iter()
+        .any(|change| change.path.starts_with("etc/") || change.path.starts_with("/etc/"));
+    if !etc_has_user_changes {
+        changes.retain(|change| change.path != "etc" && change.path != "/etc");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -31279,6 +31321,68 @@ volumes:
 
         let err = handle_restart(&runtime, "", 1).expect_err("restart requires container");
         assert!(err.contains("restart: container is required"));
+    }
+
+    // S48: `docker diff` on a freshly started container prints nothing — the
+    // resolver and hostname files the runtime injects at start never count as
+    // changes — and every reported path is absolute.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn container_diff_hides_injected_files_and_prints_absolute_paths() {
+        use crate::linux_cli::{docker_container_changes, format_diff_text_line};
+        use ferro_core::rootfs_diff;
+        use ferro_core::sqlite_container_store::SqliteContainerStore;
+
+        let temp = configured_cli_runtime("disabled");
+        let container_dir = temp.path().join("containers").join("fz48-app");
+        let rootfs = container_dir.join("rootfs");
+        std::fs::create_dir_all(rootfs.join("etc")).expect("rootfs etc");
+        std::fs::create_dir_all(rootfs.join("tmp")).expect("rootfs tmp");
+        std::fs::create_dir_all(rootfs.join("opt")).expect("rootfs opt");
+        std::fs::write(rootfs.join("etc").join("os-release"), b"alpine").expect("os-release");
+        std::fs::write(rootfs.join("tmp").join("keep"), b"keep").expect("tmp keep");
+        let baseline = rootfs_diff::capture(&rootfs, &[]).expect("baseline capture");
+        rootfs_diff::write_baseline(&container_dir.join("rootfs-baseline.json"), &baseline)
+            .expect("write baseline");
+
+        let store = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
+        let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "fz48-app",
+            "pid": 0,
+            "image": "alpine:3.20",
+            "command": ["sleep", "300"],
+            "created_at_unix": 1,
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "running"
+        }))
+        .expect("container record");
+        store.put(&record).expect("store container");
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        // A fresh container: empty diff, exactly like Docker.
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("fresh diff");
+        assert!(changes.is_empty(), "fresh container must report no changes");
+
+        // Runtime-injected files appear at start and still change nothing.
+        std::fs::write(rootfs.join("etc").join("resolv.conf"), b"nameserver 10.0.2.3").expect("resolv.conf");
+        std::fs::write(rootfs.join("etc").join("hostname"), b"fz48-app").expect("hostname");
+        std::fs::write(rootfs.join("etc").join("hosts"), b"127.0.0.1 localhost").expect("hosts");
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("injected diff");
+        assert!(changes.is_empty(), "injected resolver files must not surface: {changes:?}");
+
+        // User writes surface with Docker's absolute paths and change kinds:
+        // a file added under an existing directory modifies the directory
+        // entry and adds the file.
+        std::fs::write(rootfs.join("tmp").join("keep"), b"changed").expect("modify tmp/keep");
+        std::fs::write(rootfs.join("opt").join("marker"), b"x").expect("opt marker");
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("user diff");
+        let lines = changes.iter().map(format_diff_text_line).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            lines,
+            ["A /opt/marker", "C /opt", "C /tmp/keep"].iter().map(|line| line.to_string()).collect::<std::collections::BTreeSet<_>>(),
+            "diff lines must use Docker's absolute-path format"
+        );
     }
 
     #[test]

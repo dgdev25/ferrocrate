@@ -1,0 +1,64 @@
+{
+ "run": "2026-08-27T06:06Z",
+ "source": "fuzz",
+ "reason": "stdout",
+ "label": "run-detached",
+ "sequence": [
+  {
+   "label": "run-detached",
+   "args": [
+    "run",
+    "-d",
+    "--name",
+    "fz-fa02eb6a",
+    "alpine:3.20",
+    "sleep",
+    "300"
+   ]
+  },
+  {
+   "label": "rm-force",
+   "args": [
+    "rm",
+    "-f",
+    "fz-fa02eb6a"
+   ]
+  }
+ ],
+ "divergence": {
+  "step": 0,
+  "label": "run-detached",
+  "args": [
+   "run",
+   "-d",
+   "--name",
+   "fz-fa02eb6a",
+   "alpine:3.20",
+   "sleep",
+   "300"
+  ],
+  "docker": {
+   "exit": 0,
+   "stdout": "fabeb67a97405512e954858e13323bd9cb407333335e1c2e4113de6a252ec59f\n",
+   "stderr": "",
+   "state": {
+    "containers": [
+     "fz-fa02eb6a running"
+    ],
+    "images": [],
+    "volumes": []
+   }
+  },
+  "ferrocrate": {
+   "exit": 0,
+   "stdout": "run: container_id=61704f0f667a91421c1184d87d33c0fb pid=263252 network_backend=ebpf\n",
+   "stderr": "",
+   "state": {
+    "containers": [],
+    "images": [],
+    "volumes": []
+   }
+  },
+  "reason": "stdout"
+ }
+}

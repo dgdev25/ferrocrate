@@ -233,7 +233,21 @@ def cleanup(tag: str) -> None:
 # not an engine-formatted report. Compared after masking. Everything else is
 # verified through exit status and state: ferrocrate's "verb: key=value" output
 # format for those verbs is a known, ticketed divergence class.
-COMPARE_STDOUT = {"logs", "exec", "wait"}
+COMPARE_STDOUT = {"logs", "exec", "wait", "diff"}
+
+
+def diff_changes(text: str) -> set[str]:
+    """Parse `diff` output into a set of "<kind> <path>" strings.
+
+    docker prints "A /etc/resolv.conf", ferro "A etc/resolv.conf"; the leading
+    slash and the line order differ legitimately, the set of changes does not.
+    """
+    changes = set()
+    for line in text.splitlines():
+        m = re.match(r"^([ACD])\s+/?(\S+)", line.strip())
+        if m:
+            changes.add(f"{m.group(1)} {m.group(2)}")
+    return changes
 
 # Commands that legitimately block while the container runs; capped so a `wait`
 # on a live container does not burn the full step timeout on both engines.
@@ -256,8 +270,12 @@ def run_sequence(seq: list[tuple[str, list[str]]], tag: str) -> dict | None:
             agree_status = d_crash and f_crash and d_code == f_code
         else:
             agree_status = (d_code == 0) == (f_code == 0)
-        agree_stdout = (normalise(d_out) == normalise(f_out)
-                        if label in COMPARE_STDOUT and d_code == 0 and f_code == 0 else True)
+        if label == "diff" and d_code == 0 and f_code == 0:
+            agree_stdout = diff_changes(d_out) == diff_changes(f_out)
+        elif label in COMPARE_STDOUT and d_code == 0 and f_code == 0:
+            agree_stdout = normalise(d_out) == normalise(f_out)
+        else:
+            agree_stdout = True
         d_state, f_state = DOCKER.state(tag), FERROCRATE.state(tag)
         agree_state = d_state == f_state
         if not (agree_status and agree_stdout and agree_state):

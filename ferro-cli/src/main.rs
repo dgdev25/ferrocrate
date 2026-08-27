@@ -19261,7 +19261,11 @@ fn handle_docker_compat_connection(
                 200,
                 "OK\n".as_bytes(),
                 "text/plain",
-                &[("API-Version", DOCKER_API_VERSION)],
+                &[
+                    ("API-Version", DOCKER_API_VERSION),
+                    ("Ostype", "linux"),
+                    ("Builder-Version", "2"),
+                ],
             ),
             // Docker's client pings with HEAD first and only falls back to
             // GET on failure; answer both.
@@ -19269,7 +19273,11 @@ fn handle_docker_compat_connection(
                 200,
                 &[],
                 "text/plain",
-                &[("API-Version", DOCKER_API_VERSION)],
+                &[
+                    ("API-Version", DOCKER_API_VERSION),
+                    ("Ostype", "linux"),
+                    ("Builder-Version", "2"),
+                ],
             ),
             ("POST", "/auth") => {
                 let payload: serde_json::Value = serde_json::from_slice(&request.body)

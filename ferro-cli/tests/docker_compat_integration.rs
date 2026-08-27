@@ -364,6 +364,30 @@ fn docker_compat_routes_support_version_prefix() {
             .any(|line| line.eq_ignore_ascii_case("API-Version: 1.45")),
         "Docker API negotiation header missing: {ping_headers}"
     );
+    for header in ["Ostype: linux", "Builder-Version: 2"] {
+        assert!(
+            ping_headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case(header)),
+            "Docker ping header missing: {header}; headers={ping_headers}"
+        );
+    }
+
+    let head_ping = harness.request_bytes_raw("HEAD", "/v1.45/_ping", "text/plain", &[]);
+    let head_ping = String::from_utf8_lossy(&head_ping);
+    let (head_headers, head_body) = head_ping
+        .split_once("\r\n\r\n")
+        .expect("HEAD ping response headers");
+    assert!(head_headers.starts_with("HTTP/1.1 200"), "HEAD ping={head_headers}");
+    assert!(head_body.is_empty(), "HEAD ping must not include a body");
+    for header in ["API-Version: 1.45", "Ostype: linux", "Builder-Version: 2"] {
+        assert!(
+            head_headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case(header)),
+            "Docker HEAD ping header missing: {header}; headers={head_headers}"
+        );
+    }
 
     let routes = [
         "/_ping",

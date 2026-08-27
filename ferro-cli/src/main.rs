@@ -16881,7 +16881,7 @@ fn append_compose_file_resource_mounts(
 #[derive(Debug, serde::Deserialize)]
 struct DockerCreateRequest {
     #[serde(rename = "Image")]
-    image: String,
+    image: Option<String>,
     #[serde(rename = "Cmd")]
     cmd: Option<Vec<String>>,
     #[serde(rename = "Env")]
@@ -16896,6 +16896,8 @@ struct DockerCreateRequest {
     labels: Option<HashMap<String, String>>,
     #[serde(rename = "Volumes")]
     volumes: Option<HashMap<String, serde_json::Value>>,
+    #[serde(rename = "ExposedPorts")]
+    exposed_ports: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "Healthcheck")]
     healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "Tty", default)]
@@ -21963,6 +21965,8 @@ fn docker_status_for_error(err: &str) -> u16 {
         || lowered.contains("missing")
         || lowered.contains("unsupported")
         || lowered.contains("too large")
+        || lowered.contains("minimum memory limit")
+        || lowered.contains("config cannot be empty")
         || lowered.contains("bad request")
         || lowered.contains("event query parameter")
         || lowered.contains("logs query parameter")
@@ -22976,8 +22980,12 @@ fn normalize_docker_api_path(path: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
-    let request: DockerCreateRequest =
-        serde_json::from_slice(body).map_err(|err| err.to_string())?;
+    if body.is_empty() {
+        return Err("invalid JSON: EOF".to_string());
+    }
+    let request: DockerCreateRequest = serde_json::from_slice(body)
+        .map_err(|err| format!("invalid JSON: {err}"))?;
+    validate_docker_create_request(&request)?;
     let name = name
         .map(|name| validate_docker_container_name(&name).map(|_| name))
         .transpose()?;
@@ -23054,7 +23062,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         .and_then(|config| config.options.clone())
         .unwrap_or_default();
     Ok(DockerCreateSpec {
-        image: request.image,
+        image: request.image.expect("validated Docker create image"),
         cmd,
         env,
         labels,
@@ -23081,6 +23089,63 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
             .map(|duration| duration.as_secs())
             .unwrap_or(0),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_create_request(request: &DockerCreateRequest) -> Result<(), String> {
+    if request.image.is_none() {
+        return Err("config cannot be empty in order to create a container".to_string());
+    }
+    if let Some(exposed_ports) = request.exposed_ports.as_ref() {
+        for port in exposed_ports.keys() {
+            validate_docker_port_spec(port)?;
+        }
+    }
+    let Some(host_config) = request.host_config.as_ref() else {
+        return Ok(());
+    };
+    if host_config.memory.is_some_and(|memory| memory > 0 && memory < 6 * 1024 * 1024) {
+        return Err("Minimum memory limit allowed is 6MB".to_string());
+    }
+    if let Some(policy) = host_config.restart_policy.as_ref() {
+        validate_docker_restart_policy(policy)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_port_spec(port: &str) -> Result<(), String> {
+    let invalid = || format!("invalid JSON: invalid port '{port}': invalid syntax");
+    let (number, protocol) = match port.split_once('/') {
+        Some((number, protocol)) if !protocol.contains('/') => (number, protocol),
+        Some(_) => return Err(invalid()),
+        None => (port, "tcp"),
+    };
+    if number.is_empty()
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+        || number.parse::<u16>().ok().filter(|number| *number > 0).is_none()
+        || !matches!(protocol, "tcp" | "udp" | "sctp")
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docker_restart_policy(policy: &DockerRestartPolicy) -> Result<(), String> {
+    if policy.maximum_retry_count < 0 {
+        return Err("invalid restart policy: maximum retry count cannot be negative".to_string());
+    }
+    let name = if policy.name.trim().is_empty() { "no" } else { policy.name.trim() };
+    if !matches!(name, "no" | "always" | "on-failure" | "unless-stopped") {
+        return Err(format!(
+            "invalid restart policy: unknown policy '{name}'; use one of 'no', 'always', 'on-failure', or 'unless-stopped'"
+        ));
+    }
+    if name != "on-failure" && policy.maximum_retry_count != 0 {
+        return Err("invalid restart policy: maximum retry count can only be used with 'on-failure'".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -32424,6 +32489,57 @@ volumes:
             None,
         )
         .is_err());
+    }
+
+    /// Mirrors Moby's `integration/container/TestCreateValidation` request
+    /// boundary: malformed create bodies must fail before unsupported-field
+    /// translation or pending-container mutation.
+    #[test]
+    fn docker_create_validation_matches_moby_errors_and_statuses() {
+        let invalid = [
+            (b"".as_slice(), "invalid JSON: EOF"),
+            (
+                br#"{}"#.as_slice(),
+                "config cannot be empty in order to create a container",
+            ),
+            (
+                br#"{"Image":"busybox","ExposedPorts":{"19039;1230":{}}}"#.as_slice(),
+                "invalid JSON: invalid port '19039;1230': invalid syntax",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"Memory":6291455,"CpuShares":1}}"#
+                    .as_slice(),
+                "Minimum memory limit allowed is 6MB",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"mystery","MaximumRetryCount":0}}}"#
+                    .as_slice(),
+                "invalid restart policy: unknown policy 'mystery'; use one of 'no', 'always', 'on-failure', or 'unless-stopped'",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":-1}}}"#
+                    .as_slice(),
+                "invalid restart policy: maximum retry count cannot be negative",
+            ),
+            (
+                br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"always","MaximumRetryCount":1}}}"#
+                    .as_slice(),
+                "invalid restart policy: maximum retry count can only be used with 'on-failure'",
+            ),
+        ];
+
+        for (body, expected) in invalid {
+            let error = parse_docker_create_spec(body, None).expect_err(expected);
+            assert_eq!(error, expected);
+            assert_eq!(docker_status_for_error(&error), 400, "{error}");
+        }
+
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":0}}}"#,
+            None,
+        )
+        .expect("on-failure with zero retries is valid");
+        assert_eq!(spec.restart_policy, "on-failure");
     }
 
     #[test]

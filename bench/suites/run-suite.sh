@@ -471,7 +471,7 @@ PY
     passed=0; failed=0
     while IFS= read -r -d '' v; do
       name="$(basename "$v" .t)"
-      if RUNTIME="$RUNTIME" timeout 120 "$v" > "$WORK/$name.out" 2>&1; then
+      if ( cd "$DIR" && RUNTIME="$RUNTIME" timeout 120 "$v" ) > "$WORK/$name.out" 2>&1; then
         record "$name" pass 0 "" 0; passed=$((passed+1))
       else
         record "$name" fail 0 "$(tail -c 400 "$WORK/$name.out")" 1; failed=$((failed+1))

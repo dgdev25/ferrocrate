@@ -284,24 +284,11 @@ FROZEN
       buildkit-dockerfile) PKG=./frontend/dockerfile/...;;
     esac
     # A pinned HEAD whose go.mod has moved ahead of its vendor/ tree makes
-    # -mod=vendor abort with "inconsistent vendoring" before any test runs,
-    # which the summary reads as zero tests. Probe once and fall back to
-    # -mod=mod so the suite runs instead of silently recording nothing.
-    MODFLAG="-mod=vendor"
-    if ! ( cd "$DIR" && go list -mod=vendor $PKG >/dev/null 2>&1 ); then
-      echo "vendor tree out of sync with go.mod; using -mod=mod"
-      MODFLAG="-mod=mod"
-    fi
     echo "go test $PKG (this takes a while)"
     # -mod=vendor is required by docker/cli, which vendors, and fatal for
     # docker/compose, which does not: it fails with inconsistent vendoring and
     # collects zero tests. Decide per repository.
     MODFLAG=""; [ -d "$DIR/vendor" ] && MODFLAG="-mod=vendor"
-    ( cd "$DIR" && go test -count=1 $MODFLAG -timeout "${GO_TEST_TIMEOUT:-45m}" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
-    if [ ! -s "$WORK/go.json" ]; then
-      echo "$SUITE/$ENGINE: go test produced no output; first error follows" >&2
-      head -5 "$WORK/go.err" >&2
-    fi
     # BuildKit's harness reaches the engine only through its dockerd worker:
     # TEST_DOCKERD=1 registers it, Moby.New starts a "dockerd" per sandbox and
     # proxies BuildKit gRPC through that daemon's POST /grpc hijack (the route
@@ -441,7 +428,15 @@ PYEOF
     # pools have been fully subnetted") — an env failure that swamps the
     # oracle. Cap parallel tests; 4 leaves headroom in the pool.
     PAR="${GO_TEST_PARALLEL:-4}"
-    ( cd "$DIR" && "${PRE[@]}" go test -count=1 "$MODFLAG" -timeout "${GO_TEST_TIMEOUT:-45m}" -parallel "$PAR" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    # MODFLAG is empty or "-mod=vendor", so leave it unquoted: a quoted empty
+    # value reaches go test as an empty-string positional, which go resolves to
+    # the package "." ("no Go files in <repo root>"), and the run records zero
+    # tests (every compose-e2e run since 3f242299 failed exactly this way).
+    ( cd "$DIR" && "${PRE[@]}" go test -count=1 $MODFLAG -timeout "${GO_TEST_TIMEOUT:-45m}" -parallel "$PAR" -json $PKG 2>"$WORK/go.err" ) > "$WORK/go.json" || true
+    if [ ! -s "$WORK/go.json" ]; then
+      echo "$SUITE/$ENGINE: go test produced no output; first error follows" >&2
+      head -5 "$WORK/go.err" >&2
+    fi
     [ -n "${GATEPID:-}" ] && kill "$GATEPID" 2>/dev/null
     python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
 import json, re, sys

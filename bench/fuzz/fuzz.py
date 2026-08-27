@@ -227,6 +227,7 @@ def main() -> int:
                 }
                 log.write(json.dumps(record) + "\n"); log.flush()
                 seed = BENCH / "fuzz" / "seeds" / f"{time.strftime('%Y%m%d')}-{divergence['label']}-{tag}.json"
+                seed.parent.mkdir(parents=True, exist_ok=True)
                 seed.write_text(json.dumps(record, indent=1))
                 print(f"DIVERGENCE {divergence['reason']} at step {divergence['step']} ({divergence['label']}); "
                       f"minimal sequence {len(minimal)} steps -> {seed.name}")

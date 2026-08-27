@@ -324,6 +324,22 @@ struct BaseImageInfo {
     digest: Option<String>,
     onbuild: Vec<String>,
     env: Vec<String>,
+    config: BaseConfig,
+}
+
+/// The parts of a base image's config a stage inherits when its Dockerfile does
+/// not set them. A Dockerfile that adds only a COPY previously produced an image
+/// with no command at all, so `run` had nothing to start (S24).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BaseConfig {
+    entrypoint: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+    workdir: Option<String>,
+    user: Option<String>,
+    stop_signal: Option<String>,
+    exposed_ports: Vec<String>,
+    volumes: Vec<String>,
+    labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,6 +808,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
                 digest: None,
                 onbuild: Vec::new(),
                 env: Vec::new(),
+                config: BaseConfig::default(),
             }
         } else {
             resolve_base_image(store, runtime_dir, &stage.base, authority)?
@@ -1246,19 +1263,45 @@ fn execute_stages_and_publish(
     let final_output = built[final_idx]
         .take()
         .ok_or_else(|| DockerfileBuildError::Invalid("final stage was not built".to_string()))?;
+    // S24: what the Dockerfile does not set, the image inherits from its base.
+    // The environment is composed the same way the RUN steps already compose it,
+    // so the built image carries the base's PATH.
+    let final_base = &base_infos[final_idx].config;
+    let final_env = stage_environment(&base_infos[final_idx], &final_stage.env);
+    let mut final_labels = final_base.labels.clone();
+    final_labels.extend(
+        final_stage
+            .labels
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    let (entrypoint, cmd) = inherited_command(
+        final_stage.entrypoint.as_deref(),
+        final_stage.cmd.as_deref(),
+        final_base.entrypoint.as_deref(),
+        final_base.cmd.as_deref(),
+    );
+    let exposed_ports = merge_unique(&final_base.exposed_ports, &final_stage.exposed_ports);
+    let volumes = merge_unique(&final_base.volumes, &final_stage.volumes);
     let config_json = build_config_json(
         final_stage.healthcheck.clone(),
-        &final_stage.env,
-        &final_stage.labels,
-        final_stage.workdir.as_deref(),
-        final_stage.user.as_deref(),
-        final_stage.entrypoint.clone(),
-        final_stage.cmd.clone(),
-        final_stage.stop_signal.as_deref(),
+        &final_env,
+        &final_labels,
+        final_stage
+            .workdir
+            .as_deref()
+            .or(final_base.workdir.as_deref()),
+        final_stage.user.as_deref().or(final_base.user.as_deref()),
+        entrypoint,
+        cmd,
+        final_stage
+            .stop_signal
+            .as_deref()
+            .or(final_base.stop_signal.as_deref()),
         final_stage.author.as_deref(),
         &final_stage.onbuild,
-        &final_stage.exposed_ports,
-        &final_stage.volumes,
+        &exposed_ports,
+        &volumes,
     );
     let config_bytes = config_json.as_bytes();
     let config_digest = sha256_digest_bytes(config_bytes);
@@ -5348,6 +5391,7 @@ fn resolve_base_image(
             digest: None,
             onbuild: Vec::new(),
             env: Vec::new(),
+            config: BaseConfig::default(),
         });
     }
 
@@ -5367,12 +5411,80 @@ fn resolve_base_image(
         .map_err(|err| DockerfileBuildError::Invalid(err.to_string()))?;
     let onbuild = load_base_onbuild_triggers(runtime_dir, &manifest.config.digest)?;
     let env = load_base_environment(runtime_dir, &manifest.config.digest)?;
+    let config = load_base_config(runtime_dir, &manifest.config.digest)?;
     Ok(BaseImageInfo {
         layers,
         descriptors: manifest.layers,
         digest: Some(record.digest),
         onbuild,
         env,
+        config,
+    })
+}
+
+/// Read the base image's runtime config. Missing or malformed fields yield
+/// defaults rather than an error: an image is still usable without them.
+fn load_base_config(
+    runtime_dir: &Path,
+    config_digest: &str,
+) -> Result<BaseConfig, DockerfileBuildError> {
+    let path = config_path(runtime_dir, config_digest);
+    if !path.exists() {
+        return Ok(BaseConfig::default());
+    }
+    let bytes = fs::read(path)?;
+    let document: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| DockerfileBuildError::Invalid(format!("base config JSON: {err}")))?;
+    let Some(config) = document.get("config") else {
+        return Ok(BaseConfig::default());
+    };
+
+    let strings = |key: &str| -> Option<Vec<String>> {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+    };
+    let text = |key: &str| -> Option<String> {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let keys = |key: &str| -> Vec<String> {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+
+    Ok(BaseConfig {
+        entrypoint: strings("Entrypoint").filter(|values| !values.is_empty()),
+        cmd: strings("Cmd").filter(|values| !values.is_empty()),
+        workdir: text("WorkingDir"),
+        user: text("User"),
+        stop_signal: text("StopSignal"),
+        exposed_ports: keys("ExposedPorts"),
+        volumes: keys("Volumes"),
+        labels: config
+            .get("Labels")
+            .and_then(serde_json::Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|text| (key.clone(), text.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -5441,6 +5553,36 @@ fn load_base_environment(
 
 /// Compose base-image and Dockerfile `ENV` values. Dockerfile assignments
 /// override matching base keys but preserve base PATH/toolchain values.
+/// Decide a stage's entrypoint and command from its own instructions and its
+/// base image's. Docker's rule: a stage that sets ENTRYPOINT drops the inherited
+/// CMD unless it sets CMD too, so an inherited command cannot be handed to an
+/// unrelated entrypoint.
+fn inherited_command(
+    stage_entrypoint: Option<&[String]>,
+    stage_cmd: Option<&[String]>,
+    base_entrypoint: Option<&[String]>,
+    base_cmd: Option<&[String]>,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let entrypoint = stage_entrypoint.or(base_entrypoint).map(<[String]>::to_vec);
+    let cmd = match (stage_cmd, stage_entrypoint) {
+        (Some(cmd), _) => Some(cmd.to_vec()),
+        (None, Some(_)) => None,
+        (None, None) => base_cmd.map(<[String]>::to_vec),
+    };
+    (entrypoint, cmd)
+}
+
+/// Base values first, then the stage's own, without duplicates.
+fn merge_unique(base: &[String], stage: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for value in base.iter().chain(stage) {
+        if !merged.iter().any(|existing| existing == value) {
+            merged.push(value.clone());
+        }
+    }
+    merged
+}
+
 fn stage_environment(base: &BaseImageInfo, stage: &[String]) -> Vec<String> {
     let mut env = Vec::new();
     for entry in base.env.iter().chain(stage) {
@@ -6260,6 +6402,58 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_stage_inherits_the_base_command_and_docker_s_entrypoint_rule() {
+        let base_entry = vec!["/docker-entrypoint.sh".to_string()];
+        let base_cmd = vec!["nginx".to_string(), "-g".to_string()];
+
+        // S24: a Dockerfile that only COPYs inherits both.
+        assert_eq!(
+            super::inherited_command(None, None, Some(&base_entry), Some(&base_cmd)),
+            (Some(base_entry.clone()), Some(base_cmd.clone()))
+        );
+
+        // Setting ENTRYPOINT alone drops the inherited CMD.
+        let own_entry = vec!["/app/run".to_string()];
+        assert_eq!(
+            super::inherited_command(Some(&own_entry), None, Some(&base_entry), Some(&base_cmd)),
+            (Some(own_entry.clone()), None)
+        );
+
+        // Setting both keeps both.
+        let own_cmd = vec!["--serve".to_string()];
+        assert_eq!(
+            super::inherited_command(
+                Some(&own_entry),
+                Some(&own_cmd),
+                Some(&base_entry),
+                Some(&base_cmd)
+            ),
+            (Some(own_entry), Some(own_cmd.clone()))
+        );
+
+        // CMD alone overrides the inherited command, entrypoint still inherited.
+        assert_eq!(
+            super::inherited_command(None, Some(&own_cmd), Some(&base_entry), Some(&base_cmd)),
+            (Some(base_entry), Some(own_cmd))
+        );
+    }
+
+    #[test]
+    fn merge_unique_keeps_base_order_and_drops_duplicates() {
+        assert_eq!(
+            super::merge_unique(
+                &["80/tcp".to_string(), "443/tcp".to_string()],
+                &["443/tcp".to_string(), "8080/tcp".to_string()]
+            ),
+            vec![
+                "80/tcp".to_string(),
+                "443/tcp".to_string(),
+                "8080/tcp".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn layer_cap_defaults_high_and_honours_the_override() {
         // S23: a one gibibyte cap rejected ordinary application images.
         assert_eq!(super::DEFAULT_MAX_LAYER_SIZE, 4 * 1024 * 1024 * 1024);
@@ -6790,6 +6984,7 @@ mod tests {
                 "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
                 "RUSTUP_HOME=/usr/local/rustup".to_string(),
             ],
+            config: super::BaseConfig::default(),
         };
 
         assert_eq!(
@@ -6935,6 +7130,7 @@ mod tests {
             digest: None,
             onbuild: Vec::new(),
             env: Vec::new(),
+            config: super::BaseConfig::default(),
         };
         let keyed = BaseImageInfo {
             digest: Some("sha256:base".to_string()),
@@ -6980,6 +7176,7 @@ mod tests {
                     digest: None,
                     onbuild: Vec::new(),
                     env: Vec::new(),
+                    config: super::BaseConfig::default(),
                 }],
                 BUILD_CACHE_PLATFORM
             )

@@ -228,9 +228,11 @@ FROZEN
     echo "go test $PKG (this takes a while)"
     # BuildKit's harness reaches the engine only through its dockerd worker:
     # TEST_DOCKERD=1 registers it, Moby.New starts a "dockerd" per sandbox and
-    # proxies BuildKit gRPC through that daemon's /grpc endpoint (the route the
-    # docker-driver uses, and the one Ferrocrate implements). Two obstacles on
-    # this host, both solved here instead of in the suite:
+    # proxies BuildKit gRPC through that daemon's POST /grpc hijack (the route
+    # the docker-driver uses). Ferrocrate answers 404 on /grpc (ticket S34), so
+    # every worker-dependent test fails with "error reading server preface"
+    # until that route exists; the S31 ping gate alone cannot fix the suite.
+    # Two obstacles on this host, both solved here instead of in the suite:
     #  1. Moby.New calls requireRoot() and we have no sudo. `unshare -Ur` gives
     #     the test process a user namespace with uid 0, which passes the check.
     #  2. Inside that namespace supplementary groups are gone, so the test

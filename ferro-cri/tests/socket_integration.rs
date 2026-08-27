@@ -552,7 +552,12 @@ async fn cri_socket_serves_runtime_and_image_requests() {
         .expect("image fs info rpc")
         .into_inner();
     assert_eq!(fs_info.image_filesystems.len(), 1);
-    assert!(fs_info.image_filesystems[0].mountpoint.ends_with("/images"));
+    assert!(fs_info.image_filesystems[0]
+        .fs_id
+        .as_ref()
+        .expect("filesystem identifier")
+        .mountpoint
+        .ends_with("/images"));
 
     server.abort();
     let _ = server.await;

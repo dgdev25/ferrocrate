@@ -3616,6 +3616,69 @@ fn docker_compat_attach_accepts_pre_start_hijack_handshake() {
 }
 
 #[test]
+fn run_detached_stdout_is_only_the_container_id() {
+    // S28: Docker writes the bare id to stdout so CID=$(docker run -d ...)
+    // works. Ferrocrate wrote pull progress and a decorated line there, which
+    // broke every script that reads the id back, including this project's own
+    // suite harness when it extracted a registry container.
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/run-detached-stdout:latest");
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args([
+            "run",
+            "-d",
+            "--name",
+            "run-detached-stdout",
+            "--network",
+            "none",
+            "compat/run-detached-stdout:latest",
+            "/bin/busybox",
+            "sh",
+            "-c",
+            "sleep 5",
+        ])
+        .output()
+        .expect("run detached");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    assert!(
+        output.status.success(),
+        "run -d failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "stdout must be exactly the id, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("container_id") && !stdout.contains("pull:") && !stdout.contains("run:"),
+        "diagnostics must go to stderr, got: {stdout:?}"
+    );
+    // The property that matters: what stdout gives back must address the
+    // container. The id's own shape is a separate concern, filed as S61.
+    let removed = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["rm", "-f", stdout])
+        .output()
+        .expect("remove by the captured id");
+    assert!(
+        removed.status.success(),
+        "the id from stdout must address the container, got {stdout:?}: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+}
+
+#[test]
 fn docker_compat_pre_start_hijack_streams_foreground_output_after_start() {
     if nix::unistd::geteuid().is_root() {
         eprintln!("skipping rootful foreground-attach fixture");

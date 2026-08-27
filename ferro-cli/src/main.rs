@@ -6953,10 +6953,15 @@ fn handle_run(
         }
     };
     let record = run(forced_id).map_err(|err| err.to_string())?;
-    println!(
+    // S28: Docker writes the bare container id to stdout and nothing else, so
+    // that `CID=$(docker run -d ...)` captures an id. Diagnostics belong on
+    // stderr; a decorated line here broke every script that reads the id back,
+    // including this project's own test harness.
+    eprintln!(
         "run: container_id={} pid={} network_backend={}",
         record.id, record.pid, effective_backend
     );
+    println!("{}", record.id);
     if rm {
         wait_for_container_exit(runtime, &record.id)?;
         runtime.remove(&record.id).map_err(|err| err.to_string())?;
@@ -8271,7 +8276,9 @@ fn dispatch_remote_socket(
                 )?;
                 request("DELETE", format!("/containers/{id}"))?;
             }
-            println!("run: id={id}");
+            // S28: the id on stdout, bare, exactly as Docker does. The
+            // remote path had the same decoration as the native one.
+            println!("{id}");
             Ok(())
         })(),
         Commands::Build {
@@ -14403,10 +14410,10 @@ fn execute_image_pull(
         return Ok(());
     }
     let runtime_dir = runtime_dir();
-    println!("pull: fetching image={}", plan.canonical_reference());
+    eprintln!("pull: fetching image={}", plan.canonical_reference());
     ferro_core::image_fetch::pull_image_with_store_authorized(&runtime_dir, &plan, store, permit)
         .map_err(|error| error.to_string())?;
-    println!("pull: image={}", plan.canonical_reference());
+    eprintln!("pull: image={}", plan.canonical_reference());
     Ok(())
 }
 

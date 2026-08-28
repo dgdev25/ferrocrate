@@ -25274,7 +25274,14 @@ fn buildkit_gateway_read_file(
     source: &BuildkitDockerfileSource,
     request: &buildkit_proto::moby::buildkit::v1::frontend::ReadFileRequest,
 ) -> Result<Vec<u8>, String> {
-    if request.file_path == format!("{}.dockerignore", source.filename) {
+    // The client Dockerfile frontend probes the context-root `.dockerignore`
+    // through the gateway before it parses the Dockerfile.  A Dockerfile with
+    // a custom filename also has an optional sibling `<filename>.dockerignore`.
+    // Neither file is retained by this compatibility frontend, but their
+    // absence is represented by an empty read rather than a gateway error.
+    if request.file_path == ".dockerignore"
+        || request.file_path == format!("{}.dockerignore", source.filename)
+    {
         return Ok(Vec::new());
     }
     if request.file_path != source.filename {
@@ -34504,6 +34511,16 @@ volumes:
         )
         .expect("absent Dockerfile-specific ignore file");
         assert!(dockerignore.is_empty());
+
+        let context_dockerignore = super::buildkit_gateway_read_file(
+            &source,
+            &ReadFileRequest {
+                file_path: ".dockerignore".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("absent context Dockerfile ignore file");
+        assert!(context_dockerignore.is_empty());
     }
 
     #[test]

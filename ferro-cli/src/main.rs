@@ -82,7 +82,7 @@ use ferro_core::image_manifest::{
     parse_image_manifest, Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE,
     OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
-use ferro_core::image_store::LocalImageStore;
+use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use ferro_core::image_tagging::{
     canonicalize_reference, execute_image_tag_authorized, normalize_selector, prepare_image_tag,
     resolve_reference, ImageSelector,
@@ -11281,11 +11281,15 @@ fn prefetch_dockerfile_bases(
     for base in ferro_core::dockerfile_build::dockerfile_external_base_images(dockerfile)
         .map_err(|error| error.to_string())?
     {
+        let selector = normalize_selector(&base).map_err(|error| error.to_string())?;
         if resolve_reference(store, &base)
             .map_err(|error| error.to_string())?
             .is_some()
         {
             continue;
+        }
+        if selector.is_local_only() {
+            return Err(format!("build: base image not found locally: {base}"));
         }
         let parsed = parse_image_reference(&base).map_err(|error| error.to_string())?;
         let supplied_auth = session_auth.and_then(|auth| auth.get(&parsed.registry));
@@ -12978,6 +12982,30 @@ fn handle_rmi(
 ) -> Result<(), String> {
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
     handle_rmi_authorized(store, image, force, &origin, authorization)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug)]
+enum ImageRemoveError {
+    Store(ImageStoreError),
+    Other(String),
+}
+
+impl std::fmt::Display for ImageRemoveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::Other(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for ImageRemoveError {}
+
+impl From<ImageStoreError> for ImageRemoveError {
+    fn from(error: ImageStoreError) -> Self {
+        Self::Store(error)
+    }
 }
 
 fn handle_rmi_authorized(
@@ -12986,11 +13014,11 @@ fn handle_rmi_authorized(
     force: bool,
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
-) -> Result<(), String> {
-    let selector = normalize_selector(image).map_err(|err| err.to_string())?;
+) -> Result<(), ImageRemoveError> {
+    let selector = normalize_selector(image).map_err(|err| ImageRemoveError::Other(err.to_string()))?;
     let record = resolve_reference(store, image)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| format!("rmi: not found {}", selector.canonical()))?;
+        .map_err(|err| ImageRemoveError::Other(err.to_string()))?
+        .ok_or_else(|| ImageRemoveError::Other(format!("rmi: not found {}", selector.canonical())))?;
     match selector {
         ImageSelector::Named(canonical) => {
             let proof = authorization
@@ -13001,13 +13029,12 @@ fn handle_rmi_authorized(
                     &record.digest,
                     1,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| ImageRemoveError::Other(error.to_string()))?;
             execute_image_delete(store, &canonical, &record.digest, proof)
+                .map_err(ImageRemoveError::Other)
         }
         ImageSelector::IdPrefix(_) => {
-            let plan = store
-                .prepare_digest_delete(&record.digest, force)
-                .map_err(|error| error.to_string())?;
+            let plan = store.prepare_digest_delete(&record.digest, force)?;
             let mut permits = Vec::with_capacity(plan.references().len());
             for reference in plan.references() {
                 match authorization.authorize_image_binding(
@@ -13019,17 +13046,21 @@ fn handle_rmi_authorized(
                 ) {
                     Ok(permit) => permits.push(permit),
                     Err(error) => {
+                        let mut cleanup_error = None;
                         for permit in permits {
-                            permit.finish(false).map_err(|finish| finish.to_string())?;
+                            if let Err(finish) = permit.finish(false) {
+                                cleanup_error.get_or_insert(finish);
+                            }
                         }
-                        return Err(error.to_string());
+                        if let Some(finish) = cleanup_error {
+                            return Err(ImageRemoveError::Other(finish.to_string()));
+                        }
+                        return Err(ImageRemoveError::Other(error.to_string()));
                     }
                 }
             }
             let digest = plan.digest().to_string();
-            let removed = store
-                .execute_digest_delete_authorized(plan, permits)
-                .map_err(|error| error.to_string())?;
+            let removed = store.execute_digest_delete_authorized(plan, permits)?;
             if removed {
                 println!("rmi: removed {digest}");
             } else {
@@ -22125,8 +22156,14 @@ fn handle_docker_compat_connection(
             ("DELETE", path) if path.starts_with("/images/") => {
                 let reference = percent_decode_path_segment(path.trim_start_matches("/images/"))?;
                 let force = parse_docker_bool_query(query.get("force"), "force")?;
-                handle_rmi_authorized(&store, &reference, force, &origin, &surface_authorization)?;
-                http_response(200, b"[]", "application/json")
+                match handle_rmi_authorized(&store, &reference, force, &origin, &surface_authorization) {
+                    Ok(()) => http_response(200, b"[]", "application/json"),
+                    Err(ImageRemoveError::Store(ImageStoreError::DeleteConflict(digest))) => {
+                        let message = ImageStoreError::DeleteConflict(digest).to_string();
+                        docker_error_response(409, &message)
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
             }
             ("POST", "/volumes/create") => {
                 let body: serde_json::Value = serde_json::from_slice(&request.body)
@@ -25608,11 +25645,16 @@ async fn execute_buildkit_frontend(
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
     for base in &external_bases {
+        let selector = normalize_selector(base)
+            .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?;
         if resolve_reference(execution.store.as_ref(), base)
             .map_err(|error| format!("buildkit solve: inspect base failed: {error}"))?
             .is_some()
         {
             continue;
+        }
+        if selector.is_local_only() {
+            return Err(format!("buildkit solve: base image not found locally: {base}"));
         }
         let registry = parse_image_reference(base)
             .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?

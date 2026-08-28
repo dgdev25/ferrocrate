@@ -72,9 +72,16 @@ pub fn prepare_image_tag(
     target_reference: &str,
 ) -> Result<ImageTagPlan, ImageTaggingError> {
     use sha2::{Digest, Sha256};
-    let source = resolve_reference(store, source_reference)?
-        .ok_or_else(|| ImageTaggingError::SourceNotFound(source_reference.to_string()))?;
-    let source_reference = source.digest.clone();
+    let selector = normalize_selector(source_reference)?;
+    let source = match &selector {
+        ImageSelector::Named(canonical) => store.resolve_reference(canonical)?,
+        ImageSelector::IdPrefix(prefix) => store.resolve_id_prefix(prefix)?,
+    }
+    .ok_or_else(|| ImageTaggingError::SourceNotFound(source_reference.to_string()))?;
+    let source_reference = match selector {
+        ImageSelector::Named(canonical) => canonical,
+        ImageSelector::IdPrefix(_) => source.digest.clone(),
+    };
     let target_reference = canonicalize_reference(target_reference)?;
     let manifest_digest: [u8; 32] = Sha256::digest(source.manifest_json.as_bytes()).into();
     let mut hash = Sha256::new();
@@ -157,9 +164,23 @@ pub fn execute_image_tag_authorized(
             "image tag plan does not match proof".to_string(),
         ));
     }
-    let source = store
-        .resolve_reference(&plan.source_reference)?
-        .ok_or_else(|| ImageTaggingError::SourceNotFound(plan.source_reference.clone()))?;
+    let source = match store.resolve_reference(&plan.source_reference) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            permit
+                .finish(false)
+                .map_err(|error| ImageTaggingError::Authorization(error.to_string()))?;
+            return Err(ImageTaggingError::SourceNotFound(
+                plan.source_reference.clone(),
+            ));
+        }
+        Err(error) => {
+            permit
+                .finish(false)
+                .map_err(|finish| ImageTaggingError::Authorization(finish.to_string()))?;
+            return Err(error.into());
+        }
+    };
     if source.digest != plan.source_digest
         || <[u8; 32]>::from(Sha256::digest(source.manifest_json.as_bytes())) != plan.manifest_digest
     {
@@ -193,7 +214,8 @@ pub fn execute_image_tag_authorized(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_reference, normalize_selector, resolve_reference, tag_image, ImageSelector,
+        canonicalize_reference, execute_image_tag_authorized, normalize_selector,
+        prepare_image_tag, resolve_reference, tag_image, ImageSelector,
     };
     use crate::image_store::LocalImageStore;
 
@@ -306,5 +328,64 @@ mod tests {
             .to_string()
             .contains("multiple images match prefix"));
         assert!(resolve_reference(&store, "deadbeefdead").unwrap().is_none());
+    }
+    #[test]
+    fn authorized_named_tag_rejects_source_retarget_without_creating_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let source = "registry.example/team/source:latest";
+        let target = "registry.example/team/target:latest";
+        let digest_a = format!("sha256:{}", "a".repeat(64));
+        let digest_b = format!("sha256:{}", "b".repeat(64));
+        store.put_reference(&authority, source, &digest_a, "test", "{\"version\":1}").unwrap();
+        let plan = prepare_image_tag(&store, source, target).unwrap();
+        let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+        let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
+        let permit = auth.authorize_image_tag_plan(&origin, &plan).unwrap();
+        store.put_reference(&authority, source, &digest_b, "test", "{\"version\":2}").unwrap();
+        assert!(execute_image_tag_authorized(&store, plan, permit).unwrap_err().to_string().contains("source changed after authorization"));
+        assert!(store.resolve_reference(target).unwrap().is_none());
+    }
+
+    #[test]
+    fn authorized_named_tag_rejects_removed_source_without_creating_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let source = "registry.example/team/source:latest";
+        let target = "registry.example/team/target:latest";
+        let digest = format!("sha256:{}", "a".repeat(64));
+        store
+            .put_reference(&authority, source, &digest, "test", "{\"version\":1}")
+            .unwrap();
+        let plan = prepare_image_tag(&store, source, target).unwrap();
+        let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+        let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
+        let permit = auth.authorize_image_tag_plan(&origin, &plan).unwrap();
+        assert_eq!(store.prune_references(&authority).unwrap(), 1);
+        assert!(matches!(
+            execute_image_tag_authorized(&store, plan, permit),
+            Err(super::ImageTaggingError::SourceNotFound(_))
+        ));
+        assert!(store.resolve_reference(target).unwrap().is_none());
+    }
+
+    #[test]
+    fn authorized_id_tag_stays_pinned_to_selected_full_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let digest_a = format!("sha256:abcde{}", "1".repeat(59));
+        let digest_b = format!("sha256:abcde{}", "2".repeat(59));
+        let target = "registry.example/team/target:latest";
+        store.put_reference(&authority, "registry.example/team/a:latest", &digest_a, "test", "{\"version\":1}").unwrap();
+        let plan = prepare_image_tag(&store, "ABCDE", target).unwrap();
+        let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+        let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
+        let permit = auth.authorize_image_tag_plan(&origin, &plan).unwrap();
+        store.put_reference(&authority, "registry.example/team/b:latest", &digest_b, "test", "{\"version\":2}").unwrap();
+        execute_image_tag_authorized(&store, plan, permit).unwrap();
+        assert_eq!(store.resolve_reference(target).unwrap().unwrap().digest, digest_a);
     }
 }

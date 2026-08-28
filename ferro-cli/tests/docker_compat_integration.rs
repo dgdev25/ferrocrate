@@ -977,8 +977,9 @@ fn s177_image_ids_work_over_http_and_execute_in_run_and_compose() {
     let short = &bare[..12];
     let upper_bare = bare.to_ascii_uppercase();
     let upper_short = short.to_ascii_uppercase();
+    let upper_sha = format!("sha256:{upper_bare}");
 
-    for selector in [bare, digest.as_str(), short, &upper_bare, &upper_short] {
+    for selector in [bare, digest.as_str(), short, &upper_bare, &upper_short, &upper_sha] {
         let selector = selector.replace(':', "%3A");
         assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/json")).0, 200);
         assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/history")).0, 200);
@@ -1026,6 +1027,17 @@ fn s177_image_ids_work_over_http_and_execute_in_run_and_compose() {
     assert!(compose.status.success(), "compose up: {}", String::from_utf8_lossy(&compose.stderr));
     assert!(!String::from_utf8_lossy(&compose.stderr).contains("pull image"));
 
+    fs::write(&compose_file, "services:\n  missing:\n    image: DEADBEEFDEAD\n").unwrap();
+    let missing_compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-compose-missing")
+        .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
+        .output().unwrap();
+    let missing_compose_error = String::from_utf8_lossy(&missing_compose.stderr);
+    assert!(!missing_compose.status.success());
+    assert!(missing_compose_error.contains("not found locally"), "{missing_compose_error}");
+    assert!(!missing_compose_error.contains("registry name"), "{missing_compose_error}");
+
     harness.start_daemon();
     assert_eq!(harness.request("POST", &format!("/v1.45/images/{short}/tag?repo=compat%2Fs177-copy&tag=stable")).0, 201);
     assert_eq!(harness.request("DELETE", "/v1.45/images/compat%2Fs177-copy%3Astable").0, 200);
@@ -1053,8 +1065,15 @@ fn s177_id_removal_honors_force_locally_remotely_and_over_http() {
     build_local_busybox_image(&harness, "compat/s177-remove:latest");
     assert_eq!(harness.request("POST", &format!("/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest")).0, 201);
     let (status, body) = harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}"));
-    assert_ne!(status, 200, "non-force unexpectedly removed multi-tag image: {body}");
+    assert_eq!(status, 409, "non-force conflict response: {body}");
+    assert!(body.contains("multiple references; use force"), "{body}");
     assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 200);
+    for value in ["maybe", "2", "true%00"] {
+        let (status, body) = harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}?force={value}"));
+        assert_eq!(status, 400, "invalid force value {value}: {body}");
+        assert!(body.contains("force must be a boolean"), "{body}");
+        assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 200);
+    }
     assert_eq!(harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}?force=true")).0, 200);
     assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
 
@@ -1066,6 +1085,14 @@ fn s177_id_removal_honors_force_locally_remotely_and_over_http() {
         .args(["rmi", "--force", &upper_prefix]).output().unwrap();
     assert!(remote.status.success(), "remote forced ID rmi: {}", String::from_utf8_lossy(&remote.stderr));
     assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
+
+    build_local_busybox_image(&harness, "compat/s177-remove:latest");
+    harness.stop_daemon();
+    let local_force = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-image-rm-force")
+        .args(["image", "rm", "--force", &upper_prefix]).output().unwrap();
+    assert!(local_force.status.success(), "local image rm --force: {}", String::from_utf8_lossy(&local_force.stderr));
 }
 
 #[test]
@@ -1154,6 +1181,51 @@ fn docker_compat_build_accepts_secure_tar_context() {
     );
     assert_eq!(status, 200, "body={body}");
     assert!(body.contains("Successfully built"), "body={body}");
+}
+
+#[test]
+fn s177_classic_cli_and_daemon_missing_uppercase_id_from_stay_local() {
+    const MISSING: &str =
+        "sha256:DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF";
+    let mut harness = DaemonHarness::spawn();
+    let context = harness.runtime_dir().join("s177-missing-base");
+    fs::create_dir_all(&context).unwrap();
+    fs::write(context.join("Dockerfile"), format!("FROM {MISSING}\nRUN true\n")).unwrap();
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-classic-missing-from")
+        .args(["build", "-t", "compat/s177-missing:cli", context.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let cli_error = String::from_utf8_lossy(&cli.stderr);
+    assert!(!cli.status.success());
+    assert!(cli_error.contains("base image not found locally"), "{cli_error}");
+    assert!(!cli_error.contains("pull image"), "{cli_error}");
+    assert!(!cli_error.contains("registry"), "{cli_error}");
+
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let dockerfile = format!("FROM {MISSING}\nRUN true\n");
+        let mut header = tar::Header::new_gnu();
+        header.set_path("Dockerfile").unwrap();
+        header.set_size(dockerfile.len() as u64);
+        header.set_cksum();
+        builder.append(&header, dockerfile.as_bytes()).unwrap();
+        builder.finish().unwrap();
+    }
+    harness.start_daemon();
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/build?dockerfile=Dockerfile&t=compat%2Fs177-missing%3Adaemon",
+        "application/x-tar",
+        &archive,
+    );
+    assert_ne!(status, 200, "missing base unexpectedly built: {body}");
+    assert!(body.contains("base image not found locally"), "{body}");
+    assert!(!body.contains("pull image"), "{body}");
+    assert!(!body.contains("registry"), "{body}");
 }
 
 #[test]

@@ -7,7 +7,9 @@ use crate::image_manifest::{
     OCI_IMAGE_LAYER_MEDIA_TYPE, OCI_IMAGE_LAYER_ZSTD_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 use crate::image_store::LocalImageStore;
-use crate::image_tagging::{canonicalize_reference, resolve_reference};
+use crate::image_tagging::{
+    canonicalize_reference, normalize_selector, resolve_reference, ImageSelector,
+};
 use crate::layer_compression::{
     compress_bytes_gzip, compress_bytes_zstd, CompressionFormat, LayerCompressionError,
 };
@@ -5847,10 +5849,16 @@ fn resolve_base_image(
         });
     }
 
+    let selector = normalize_selector(base).map_err(DockerfileBuildError::Reference)?;
     if resolve_reference(store, base)
         .map_err(DockerfileBuildError::Reference)?
         .is_none()
     {
+        if matches!(selector, ImageSelector::IdPrefix(_)) {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "base image not found locally: {base}"
+            )));
+        }
         pull_image_with_store(runtime_dir, base, store, authority)
             .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
     }
@@ -7011,7 +7019,8 @@ mod tests {
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_run_with_workdir,
         parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner,
+        registry_cache_reference, reject_cache_path_symlinks, resolve_base_image,
+        resolve_copy_owner,
         run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
         stage_checkpoint_path, stage_content_identities, validate_mount_target, BaseImageInfo,
         BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits, CacheSharing, CopyOwner,
@@ -7040,6 +7049,22 @@ mod tests {
             dockerfile_external_base_images(&dockerfile).unwrap(),
             vec!["alpine:3.20", "registry.example/app:1"]
         );
+    }
+
+    #[test]
+    fn uppercase_missing_id_base_fails_locally_before_pull_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let error = resolve_base_image(
+            &store,
+            &runtime,
+            "sha256:DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("base image not found locally"));
+        assert!(!error.to_string().contains("registry"));
     }
 
     #[test]

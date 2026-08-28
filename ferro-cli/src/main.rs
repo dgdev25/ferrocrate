@@ -18272,6 +18272,7 @@ struct DockerCompatState {
     starting: Mutex<std::collections::HashSet<String>>,
     attach_readiness: Mutex<HashMap<String, Vec<Weak<DockerAttachReadiness>>>>,
     pending_path: PathBuf,
+    pending_snapshot_hook: Arc<dyn PendingSnapshotPublicationHook>,
     name_store: ferro_core::sqlite_container_store::SqliteContainerStore,
     execs: Mutex<HashMap<String, DockerExecSpec>>,
     auto_remove_results: Mutex<HashMap<String, Option<i32>>>,
@@ -18292,11 +18293,88 @@ struct DockerEventStore {
 }
 
 #[cfg(target_os = "linux")]
-fn write_pending_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingSnapshotPublicationPhase {
+    BeforeRename,
+    AfterRename,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PendingSnapshotPublicationError {
+    phase: PendingSnapshotPublicationPhase,
+    error: String,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for PendingSnapshotPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+#[cfg(target_os = "linux")]
+trait PendingSnapshotPublicationHook: Send + Sync {
+    fn reached(&self, _phase: PendingSnapshotPublicationPhase) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NoopPendingSnapshotPublicationHook;
+
+#[cfg(target_os = "linux")]
+impl PendingSnapshotPublicationHook for NoopPendingSnapshotPublicationHook {}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PendingDisconnectPublicationError {
+    message: String,
+    outcome_unknown: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PendingDisconnectPublicationError {
+    fn known(message: String) -> Self {
+        Self {
+            message,
+            outcome_unknown: false,
+        }
+    }
+
+    fn unknown(message: String) -> Self {
+        Self {
+            message,
+            outcome_unknown: true,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for PendingDisconnectPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_pending_snapshot(
+    path: &Path,
+    bytes: &[u8],
+    hook: &dyn PendingSnapshotPublicationHook,
+) -> Result<(), PendingSnapshotPublicationError> {
+    let before_rename = |error: String| PendingSnapshotPublicationError {
+        phase: PendingSnapshotPublicationPhase::BeforeRename,
+        error,
+    };
+    let after_rename = |error: String| PendingSnapshotPublicationError {
+        phase: PendingSnapshotPublicationPhase::AfterRename,
+        error,
+    };
     let parent = path
         .parent()
-        .ok_or_else(|| "docker: pending state has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        .ok_or_else(|| before_rename("docker: pending state has no parent".to_string()))?;
+    std::fs::create_dir_all(parent).map_err(|error| before_rename(error.to_string()))?;
     let temp = parent.join(format!(
         ".docker-pending.{}.{}.tmp",
         std::process::id(),
@@ -18312,19 +18390,25 @@ fn write_pending_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp).map_err(|error| error.to_string())?;
+    let mut file = options.open(&temp).map_err(|error| before_rename(error.to_string()))?;
     use std::io::Write as _;
     if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
         let _ = std::fs::remove_file(&temp);
-        return Err(error.to_string());
+        return Err(before_rename(error.to_string()));
+    }
+    if let Err(error) = hook.reached(PendingSnapshotPublicationPhase::BeforeRename) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(before_rename(error));
     }
     std::fs::rename(&temp, path).map_err(|error| {
         let _ = std::fs::remove_file(&temp);
-        error.to_string()
+        before_rename(error.to_string())
     })?;
+    hook.reached(PendingSnapshotPublicationPhase::AfterRename)
+        .map_err(after_rename)?;
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())
+        .map_err(|error| after_rename(error.to_string()))
 }
 
 #[cfg(target_os = "linux")]
@@ -18357,6 +18441,7 @@ impl DockerCompatState {
             starting: Mutex::new(std::collections::HashSet::new()),
             attach_readiness: Mutex::new(HashMap::new()),
             pending_path,
+            pending_snapshot_hook: Arc::new(NoopPendingSnapshotPublicationHook),
             name_store,
             execs: Mutex::new(HashMap::new()),
             auto_remove_results: Mutex::new(HashMap::new()),
@@ -18494,7 +18579,8 @@ impl DockerCompatState {
                 .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
             serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?
         };
-        write_pending_snapshot(&self.pending_path, &bytes)
+        write_pending_snapshot(&self.pending_path, &bytes, self.pending_snapshot_hook.as_ref())
+            .map_err(|error| error.to_string())
     }
 
     fn disconnect_pending_network(
@@ -18502,16 +18588,22 @@ impl DockerCompatState {
         id: &str,
         network_name: &str,
         force: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), PendingDisconnectPublicationError> {
         let mut pending = self
             .pending
             .lock()
-            .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-        let previous_bytes =
-            serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                PendingDisconnectPublicationError::known(format!(
+                    "docker: pending lock poisoned: {error}"
+                ))
+            })?;
         let spec = pending
             .get_mut(id)
-            .ok_or_else(|| format!("docker: container not found: {id}"))?;
+            .ok_or_else(|| {
+                PendingDisconnectPublicationError::known(format!(
+                    "docker: container not found: {id}"
+                ))
+            })?;
         let previous = spec.network_attachments.clone();
         let attachments = spec
             .network_attachments
@@ -18523,24 +18615,34 @@ impl DockerCompatState {
             return if force {
                 Ok(())
             } else {
-                Err(format!(
+                Err(PendingDisconnectPublicationError::known(format!(
                     "container is not connected to network {network_name}"
-                ))
+                )))
             };
         };
         attachments.remove(index);
-        let bytes = serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?;
-        let publication = write_pending_snapshot(&self.pending_path, &bytes);
+        let bytes = serde_json::to_vec_pretty(&*pending)
+            .map_err(|error| PendingDisconnectPublicationError::known(error.to_string()))?;
+        let publication = write_pending_snapshot(
+            &self.pending_path,
+            &bytes,
+            self.pending_snapshot_hook.as_ref(),
+        );
         if let Err(error) = publication {
-            if let Some(spec) = pending.get_mut(id) {
-                spec.network_attachments = previous;
+            if error.phase == PendingSnapshotPublicationPhase::BeforeRename {
+                if let Some(spec) = pending.get_mut(id) {
+                    spec.network_attachments = previous;
+                }
+                return Err(PendingDisconnectPublicationError::known(format!(
+                    "docker: pending disconnect publication failed: {error}"
+                )));
             }
-            return match write_pending_snapshot(&self.pending_path, &previous_bytes) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(format!(
-                    "docker: pending disconnect publication failed: {error}; rollback failed: {rollback}"
-                )),
-            };
+            // Rename has made this detached snapshot visible. Never write the
+            // old bytes over that possible winner: memory must follow it and
+            // the caller must record the outcome as uncertain.
+            return Err(PendingDisconnectPublicationError::unknown(format!(
+                "docker: pending disconnect publication outcome unknown after rename: {error}"
+            )));
         }
         Ok(())
     }
@@ -22155,7 +22257,7 @@ fn handle_docker_compat_connection(
                 } else {
                     state
                         .disconnect_pending_network(&id, &config.network_name, request.force)
-                        .map_err(|error| (error, false))
+                        .map_err(|error| (error.to_string(), error.outcome_unknown))
                 };
                 match result {
                     Ok(()) => {
@@ -27627,13 +27729,16 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use clap::CommandFactory;
-    use super::{parse_docker_update_request, DockerResourceUpdate};
+    use super::{
+        parse_docker_update_request, DockerResourceUpdate, PendingSnapshotPublicationHook,
+        PendingSnapshotPublicationPhase,
+    };
     use crate::linux_cli::docker_port_summaries;
     use ferro_core::image_manifest::parse_image_manifest;
     use sha2::Digest;
     use std::collections::{BTreeMap, HashMap};
     use std::io::Read;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -35470,13 +35575,82 @@ volumes:
         let error = state
             .disconnect_pending_network(&id, "app-net", false)
             .expect_err("publication must fail");
-        assert!(error.contains("publication failed"), "{error}");
+        assert!(!error.outcome_unknown, "pre-rename failure is known");
+        assert!(error.to_string().contains("publication failed"), "{error}");
         let pending = state.pending.lock().expect("pending lock");
         assert_eq!(
             pending[&id].effective_network_attachments(),
             vec!["app-net"],
             "failed persistence must not publish partial in-memory state"
         );
+    }
+
+    struct FailPendingSnapshotAt(PendingSnapshotPublicationPhase);
+
+    impl PendingSnapshotPublicationHook for FailPendingSnapshotAt {
+        fn reached(&self, phase: PendingSnapshotPublicationPhase) -> Result<(), String> {
+            if phase == self.0 {
+                Err(format!("injected {phase:?} failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn pending_disconnect_pre_rename_failure_keeps_memory_attached_and_known() {
+        let temp = tempfile::tempdir().expect("runtime");
+        let mut state = DockerCompatState::new(temp.path()).expect("state");
+        let id = docker_create_pending(
+            &state,
+            br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-net"}}"#,
+            Some("pending-pre-rename".to_string()),
+        )
+        .expect("pending create");
+        state.pending_snapshot_hook = Arc::new(FailPendingSnapshotAt(
+            PendingSnapshotPublicationPhase::BeforeRename,
+        ));
+
+        let error = state
+            .disconnect_pending_network(&id, "app-net", false)
+            .expect_err("pre-rename publication must fail");
+        assert!(!error.outcome_unknown, "known failed publication");
+        assert_eq!(
+            state.pending.lock().expect("pending lock")[&id].effective_network_attachments(),
+            vec!["app-net"],
+            "the old durable snapshot and in-memory state agree"
+        );
+    }
+
+    #[test]
+    fn pending_disconnect_post_rename_failure_keeps_detached_memory_and_is_unknown() {
+        let temp = tempfile::tempdir().expect("runtime");
+        let mut state = DockerCompatState::new(temp.path()).expect("state");
+        let id = docker_create_pending(
+            &state,
+            br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-net"}}"#,
+            Some("pending-post-rename".to_string()),
+        )
+        .expect("pending create");
+        state.pending_snapshot_hook = Arc::new(FailPendingSnapshotAt(
+            PendingSnapshotPublicationPhase::AfterRename,
+        ));
+
+        let error = state
+            .disconnect_pending_network(&id, "app-net", false)
+            .expect_err("post-rename fsync uncertainty must be reported");
+        assert!(error.outcome_unknown, "renamed snapshot has an unknown outcome");
+        assert!(
+            state.pending.lock().expect("pending lock")[&id]
+                .effective_network_attachments()
+                .is_empty(),
+            "memory follows the visible detached snapshot"
+        );
+        let visible: HashMap<String, DockerCreateSpec> = serde_json::from_slice(
+            &std::fs::read(temp.path().join("docker-pending.json")).expect("visible snapshot"),
+        )
+        .expect("parse visible snapshot");
+        assert!(visible[&id].effective_network_attachments().is_empty());
     }
 
     #[test]

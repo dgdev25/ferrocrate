@@ -80,6 +80,114 @@ fn prepare_image(binary: &str, runtime: &Path, image: &str) {
     }
 }
 
+/// Exercises the S183 terminal path with a real rootless workload.  This is
+/// deliberately opt-in because it requires the host's user/network namespace
+/// support and a trusted slirp4netns helper; a skipped capability is not a
+/// synthetic substitute for this operational check.
+#[test]
+fn rootless_run_stop_disconnect_and_inspect_removes_attachment() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
+        eprintln!("SKIP: set FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E=1 for S183 rootless operational coverage");
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+    let cli = |args: &[&str]| {
+        Command::new(binary)
+            .env("FERROCRATE_HOME", &runtime)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .env("FERROCRATE_ROOTLESS_NETNS", "1")
+            .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+            .args(args)
+            .output()
+            .expect("run ferro-cli")
+    };
+    let created = cli(&["network", "create", "s183-rootless-net"]);
+    if !created.status.success()
+        && String::from_utf8_lossy(&created.stderr)
+            .contains("rootless bridge networking is unavailable on this host")
+    {
+        eprintln!(
+            "SKIP: rootless named networking unavailable: {}",
+            String::from_utf8_lossy(&created.stderr).trim()
+        );
+        return;
+    }
+    assert!(
+        created.status.success(),
+        "network create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let run = cli(&[
+        "run",
+        "--detach",
+        "--name",
+        "s183-rootless-workload",
+        "--network",
+        "s183-rootless-net",
+        &rootless_test_image(),
+        "sh",
+        "-c",
+        "sleep 60",
+    ]);
+    if !run.status.success()
+        && String::from_utf8_lossy(&run.stderr)
+            .contains("rootless bridge networking is unavailable on this host")
+    {
+        eprintln!(
+            "SKIP: rootless workload networking unavailable: {}",
+            String::from_utf8_lossy(&run.stderr).trim()
+        );
+        return;
+    }
+    assert!(
+        run.status.success(),
+        "rootless run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let id = String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .find_map(|line| {
+            line.split_once("container_id=")
+                .map(|(_, id)| id.trim().to_string())
+        })
+        .expect("run container id");
+    let stop = cli(&["stop", &id]);
+    assert!(
+        stop.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let disconnect = cli(&["network", "disconnect", "s183-rootless-net", &id]);
+    assert!(
+        disconnect.status.success(),
+        "disconnect failed: {}",
+        String::from_utf8_lossy(&disconnect.stderr)
+    );
+    let inspect = cli(&["inspect", &id]);
+    assert!(
+        inspect.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).expect("inspect JSON payload");
+    assert_eq!(payload["State"]["Status"], "exited");
+    assert!(
+        payload["NetworkSettings"]["Networks"]
+            .as_object()
+            .is_none_or(|networks| !networks.contains_key("s183-rootless-net")),
+        "detached endpoint remains in inspect: {payload}"
+    );
+}
+
 #[test]
 fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {

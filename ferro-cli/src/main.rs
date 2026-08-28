@@ -14823,6 +14823,8 @@ fn compose_default_network_name_with_declared(
 fn prepare_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
     project_dir: &Path,
     name: String,
     instance: String,
@@ -14836,8 +14838,10 @@ fn prepare_compose_service(
     if let Some(build) = service.build.as_ref() {
         let context = build.context.as_deref().unwrap_or(".");
         let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
+        let dockerfile_path = project_dir.join(context).join(dockerfile);
+        prefetch_dockerfile_bases(store, origin, authorization, &dockerfile_path, None)?;
         let plan = ferro_core::dockerfile_build::prepare_dockerfile_build(
-            &project_dir.join(context).join(dockerfile),
+            &dockerfile_path,
             Some(&image),
             &runtime_dir(),
             CompressionFormat::Gzip,
@@ -15228,6 +15232,9 @@ fn handle_compose(
                 .as_millis()
                 .saturating_add(300_000)
                 .min(u64::MAX as u128) as u64;
+            let surface_authorization = runtime
+                .surface_authorization()
+                .map_err(|error| error.to_string())?;
             let prepared: Vec<_> = selected
                 .into_iter()
                 .map(|(name, instance)| {
@@ -15239,6 +15246,8 @@ fn handle_compose(
                     prepare_compose_service(
                         store,
                         volume_store,
+                        &parent_origin,
+                        &surface_authorization,
                         &project_dir,
                         name,
                         instance,
@@ -15246,9 +15255,6 @@ fn handle_compose(
                     )
                 })
                 .collect::<Result<_, _>>()?;
-            let surface_authorization = runtime
-                .surface_authorization()
-                .map_err(|error| error.to_string())?;
             ensure_compose_networks(
                 &project,
                 &runtime_dir(),

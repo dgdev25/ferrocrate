@@ -1588,6 +1588,7 @@ pub struct ContainerRuntime {
     runtime_dir: PathBuf,
     cgroup_root: PathBuf,
     active_supervisors: Arc<DashMap<String, u32>>,
+    stdin_shutdown: Arc<DashMap<String, Arc<AtomicBool>>>,
     health_cancel: DashMap<String, Arc<AtomicBool>>,
     /// Cancellation tokens for resource monitor threads (Task 5.1)
     resource_cancel: DashMap<String, Arc<AtomicBool>>,
@@ -1803,6 +1804,7 @@ impl ContainerRuntime {
             runtime_dir: self.runtime_dir.clone(),
             cgroup_root: self.cgroup_root.clone(),
             active_supervisors: Arc::clone(&self.active_supervisors),
+            stdin_shutdown: Arc::clone(&self.stdin_shutdown),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization: self.authorization.with_origin(origin),
@@ -1860,6 +1862,7 @@ impl ContainerRuntime {
             runtime_dir: runtime_dir.to_path_buf(),
             cgroup_root,
             active_supervisors: Arc::new(DashMap::new()),
+            stdin_shutdown: Arc::new(DashMap::new()),
             health_cancel: DashMap::new(),
             resource_cancel: DashMap::new(),
             authorization,
@@ -3318,6 +3321,7 @@ impl ContainerRuntime {
             tty,
             self.store.clone_db(),
             Arc::clone(&self.active_supervisors),
+            Arc::clone(&self.stdin_shutdown),
             container_id.clone(),
             Some(rootfs_dir.clone()),
             no_new_privs,
@@ -4065,6 +4069,14 @@ impl ContainerRuntime {
     #[inline]
     pub fn stdin_path(&self, id: &str) -> PathBuf {
         self.runtime_dir.join("containers").join(id).join("stdin")
+    }
+
+    /// Close the write side of a container's stdin relay after an attached
+    /// client has half-closed its hijacked socket.
+    pub fn close_stdin(&self, id: &str) {
+        if let Some(shutdown) = self.stdin_shutdown.get(id) {
+            shutdown.store(true, Ordering::Release);
+        }
     }
 
     #[inline]
@@ -5265,6 +5277,7 @@ impl ContainerRuntime {
             record.tty,
             self.store.clone_db(),
             Arc::clone(&self.active_supervisors),
+            Arc::clone(&self.stdin_shutdown),
             record.id.clone(),
             Some(self.runtime_dir.join("containers").join(id).join("rootfs")),
             false,
@@ -7107,6 +7120,7 @@ fn spawn_process_with_logs(
     tty: bool,
     store: SqliteContainerStore,
     active_supervisors: Arc<DashMap<String, u32>>,
+    stdin_shutdown: Arc<DashMap<String, Arc<AtomicBool>>>,
     container_id: String,
     rootfs_dir: Option<PathBuf>,
     no_new_privs: bool,
@@ -7140,7 +7154,7 @@ fn spawn_process_with_logs(
         &tmpfs_mounts,
         readonly_rootfs,
     )?;
-    let (child_id, child, pidfd, log_relays) = spawn_child_with_logs(
+    let (child_id, child, pidfd, log_relays, stdin_relay) = spawn_child_with_logs(
         command,
         stdout_path,
         stderr_path,
@@ -7151,6 +7165,7 @@ fn spawn_process_with_logs(
         &container_id,
         &log_driver,
     )?;
+    stdin_shutdown.insert(container_id.clone(), stdin_relay.shutdown_signal());
 
     let cmd_owned = cmd.to_vec();
     let env_owned = env.to_vec();
@@ -7169,8 +7184,10 @@ fn spawn_process_with_logs(
             child,
             pidfd,
             log_relays,
+            stdin_relay,
             store,
             active_supervisors,
+            stdin_shutdown,
             container_id,
             cmd_owned,
             env_owned,
@@ -7872,6 +7889,19 @@ impl ChildLogRelays {
     }
 }
 
+struct ChildStdinRelay {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl ChildStdinRelay {
+    fn shutdown_signal(&self) -> Arc<AtomicBool> { Arc::clone(&self.shutdown) }
+    fn drain(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_child_with_logs(
     mut command: Command,
@@ -7883,7 +7913,7 @@ fn spawn_child_with_logs(
     runtime_dir: &Path,
     container_id: &str,
     log_driver: &str,
-) -> Result<(u32, Child, OwnedFd, ChildLogRelays), RuntimeError> {
+) -> Result<(u32, Child, OwnedFd, ChildLogRelays, ChildStdinRelay), RuntimeError> {
     // Rootless launchers such as bubblewrap may retain helper descendants
     // after their recorded leader is killed. Give non-TTY workloads an
     // isolated process group so the supervisor can close every inherited log
@@ -7925,10 +7955,16 @@ fn spawn_child_with_logs(
     // Open the FIFO read/write in the launcher so child creation never blocks
     // waiting for an attach client. The descriptor is inherited as the
     // workload's stdin; attach opens the same owned FIFO for writes.
-    let stdin_file = OpenOptions::new()
+    let mut fifo_input = OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
         .open(&stdin_path)?;
+    let (stdin_reader, stdin_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
+        .map_err(|error| RuntimeError::Io(io::Error::from_raw_os_error(error as i32)))?;
+    let stdin_file = std::fs::File::from(stdin_reader);
+    let mut stdin_writer = std::fs::File::from(stdin_writer);
+    let stdin_shutdown = Arc::new(AtomicBool::new(false));
     let mut log_relays = Vec::new();
     let child = if tty {
         let pair = PtyPair::new(24, 80).map_err(RuntimeError::Io)?;
@@ -8036,13 +8072,36 @@ fn spawn_child_with_logs(
             .spawn()?
     };
     let child_id = child.id();
+    let stdin_relay = if tty {
+        drop(fifo_input); drop(stdin_writer);
+        ChildStdinRelay { shutdown: stdin_shutdown, thread: None }
+    } else {
+        let relay_shutdown = Arc::clone(&stdin_shutdown);
+        ChildStdinRelay { shutdown: stdin_shutdown, thread: Some(thread::spawn(move || {
+            let mut buffer = [0_u8; 16 * 1024];
+            loop {
+                match fifo_input.read(&mut buffer) {
+                    Ok(count) if count > 0 => if stdin_writer.write_all(&buffer[..count]).is_err() { break; },
+                    Ok(_) => {
+                        if relay_shutdown.load(Ordering::Acquire) { break; }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if relay_shutdown.load(Ordering::Acquire) { break; }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })) }
+    };
     let raw_pidfd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, child_id, 0) } as i32;
     if raw_pidfd < 0 {
         return Err(RuntimeError::Io(io::Error::last_os_error()));
     }
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
-    Ok((child_id, child, pidfd, ChildLogRelays::new(log_relays)))
+    Ok((child_id, child, pidfd, ChildLogRelays::new(log_relays), stdin_relay))
 }
 
 /// stdout/stderr with optional per-line timestamp resolution.
@@ -8430,8 +8489,10 @@ fn supervise_child(
     mut child: Child,
     mut _pidfd: OwnedFd,
     mut log_relays: ChildLogRelays,
+    mut stdin_relay: ChildStdinRelay,
     store: SqliteContainerStore,
     active_supervisors: Arc<DashMap<String, u32>>,
+    stdin_shutdown: Arc<DashMap<String, Arc<AtomicBool>>>,
     container_id: String,
     cmd: Vec<String>,
     env: Vec<String>,
@@ -8516,6 +8577,7 @@ fn supervise_child(
 
     loop {
         let status = child.wait();
+        stdin_relay.drain();
         if !tty {
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(-(child.id() as i32)),
@@ -8696,7 +8758,7 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd, new_log_relays) = match spawn_child_with_logs(
+        let (pid, new_child, new_pidfd, new_log_relays, new_stdin_relay) = match spawn_child_with_logs(
             command,
             &stdout_path,
             &stderr_path,
@@ -8728,6 +8790,7 @@ fn supervise_child(
                 break;
             }
         };
+        stdin_shutdown.insert(container_id.clone(), new_stdin_relay.shutdown_signal());
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
             if ai_enabled {
@@ -8763,6 +8826,7 @@ fn supervise_child(
         child = new_child;
         _pidfd = new_pidfd;
         log_relays = new_log_relays;
+        stdin_relay = new_stdin_relay;
         active_supervisors.insert(container_id.clone(), pid);
         container_start_time = std::time::Instant::now();
         if ai_enabled {
@@ -19522,7 +19586,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -19541,6 +19605,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         );
         super::release_prepared_child(pid).unwrap();
         assert!(child.wait().unwrap().success());
+        stdin_relay.drain();
         log_relays.drain();
         assert!(marker.exists());
     }
@@ -19567,7 +19632,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd, mut log_relays) = super::spawn_child_with_logs(
+        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) = super::spawn_child_with_logs(
             command,
             &stdout,
             &stderr,
@@ -19581,6 +19646,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
+        stdin_relay.drain();
         log_relays.drain();
         for _ in 0..50 {
             if std::fs::read_to_string(&stdout)
@@ -19744,7 +19810,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, _child, _pidfd, _log_relays) = super::spawn_child_with_logs(
+        let (pid, _child, _pidfd, _log_relays, _stdin_relay) = super::spawn_child_with_logs(
             command,
             &root.path().join("stdout.log"),
             &root.path().join("stderr.log"),

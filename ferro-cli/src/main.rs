@@ -20256,7 +20256,7 @@ fn handle_docker_compat_connection(
                     .get("detachKeys")
                     .map(|value| parse_detach_keys(value))
                     .transpose()?
-                    .unwrap_or_else(|| vec![0x10, 0x11]);
+                    .unwrap_or_default();
                 let id = {
                     let pending = state
                         .pending
@@ -27020,6 +27020,7 @@ fn stream_docker_attach(
                     }
                     input_closed = true;
                     stdin = None;
+                    runtime.close_stdin(id);
                 }
                 Ok(size) => {
                     input_progress = true;

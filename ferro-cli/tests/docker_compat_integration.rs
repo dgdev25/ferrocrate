@@ -4208,6 +4208,28 @@ fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
 }
 
 #[test]
+fn docker_compat_attach_delivers_eof_after_client_close() {
+    if nix::unistd::geteuid().is_root() { return; }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/attach-eof:latest");
+    let (status, body) = harness.request_bytes("POST", "/v1.45/containers/create?name=attach-eof", "application/json", br#"{"Image":"compat/attach-eof:latest","Cmd":["/bin/busybox","sh","-c","cat -"],"HostConfig":{"NetworkMode":"none"}}"#);
+    assert_eq!(status, 201, "create response={body}");
+    assert_eq!(harness.request("POST", "/v1.45/containers/attach-eof/start").0, 204);
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    stream.write_all(b"POST /v1.45/containers/attach-eof/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n").expect("write attach handshake");
+    stream.set_read_timeout(Some(Duration::from_secs(20))).expect("set attach timeout");
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") { let mut byte = [0_u8; 1]; stream.read_exact(&mut byte).expect("read attach headers"); headers.push(byte[0]); }
+    assert!(String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"));
+    let input = vec![0xa5; 1024 * 1024];
+    let writer_input = input.clone(); let mut writer = stream.try_clone().expect("clone attach socket");
+    let writer = thread::spawn(move || -> std::io::Result<()> { writer.write_all(&writer_input)?; writer.shutdown(std::net::Shutdown::Write) });
+    let mut output = Vec::new(); stream.set_read_timeout(None).expect("clear attach read timeout"); stream.read_to_end(&mut output).expect("drain attach output"); writer.join().expect("writer").expect("write stdin");
+    let stdout: Vec<u8> = decode_raw_frames(&output).expect("complete frames").into_iter().filter(|(stream, _)| *stream == 1).flat_map(|(_, payload)| payload).copied().collect();
+    assert_eq!(stdout, input, "cat output must drain completely after stdin EOF");
+}
+
+#[test]
 fn docker_compat_listing_accepts_docker_cli_boolean_keyed_filters() {
     let harness = DaemonHarness::spawn();
     for path in [

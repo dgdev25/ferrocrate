@@ -1,0 +1,52 @@
+{"app":"actix-basics","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"app-retriage2/run/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":2807,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/rust:1.97-slim\npull: image=registry-1.docker.io/library/rust:1.97-slim\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":3105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":2905,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":18917,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":5107,"stderr_tail":"run: container_id=33cf2696e943c950b95934e13c74134047d64eb134441b644384543b6afd1558 pid=311780 network_backend=ebpf\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"start","status":"fail","exit":1,"ms":30524,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"2026-08-28T02:23:36.653247Z  WARN ferro_core::runtime: [reconcile] container 33cf2696e943c950b95934e13c74134047d64eb134441b644384543b6afd1558 had stale running pid 312423, marking exited\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"commit","status":"pass","exit":0,"ms":19420,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"kill","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"rmi-committed","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":6008,"stderr_tail":"run: container_id=31b89adcd3aa837ea7982fb9c344c0b7a03a895c53177d63ff3073b45e8fc78d pid=324971 network_backend=ebpf\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":5608,"stderr_tail":"run: container_id=a2ac5798caf97542e78babdb34353e5c91b218d43e7cd8cbd150c79018b59efe pid=326807 network_backend=ebpf\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":8712,"stderr_tail":"run: container_id=fe424fc6ba0152cbd199d22aa6ce0451e1c3c03d04acf05a2f9d19952c88b881 pid=328115 network_backend=ebpf\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}

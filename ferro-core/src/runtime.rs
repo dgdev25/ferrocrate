@@ -3508,7 +3508,7 @@ impl ContainerRuntime {
         }
         release_prepared_child(child_id)?;
         if use_slirp {
-            let api_socket = slirp_api_socket_path(&record.id)?;
+            let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
                     rollback.slirp_process = Some((helper_pid, helper_start_time));
@@ -5409,7 +5409,7 @@ impl ContainerRuntime {
         )?;
         release_prepared_child(child_id)?;
         if restart_rootless_slirp {
-            let api_socket = slirp_api_socket_path(&record.id)?;
+            let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             let (helper_pid, helper_start_time) = match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok(helper) => helper,
                 Err(error) => {
@@ -12200,9 +12200,14 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
 /// Unix-domain socket paths are limited to `sun_path` (usually 108 bytes).
 /// Container storage may deliberately live under a long isolated directory, so
 /// keep slirp control sockets in a short, per-user host runtime directory.
-fn slirp_api_socket_path(container_id: &str) -> Result<PathBuf, RuntimeError> {
+fn slirp_api_socket_path(runtime_dir: &Path, container_id: &str) -> Result<PathBuf, RuntimeError> {
     let uid = nix::unistd::Uid::effective().as_raw();
-    let directory = std::env::temp_dir().join(format!("ferrocrate-slirp-{uid}"));
+    let runtime_id = hex::encode(load_or_create_runtime_id(runtime_dir)?);
+    let user_directory = std::env::temp_dir().join(format!("ferrocrate-slirp-{uid}"));
+    fs::create_dir_all(&user_directory)?;
+    #[cfg(unix)]
+    fs::set_permissions(&user_directory, fs::Permissions::from_mode(0o700))?;
+    let directory = user_directory.join(runtime_id);
     fs::create_dir_all(&directory)?;
     #[cfg(unix)]
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
@@ -12239,8 +12244,8 @@ fn terminate_slirp4netns_helper(record: &ContainerRecord) {
     }
 }
 
-/// Remove helpers whose socket belongs to this runtime but whose exact
-/// process identity is absent from a live container record.
+/// Remove helpers whose socket namespace belongs to this runtime but whose
+/// exact process identity is absent from a live container record.
 fn reap_orphaned_slirp4netns_helpers(
     runtime_dir: &Path,
     store: &SqliteContainerStore,
@@ -12248,20 +12253,28 @@ fn reap_orphaned_slirp4netns_helpers(
     reap_orphaned_slirp4netns_helpers_in(runtime_dir, store, Path::new("/proc"))
 }
 
-/// The durable container record is the ownership authority.  A helper can be
-/// started before its PID metadata is refreshed, and a container can be in a
-/// transitional state while creation is being committed; neither makes its
-/// runtime directory or helper an orphan.
+/// The runtime-instance socket namespace establishes ownership, and the
+/// durable container record establishes liveness within that namespace. A
+/// helper can be started before its PID metadata is refreshed, and a container
+/// can be in a transitional state while creation is being committed; neither
+/// makes its runtime directory or helper an orphan. Legacy sockets directly in
+/// the per-user directory carry no runtime provenance and are deliberately not
+/// reaped here; their persisted PID/start-time identity remains available to
+/// explicit container lifecycle cleanup.
 fn reap_orphaned_slirp4netns_helpers_in(
-    _runtime_dir: &Path,
+    runtime_dir: &Path,
     store: &SqliteContainerStore,
     proc_root: &Path,
 ) -> Result<(), RuntimeError> {
     let records = store.list()?;
     let owned_sockets = records
         .iter()
-        .filter_map(|record| slirp_api_socket_path(&record.id).ok())
+        .filter_map(|record| slirp_api_socket_path(runtime_dir, &record.id).ok())
         .collect::<HashSet<_>>();
+    let owned_directory = slirp_api_socket_path(runtime_dir, "probe")?
+        .parent()
+        .expect("slirp socket always has a parent")
+        .to_path_buf();
     for entry in fs::read_dir(proc_root)?.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
@@ -12273,7 +12286,7 @@ fn reap_orphaned_slirp4netns_helpers_in(
             continue;
         };
         let socket = PathBuf::from(socket);
-        if socket.parent() != slirp_api_socket_path("probe")?.parent() {
+        if socket.parent() != Some(owned_directory.as_path()) {
             continue;
         }
         if !owned_sockets.contains(&socket) {
@@ -17173,10 +17186,21 @@ mod tests {
 
     #[test]
     fn slirp_api_socket_stays_within_unix_socket_limit_for_long_runtime_paths() {
-        let first = super::slirp_api_socket_path(&"a".repeat(64)).expect("first socket");
-        let second = super::slirp_api_socket_path(&"b".repeat(64)).expect("second socket");
+        let first_runtime = tempfile::tempdir().expect("first runtime");
+        let second_runtime = tempfile::tempdir().expect("second runtime");
+        let first = super::slirp_api_socket_path(first_runtime.path(), &"a".repeat(64))
+            .expect("first socket");
+        let second = super::slirp_api_socket_path(first_runtime.path(), &"b".repeat(64))
+            .expect("second socket");
+        let other_runtime = super::slirp_api_socket_path(second_runtime.path(), &"a".repeat(64))
+            .expect("other runtime socket");
         assert!(first.as_os_str().len() < 108, "{}", first.display());
         assert_ne!(first, second, "container sockets must not collide");
+        assert_ne!(
+            first.parent(),
+            other_runtime.parent(),
+            "isolated runtimes must have disjoint slirp socket namespaces"
+        );
     }
 
     #[test]
@@ -17248,7 +17272,8 @@ mod tests {
         let record = fixture_container_record("recorded-helper", "created");
         store.put(&record).expect("persist recorded container");
 
-        let socket = super::slirp_api_socket_path(&record.id).expect("short helper socket");
+        let socket =
+            super::slirp_api_socket_path(runtime.path(), &record.id).expect("short helper socket");
         let mut helper = std::process::Command::new("bash")
             .args([
                 "-c",
@@ -17275,6 +17300,133 @@ mod tests {
         );
         let _ = helper.kill();
         let _ = helper.wait();
+    }
+
+    #[test]
+    fn slirp_reaper_does_not_kill_another_runtime_stores_helper() {
+        let runtime_a = tempfile::tempdir().expect("runtime A root");
+        let store_a = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime_a.path().join("containers.db"),
+        )
+        .expect("runtime A container store");
+        let record = fixture_container_record("runtime-a-helper", "running");
+        store_a.put(&record).expect("persist runtime A container");
+
+        let runtime_b = tempfile::tempdir().expect("runtime B root");
+        let store_b = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime_b.path().join("containers.db"),
+        )
+        .expect("runtime B container store");
+
+        let socket = super::slirp_api_socket_path(runtime_a.path(), &record.id)
+            .expect("short helper socket");
+        let mut helper = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "slirp4netns",
+                &format!("--api-socket={}", socket.display()),
+            ])
+            .spawn()
+            .expect("start runtime A helper stand-in");
+        for _ in 0..50 {
+            if std::fs::read(format!("/proc/{}/cmdline", helper.id()))
+                .ok()
+                .is_some_and(|cmdline| super::slirp_api_socket_from_cmdline(&cmdline).is_some())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        super::reap_orphaned_slirp4netns_helpers(runtime_b.path(), &store_b)
+            .expect("runtime B reaper");
+        let status_after_runtime_b = helper.try_wait().expect("runtime A helper status");
+        if status_after_runtime_b.is_none() {
+            let _ = helper.kill();
+            let _ = helper.wait();
+        }
+        assert!(
+            status_after_runtime_b.is_none(),
+            "runtime B must not reap runtime A's recorded helper"
+        );
+    }
+
+    #[test]
+    fn slirp_reaper_kills_an_orphan_owned_by_the_current_runtime() {
+        let runtime = tempfile::tempdir().expect("runtime root");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("container store");
+        let socket = super::slirp_api_socket_path(runtime.path(), "orphaned-helper")
+            .expect("short helper socket");
+        let mut helper = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "slirp4netns",
+                &format!("--api-socket={}", socket.display()),
+            ])
+            .spawn()
+            .expect("start orphan helper stand-in");
+        for _ in 0..50 {
+            if std::fs::read(format!("/proc/{}/cmdline", helper.id()))
+                .ok()
+                .is_some_and(|cmdline| super::slirp_api_socket_from_cmdline(&cmdline).is_some())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        super::reap_orphaned_slirp4netns_helpers(runtime.path(), &store)
+            .expect("reap current-runtime orphan");
+        let status = helper.wait().expect("wait for orphan reaping");
+        assert!(!status.success(), "current-runtime orphan must be reaped");
+    }
+
+    #[test]
+    fn slirp_reaper_leaves_legacy_unscoped_helpers_alone() {
+        let runtime = tempfile::tempdir().expect("runtime root");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            runtime.path().join("containers.db"),
+        )
+        .expect("container store");
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let legacy_socket = std::env::temp_dir()
+            .join(format!("ferrocrate-slirp-{uid}"))
+            .join("legacy-unscoped.sock");
+        let mut helper = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "slirp4netns",
+                &format!("--api-socket={}", legacy_socket.display()),
+            ])
+            .spawn()
+            .expect("start legacy helper stand-in");
+        for _ in 0..50 {
+            if std::fs::read(format!("/proc/{}/cmdline", helper.id()))
+                .ok()
+                .is_some_and(|cmdline| super::slirp_api_socket_from_cmdline(&cmdline).is_some())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        super::reap_orphaned_slirp4netns_helpers(runtime.path(), &store)
+            .expect("scan legacy helper");
+        let status = helper.try_wait().expect("legacy helper status");
+        if status.is_none() {
+            let _ = helper.kill();
+            let _ = helper.wait();
+        }
+        assert!(
+            status.is_none(),
+            "unscoped legacy helper ownership is ambiguous and must not be guessed"
+        );
     }
 
     #[test]

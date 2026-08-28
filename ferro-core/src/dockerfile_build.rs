@@ -2877,9 +2877,8 @@ struct StageSpec {
 /// Docker reads `# key=value` directives only from the comment block before
 /// the first instruction. `escape` selects the continuation character; any
 /// other `key=value` comment stays a comment, matching Docker's
-/// warn-and-continue behavior. The `syntax` directive selects a BuildKit
-/// frontend; this builder has no frontend switching, so accepting it silently
-/// would build with different semantics than the file requests.
+/// warn-and-continue behavior. `syntax` is a leading parser directive, not
+/// an image instruction, so the built-in parser consumes it before stages.
 fn preprocess_dockerfile(contents: &str) -> Result<String, DockerfileBuildError> {
     let mut escape = '\\';
     let mut lines: Vec<String> = Vec::new();
@@ -2895,11 +2894,7 @@ fn preprocess_dockerfile(contents: &str) -> Result<String, DockerfileBuildError>
                 if let Some((key, value)) = comment.trim().split_once('=') {
                     match key.trim() {
                         "escape" => escape = parse_escape_directive(value.trim())?,
-                        "syntax" => {
-                            return Err(DockerfileBuildError::Unsupported(format!(
-                                "Dockerfile syntax directive is not supported: {value}"
-                            )));
-                        }
+                        "syntax" => {}
                         _ => {}
                     }
                 }
@@ -10220,11 +10215,11 @@ mod tests {
     }
 
     #[test]
-    fn syntax_directive_fails_closed_as_an_unsupported_frontend() {
-        let error = parse_stages("# syntax=docker/dockerfile:1\nFROM scratch\n")
-            .expect_err("syntax directive must fail closed");
-        assert!(error.to_string().contains("syntax"));
-        assert!(error.to_string().contains("not supported"));
+    fn syntax_directive_is_consumed_before_dockerfile_instructions() {
+        let stages = parse_stages("# syntax=docker/dockerfile:1\nFROM alpine:3.20\n")
+            .expect("syntax directive must not become an instruction");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].base, "alpine:3.20");
     }
 
     #[test]

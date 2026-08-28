@@ -281,7 +281,7 @@ fn dockerfile_escape_directive_builds_with_backtick_continuation() {
 }
 
 #[test]
-fn dockerfile_syntax_directive_fails_with_explicit_error() {
+fn dockerfile_syntax_directive_is_consumed_before_building() {
     let runtime_dir = tempfile::tempdir().expect("runtime dir");
     let context_dir = tempfile::tempdir().expect("context dir");
     let dockerfile_path = context_dir.path().join("Dockerfile");
@@ -299,13 +299,10 @@ fn dockerfile_syntax_directive_fails_with_explicit_error() {
         &[],
     );
     assert!(
-        !output.status.success(),
-        "syntax directive must not build with default frontend semantics"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("syntax") && stderr.contains("not supported"),
-        "syntax directive error must be explicit, got: {stderr}"
+        output.status.success(),
+        "syntax directive build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

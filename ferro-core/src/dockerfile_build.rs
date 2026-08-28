@@ -296,7 +296,7 @@ struct BuiltStage {
     context_layer: Option<StageLayer>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StageLayer {
     digest: String,
     media_type: String,
@@ -309,6 +309,8 @@ struct StageCheckpoint {
     layer_digest: String,
     layer_media_type: String,
     layer_size: i64,
+    #[serde(default)]
+    context_layer: Option<StageLayer>,
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +599,7 @@ fn restore_stage_from_checkpoint(
     runtime_dir: &Path,
     idx: usize,
     base_info: &BaseImageInfo,
+    inherited_root: Option<&Path>,
     checkpoint: &StageCheckpoint,
 ) -> Result<Option<BuiltStage>, DockerfileBuildError> {
     if checkpoint.layer_size < 0 {
@@ -617,11 +620,28 @@ fn restore_stage_from_checkpoint(
     // Its root must therefore be per-attempt, just like the context scratch.
     let stage_root = create_build_dir(runtime_dir, &format!("stage-{idx}"))?;
     let cas_root = runtime_dir.join("images").join("cas").join("blake3");
-    if !base_info.layers.is_empty() {
+    if let Some(parent_root) = inherited_root {
+        copy_rootfs_contents(parent_root, &stage_root)?;
+    } else if !base_info.layers.is_empty() {
         construct_rootfs_with_dedup(&stage_root, &base_info.layers, &cas_root)
             .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
     } else {
         fs::create_dir_all(&stage_root)?;
+    }
+    if let Some(context_layer) = &checkpoint.context_layer {
+        let context_path = layer_blob_path(runtime_dir, &context_layer.digest);
+        let metadata = match fs::metadata(&context_path) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(None),
+        };
+        if !metadata.is_file()
+            || metadata.len() != context_layer.size as u64
+            || !file_matches_digest(&context_path, &context_layer.digest)
+        {
+            return Ok(None);
+        }
+        apply_layer_tar(&stage_root, &context_path)
+            .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
     }
     apply_layer_tar(&stage_root, &layer_path)
         .map_err(|error| DockerfileBuildError::Invalid(error.to_string()))?;
@@ -631,7 +651,7 @@ fn restore_stage_from_checkpoint(
         layer_digest: checkpoint.layer_digest.clone(),
         layer_media_type: checkpoint.layer_media_type.clone(),
         layer_size: checkpoint.layer_size,
-        context_layer: None,
+        context_layer: checkpoint.context_layer.clone(),
     }))
 }
 
@@ -1184,6 +1204,7 @@ fn execute_stages_and_publish(
                         runtime_dir,
                         idx,
                         &base_infos[idx],
+                        inherited_root.as_deref(),
                         &checkpoint,
                     ) {
                         Ok(Some(mut output)) => {
@@ -1259,6 +1280,7 @@ fn execute_stages_and_publish(
                                 layer_digest: output.layer_digest.clone(),
                                 layer_media_type: output.layer_media_type.clone(),
                                 layer_size: output.layer_size,
+                                context_layer: output.context_layer.clone(),
                             },
                         );
                     }
@@ -3360,7 +3382,10 @@ fn stage_content_identities(
     let mut identities: Vec<String> = Vec::with_capacity(stages.len());
     for (index, stage) in stages.iter().enumerate() {
         let mut buffer = Vec::new();
-        buffer.extend_from_slice(b"ferrocrate/stage-identity/v1\0");
+        // Checkpoints now retain both the context and RUN layers so a
+        // restored stage reproduces its complete rootfs rather than just its
+        // final delta. Invalidate checkpoints written by the old format.
+        buffer.extend_from_slice(b"ferrocrate/stage-identity/v2\0");
         buffer.push(match compression {
             CompressionFormat::None => 0,
             CompressionFormat::Gzip => 1,
@@ -4627,7 +4652,9 @@ fn parse_exec_or_shell(raw: &str, shell: &[String]) -> Result<Vec<String>, Docke
 
 fn parse_json_array(raw: &str) -> Result<Vec<String>, DockerfileBuildError> {
     try_parse_json_array(raw).ok_or_else(|| {
-        DockerfileBuildError::Invalid("invalid JSON array: expected a JSON string array".to_string())
+        DockerfileBuildError::Invalid(
+            "invalid JSON array: expected a JSON string array".to_string(),
+        )
     })
 }
 
@@ -6904,14 +6931,14 @@ mod tests {
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_run_with_workdir,
-        parse_stages,
-        parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
-        prune_build_cache, registry_cache_descriptor, registry_cache_reference,
-        reject_cache_path_symlinks, resolve_copy_owner, run_stage_worker_pool, save_build_cache,
-        save_build_journal, sha256_digest_bytes, stage_checkpoint_path, stage_content_identities,
-        validate_mount_target, BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournalState,
-        BuildLimits, CacheSharing, CopyOwner, DockerfileBuildError, BUILD_CACHE_PLATFORM,
-        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
+        parse_stages, parse_stop_signal, prepare_dockerfile_build,
+        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        registry_cache_reference, reject_cache_path_symlinks, resolve_copy_owner,
+        run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
+        stage_checkpoint_path, stage_content_identities, validate_mount_target, BaseImageInfo,
+        BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits, CacheSharing, CopyOwner,
+        DockerfileBuildError, BUILD_CACHE_PLATFORM, OCI_IMAGE_LAYER_MEDIA_TYPE,
+        REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use sha2::Digest;
     use std::collections::HashMap;
@@ -7738,6 +7765,63 @@ mod tests {
         assert!(stage_root(&runtime, 0).is_dir());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_restore_preserves_artifacts_copied_from_a_build_stage() {
+        let _env = crate::test_support::acquire_env_lock();
+        if skip_unavailable_rootless_build_sandbox() {
+            return;
+        }
+        let Some(busybox) = static_busybox() else {
+            eprintln!("skipping: no static /usr/bin/busybox on this host");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS addon-build\n\
+             COPY busybox /busybox\n\
+             COPY native-addon /opt/addon.node\n\
+             RUN [\"/busybox\", \"true\"]\n\
+             FROM addon-build AS test\n\
+             RUN [\"/busybox\", \"sh\", \"-c\", \"test -s /opt/addon.node\"]\n",
+        )
+        .expect("dockerfile");
+        fs::copy(busybox, temp.path().join("busybox")).expect("copy busybox");
+        fs::write(temp.path().join("native-addon"), b"native-addon").expect("native addon");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("image store");
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/checkpoint-addon:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("seed build");
+        fs::remove_file(build_cache_path(&runtime)).expect("remove build cache");
+        fs::remove_dir_all(stage_root(&runtime, 0)).expect("remove build stage root");
+        fs::remove_dir_all(stage_root(&runtime, 1)).expect("remove test stage root");
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/checkpoint-addon:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &authority,
+        )
+        .expect("checkpointed build");
+        assert!(
+            stage_root(&runtime, 1).join("opt/addon.node").is_file(),
+            "a checkpointed stage must retain files copied from its build stage"
+        );
+    }
+
     #[test]
     fn cache_entry_records_source_provenance_when_context_changes() {
         let _env = crate::test_support::acquire_env_lock();
@@ -8313,10 +8397,9 @@ mod tests {
         // a cache hit must not add any stage directories to it.
         assert!(
             fs::read_dir(target_runtime.join("build"))
-                .map(|entries| entries.filter_map(Result::ok).all(|entry| !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("stage-0-")))
+                .map(|entries| entries
+                    .filter_map(Result::ok)
+                    .all(|entry| !entry.file_name().to_string_lossy().starts_with("stage-0-")))
                 .unwrap_or(true),
             "imported registry cache hit must not rebuild stages"
         );
@@ -9377,8 +9460,9 @@ mod tests {
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
         )
         .unwrap_or_else(|error| panic!("bracket-utility RUN should build: {error}"));
-        let layers = resolve_layer_paths_with_store(&runtime, "local/run-bracket-shell:latest", &store)
-            .unwrap();
+        let layers =
+            resolve_layer_paths_with_store(&runtime, "local/run-bracket-shell:latest", &store)
+                .unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(&root).unwrap();
         for layer in &layers {

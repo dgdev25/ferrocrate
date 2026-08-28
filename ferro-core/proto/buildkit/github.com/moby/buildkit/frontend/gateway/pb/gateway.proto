@@ -16,6 +16,8 @@ service LLBBridge {
   rpc Solve(SolveRequest) returns (SolveResponse);
   rpc Ping(PingRequest) returns (PongResponse);
   rpc Return(ReturnRequest) returns (ReturnResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc Warn(WarnRequest) returns (WarnResponse);
 }
 
 message Result {
@@ -71,3 +73,29 @@ message PongResponse {
   repeated moby.buildkit.v1.apicaps.APICap LLBCaps = 2;
   repeated moby.buildkit.v1.types.WorkerRecord Workers = 3;
 }
+
+message WarnRequest {
+  string digest = 1;
+  int64 level = 2;
+  bytes short = 3;
+  repeated bytes detail = 4;
+  string url = 5;
+  pb.SourceInfo info = 6;
+  repeated pb.Range ranges = 7;
+}
+
+message WarnResponse {}
+
+message ReadFileRequest {
+  string Ref = 1;
+  string FilePath = 2;
+  FileRange Range = 3;
+  int32 MountIndex = 4;
+}
+
+message FileRange {
+  int64 Offset = 1;
+  int64 Length = 2;
+}
+
+message ReadFileResponse { bytes Data = 1; }

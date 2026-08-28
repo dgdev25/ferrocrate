@@ -17452,6 +17452,7 @@ struct BuildkitBuild {
         Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::SolveRequest>>,
     returned: Mutex<Option<buildkit_proto::moby::buildkit::v1::frontend::ReturnRequest>>,
     result: Mutex<Option<BuildkitBuildResult>>,
+    gateway_warnings: Mutex<Vec<buildkit_proto::moby::buildkit::v1::VertexWarning>>,
     error: Mutex<Option<String>>,
     dockerfile_source: Mutex<Option<BuildkitDockerfileSource>>,
     is_completed: AtomicBool,
@@ -17727,6 +17728,7 @@ impl DockerCompatState {
             gateway_solve: Mutex::new(None),
             returned: Mutex::new(None),
             result: Mutex::new(None),
+            gateway_warnings: Mutex::new(Vec::new()),
             error: Mutex::new(None),
             dockerfile_source: Mutex::new(None),
             is_completed: AtomicBool::new(false),
@@ -17778,15 +17780,29 @@ impl DockerCompatState {
         build_id: &str,
         request: buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
     ) -> Result<Arc<BuildkitBuild>, String> {
-        if request.frontend != "dockerfile.v0" || request.definition.is_some() {
+        let build = self.buildkit_build(build_id)?;
+        let is_dockerfile = request.frontend == "dockerfile.v0"
+            || (request.frontend == "gateway.v0"
+                && request.frontend_opt.get("source").map(String::as_str) == Some("dockerfile.v0"));
+        // The BuildKit client frontend reads the Dockerfile through Inputs,
+        // then submits its generated LLB here. Inputs has already produced
+        // the Dockerfile result (including its lint warnings), so this is not
+        // an arbitrary LLB solve.
+        let is_prepared_client_llb = request.frontend.is_empty()
+            && request.definition.is_some()
+            && build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .is_some();
+        if !(is_dockerfile && request.definition.is_none()) && !is_prepared_client_llb {
             return Err("buildkit gateway: only dockerfile.v0 frontend solves are supported".to_string());
         }
-        let build = self.buildkit_build(build_id)?;
         let mut callback = build
             .gateway_solve
             .lock()
             .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?;
-        if callback.is_some() {
+        if callback.is_some() && !is_prepared_client_llb {
             return Err("buildkit gateway: duplicate frontend solve".to_string());
         }
         *callback = Some(request);
@@ -24411,6 +24427,48 @@ async fn handle_buildkit_control_request(
             .map_err(|error| format!("buildkit control: gateway ping failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
+    if method == BuildkitControlMethod::GatewayWarn {
+        use buildkit_proto::moby::buildkit::v1::frontend::{WarnRequest, WarnResponse};
+
+        let build_id = build_id
+            .as_deref()
+            .ok_or_else(|| "buildkit gateway: missing build id".to_string())?;
+        let warning = receive_buildkit_unary::<WarnRequest>(request.into_body()).await?;
+        let build = state
+            .wait_for_buildkit_build(build_id, Duration::from_secs(3))
+            .await?;
+        build
+            .gateway_warnings
+            .lock()
+            .map_err(|error| format!("buildkit gateway warnings poisoned: {error}"))?
+            .push(buildkit_gateway_warning(warning));
+        response_stream
+            .send_data(grpc_message(&WarnResponse::default()), false)
+            .map_err(|error| format!("buildkit gateway warn: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::GatewayReadFile {
+        use buildkit_proto::moby::buildkit::v1::frontend::{ReadFileRequest, ReadFileResponse};
+
+        let build_id = build_id
+            .as_deref()
+            .ok_or_else(|| "buildkit gateway: missing build id".to_string())?;
+        let read = receive_buildkit_unary::<ReadFileRequest>(request.into_body()).await?;
+        let build = state
+            .wait_for_buildkit_build(build_id, Duration::from_secs(3))
+            .await?;
+        let source = build
+            .dockerfile_source
+            .lock()
+            .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
+            .clone()
+            .ok_or_else(|| "buildkit gateway: Dockerfile source is unavailable".to_string())?;
+        let data = buildkit_gateway_read_file(&source, &read)?;
+        response_stream
+            .send_data(grpc_message(&ReadFileResponse { data }), false)
+            .map_err(|error| format!("buildkit gateway read file: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
     if method == BuildkitControlMethod::GatewayInputs {
         use buildkit_proto::moby::buildkit::v1::frontend::{InputsRequest, InputsResponse};
 
@@ -24550,13 +24608,28 @@ async fn handle_buildkit_control_request(
                 })
                 .into_iter()
                 .collect();
+            let client_warnings = build
+                .gateway_solve
+                .lock()
+                .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?
+                .as_ref()
+                .is_some_and(|solve| solve.frontend.is_empty() && solve.definition.is_some());
+            let warnings = if client_warnings {
+                build
+                    .gateway_warnings
+                    .lock()
+                    .map_err(|error| format!("buildkit gateway warnings poisoned: {error}"))?
+                    .clone()
+            } else {
+                buildkit_progress_warnings(&result.warnings, &build.dockerfile_source)?
+            };
             use buildkit_proto::moby::buildkit::v1::StatusResponse;
             response_stream
                 .send_data(
                     grpc_message(&StatusResponse {
                         vertexes,
                         logs,
-                        warnings: buildkit_progress_warnings(&result.warnings, &build.dockerfile_source)?,
+                        warnings,
                         ..Default::default()
                     }),
                     false,
@@ -24577,13 +24650,22 @@ async fn handle_buildkit_control_request(
             .wait_for_buildkit_build(build_id, Duration::from_secs(3))
             .await?;
         let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
-        let result = execute_buildkit_frontend(
-            state.as_ref(),
-            execution.clone(),
-            build.as_ref(),
-            &solve,
-        )
-        .await;
+        let result = if solve.frontend.is_empty() && solve.definition.is_some() {
+            build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .clone()
+                .ok_or_else(|| "buildkit gateway: client LLB solve has no prepared Dockerfile result".to_string())
+        } else {
+            execute_buildkit_frontend(
+                state.as_ref(),
+                execution.clone(),
+                build.as_ref(),
+                &solve,
+            )
+            .await
+        };
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -24725,14 +24807,33 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
             "source.local",
             "source.local.unique",
             "source.local.sessionid",
+            "source.local.includepatterns",
+            "source.local.followpaths",
+            "source.local.excludepatterns",
             "source.local.sharedkeyhint",
+            "source.git",
+            "source.git.keepgitdir",
+            "source.git.fullurl",
+            "source.http",
+            "source.http.checksum",
+            "source.http.perm",
+            "soruce.http.uidgid",
+            "source.buildop.llbfilename",
             "exec.meta.base",
             "exec.meta.network",
             "exec.meta.proxyenv",
             "exec.mount.bind",
+            "exec.mount.cache",
+            "exec.mount.cache.sharing",
+            "exec.mount.selector",
+            "exec.mount.tmpfs",
+            "exec.mount.secret",
             "file.base",
             "constraints",
             "platform",
+            "meta.ignorecache",
+            "meta.description",
+            "meta.exportcache",
         ]
         .into_iter()
         .map(enabled)
@@ -24914,7 +25015,16 @@ async fn execute_buildkit_frontend(
         .filter(|name| !name.is_empty())
         .unwrap_or("local/build:latest")
         .to_string();
-    let platform = request.frontend_opt.get("platform").cloned();
+    // The classic executor materializes one platform at a time.  BuildKit
+    // clients commonly request a comma-separated platform list even for
+    // check-only solves; use its first requested platform here rather than
+    // handing the whole list to the single-platform parser.
+    let platform = request
+        .frontend_opt
+        .get("platform")
+        .and_then(|platforms| platforms.split(',').next())
+        .filter(|platform| !platform.is_empty())
+        .map(str::to_owned);
     // Registry pulls and the classic build executor are synchronous.  Running
     // them on this h2 request runtime makes reqwest's blocking client try to
     // tear down its private Tokio runtime from an async context, which aborts
@@ -24987,13 +25097,30 @@ async fn execute_buildkit_frontend(
 #[cfg(target_os = "linux")]
 fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
     let mut instructions = Vec::new();
+    let mut heredoc_terminator = None;
     for (index, line) in dockerfile.lines().enumerate() {
         let trimmed = line.trim();
+        if let Some(terminator) = heredoc_terminator.as_deref() {
+            if trimmed == terminator {
+                heredoc_terminator = None;
+            }
+            continue;
+        }
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let keyword = trimmed.split_whitespace().next().unwrap_or("");
         instructions.push((index + 1, keyword.to_string(), trimmed.to_string()));
+        if let Some(marker) = trimmed.split("<<").nth(1) {
+            let terminator = marker
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"']);
+            if !terminator.is_empty() {
+                heredoc_terminator = Some(terminator.to_string());
+            }
+        }
     }
     let uppercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_uppercase()).count();
     let lowercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_lowercase()).count();
@@ -25128,6 +25255,63 @@ fn buildkit_progress_warnings(
 }
 
 #[cfg(target_os = "linux")]
+fn buildkit_gateway_warning(
+    warning: buildkit_proto::moby::buildkit::v1::frontend::WarnRequest,
+) -> buildkit_proto::moby::buildkit::v1::VertexWarning {
+    buildkit_proto::moby::buildkit::v1::VertexWarning {
+        vertex: warning.digest,
+        level: warning.level,
+        short: warning.short,
+        detail: warning.detail,
+        url: warning.url,
+        info: warning.info,
+        ranges: warning.ranges,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_gateway_read_file(
+    source: &BuildkitDockerfileSource,
+    request: &buildkit_proto::moby::buildkit::v1::frontend::ReadFileRequest,
+) -> Result<Vec<u8>, String> {
+    // The client Dockerfile frontend probes the context-root `.dockerignore`
+    // through the gateway before it parses the Dockerfile.  A Dockerfile with
+    // a custom filename also has an optional sibling `<filename>.dockerignore`.
+    // Neither file is retained by this compatibility frontend, but their
+    // absence is represented by an empty read rather than a gateway error.
+    if request.file_path == ".dockerignore"
+        || request.file_path == format!("{}.dockerignore", source.filename)
+    {
+        return Ok(Vec::new());
+    }
+    if request.file_path != source.filename {
+        return Err(format!("buildkit gateway: file {} is unavailable", request.file_path));
+    }
+    let range = request.range.as_ref();
+    let offset = range.map(|range| range.offset).unwrap_or_default();
+    let length = range.map(|range| range.length).unwrap_or_default();
+    if offset < 0 || length < 0 {
+        return Err("buildkit gateway: file range must not be negative".to_string());
+    }
+    let start = usize::try_from(offset)
+        .map_err(|_| "buildkit gateway: file range offset is invalid".to_string())?;
+    if start > source.data.len() {
+        return Err("buildkit gateway: file range starts beyond Dockerfile".to_string());
+    }
+    let end = if length == 0 {
+        source.data.len()
+    } else {
+        start
+            .checked_add(usize::try_from(length).map_err(|_| {
+                "buildkit gateway: file range length is invalid".to_string()
+            })?)
+            .filter(|end| *end <= source.data.len())
+            .ok_or_else(|| "buildkit gateway: file range ends beyond Dockerfile".to_string())?
+    };
+    Ok(source.data[start..end].to_vec())
+}
+
+#[cfg(target_os = "linux")]
 fn buildkit_metadata_reference(base: &str) -> Result<String, String> {
     let parsed = parse_image_reference(base).map_err(|error| error.to_string())?;
     let registry = if parsed.registry == "registry-1.docker.io" {
@@ -25216,8 +25400,10 @@ enum BuildkitControlMethod {
     Status,
     GatewayPing,
     GatewayInputs,
+    GatewayReadFile,
     GatewaySolve,
     GatewayReturn,
+    GatewayWarn,
     Other,
 }
 
@@ -25230,8 +25416,10 @@ fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
         "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
         "/moby.buildkit.v1.frontend.LLBBridge/Ping" => BuildkitControlMethod::GatewayPing,
         "/moby.buildkit.v1.frontend.LLBBridge/Inputs" => BuildkitControlMethod::GatewayInputs,
+        "/moby.buildkit.v1.frontend.LLBBridge/ReadFile" => BuildkitControlMethod::GatewayReadFile,
         "/moby.buildkit.v1.frontend.LLBBridge/Solve" => BuildkitControlMethod::GatewaySolve,
         "/moby.buildkit.v1.frontend.LLBBridge/Return" => BuildkitControlMethod::GatewayReturn,
+        "/moby.buildkit.v1.frontend.LLBBridge/Warn" => BuildkitControlMethod::GatewayWarn,
         _ => BuildkitControlMethod::Other,
     }
 }
@@ -34210,11 +34398,11 @@ volumes:
             .record_buildkit_gateway_solve(
                 "build-ref",
                 frontend::SolveRequest {
-                    frontend: "dockerfile.v0".to_string(),
-                    frontend_opt: HashMap::from([(
-                        "filename".to_string(),
-                        "Dockerfile.custom".to_string(),
-                    )]),
+                    frontend: "gateway.v0".to_string(),
+                    frontend_opt: HashMap::from([
+                        ("source".to_string(), "dockerfile.v0".to_string()),
+                        ("filename".to_string(), "Dockerfile.custom".to_string()),
+                    ]),
                     ..Default::default()
                 },
             )
@@ -34225,9 +34413,114 @@ volumes:
 
         assert_eq!(
             build.gateway_solve.lock().expect("gateway solve").as_ref().expect("callback").frontend,
-            "dockerfile.v0"
+            "gateway.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_gateway_accepts_client_llb_after_inputs_prepared_the_result() {
+        use super::buildkit_proto::{moby::buildkit::v1::frontend, pb::Definition};
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "client-build".to_string(),
+                session: "session-id".to_string(),
+                ..Default::default()
+            })
+            .expect("register outer solve");
+        *build.result.lock().expect("result") = Some(super::BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+        });
+
+        state
+            .record_buildkit_gateway_solve(
+                "client-build",
+                frontend::SolveRequest {
+                    definition: Some(Definition::default()),
+                    ..Default::default()
+                },
+            )
+            .expect("client LLB after prepared inputs is accepted");
+    }
+
+    #[test]
+    fn buildkit_gateway_warn_projects_the_client_warning_unchanged() {
+        use super::buildkit_proto::{moby::buildkit::v1::frontend::WarnRequest, pb::{Position, Range, SourceInfo}};
+
+        let warning = super::buildkit_gateway_warning(WarnRequest {
+            digest: "sha256:warning".to_string(),
+            level: 1,
+            short: b"FromAsCasing: 'as' and 'FROM' keywords' casing do not match".to_vec(),
+            detail: vec![b"FROM is uppercase but AS is lowercase".to_vec()],
+            url: "https://docs.docker.com/go/dockerfile/rule/from-as-casing/".to_string(),
+            info: Some(SourceInfo {
+                filename: "Dockerfile".to_string(),
+                data: b"FROM alpine as build\n".to_vec(),
+                ..Default::default()
+            }),
+            ranges: vec![Range {
+                start: Some(Position { line: 0, character: 0 }),
+                end: Some(Position { line: 0, character: 19 }),
+            }],
+        });
+
+        assert_eq!(warning.vertex, "sha256:warning");
+        assert_eq!(warning.short, b"FromAsCasing: 'as' and 'FROM' keywords' casing do not match");
+        assert_eq!(warning.ranges.len(), 1);
+        assert_eq!(warning.info.expect("source").filename, "Dockerfile");
+    }
+
+    #[test]
+    fn buildkit_gateway_read_file_serves_the_captured_dockerfile_range() {
+        use super::buildkit_proto::moby::buildkit::v1::frontend::{FileRange, ReadFileRequest};
+
+        let source = super::BuildkitDockerfileSource {
+            filename: "Dockerfile".to_string(),
+            data: b"FROM scratch\n".to_vec(),
+        };
+        let data = super::buildkit_gateway_read_file(
+            &source,
+            &ReadFileRequest {
+                file_path: "Dockerfile".to_string(),
+                range: Some(FileRange {
+                    offset: 5,
+                    length: 7,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("Dockerfile range");
+
+        assert_eq!(data, b"scratch");
+
+        let dockerignore = super::buildkit_gateway_read_file(
+            &source,
+            &ReadFileRequest {
+                file_path: "Dockerfile.dockerignore".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("absent Dockerfile-specific ignore file");
+        assert!(dockerignore.is_empty());
+
+        let context_dockerignore = super::buildkit_gateway_read_file(
+            &source,
+            &ReadFileRequest {
+                file_path: ".dockerignore".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("absent context Dockerfile ignore file");
+        assert!(context_dockerignore.is_empty());
     }
 
     #[test]
@@ -34287,10 +34580,20 @@ volumes:
         ] {
             assert!(frontend_caps.contains(required), "missing frontend cap {required}");
         }
-        assert!(pong
+        let llb_caps = pong
             .llb_caps
             .iter()
-            .any(|cap| cap.enabled && cap.id == "source.local.sessionid"));
+            .filter(|cap| cap.enabled)
+            .map(|cap| cap.id.as_str())
+            .collect::<HashSet<_>>();
+        for required in [
+            "source.local.sessionid",
+            "source.local.followpaths",
+            "source.local.excludepatterns",
+            "meta.description",
+        ] {
+            assert!(llb_caps.contains(required), "missing LLB cap {required}");
+        }
     }
 
     #[test]

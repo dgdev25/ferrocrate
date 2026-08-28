@@ -59,7 +59,11 @@ export PATH="$HOME/.local/go-install/go/bin:$PATH"
 DATE="$(date -u +%Y-%m-%d)"; RUN="$(date -u +%Y-%m-%dT%H:%MZ)"
 HEAD="$(git -C "$BENCH/.." rev-parse --short HEAD)"
 OUT="$BENCH/results/$DATE/suite-$SUITE-$ENGINE.jsonl"; mkdir -p "$(dirname "$OUT")"; : > "$OUT"
-SOCK="${FERROCRATE_SOCK:-/run/user/1000/ferrocrate-suites.sock}"
+# The socket lives under FERROCRATE_HOME, not /run/user/1000: every agent on
+# this host gets its own FERROCRATE_HOME, so per-suite runtimes never collide,
+# while a fixed /run/user/1000 name makes two agents race for one socket (each
+# daemon's startup `rm -f` deletes the other's listener mid-run).
+SOCK="${FERROCRATE_SOCK:-$FERROCRATE_HOME/ferrocrate-suites.sock}"
 FERRO="${FERROCRATE_BIN:-}"
 if [ -z "$FERRO" ]; then
   for c in "$BENCH/../target/release/ferro-cli" "$BENCH/../release-artifacts/ferro-cli"; do
@@ -114,7 +118,7 @@ echo "== $SUITE @ $(git -C "$DIR" rev-parse --short HEAD) on $ENGINE"
 # --- engine under test ---
 # critest speaks CRI, not the Docker API, so it needs the ferro-cri server on its
 # own socket. Every other suite goes through the Docker-compatible socket.
-CRI_PATH="${FERROCRATE_CRI_SOCKET:-/run/user/1000/ferrocrate-cri.sock}"
+CRI_PATH="${FERROCRATE_CRI_SOCKET:-$FERROCRATE_HOME/ferrocrate-cri.sock}"
 if [ "$ENGINE" = ferrocrate ]; then
   command -v "$FERRO" >/dev/null 2>&1 || [ -x "$FERRO" ] || { echo "no ferro-cli at $FERRO" >&2; exit 2; }
   if [ "$SUITE" = critest ]; then

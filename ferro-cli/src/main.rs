@@ -286,9 +286,10 @@ pub enum Commands {
         annotations: Vec<String>,
         #[arg(long = "log-driver", default_value = "json-file")]
         log_driver: String,
-        #[arg(long)]
+        #[arg(short = 'u', long)]
         user: Option<String>,
-        #[arg(long)]
+        /// Docker documents -w as the short form of --workdir.
+        #[arg(short = 'w', long)]
         workdir: Option<String>,
         #[arg(long)]
         entrypoint: Option<String>,
@@ -585,7 +586,7 @@ pub enum Commands {
         container: String,
         #[arg(long, default_value = "text", value_parser = validate_output_format)]
         format: String,
-        #[arg(long)]
+        #[arg(short = 'f', long)]
         follow: bool,
     },
     #[cfg(target_os = "linux")]
@@ -643,7 +644,7 @@ pub enum Commands {
     Stop {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "10")]
+        #[arg(short = 't', long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
@@ -651,7 +652,7 @@ pub enum Commands {
     Kill {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "SIGKILL")]
+        #[arg(short = 's', long, default_value = "SIGKILL")]
         signal: String,
     },
     #[cfg(target_os = "linux")]
@@ -682,7 +683,7 @@ pub enum Commands {
     Restart {
         #[arg(required = true)]
         containers: Vec<String>,
-        #[arg(long, default_value = "10")]
+        #[arg(short = 't', long, default_value = "10")]
         timeout: u64,
     },
     #[cfg(target_os = "linux")]
@@ -1298,6 +1299,20 @@ pub enum NetworkCommands {
     Rm {
         name: String,
     },
+    /// Attach a container to a network.
+    Connect {
+        network: String,
+        container: String,
+        #[arg(long = "alias")]
+        aliases: Vec<String>,
+    },
+    /// Detach a container from a network.
+    Disconnect {
+        network: String,
+        container: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1571,6 +1586,8 @@ pub fn main() {
     }
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let qualification_fixture = ferro_core::observability::qualification_fixture("cli");
+    // Daemon-side failures of the run verb are Docker exit status 125.
+    let run_daemon_error = matches!(cli.command, Commands::Run { .. });
     #[cfg(feature = "dashboard")]
     if matches!(&cli.command, Commands::Dashboard { .. }) {
         if let Some(message) = super::dashboard::unavailable_message() {
@@ -1587,6 +1604,11 @@ pub fn main() {
         );
         tracing::error!("{normalized}");
         eprintln!("error: {normalized}");
+        // Docker reserves 125 for daemon-side failures of the run verb
+        // (client usage errors still exit 2 through clap).
+        if run_daemon_error {
+            process::exit(125);
+        }
         process::exit(1);
     }
     let _ = ferro_core::observability::persist_authorization_fixture_evidence(
@@ -5443,8 +5465,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Diff { container } => {
                 for change in docker_container_changes(&runtime_dir, &runtime, &container)? {
-                    let kind = match change.kind { 0 => "C", 1 => "A", 2 => "D", _ => "C" };
-                    println!("{kind} {}", change.path);
+                    println!("{}", format_diff_text_line(&change));
                 }
                 Ok(())
             }
@@ -6746,6 +6767,50 @@ fn read_signing_key_file(path: &Path) -> Result<[u8; 32], String> {
 
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "linux")]
+/// Docker's run path creates the container before network setup, so a
+/// network failure leaves the half-built container behind in state `created`
+/// and scripts clean it up with `rm`. Mirror that leftover.
+fn persist_half_built_container(
+    runtime_dir: &Path,
+    image: &str,
+    cmd: &[String],
+    name: Option<&str>,
+) -> Result<(), String> {
+    let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime_dir.join("containers.db"),
+    )
+    .map_err(|error| error.to_string())?;
+    let id = ferro_core::runtime::generate_container_id();
+    let record: ferro_core::container_store::ContainerRecord =
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "pid": 0,
+            "image": image,
+            "command": cmd,
+            "created_at_unix": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "created"
+        }))
+        .map_err(|error| format!("run: half-built container record: {error}"))?;
+    store.put(&record).map_err(|error| error.to_string())?;
+    if let Some(name) = name {
+        // Hold the name so a later run cannot reuse the failed container's
+        // name, matching Docker's name-in-use error.
+        store
+            .reserve_name(name, &record.id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+// Compose and the CLI surface every run knob, so the parameter count tracks
+// the flag set instead of an abstraction boundary.
+#[allow(clippy::too_many_arguments)]
 fn handle_run(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -6790,7 +6855,17 @@ fn handle_run(
     forced_id: Option<&str>,
     resolved_image_execution: Option<&ResolvedRunImageExecution>,
 ) -> Result<String, String> {
-    let binding = bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)?;
+    let binding = match bind_run_network_for_runtime(runtime_dir, runtime, network, bridge_cidr, bridge_name)
+    {
+        Ok(binding) => binding,
+        Err(error) => {
+            // Docker creates the container first and fails network setup
+            // afterwards: the half-built container stays behind in state
+            // `created` and the caller removes it with `rm`.
+            persist_half_built_container(runtime_dir, image, cmd, name)?;
+            return Err(error);
+        }
+    };
     let effective_network = binding.mode;
     let selected_network_name = binding.association;
     let resolved_bridge_cidr = binding.bridge_cidr;
@@ -9054,7 +9129,8 @@ fn dispatch_remote_socket(
                 .get("StatusCode")
                 .and_then(serde_json::Value::as_i64)
                 .unwrap_or_default();
-            println!("wait: container={} status_code={status}", container);
+            // Docker prints only the exit status code on stdout.
+            println!("{status}");
             Ok(())
         })()),
         Commands::Pause { containers } => handle_multiple_containers(containers, "pause", |container| request(
@@ -9256,6 +9332,55 @@ fn dispatch_remote_socket(
             format!("/networks/{}", percent_encode_path_component(name)),
         )
         .map(|_| ()),
+        Commands::Network {
+            command:
+                NetworkCommands::Connect {
+                    network,
+                    container,
+                    aliases,
+                },
+        } => {
+            let body = serde_json::json!({
+                "Container": container,
+                "EndpointConfig": {"Aliases": aliases},
+            });
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body(
+                "POST",
+                format!(
+                    "/networks/{}/connect",
+                    percent_encode_path_component(network)
+                ),
+                Some(body),
+            )
+            .map(|_| ())
+        }
+        Commands::Network {
+            command:
+                NetworkCommands::Disconnect {
+                    network,
+                    container,
+                    force,
+                },
+        } => {
+            let body = serde_json::json!({"Container": container, "Force": force});
+            let body = match serde_json::to_vec(&body) {
+                Ok(body) => body,
+                Err(error) => return Some(Err(error.to_string())),
+            };
+            request_with_body(
+                "POST",
+                format!(
+                    "/networks/{}/disconnect",
+                    percent_encode_path_component(network)
+                ),
+                Some(body),
+            )
+            .map(|_| ())
+        }
         Commands::Network {
             command: NetworkCommands::Prune { filters },
         } => (|| -> Result<(), String> {
@@ -12325,13 +12450,20 @@ fn docker_load_image_archive(
         .get(config_name)
         .ok_or_else(|| format!("docker: image load is missing config {config_name}"))?;
     let config_digest = format!("sha256:{:x}", Sha256::digest(config_bytes));
-    let expected_config_name = format!(
-        "{}.json",
-        config_digest
-            .strip_prefix("sha256:")
-            .expect("sha256 digest has prefix")
-    );
-    if config_name != expected_config_name {
+    // Both layouts name the config by its content digest. Ferrocrate's save
+    // writes `<hex>.json`; docker 25+ writes `blobs/sha256/<hex>` with no
+    // suffix. Compare the digest to the basename modulo that suffix so a
+    // docker-save tarball loads while a config that is not content-addressed
+    // by its declared name still fails.
+    let declared_config_name = config_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(config_name)
+        .trim_end_matches(".json");
+    let config_hex = config_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 digest has prefix");
+    if declared_config_name != config_hex {
         return Err("docker: image load config digest does not match its filename".to_string());
     }
     let reference = manifest
@@ -12456,16 +12588,63 @@ fn docker_export_container_archive(runtime_dir: &Path, runtime: &ContainerRuntim
 }
 
 #[cfg(target_os = "linux")]
+/// `docker diff` prints one "<kind> <absolute-path>" line per change.
+fn format_diff_text_line(change: &rootfs_diff::RootfsChange) -> String {
+    let kind = match change.kind { 0 => "C", 1 => "A", 2 => "D", _ => "C" };
+    if change.path.starts_with('/') {
+        format!("{kind} {}", change.path)
+    } else {
+        format!("{kind} /{}", change.path)
+    }
+}
+
 fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requested_id: &str) -> Result<Vec<rootfs_diff::RootfsChange>, String> {
     let id = resolve_container_id(runtime, requested_id)?;
     let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
     let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
     let baseline = runtime_dir.join("containers").join(&record.id).join("rootfs-baseline.json");
+    // Docker injects /etc/resolv.conf, /etc/hostname and /etc/hosts into the
+    // container at start and `docker diff` never reports them. Ferrocrate
+    // writes the same files after the create-time baseline was captured, so
+    // exclude them here or every diff would list resolver noise.
     let excluded = record.mounts.iter().map(|mount| rootfs.join(&mount.target))
-        .chain(record.tmpfs_mounts.iter().map(|mount| rootfs.join(&mount.target))).collect::<Vec<_>>();
+        .chain(record.tmpfs_mounts.iter().map(|mount| rootfs.join(&mount.target)))
+        .chain([
+            rootfs.join("etc/resolv.conf"),
+            rootfs.join("etc/hostname"),
+            rootfs.join("etc/hosts"),
+        ])
+        // The runtime mounts proc, sys, dev and run into a started container
+        // after the baseline was captured, the same runtime-only mounts the
+        // commit and export paths already skip.
+        .chain(["proc", "sys", "dev", "run"].map(|mount| rootfs.join(mount)))
+        .collect::<Vec<_>>();
     if rootfs.is_dir() && baseline.is_file() {
-        rootfs_diff::diff(&rootfs, &baseline, &excluded).map_err(|error| format!("docker: container diff failed: {error}"))
+        let mut changes = rootfs_diff::diff(&rootfs, &baseline, &excluded)
+            .map_err(|error| format!("docker: container diff failed: {error}"))?;
+        drop_runtime_injected_changes(&mut changes);
+        Ok(changes)
     } else { Ok(Vec::new()) }
+}
+
+/// Drop the changes the runtime's own start-time writes produce.
+///
+/// Docker binds the resolver, hostname and hosts files into the container at
+/// start, so they live outside the image layer and `docker diff` never reports
+/// them. Ferrocrate writes the same files into the rootfs after the
+/// create-time baseline, which would otherwise surface as resolver noise on
+/// every started container, including a fresh one.
+fn drop_runtime_injected_changes(changes: &mut Vec<rootfs_diff::RootfsChange>) {
+    const INJECTED: [&str; 3] = ["etc/resolv.conf", "etc/hostname", "etc/hosts"];
+    changes.retain(|change| !INJECTED.contains(&change.path.as_str()));
+    // Writing into /etc also bumps the directory's own mtime. Report that
+    // modification only when user content under /etc changed as well.
+    let etc_has_user_changes = changes
+        .iter()
+        .any(|change| change.path.starts_with("etc/") || change.path.starts_with("/etc/"));
+    if !etc_has_user_changes {
+        changes.retain(|change| change.path != "etc" && change.path != "/etc");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -13012,6 +13191,7 @@ fn handle_top(runtime: &ContainerRuntime, container: &str, format: &str) -> Resu
         return Err("top: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)?;
     let payload = docker_top_payload(runtime, &resolved)?;
     if format == "json" {
         println!(
@@ -13099,10 +13279,12 @@ fn handle_wait(
         });
         println!(
             "{}",
-            serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+            serde_json::to_string(&output).map_err(|error| error.to_string())?
         );
     } else {
-        println!("wait: container={} status_code={status_code}", resolved);
+        // Docker prints only the exit status code on stdout; scripts use
+        // `wait` to capture it directly.
+        println!("{status_code}");
     }
     Ok(())
 }
@@ -13174,6 +13356,8 @@ fn handle_kill(
         return Err("kill: container is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)
+        .map_err(|error| format!("cannot kill container: {resolved}: {error}"))?;
     let signal = parse_docker_kill_signal(Some(&signal_name.to_string()))?;
     runtime
         .kill_with_signal(&resolved, signal)
@@ -13193,6 +13377,11 @@ fn handle_rm(
 ) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("rm: container is required".to_string());
+    }
+    if force && !container_exists(runtime, container)? {
+        // Docker treats `rm -f` of a missing container as a successful no-op;
+        // without `--force` the missing container is still an error.
+        return Ok(());
     }
     let resolved = resolve_container_id(runtime, container)?;
     if force {
@@ -13302,8 +13491,20 @@ fn handle_start(runtime: &ContainerRuntime, container: &str) -> Result<(), Strin
     }
     let resolved = resolve_container_id(runtime, container)?;
     runtime.start(&resolved).map_err(|err| err.to_string())?;
-    println!("start: {resolved}");
+    let record = runtime.inspect(&resolved).ok();
+    let name = record.as_ref().and_then(|record| record.name.as_deref());
+    println!("{}", docker_start_reference(name, container, &resolved));
     Ok(())
+}
+
+/// Docker's `start` echoes the reference the caller used: the container name
+/// when addressed by name, the 12-character id prefix otherwise.
+fn docker_start_reference(name: Option<&str>, requested: &str, resolved: &str) -> String {
+    if name == Some(requested) {
+        requested.to_string()
+    } else {
+        resolved.chars().take(12).collect()
+    }
 }
 
 fn handle_volume(
@@ -13325,6 +13526,12 @@ fn handle_volume_authorized(
         .map_err(|err| err.to_string())?;
     match command {
         VolumeCommands::Create { name, driver, opts } => {
+            // Docker's `volume create` is idempotent: an existing name returns
+            // the stored volume and exits 0 instead of reporting an error.
+            if let Some(record) = store.get(&name).map_err(|error| error.to_string())? {
+                println!("volume create: {} {}", record.name, record.path);
+                return Ok(());
+            }
             let driver_opts = parse_driver_opts(&opts)?;
             let plan = store
                 .prepare_create(&name, &driver, driver_opts)
@@ -13486,11 +13693,12 @@ fn handle_volume_authorized(
                 )
                 .map_err(|error| error.to_string())?;
             let removed = execute_volume_remove(&store, &name, proof)?;
-            if removed {
-                println!("volume rm: {name}");
-            } else {
-                println!("volume rm: not found {name}");
+            if !removed {
+                // Docker reports a missing volume as a daemon error, not as a
+                // silent success: `get <name>: no such volume`, exit 1.
+                return Err(format!("volume rm: get {name}: no such volume"));
             }
+            println!("volume rm: {name}");
         }
     }
     Ok(())
@@ -14080,6 +14288,72 @@ fn handle_network_authorized(
             }
             println!("network rm: {name}");
         }
+        NetworkCommands::Connect {
+            network,
+            container,
+            aliases,
+        } => {
+            let id = resolve_container_id(runtime, &container)?;
+            let mut config = docker_named_endpoint_config(runtime_dir, &network)?;
+            config.aliases = aliases;
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkAttach,
+                    ResourceKind::Network,
+                    &config.network_name,
+                    config.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            match runtime.connect_network(&id, config) {
+                Ok(()) => permit.finish(true).map_err(|error| error.to_string())?,
+                Err(error) => {
+                    if matches!(
+                        error,
+                        ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                    ) {
+                        permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                    } else {
+                        permit.finish(false).map_err(|finish| finish.to_string())?;
+                    }
+                    return Err(error.to_string());
+                }
+            }
+        }
+        NetworkCommands::Disconnect {
+            network,
+            container,
+            force,
+        } => {
+            let id = resolve_container_id(runtime, &container)?;
+            let config = docker_named_endpoint_config(runtime_dir, &network)?;
+            let permit = authorization
+                .authorize_named(
+                    origin,
+                    AuthorizationAction::NetworkDetach,
+                    ResourceKind::Network,
+                    &config.network_name,
+                    config.generation,
+                )
+                .map_err(|error| error.to_string())?;
+            match runtime.disconnect_network(&id, &config.network_name) {
+                Ok(()) => permit.finish(true).map_err(|error| error.to_string())?,
+                Err(error) if force && error.to_string().contains("not connected") => {
+                    permit.finish(true).map_err(|finish| finish.to_string())?;
+                }
+                Err(error) => {
+                    if matches!(
+                        error,
+                        ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                    ) {
+                        permit.finish_unknown().map_err(|finish| finish.to_string())?;
+                    } else {
+                        permit.finish(false).map_err(|finish| finish.to_string())?;
+                    }
+                    return Err(error.to_string());
+                }
+            }
+        }
         NetworkCommands::Prune { filters } => {
             let filters = parse_cli_filters(&filters)?;
             validate_docker_network_filters(&filters)?;
@@ -14385,6 +14659,7 @@ fn handle_exec(
         return Err("exec: command is required".to_string());
     }
     let resolved = resolve_container_id(runtime, container)?;
+    require_live_container(runtime, &resolved)?;
     let result = if interactive {
         let mut input = Vec::new();
         std::io::stdin()
@@ -14420,7 +14695,36 @@ fn handle_exec(
     Ok(())
 }
 
+/// Docker rejects the `kill`, `top` and `exec` commands against a container
+/// whose state is not live, while the local runtime tolerates terminal states
+/// for race recovery. The CLI enforces Docker's contract here.
+fn require_live_container(runtime: &ContainerRuntime, resolved: &str) -> Result<(), String> {
+    let status = runtime
+        .inspect(resolved)
+        .map_err(|err| format!("container {resolved} lookup failed: {err}"))?
+        .status;
+    if matches!(status.as_str(), "running" | "paused" | "restarting") {
+        return Ok(());
+    }
+    Err(format!("container {resolved} is not running"))
+}
+
 #[cfg(target_os = "linux")]
+/// Whether a container name or id prefix currently resolves to a record.
+/// Used by `rm -f`, which must treat an absent container as already removed.
+fn container_exists(runtime: &ContainerRuntime, container: &str) -> Result<bool, String> {
+    if runtime.inspect(container).is_ok() {
+        return Ok(true);
+    }
+    Ok(runtime
+        .list()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .any(|record| {
+            record.id.starts_with(container) || record.name.as_deref() == Some(container)
+        }))
+}
+
 fn resolve_container_id(runtime: &ContainerRuntime, container: &str) -> Result<String, String> {
     if runtime.inspect(container).is_ok() {
         return Ok(container.to_string());
@@ -15548,15 +15852,17 @@ fn handle_compose(
                         let eligibility = restart_eligible.get(name);
                         match record.status.as_str() {
                             // `exited` between restarts: stay attached while
-                            // the policy will relaunch this instance.
-                            "exited" => match eligibility {
+                            // the policy will relaunch this instance. A manual
+                            // stop or kill also publishes `exited`, so the
+                            // user-stop flag decides, not the status alone.
+                            "exited" if !record.user_stopped => match eligibility {
                                 Some(ComposeRestartEligibility::Always) => true,
                                 Some(ComposeRestartEligibility::OnFailure) => {
                                     record.last_exit_code.is_some_and(|code| code != 0)
                                 }
                                 _ => false,
                             },
-                            "stopped" | "killed" => false,
+                            "exited" | "stopped" | "killed" => false,
                             // Any pre-terminal state (created/pending/running/
                             // paused/…) keeps the attached up alive.
                             _ => true,
@@ -19118,7 +19424,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>, bool, bool, bool)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
+    let mut wait_follow: Option<(String, String, Option<Duration>, bool)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
@@ -20948,7 +21254,7 @@ fn handle_docker_compat_connection(
                 // client composing wait with other calls) for the container's
                 // entire lifetime. Defer the blocking wait to the streaming
                 // epilogue.
-                wait_follow = Some((id, condition.to_string(), timeout));
+                wait_follow = Some((id, condition.to_string(), timeout, pending_auto_remove));
                 docker_chunked_headers(200, "application/json")
             }
             ("DELETE", path) if path.starts_with("/containers/") => {
@@ -21612,6 +21918,15 @@ fn handle_docker_compat_connection(
                     })
                     .unwrap_or_default();
                 let driver_opts = parse_driver_opts(&opts)?;
+                // Docker's `volume create` is idempotent: an existing name
+                // returns the stored volume instead of a conflict error.
+                if let Some(record) = volume_store
+                    .get(name)
+                    .map_err(|error| error.to_string())?
+                {
+                    let body = serde_json::json!({"Name": record.name, "Driver": record.driver, "Mountpoint": record.path, "Labels": record.labels});
+                    return Ok(http_response(201, body.to_string().as_bytes(), "application/json"));
+                }
                 let plan = volume_store
                     .prepare_create(name, driver, driver_opts)
                     .map_err(|error| error.to_string())?;
@@ -21859,7 +22174,7 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, daemon_runtime.as_ref(), &id)?;
         return Ok(());
     }
-    if let Some((id, condition, timeout)) = wait_follow {
+    if let Some((id, condition, timeout, pending_auto_remove)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
         let auto_remove_result = || -> Result<Option<i32>, String> {
             let started = Instant::now();
@@ -21881,6 +22196,21 @@ fn handle_docker_compat_connection(
                         // the start handler registers its auto-remove result
                         // after receiving the already-sent response headers.
                         std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None if pending_auto_remove
+                        && timeout.is_none_or(|limit| started.elapsed() < limit) =>
+                    {
+                        // A next-exit waiter registered against a still-pending
+                        // create must receive the exit status even though the
+                        // auto-remove thread deletes the record right after
+                        // exit; wait for that registration instead of falling
+                        // into the inspect poll that races the removal.
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None if pending_auto_remove => {
+                        return Err(format!(
+                            "wait: timed out waiting for auto-remove container {id}"
+                        ))
                     }
                     None => return Ok(None),
                 }
@@ -31232,6 +31562,53 @@ volumes:
         .expect("rm volume");
     }
 
+    // S44: `volume rm` of a name that was never created is a daemon error
+    // with exit 1, matching `docker volume rm` on a missing volume.
+    #[test]
+    fn volume_rm_missing_volume_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().to_path_buf();
+        let authorization = test_surface_authorization(&runtime_dir);
+
+        let err = handle_volume(
+            &runtime_dir,
+            VolumeCommands::Rm {
+                name: "fzv-missing".to_string(),
+            },
+            &authorization,
+        )
+        .expect_err("missing volume must not succeed");
+        assert!(
+            err.contains("fzv-missing") && err.contains("no such volume"),
+            "error must name the volume, got {err}"
+        );
+    }
+
+    // S53: `volume create` on an existing name is idempotent and exits 0,
+    // matching `docker volume create`.
+    #[test]
+    fn volume_create_existing_name_is_idempotent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().to_path_buf();
+        let authorization = test_surface_authorization(&runtime_dir);
+        let command = || VolumeCommands::Create {
+            name: "fzv-twice".to_string(),
+            driver: "local".to_string(),
+            opts: Vec::new(),
+        };
+
+        handle_volume(&runtime_dir, command(), &authorization).expect("first create");
+        handle_volume(&runtime_dir, command(), &authorization).expect("second create");
+
+        let store = ferro_core::volume_store::LocalVolumeStore::open(runtime_dir.join("volumes"))
+            .expect("store");
+        assert_eq!(
+            store.list().expect("list").len(),
+            1,
+            "idempotent create must not duplicate the volume"
+        );
+    }
+
     #[test]
     fn network_handlers_run() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -31554,6 +31931,133 @@ volumes:
         super::reset_network_kernel_effect_count();
         create_and_remove_named_network(temp.path(), "shadow-net");
         assert!(super::network_kernel_effect_count() > 0);
+    }
+
+    #[test]
+    fn parses_network_connect_and_disconnect() {
+        let cli = Cli::parse_from(["ferrocrate", "network", "connect", "net1", "web"]);
+        match cli.command {
+            Commands::Network {
+                command:
+                    NetworkCommands::Connect {
+                        network,
+                        container,
+                        aliases,
+                    },
+            } => {
+                assert_eq!(network, "net1");
+                assert_eq!(container, "web");
+                assert!(aliases.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "ferrocrate",
+            "network",
+            "disconnect",
+            "--force",
+            "net1",
+            "web",
+        ]);
+        match cli.command {
+            Commands::Network {
+                command:
+                    NetworkCommands::Disconnect {
+                        network,
+                        container,
+                        force,
+                    },
+            } => {
+                assert_eq!(network, "net1");
+                assert_eq!(container, "web");
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn network_connect_and_disconnect_enforce_the_docker_contract() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime
+            .surface_authorization()
+            .expect("surface authorization");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz43-app",
+                "name": "fz43-app",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        store.put(&record).expect("seed running record");
+
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Create {
+                name: "fz43-net".to_string(),
+                subnet: Some("172.35.0.0/16".to_string()),
+                gateway: Some("172.35.0.1".to_string()),
+                ipv6_subnet: None,
+                ipv6_gateway: None,
+                labels: Vec::new(),
+            },
+            &authorization,
+        )
+        .expect("create network");
+
+        // A connect against a missing network must name the network.
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Connect {
+                network: "fz43-nope".to_string(),
+                container: "fz43-app".to_string(),
+                aliases: Vec::new(),
+            },
+            &authorization,
+        )
+        .expect_err("missing network");
+        assert!(err.contains("network: not found fz43-nope"), "got {err}");
+
+        // Docker refuses to detach a container that is not on the network.
+        let err = handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Disconnect {
+                network: "fz43-net".to_string(),
+                container: "fz43-app".to_string(),
+                force: false,
+            },
+            &authorization,
+        )
+        .expect_err("container is not connected");
+        assert!(err.contains("not connected"), "got {err}");
+
+        // `--force` turns the failed detach into a no-op, matching
+        // `docker network disconnect -f`.
+        handle_network(
+            temp.path(),
+            &runtime,
+            NetworkCommands::Disconnect {
+                network: "fz43-net".to_string(),
+                container: "fz43-app".to_string(),
+                force: true,
+            },
+            &authorization,
+        )
+        .expect("forced disconnect is a no-op");
     }
 
     #[test]
@@ -31990,6 +32494,349 @@ volumes:
     }
 
     #[test]
+    fn kill_top_exec_reject_a_container_that_is_not_running() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let stopped: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fzs-stopped",
+                "name": "fzs-stopped",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "exited",
+                "last_exit_code": 0
+            }))
+            .expect("decode stopped record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&stopped).expect("seed stopped record");
+
+        let err = handle_kill(&runtime, "fzs-stopped", "SIGKILL").expect_err("kill stopped");
+        assert!(err.contains("cannot kill container: fzs-stopped"));
+        assert!(err.contains("is not running"));
+
+        let err = handle_top(&runtime, "fzs-stopped", "text").expect_err("top stopped");
+        assert!(err.contains("fzs-stopped is not running"));
+
+        let err = handle_exec(
+            &runtime,
+            "fzs-stopped",
+            &["echo".to_string()],
+            &[],
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect_err("exec stopped");
+        assert!(err.contains("fzs-stopped is not running"));
+    }
+
+    // S40: `docker start` on a running container is a successful no-op, not
+    // an "already running" error and not a second workload.
+    #[test]
+    fn start_on_a_running_container_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz40-app",
+                "name": "fz40-app",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        crate::linux_cli::handle_start(&runtime, "fz40-app")
+            .expect("start on a running container is a no-op");
+        let record = runtime.inspect("fz40-app").expect("inspect");
+        assert_eq!(record.status, "running");
+        assert_eq!(record.pid, 0, "start must not spawn a second workload");
+        assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    // S40: the start echo matches Docker. A name addressed by name comes back
+    // unchanged; an id comes back as the 12-character prefix.
+    #[test]
+    fn start_echo_uses_dockers_reference_rule() {
+        use crate::linux_cli::docker_start_reference;
+
+        let id = "70f18b597abf9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f9";
+        assert_eq!(
+            docker_start_reference(Some("fz40-app"), "fz40-app", id),
+            "fz40-app",
+            "a name addressed by name is echoed unchanged"
+        );
+        assert_eq!(
+            docker_start_reference(None, id, id),
+            &id[..12],
+            "an id-addressed container echoes the truncated id"
+        );
+        assert_eq!(
+            docker_start_reference(Some("fz40-app"), id, id),
+            &id[..12],
+            "a named container addressed by id still echoes the truncated id"
+        );
+    }
+
+    // S45: Docker's short flags are accepted: run -u/-w, logs -f,
+    // stop/restart -t and kill -s.
+    #[test]
+    fn parses_the_docker_short_flags() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "run",
+            "-u",
+            "1000:1000",
+            "-w",
+            "/srv",
+            "alpine:3.20",
+            "id",
+        ])
+        .expect("run -u/-w parse");
+        match cli.command {
+            Commands::Run { user, workdir, .. } => {
+                assert_eq!(user.as_deref(), Some("1000:1000"));
+                assert_eq!(workdir.as_deref(), Some("/srv"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["ferrocrate", "logs", "-f", "web"]).expect("logs -f parse");
+        match cli.command {
+            Commands::Logs { follow, .. } => assert!(follow),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["ferrocrate", "stop", "-t", "3", "web"]).expect("stop -t parse");
+        match cli.command {
+            Commands::Stop { timeout, .. } => assert_eq!(timeout, 3),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "kill",
+            "-s",
+            "SIGTERM",
+            "web",
+        ])
+        .expect("kill -s parse");
+        match cli.command {
+            Commands::Kill { signal, .. } => assert_eq!(signal, "SIGTERM"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["ferrocrate", "restart", "-t", "5", "web"])
+            .expect("restart -t parse");
+        match cli.command {
+            Commands::Restart { timeout, .. } => assert_eq!(timeout, 5),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    // S46: `docker rm -f` of a name that does not exist exits 0 as a no-op,
+    // while a plain `rm` still reports the missing container.
+    #[test]
+    fn rm_force_on_a_missing_container_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+
+        handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz46-missing",
+            true,
+            false,
+        )
+        .expect("rm -f of a missing container is a no-op");
+
+        let err = handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz46-missing",
+            false,
+            false,
+        )
+        .expect_err("rm without --force still fails");
+        assert!(err.contains("fz46-missing"), "got: {err}");
+    }
+
+    #[test]
+    fn ps_reports_exited_after_kill_and_stop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        let base: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz41-kill",
+                "name": "fz41-kill",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        store.put(&base).expect("seed running record");
+
+        handle_kill(&runtime, "fz41-kill", "SIGKILL").expect("kill");
+        let killed = runtime.inspect("fz41-kill").expect("inspect killed record");
+        assert_eq!(killed.status, "exited");
+        // S47: Docker reports a signalled container's status as 128 + signal,
+        // and `wait` prints that value.
+        assert_eq!(killed.last_exit_code, Some(137));
+        assert_eq!(
+            super::docker_container_list_entry(&killed, "")["State"], "exited",
+            "docker ps State must be `exited`, never the termination cause"
+        );
+
+        let mut stopped = base.clone();
+        stopped.id = "fz41-stop".to_string();
+        stopped.name = Some("fz41-stop".to_string());
+        stopped.status = "running".to_string();
+        stopped.user_stopped = false;
+        store.put(&stopped).expect("seed second record");
+
+        handle_stop(&runtime, "fz41-stop", 1).expect("stop");
+        let stopped_record = runtime.inspect("fz41-stop").expect("inspect stopped record");
+        assert_eq!(stopped_record.status, "exited");
+        assert_eq!(
+            super::docker_container_list_entry(&stopped_record, "")["State"], "exited",
+            "docker ps State must be `exited` after a graceful stop too"
+        );
+    }
+
+    #[test]
+    fn kill_still_succeeds_on_a_running_container_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fzs-running",
+                "name": "fzs-running",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        handle_kill(&runtime, "fzs-running", "SIGKILL").expect("kill running record");
+        // S41: Docker's state vocabulary has no `killed`; a killed container
+        // is `exited`, in the record and therefore in `ps` and `inspect`.
+        assert_eq!(
+            runtime
+                .inspect("fzs-running")
+                .expect("inspect killed record")
+                .status,
+            "exited"
+        );
+    }
+
+    // S48: `docker diff` on a freshly started container prints nothing — the
+    // resolver and hostname files the runtime injects at start never count as
+    // changes — and every reported path is absolute.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn container_diff_hides_injected_files_and_prints_absolute_paths() {
+        use crate::linux_cli::{docker_container_changes, format_diff_text_line};
+        use ferro_core::rootfs_diff;
+        use ferro_core::sqlite_container_store::SqliteContainerStore;
+
+        let temp = configured_cli_runtime("disabled");
+        let container_dir = temp.path().join("containers").join("fz48-app");
+        let rootfs = container_dir.join("rootfs");
+        std::fs::create_dir_all(rootfs.join("etc")).expect("rootfs etc");
+        std::fs::create_dir_all(rootfs.join("tmp")).expect("rootfs tmp");
+        std::fs::create_dir_all(rootfs.join("opt")).expect("rootfs opt");
+        std::fs::write(rootfs.join("etc").join("os-release"), b"alpine").expect("os-release");
+        std::fs::write(rootfs.join("tmp").join("keep"), b"keep").expect("tmp keep");
+        let baseline = rootfs_diff::capture(&rootfs, &[]).expect("baseline capture");
+        rootfs_diff::write_baseline(&container_dir.join("rootfs-baseline.json"), &baseline)
+            .expect("write baseline");
+
+        let store = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
+        let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "fz48-app",
+            "pid": 0,
+            "image": "alpine:3.20",
+            "command": ["sleep", "300"],
+            "created_at_unix": 1,
+            "stdout_path": "",
+            "stderr_path": "",
+            "status": "running"
+        }))
+        .expect("container record");
+        store.put(&record).expect("store container");
+
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        // A fresh container: empty diff, exactly like Docker.
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("fresh diff");
+        assert!(changes.is_empty(), "fresh container must report no changes");
+
+        // Runtime-injected files appear at start and still change nothing.
+        std::fs::write(rootfs.join("etc").join("resolv.conf"), b"nameserver 10.0.2.3").expect("resolv.conf");
+        std::fs::write(rootfs.join("etc").join("hostname"), b"fz48-app").expect("hostname");
+        std::fs::write(rootfs.join("etc").join("hosts"), b"127.0.0.1 localhost").expect("hosts");
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("injected diff");
+        assert!(changes.is_empty(), "injected resolver files must not surface: {changes:?}");
+
+        // The runtime also mounts proc, sys, dev and run into a started
+        // container; those directories must not surface either, exactly like
+        // the commit and export paths already skip them.
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::create_dir_all(rootfs.join(mount).join("sub")).expect("runtime mount");
+            std::fs::write(rootfs.join(mount).join("sub").join("entry"), b"x").expect("mount entry");
+        }
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("mount diff");
+        assert!(changes.is_empty(), "runtime mount dirs must not surface: {changes:?}");
+
+        // User writes surface with Docker's absolute paths and change kinds:
+        // a file added under an existing directory modifies the directory
+        // entry and adds the file.
+        std::fs::write(rootfs.join("tmp").join("keep"), b"changed").expect("modify tmp/keep");
+        std::fs::write(rootfs.join("opt").join("marker"), b"x").expect("opt marker");
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("user diff");
+        let lines = changes.iter().map(format_diff_text_line).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            lines,
+            ["A /opt/marker", "C /opt", "C /tmp/keep"].iter().map(|line| line.to_string()).collect::<std::collections::BTreeSet<_>>(),
+            "diff lines must use Docker's absolute-path format"
+        );
+    }
+
+    #[test]
     fn force_remove_surfaces_post_effect_cas_loss() {
         use std::cell::Cell;
 
@@ -32260,6 +33107,167 @@ volumes:
         )
         .expect_err("invalid reference");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn run_with_missing_network_leaves_a_created_container_behind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let runtime = ContainerRuntime::new(temp.path())
+            .expect("runtime")
+            .with_request_origin(origin);
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+        let err = handle_run(
+            temp.path(),
+            &runtime,
+            &store,
+            &volume_store,
+            "alpine:3.20",
+            &["sleep".to_string(), "5".to_string()],
+            "fz42-net",
+            "ebpf",
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("fz42-half"),
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            "no",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing network");
+        assert!(err.contains("network: not found"));
+
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let records = store.list().expect("list");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "created");
+        assert_eq!(records[0].name.as_deref(), Some("fz42-half"));
+
+        // `docker rm` cleans the half-built container up without `--force`.
+        handle_rm(&runtime, &volume_store, &authorization, "fz42-half", false, false)
+            .expect("rm removes the half-built container");
+        assert!(store.list().expect("list").is_empty());
+    }
+
+    // S52: `docker save` names the config blob `blobs/sha256/<hex>` with no
+    // `.json` suffix. `load` must accept that layout, and must still reject a
+    // config that is not named by its own content digest.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_load_accepts_the_docker_save_layout() {
+        use crate::linux_cli::docker_load_image_archive;
+        use sha2::Digest;
+
+        fn append_entry(
+            builder: &mut tar::Builder<Vec<u8>>,
+            path: &str,
+            bytes: &[u8],
+        ) {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes)
+                .expect("append archive entry");
+        }
+
+        let build_archive = |config_name: &str| {
+            let layer = b"ferrocrate-s52-layer".to_vec();
+            let layer_hex = format!("{:x}", sha2::Sha256::digest(&layer));
+            let config = serde_json::json!({
+                "architecture": "amd64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_hex}")]}
+            });
+            let config_bytes =
+                serde_json::to_vec(&config).expect("serialize image config");
+            let config_hex = format!("{:x}", sha2::Sha256::digest(&config_bytes));
+            let manifest = serde_json::json!([{
+                "Config": config_name.replace("{config_hex}", &config_hex),
+                "RepoTags": ["alpine:3.20"],
+                "Layers": [format!("blobs/sha256/{layer_hex}")],
+            }]);
+            let mut builder = tar::Builder::new(Vec::new());
+            append_entry(
+                &mut builder,
+                &config_name.replace("{config_hex}", &config_hex),
+                &config_bytes,
+            );
+            append_entry(&mut builder, &format!("blobs/sha256/{layer_hex}"), &layer);
+            append_entry(
+                &mut builder,
+                "manifest.json",
+                serde_json::to_vec(&manifest)
+                    .expect("serialize manifest")
+                    .as_slice(),
+            );
+            builder.into_inner().expect("finish archive")
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("image store");
+        let authorization = test_surface_authorization(temp.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+
+        let loaded = docker_load_image_archive(
+            temp.path(),
+            &store,
+            &authorization,
+            &origin,
+            &build_archive("blobs/sha256/{config_hex}"),
+        )
+        .expect("docker-save layout loads");
+        assert!(loaded.contains("alpine:3.20"), "loaded reference: {loaded}");
+        assert!(
+            store.resolve_reference(&loaded).expect("resolve").is_some(),
+            "loaded image must be published under its repo tag"
+        );
+
+        let error = docker_load_image_archive(
+            temp.path(),
+            &store,
+            &authorization,
+            &origin,
+            &build_archive("blobs/sha256/not-the-config-digest"),
+        )
+        .expect_err("config must stay content-addressed");
+        assert!(
+            error.contains("config digest does not match its filename"),
+            "got: {error}"
+        );
     }
 
     #[test]

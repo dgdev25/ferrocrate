@@ -122,16 +122,9 @@ class DockerEngine(Engine):
 
 
 class FerroEngine(Engine):
-    # ferro-cli reports "killed" after a kill and "stopped" after a stop; docker's
-    # State vocabulary is created/running/paused/restarting/removing/exited/dead,
-    # and both paths leave "exited". Mapped so the vocabulary gap does not mask
-    # later steps in a sequence; the gap itself is ticketed (S41).
-    STATUS_MAP = {"killed": "exited", "stopped": "exited"}
-
     def _fields(self, key: str, record: dict) -> list[str]:
         if key == "containers":
-            status = self.STATUS_MAP.get(record["status"], record["status"])
-            return [f'{record["name"]} {status}']
+            return [f'{record["name"]} {record["status"]}']
         if key == "images":
             # RepoTags are fully qualified (registry-1.docker.io/library/alpine:3.20);
             # docker reports the short form. Keep the last path segment.

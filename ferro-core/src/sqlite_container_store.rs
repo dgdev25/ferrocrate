@@ -458,6 +458,40 @@ impl SqliteContainerStore {
         Ok(())
     }
 
+    /// Records the terminal exit code of a container under an active mutation.
+    /// Docker reports `128 + signal` for a container killed by a signal, so the
+    /// kill path publishes that value while its own reservation is still open;
+    /// a plain `put` would conflict with it.
+    pub(crate) fn set_last_exit_code_for_mutation(
+        &self,
+        id: &str,
+        operation_id: [u8; 16],
+        expected_generation: u64,
+        exit_code: i32,
+    ) -> Result<(), ContainerStoreError> {
+        self.transaction(|transaction| {
+            let mut record =
+                Self::get_tx(transaction, id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            let reservation = record
+                .pending_mutation
+                .as_ref()
+                .ok_or(ContainerStoreError::MutationConflict)?;
+            if reservation.operation_id != operation_id
+                || reservation.generation != expected_generation
+                || record.mutation_generation != expected_generation
+            {
+                return Err(ContainerStoreError::MutationConflict);
+            }
+            record.last_exit_code = Some(exit_code);
+            let payload = Self::encode(&record)?;
+            transaction.execute(
+                "UPDATE containers SET payload=?2 WHERE id=?1",
+                params![id, payload],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn transition_status_and_user_stopped_for_mutation(
         &self,
         id: &str,

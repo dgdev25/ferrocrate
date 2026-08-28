@@ -53,7 +53,9 @@ fn unwitnessed_lifecycle_consumes_its_durable_reservation() {
     runtime.stop(&record.id, Duration::from_secs(2)).unwrap();
     reaper.join().unwrap();
     let stopped = runtime.inspect(&record.id).unwrap();
-    assert_eq!(stopped.status, "stopped");
+    // Docker's state vocabulary has no `stopped`: an explicit stop reaches
+    // the terminal state `exited` (S47).
+    assert_eq!(stopped.status, "exited");
     assert_eq!(stopped.mutation_generation, 2);
     assert!(stopped.pending_mutation.is_none());
     runtime.remove(&record.id).unwrap();

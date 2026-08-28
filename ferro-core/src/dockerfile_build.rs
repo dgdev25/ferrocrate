@@ -763,9 +763,43 @@ fn build_one_stage(
         // repeat the base filesystem).
         let stage_baseline = snapshot_stage_root(&stage_root)?;
         apply_stage_workdir(&stage_root, workdir)?;
+        let copy_from_after_run_index = stage
+            .copy_from_after_run_index
+            .unwrap_or(stage.run.len());
         run_stage_commands(
             &stage_root,
-            &stage.run,
+            &stage.run[..copy_from_after_run_index],
+            &stage_environment(base_info, &stage.env),
+            workdir,
+            stage.user.as_deref(),
+            &runtime_dir
+                .join("build")
+                .join("cache")
+                .join(format!("stage-{idx}")),
+            secrets,
+            context_dir,
+            control,
+        )?;
+        // Preserve Dockerfile ordering for artifacts copied after a RUN. In
+        // particular, `npm ci` removes sqlite3's build directory, so its
+        // native binding must be copied only after that command completes.
+        for copy in &stage.copy_from_after_run {
+            let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
+                .ok_or_else(|| {
+                    DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
+                })?;
+            let source = safe_context_source(&source_root, &copy.src)?;
+            let destination = resolve_copy_destination(workdir, &copy.dest);
+            let dest = safe_context_destination(&stage_root, &destination)?;
+            copy_path_recursive(&source, &dest)?;
+            if let Some(owner) = copy.owner.as_ref() {
+                let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+                apply_copy_owner_recursive(&dest, &CopyOwner::Numeric(uid, gid))?;
+            }
+        }
+        run_stage_commands(
+            &stage_root,
+            &stage.run[copy_from_after_run_index..],
             &stage_environment(base_info, &stage.env),
             workdir,
             stage.user.as_deref(),
@@ -2798,6 +2832,8 @@ struct StageSpec {
     base: String,
     name: Option<String>,
     copy_from: Vec<CopyFromSpec>,
+    copy_from_after_run: Vec<CopyFromSpec>,
+    copy_from_after_run_index: Option<usize>,
     copy_paths: Vec<CopySpec>,
     healthcheck: Option<HealthcheckSpec>,
     env: Vec<String>,
@@ -2928,6 +2964,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 base,
                 name,
                 copy_from: Vec::new(),
+                copy_from_after_run: Vec::new(),
+                copy_from_after_run_index: None,
                 copy_paths: Vec::new(),
                 healthcheck: None,
                 env: Vec::new(),
@@ -2962,7 +3000,12 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
         match keyword.as_str() {
             "COPY" => {
                 if let Some(copy) = parse_copy_from(&interpolated)? {
-                    stage.copy_from.push(copy);
+                    if stage.run.is_empty() {
+                        stage.copy_from.push(copy);
+                    } else {
+                        stage.copy_from_after_run_index.get_or_insert(stage.run.len());
+                        stage.copy_from_after_run.push(copy);
+                    }
                 } else if let Some(copy) = parse_copy_spec(&interpolated)? {
                     if copy.checksum.is_some() {
                         return Err(DockerfileBuildError::Invalid(
@@ -3079,6 +3122,7 @@ fn build_stage_dependency_graph(
         let mut dependencies = stage
             .copy_from
             .iter()
+            .chain(stage.copy_from_after_run.iter())
             .filter_map(|copy| {
                 if named_contexts.contains_key(&copy.from) {
                     return None;
@@ -3213,7 +3257,19 @@ fn append_stage_identity_owner(buffer: &mut Vec<u8>, tag: &str, owner: &Option<C
 fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
     append_stage_identity_str(buffer, "base", &stage.base);
     append_stage_identity_opt_str(buffer, "name", &stage.name);
-    for copy in &stage.copy_from {
+    append_stage_identity_u64(
+        buffer,
+        "cf.after_run_index",
+        stage
+            .copy_from_after_run_index
+            .map(|index| index as u64)
+            .unwrap_or(u64::MAX),
+    );
+    for copy in stage
+        .copy_from
+        .iter()
+        .chain(stage.copy_from_after_run.iter())
+    {
         append_stage_identity_str(buffer, "cf.from", &copy.from);
         append_stage_identity_str(buffer, "cf.src", &copy.src);
         append_stage_identity_str(buffer, "cf.dest", &copy.dest);
@@ -3357,7 +3413,9 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
 /// A stage consumes the build context when it COPYs from it directly or from
 /// a named context; RUN-only stages never see context bytes.
 fn stage_consumes_context(stage: &StageSpec) -> bool {
-    !stage.copy_paths.is_empty() || !stage.copy_from.is_empty()
+    !stage.copy_paths.is_empty()
+        || !stage.copy_from.is_empty()
+        || !stage.copy_from_after_run.is_empty()
 }
 
 /// Compute the content-addressed identity of every stage in Dockerfile order.
@@ -7784,7 +7842,10 @@ mod tests {
              COPY busybox /busybox\n\
              COPY native-addon /opt/addon.node\n\
              RUN [\"/busybox\", \"true\"]\n\
-             FROM addon-build AS test\n\
+             FROM scratch AS test\n\
+             COPY busybox /busybox\n\
+             RUN [\"/busybox\", \"sh\", \"-c\", \"rm -f /opt/addon.node\"]\n\
+             COPY --from=addon-build /opt/addon.node /opt/addon.node\n\
              RUN [\"/busybox\", \"sh\", \"-c\", \"test -s /opt/addon.node\"]\n",
         )
         .expect("dockerfile");

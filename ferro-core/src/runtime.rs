@@ -10790,6 +10790,11 @@ fn validate_port_mapping_conflicts(
         }
         for left in &existing.ports {
             for right in requested {
+                // Host port 0 is the ephemeral sentinel: it claims no fixed
+                // host port, so it can never collide with another mapping.
+                if left.host_port == 0 || right.host_port == 0 {
+                    continue;
+                }
                 if left.host_port == right.host_port
                     && left.protocol.eq_ignore_ascii_case(&right.protocol)
                 {
@@ -18657,6 +18662,36 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         }];
         let err = super::validate_port_mapping_conflicts(&store, &requested).expect_err("conflict");
         assert!(err.to_string().contains("already mapped"));
+    }
+
+    #[test]
+    fn ephemeral_port_mappings_do_not_conflict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::sqlite_container_store::SqliteContainerStore::open(temp.path()).expect("store");
+        let mut existing = fixture_container_record("c-ephemeral", "running");
+        existing.ports = vec![PortMappingRecord {
+            host_port: 0,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        }];
+        store.put(&existing).expect("put existing");
+
+        // Host port 0 is the ephemeral sentinel; it claims no fixed host port,
+        // so two mappings of it never collide with each other or with a real
+        // port.
+        let requested = vec![PortMappingRecord {
+            host_port: 0,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        }];
+        super::validate_port_mapping_conflicts(&store, &requested).expect("no ephemeral conflict");
+        let fixed = vec![PortMappingRecord {
+            host_port: 8080,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        }];
+        super::validate_port_mapping_conflicts(&store, &fixed).expect("no fixed-port conflict");
     }
 
     #[test]

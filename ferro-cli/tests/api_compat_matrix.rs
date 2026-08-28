@@ -1328,6 +1328,121 @@ fn parse_first_chunk(buffered: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(&body[line_end + 2..frame_end]).into_owned())
 }
 
+/// The runtime appends container lifecycle events (`die`, `start`, `oom`)
+/// straight to the event journal, so a subscriber whose cursor is seeded from
+/// a counter that only API-layer writes advance misses the tail and gets the
+/// lifecycle events replayed as new. docker/compose's `up` monitor builds its
+/// watched-container set from the event stream; replayed `die` events drained
+/// the set before the containers ran and the monitor never returned, which
+/// stalled the whole compose-e2e suite. The subscriber below connects after
+/// the out-of-band `die` was journaled and must see only its own create.
+#[test]
+fn docker_events_stream_does_not_replay_journal_events_appended_outside_the_api() {
+    let harness = DaemonHarness::spawn();
+    let (status, _) =
+        harness.request("POST", "/volumes/create", r#"{"Name":"tail-seed-volume"}"#);
+    assert_eq!(status, 201);
+
+    // The runtime's write path: journal-direct append, no API call.
+    let runtime_dir = harness
+        .socket_path
+        .parent()
+        .expect("socket lives in the runtime dir")
+        .to_path_buf();
+    let mut journal = ferro_core::docker_events::DockerEventJournal::open(&runtime_dir)
+        .expect("open runtime journal");
+    journal
+        .append_container(
+            "die",
+            "out-of-band-lifecycle-id",
+            "busybox",
+            [("exitCode", "0")],
+        )
+        .expect("runtime-style journal append");
+
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET /events?follow=1 HTTP/1.1\r\nHost: docker\r\n\r\n")
+        .expect("write events request");
+    thread::sleep(Duration::from_millis(500));
+
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"tail-live-volume"}"#);
+    assert_eq!(status, 201);
+
+    let mut buffered = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        if Instant::now() > deadline {
+            panic!("no event chunk arrived before timeout");
+        }
+        if let Some(text) = parse_first_chunk(&buffered) {
+            break text;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => panic!("stream closed before a chunk arrived: {buffered:?}"),
+            Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                panic!("read timed out before a chunk arrived: {error}")
+            }
+            Err(error) => panic!("stream read failed: {error}"),
+        }
+    };
+    let payload: serde_json::Value = serde_json::from_str(&frame)
+        .unwrap_or_else(|error| panic!("chunk payload must be one JSON object: {error}: {frame}"));
+    assert_eq!(
+        payload["Actor"]["ID"],
+        "tail-live-volume",
+        "first streamed event must be the one after the subscriber connected, got: {frame}"
+    );
+}
+
+/// compose publishes container ports without a host port
+/// (`HostConfig.PortBindings: {"80/tcp": [{"HostPort": ""}]}`), which Docker
+/// stores as an ephemeral binding and resolves at start. The stored pending
+/// spec is `":80/tcp"`; parsing that must not fail, and one unparsable spec
+/// must not fail the whole `/containers/json` listing, because compose lists
+/// containers to decide what to stop, remove and restart. Until start assigns
+/// the host port, Docker leaves `IP` and `PublicPort` out of the port entry.
+#[test]
+fn docker_listing_survives_a_pending_spec_with_an_empty_host_port() {
+    let mut harness = DaemonHarness::spawn();
+    let (status, body) = harness.request(
+        "POST",
+        "/containers/create?name=ephemeral-port-pending",
+        r#"{"Image":"busybox","HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":""}]}}}"#,
+    );
+    assert_eq!(status, 201, "create response: {body}");
+
+    // Pending specs persist to docker-pending.json and reload at boot, which
+    // is how the compose-e2e suite's stored `":80/tcp"` entries reached the
+    // listing path.
+    harness.restart();
+    let (status, body) = harness.request("GET", "/containers/json?all=1", "");
+    assert_eq!(status, 200, "list response: {body}");
+    let listed = serde_json::from_str::<serde_json::Value>(&body).expect("list JSON");
+    let entry = listed
+        .as_array()
+        .expect("list array")
+        .iter()
+        .find(|item| item["Names"][0] == "/ephemeral-port-pending")
+        .expect("created container must appear in the listing");
+    let published = entry["Ports"]
+        .as_array()
+        .expect("ports array")
+        .iter()
+        .find(|port| port["PrivatePort"] == 80)
+        .expect("published container port 80");
+    assert_eq!(published["Type"], "tcp");
+    assert!(
+        published.get("PublicPort").is_none() && published.get("IP").is_none(),
+        "an ephemeral binding has no assigned host port yet: {published}"
+    );
+}
+
 #[test]
 fn docker_events_replay_since_until_bounds_and_reject_malformed_bounds() {
     let harness = DaemonHarness::spawn();

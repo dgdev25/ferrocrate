@@ -10488,9 +10488,18 @@ fn parse_publish(
         if port_parts.len() != 2 {
             return Err("run: publish must be host:container[/proto]".to_string());
         }
-        let host_port = port_parts[0]
-            .parse::<u16>()
-            .map_err(|_| "run: invalid host port".to_string())?;
+        // Docker treats an empty host port as "the daemon assigns an ephemeral
+        // host port at start": `docker run -p 80` and `HostPort: ""` both
+        // produce it, and compose's create specs carry `":80/tcp"`. Port 0 is
+        // that sentinel; the binding fields stay out of listings until a real
+        // host port exists (see `docker_port_summaries`).
+        let host_port = if port_parts[0].is_empty() {
+            0
+        } else {
+            port_parts[0]
+                .parse::<u16>()
+                .map_err(|_| "run: invalid host port".to_string())?
+        };
         let container_port = port_parts[1]
             .parse::<u16>()
             .map_err(|_| "run: invalid container port".to_string())?;
@@ -17631,7 +17640,6 @@ fn docker_compat_id(_prefix: &str, _sequence: &AtomicU64) -> String {
 #[cfg(target_os = "linux")]
 struct DockerEventStore {
     journal: DockerEventJournal,
-    next_id: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -17900,18 +17908,7 @@ impl DockerEventStore {
             .parent()
             .ok_or_else(|| "docker: event journal has no parent".to_string())?;
         let journal = DockerEventJournal::open(runtime_dir)?;
-        // Opening is deliberately tolerant of a corrupt journal: callers
-        // must still be able to reach `query`, which reports the malformed
-        // record to the Docker client instead of turning startup into a
-        // generic open failure.
-        let next_id = journal
-            .read()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|event| event.id.saturating_add(1))
-            .max()
-            .unwrap_or(0);
-        Ok(Self { journal, next_id })
+        Ok(Self { journal })
     }
 
     /// Highest event id currently in the journal, or `None` for an empty one.
@@ -17919,8 +17916,20 @@ impl DockerEventStore {
     /// only events appended after it connected. An empty journal has no tail,
     /// and a `Some(0)` seed would swallow the first appended event (id 0),
     /// which is how a subscriber on a fresh daemon missed every event.
+    ///
+    /// This reads the journal file, not a cached counter. Container
+    /// lifecycle events (`start`, `die`, `oom`, `health_status`) are appended
+    /// by the runtime through the journal's own lock, and no API-layer write
+    /// path runs for them, so a cached counter trails the file. A subscriber
+    /// seeded from that counter received the runtime-appended events replayed
+    /// as if they were new (S130 follow-up, 2026-08-28).
     fn max_event_id(&self) -> Option<u64> {
-        self.next_id.checked_sub(1)
+        self.journal
+            .read()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|event| event.id)
+            .max()
     }
 
     #[allow(dead_code)]
@@ -17984,13 +17993,6 @@ impl DockerEventStore {
             status,
             attributes,
         )?;
-        self.next_id = self
-            .journal
-            .read()?
-            .into_iter()
-            .map(|event| event.id.saturating_add(1))
-            .max()
-            .unwrap_or(0);
         Ok(())
     }
 
@@ -19488,7 +19490,16 @@ fn handle_docker_compat_connection(
                             .map_err(|error| error.to_string())?
                             .map(|image| image.digest)
                             .unwrap_or_default();
-                        entries.push(docker_pending_list_entry(id, spec, &image_id)?);
+                        // One unparsable pending spec must not blind the whole
+                        // listing: compose lists containers to decide what to
+                        // stop, remove and restart, and Docker answers `ps`
+                        // with the entries it can render. Skip the entry.
+                        match docker_pending_list_entry(id, spec, &image_id) {
+                            Ok(entry) => entries.push(entry),
+                            Err(error) => {
+                                eprintln!("docker: skipping container {id} in listing: {error}");
+                            }
+                        }
                     }
                 }
                 if let Some(limit) = limit {
@@ -23274,12 +23285,21 @@ fn docker_port_summaries(
     ports
         .iter()
         .map(|port| {
-            serde_json::json!({
-                "IP": "0.0.0.0",
-                "PrivatePort": port.container_port,
-                "PublicPort": port.host_port,
-                "Type": port.protocol,
-            })
+            // An ephemeral mapping (host port 0) has no assigned host port
+            // yet, so Docker leaves `IP` and `PublicPort` out of the entry.
+            if port.host_port == 0 {
+                serde_json::json!({
+                    "PrivatePort": port.container_port,
+                    "Type": port.protocol,
+                })
+            } else {
+                serde_json::json!({
+                    "IP": "0.0.0.0",
+                    "PrivatePort": port.container_port,
+                    "PublicPort": port.host_port,
+                    "Type": port.protocol,
+                })
+            }
         })
         .collect()
 }
@@ -26209,6 +26229,7 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
 mod tests {
     use clap::CommandFactory;
     use super::{parse_docker_update_request, DockerResourceUpdate};
+    use crate::linux_cli::docker_port_summaries;
     use ferro_core::image_manifest::parse_image_manifest;
     use sha2::Digest;
     use std::collections::{BTreeMap, HashMap};
@@ -31664,6 +31685,36 @@ volumes:
         assert_eq!(mappings[0].container_port, 80);
         assert_eq!(mappings[0].protocol, "tcp");
         assert_eq!(mappings[2].protocol, "udp");
+        // Docker treats an empty host port as "assign an ephemeral host port
+        // at start"; compose create specs store it as ":80/tcp".
+        let ephemeral = parse_publish(&[":80/tcp".to_string()]).expect("ephemeral publish");
+        assert_eq!(ephemeral[0].host_port, 0);
+        assert_eq!(ephemeral[0].container_port, 80);
+        assert_eq!(ephemeral[0].protocol, "tcp");
+    }
+
+    #[test]
+    fn port_summaries_omit_the_binding_until_a_host_port_exists() {
+        let summaries = docker_port_summaries(&[
+            ferro_core::container_store::PortMappingRecord {
+                host_port: 0,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            },
+            ferro_core::container_store::PortMappingRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            },
+        ]);
+        assert!(
+            summaries[0].get("PublicPort").is_none() && summaries[0].get("IP").is_none(),
+            "an ephemeral mapping has no assigned host port yet: {summaries:?}"
+        );
+        assert_eq!(summaries[0]["PrivatePort"], 80);
+        assert_eq!(summaries[0]["Type"], "tcp");
+        assert_eq!(summaries[1]["PublicPort"], 8080);
+        assert_eq!(summaries[1]["IP"], "0.0.0.0");
     }
 
     #[test]
@@ -31991,7 +32042,7 @@ volumes:
             .unwrap();
         store.append("POST", "/networks/n1", 404).unwrap();
         let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
-        assert_eq!(reopened.next_id, 2);
+        assert_eq!(reopened.max_event_id(), Some(1));
         let mut filter = HashMap::new();
         filter.insert("container".to_string(), "c1".to_string());
         let events = reopened.query(&filter).unwrap();
@@ -33610,6 +33661,21 @@ volumes:
 
         let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         assert_eq!(reopened.max_event_id(), tail, "tail survives a reopen");
+
+        // The runtime appends lifecycle events (`die`, `start`, `oom`) through
+        // the journal's own lock, bypassing every API-layer write path. The
+        // cursor seed must still see them, or a subscriber connected before
+        // the runtime append gets those events replayed as new.
+        let mut runtime_journal = ferro_core::docker_events::DockerEventJournal::open(temp.path())
+            .expect("open runtime journal");
+        runtime_journal
+            .append_container("die", "runtime-appended-id", "busybox", [("exitCode", "0")])
+            .expect("runtime append");
+        let runtime_tail = store.max_event_id();
+        assert!(
+            runtime_tail.is_some_and(|id| id > tail.unwrap_or(0)),
+            "cursor seed must follow journal appends made outside the API store: {runtime_tail:?}"
+        );
     }
 
     #[test]

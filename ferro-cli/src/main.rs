@@ -19317,7 +19317,7 @@ fn handle_docker_compat_connection(
     let mut event_follow_query: Option<HashMap<String, String>> = None;
     let mut log_follow: Option<(String, Option<String>, bool, bool, bool)> = None;
     let mut stats_follow: Option<String> = None;
-    let mut wait_follow: Option<(String, String, Option<Duration>)> = None;
+    let mut wait_follow: Option<(String, String, Option<Duration>, bool)> = None;
     let mut attach_hijack: Option<DockerAttachHijack> = None;
     let mut websocket_attach: Option<Vec<u8>> = None;
     let mut exec_hijack_session = None;
@@ -21148,7 +21148,7 @@ fn handle_docker_compat_connection(
                 // client composing wait with other calls) for the container's
                 // entire lifetime. Defer the blocking wait to the streaming
                 // epilogue.
-                wait_follow = Some((id, condition.to_string(), timeout));
+                wait_follow = Some((id, condition.to_string(), timeout, pending_auto_remove));
                 docker_chunked_headers(200, "application/json")
             }
             ("DELETE", path) if path.starts_with("/containers/") => {
@@ -22068,7 +22068,7 @@ fn handle_docker_compat_connection(
         stream_docker_stats(&mut stream, daemon_runtime.as_ref(), &id)?;
         return Ok(());
     }
-    if let Some((id, condition, timeout)) = wait_follow {
+    if let Some((id, condition, timeout, pending_auto_remove)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
         let auto_remove_result = || -> Result<Option<i32>, String> {
             let started = Instant::now();
@@ -22090,6 +22090,21 @@ fn handle_docker_compat_connection(
                         // the start handler registers its auto-remove result
                         // after receiving the already-sent response headers.
                         std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None if pending_auto_remove
+                        && timeout.is_none_or(|limit| started.elapsed() < limit) =>
+                    {
+                        // A next-exit waiter registered against a still-pending
+                        // create must receive the exit status even though the
+                        // auto-remove thread deletes the record right after
+                        // exit; wait for that registration instead of falling
+                        // into the inspect poll that races the removal.
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    None if pending_auto_remove => {
+                        return Err(format!(
+                            "wait: timed out waiting for auto-remove container {id}"
+                        ))
                     }
                     None => return Ok(None),
                 }

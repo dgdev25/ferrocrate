@@ -26632,35 +26632,35 @@ fn stream_docker_attach(
     };
     if let Some(stdin) = stdin.as_mut() {
         if !initial_stdin.is_empty() {
-            use std::io::Write as _;
             stdin
                 .write_all(initial_stdin)
+                .and_then(|_| stdin.flush())
                 .map_err(|error| format!("docker: writing container stdin: {error}"))?;
-            stdin
-                .flush()
-                .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
         }
     }
+    // An attach is full duplex.  A slow reader can fill the socket's output
+    // buffer while the Docker client is still uploading stdin; blocking in
+    // `write_all` then prevents us from seeing its CloseWrite and leaves the
+    // container's FIFO open forever.  Keep the upgraded socket nonblocking
+    // and queue output so input and output always make independent progress.
     stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .map_err(|error| error.to_string())?;
+        .set_nonblocking(true)
+        .map_err(|error| format!("docker: attach nonblocking setup failed: {error}"))?;
     let mut emitted_stdout = initial_stdout.len();
     let mut emitted_stderr = initial_stderr.len();
+    let mut pending_output = std::collections::VecDeque::new();
     let mut input = [0_u8; 16 * 1024];
-    // A non-interactive local run has no producer for the socket's input
-    // half. Do not pay the daemon-compatible 250 ms read timeout before each
-    // lifecycle observation on that path.
     let mut input_closed = !stdin_requested;
     let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
     let local_stream_started = Instant::now();
     let mut terminal_log_lengths = None;
     loop {
+        let mut input_progress = false;
         if !input_closed {
             match stream.read(&mut input) {
                 Ok(0) => {
                     let trailing = detach_matcher.finish();
                     if let Some(stdin) = stdin.as_mut() {
-                        use std::io::Write as _;
                         stdin.write_all(&trailing).map_err(|error| {
                             format!("docker: writing container stdin: {error}")
                         })?;
@@ -26669,25 +26669,18 @@ fn stream_docker_attach(
                     stdin = None;
                 }
                 Ok(size) => {
-                    use std::io::Write as _;
+                    input_progress = true;
                     let (forward, detached) = detach_matcher.feed(&input[..size]);
                     if let Some(stdin) = stdin.as_mut() {
-                        stdin.write_all(&forward).map_err(|error| {
+                        stdin.write_all(&forward).and_then(|_| stdin.flush()).map_err(|error| {
                             format!("docker: writing container stdin: {error}")
-                        })?;
-                        stdin.flush().map_err(|error| {
-                            format!("docker: flushing container stdin: {error}")
                         })?;
                     }
                     if detached {
                         return Ok(());
                     }
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -26714,12 +26707,20 @@ fn stream_docker_attach(
                     &[]
                 },
             );
-            stream
-                .write_all(&frame)
-                .map_err(|error| error.to_string())?;
-            stream.flush().map_err(|error| error.to_string())?;
+            pending_output.extend(frame);
             emitted_stdout = stdout.len();
             emitted_stderr = stderr.len();
+        }
+        while !pending_output.is_empty() {
+            let (head, _) = pending_output.as_slices();
+            match stream.write(head) {
+                Ok(0) => return Err("docker: attach output socket closed".to_string()),
+                Ok(size) => {
+                    pending_output.drain(..size);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.to_string()),
+            }
         }
         // A hijacked Docker attach stream is tied to the container lifecycle.
         // Once the runtime has recorded a terminal state, all newly-appended
@@ -26730,11 +26731,11 @@ fn stream_docker_attach(
             current.status.as_str(),
             "created" | "running" | "restarting" | "paused"
         ) {
-            if !fast_local_exit
+            if pending_output.is_empty() && (!fast_local_exit
                 || local_attach_logs_drained(
                     &mut terminal_log_lengths,
                     (stdout.len(), stderr.len()),
-                )
+                ))
             {
                 return Ok(());
             }
@@ -26742,6 +26743,13 @@ fn stream_docker_attach(
             continue;
         }
         terminal_log_lengths = None;
+        if input_progress {
+            // Keep draining a piped stdin source while the client has data
+            // ready.  The normal lifecycle interval is useful only when the
+            // transport is idle; applying it per 16 KiB turns a large pipe
+            // into a deadlock-prone 64 KiB/s trickle.
+            continue;
+        }
         let interval = if fast_local_exit {
             local_attach_poll_interval(local_stream_started.elapsed())
         } else {

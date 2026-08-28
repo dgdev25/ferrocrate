@@ -12630,13 +12630,26 @@ fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requ
 /// Drop the changes the runtime's own start-time writes produce.
 ///
 /// Docker binds the resolver, hostname and hosts files into the container at
-/// start, so they live outside the image layer and `docker diff` never reports
-/// them. Ferrocrate writes the same files into the rootfs after the
-/// create-time baseline, which would otherwise surface as resolver noise on
-/// every started container, including a fresh one.
+/// start, and provides the standard mount roots outside the image layer, so
+/// `docker diff` never reports them. Ferrocrate writes the files and hides the
+/// mount roots after the create-time baseline, which would otherwise surface
+/// as runtime noise on every started container, including a fresh one.
 fn drop_runtime_injected_changes(changes: &mut Vec<rootfs_diff::RootfsChange>) {
-    const INJECTED: [&str; 3] = ["etc/resolv.conf", "etc/hostname", "etc/hosts"];
-    changes.retain(|change| !INJECTED.contains(&change.path.as_str()));
+    const INJECTED: [&str; 7] = [
+        "etc/resolv.conf",
+        "etc/hostname",
+        "etc/hosts",
+        "dev",
+        "proc",
+        "run",
+        "sys",
+    ];
+    changes.retain(|change| {
+        let path = change.path.trim_start_matches('/');
+        !INJECTED
+            .iter()
+            .any(|runtime_path| path == *runtime_path || path.starts_with(&format!("{runtime_path}/")))
+    });
     // Writing into /etc also bumps the directory's own mtime. Report that
     // modification only when user content under /etc changed as well.
     let etc_has_user_changes = changes
@@ -32838,11 +32851,20 @@ volumes:
         std::fs::create_dir_all(rootfs.join("etc")).expect("rootfs etc");
         std::fs::create_dir_all(rootfs.join("tmp")).expect("rootfs tmp");
         std::fs::create_dir_all(rootfs.join("opt")).expect("rootfs opt");
+        // Alpine image layers include these mount-point directories. Once the
+        // runtime has provisioned its own mounts, they are absent from the
+        // rootfs walk and must not appear as image-layer deletions.
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::create_dir_all(rootfs.join(mount)).expect("baseline mount point");
+        }
         std::fs::write(rootfs.join("etc").join("os-release"), b"alpine").expect("os-release");
         std::fs::write(rootfs.join("tmp").join("keep"), b"keep").expect("tmp keep");
         let baseline = rootfs_diff::capture(&rootfs, &[]).expect("baseline capture");
         rootfs_diff::write_baseline(&container_dir.join("rootfs-baseline.json"), &baseline)
             .expect("write baseline");
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::remove_dir(rootfs.join(mount)).expect("hide baseline mount point");
+        }
 
         let store = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
         let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({

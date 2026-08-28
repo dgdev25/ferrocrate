@@ -12630,13 +12630,26 @@ fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requ
 /// Drop the changes the runtime's own start-time writes produce.
 ///
 /// Docker binds the resolver, hostname and hosts files into the container at
-/// start, so they live outside the image layer and `docker diff` never reports
-/// them. Ferrocrate writes the same files into the rootfs after the
-/// create-time baseline, which would otherwise surface as resolver noise on
-/// every started container, including a fresh one.
+/// start, and provides the standard mount roots outside the image layer, so
+/// `docker diff` never reports them. Ferrocrate writes the files and hides the
+/// mount roots after the create-time baseline, which would otherwise surface
+/// as runtime noise on every started container, including a fresh one.
 fn drop_runtime_injected_changes(changes: &mut Vec<rootfs_diff::RootfsChange>) {
-    const INJECTED: [&str; 3] = ["etc/resolv.conf", "etc/hostname", "etc/hosts"];
-    changes.retain(|change| !INJECTED.contains(&change.path.as_str()));
+    const INJECTED: [&str; 7] = [
+        "etc/resolv.conf",
+        "etc/hostname",
+        "etc/hosts",
+        "dev",
+        "proc",
+        "run",
+        "sys",
+    ];
+    changes.retain(|change| {
+        let path = change.path.trim_start_matches('/');
+        !INJECTED
+            .iter()
+            .any(|runtime_path| path == *runtime_path || path.starts_with(&format!("{runtime_path}/")))
+    });
     // Writing into /etc also bumps the directory's own mtime. Report that
     // modification only when user content under /etc changed as well.
     let etc_has_user_changes = changes
@@ -14660,6 +14673,16 @@ fn handle_exec(
     }
     let resolved = resolve_container_id(runtime, container)?;
     require_live_container(runtime, &resolved)?;
+    if runtime
+        .inspect(&resolved)
+        .map_err(|err| format!("container {resolved} lookup failed: {err}"))?
+        .status
+        == "paused"
+    {
+        return Err(format!(
+            "container {resolved} is paused, unpause the container before exec"
+        ));
+    }
     let result = if interactive {
         let mut input = Vec::new();
         std::io::stdin()
@@ -32610,6 +32633,54 @@ volumes:
         assert_eq!(store.list().expect("list").len(), 1);
     }
 
+    // S166: Docker stops a paused container by unpausing internally, but
+    // refuses both exec and start until it has been explicitly unpaused.
+    #[test]
+    fn paused_container_stop_exec_and_start_follow_docker_contract() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let paused: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz166-paused",
+                "name": "fz166-paused",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "paused"
+            }))
+            .expect("decode paused record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&paused).expect("seed paused record");
+
+        let exec = handle_exec(
+            &runtime,
+            "fz166-paused",
+            &["true".to_string()],
+            &[],
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect_err("exec refuses a paused container");
+        assert!(exec.contains("unpause the container before exec"), "got: {exec}");
+
+        let start = crate::linux_cli::handle_start(&runtime, "fz166-paused")
+            .expect_err("start refuses a paused container");
+        assert!(start.contains("cannot start a paused container"), "got: {start}");
+
+        handle_stop(&runtime, "fz166-paused", 1).expect("stop unpauses and exits the container");
+        assert_eq!(
+            runtime.inspect("fz166-paused").expect("inspect stopped record").status,
+            "exited"
+        );
+    }
+
     // S40: the start echo matches Docker. A name addressed by name comes back
     // unchanged; an id comes back as the 12-character prefix.
     #[test]
@@ -32722,6 +32793,49 @@ volumes:
         assert!(err.contains("fz46-missing"), "got: {err}");
     }
 
+    // S168: a rename releases the old name, so the existing `rm -f` missing
+    // name contract also applies when that name previously belonged to a
+    // container.
+    #[test]
+    fn rm_force_on_a_renamed_containers_old_name_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz168-container",
+                "name": "fz168-old",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        runtime.rename("fz168-container", "fz168-new").expect("rename");
+        handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz168-old",
+            true,
+            false,
+        )
+        .expect("rm -f on old name is a no-op");
+        assert_eq!(
+            runtime.inspect("fz168-container").expect("container remains").name.as_deref(),
+            Some("fz168-new")
+        );
+    }
+
     #[test]
     fn ps_reports_exited_after_kill_and_stop() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -32821,11 +32935,20 @@ volumes:
         std::fs::create_dir_all(rootfs.join("etc")).expect("rootfs etc");
         std::fs::create_dir_all(rootfs.join("tmp")).expect("rootfs tmp");
         std::fs::create_dir_all(rootfs.join("opt")).expect("rootfs opt");
+        // Alpine image layers include these mount-point directories. Once the
+        // runtime has provisioned its own mounts, they are absent from the
+        // rootfs walk and must not appear as image-layer deletions.
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::create_dir_all(rootfs.join(mount)).expect("baseline mount point");
+        }
         std::fs::write(rootfs.join("etc").join("os-release"), b"alpine").expect("os-release");
         std::fs::write(rootfs.join("tmp").join("keep"), b"keep").expect("tmp keep");
         let baseline = rootfs_diff::capture(&rootfs, &[]).expect("baseline capture");
         rootfs_diff::write_baseline(&container_dir.join("rootfs-baseline.json"), &baseline)
             .expect("write baseline");
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::remove_dir(rootfs.join(mount)).expect("hide baseline mount point");
+        }
 
         let store = SqliteContainerStore::open(temp.path().join("containers.db")).expect("container store");
         let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(serde_json::json!({

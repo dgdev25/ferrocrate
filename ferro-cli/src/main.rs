@@ -17913,6 +17913,13 @@ impl DockerEventStore {
         Ok(Self { journal, next_id })
     }
 
+    /// Highest event id currently in the journal, or 0 for an empty one.
+    /// Event streaming seeds its cursor here so a new subscriber receives
+    /// only events appended after it connected.
+    fn max_event_id(&self) -> u64 {
+        self.next_id.saturating_sub(1)
+    }
+
     #[allow(dead_code)]
     fn append(&mut self, method: &str, path: &str, status: u16) -> Result<(), String> {
         self.append_with_context(method, path, status, &HashMap::new(), &[], &[])
@@ -17988,7 +17995,11 @@ impl DockerEventStore {
         // Event filters use the same Docker JSON contract as the container
         // listing endpoint. Validate them before evaluating any predicates so
         // malformed input cannot silently degrade into an unfiltered stream.
-        parse_docker_event_filters(query)?;
+        // Reuse the parsed values: the wire format carries each selector set
+        // as a boolean-keyed object (`{"type":{"container":true}}`), which a
+        // re-parse that only understands arrays would silently drop.
+        let parsed_filters = parse_docker_event_filters(query)?;
+        let filter_values = |name: &str| -> Option<Vec<String>> { parsed_filters.get(name).cloned() };
         let since = query
             .get("since")
             .map(|value| parse_event_time_bound(value, "since"))
@@ -18007,25 +18018,6 @@ impl DockerEventStore {
             ("plugin", "plugin"),
             ("volume", "volume"),
         ];
-        let filters = query
-            .get("filters")
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
-        let filter_values = |name: &str| -> Option<Vec<String>> {
-            filters
-                .as_ref()
-                .and_then(|value| value.get(name))
-                .and_then(|value| match value {
-                    serde_json::Value::Array(values) => Some(
-                        values
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            .collect(),
-                    ),
-                    serde_json::Value::String(value) => Some(vec![value.clone()]),
-                    _ => None,
-                })
-        };
         let filter_events = filter_values("event");
         let filter_types = filter_values("type");
         let filter_containers = filter_values("container");
@@ -25559,7 +25551,23 @@ fn stream_docker_events(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("docker: event stream write timeout setup failed: {error}"))?;
-    let mut cursor: Option<u64> = None;
+    // Docker's contract: without `since`, `/events` streams only events that
+    // happen after the call connects. Seeding the cursor at the journal end
+    // keeps history (previous runs' container creates, for example) out of
+    // the stream; a client cannot tell a replayed event from a live one, and
+    // lifecycle bookkeeping built on the stream breaks when history is
+    // re-delivered.
+    let mut cursor: Option<u64> = if query.contains_key("since") {
+        None
+    } else {
+        Some(
+            state
+                .events
+                .lock()
+                .map_err(|error| format!("docker: event store lock poisoned: {error}"))?
+                .max_event_id(),
+        )
+    };
     loop {
         let events = state
             .events
@@ -33500,6 +33508,77 @@ volumes:
             r#"{"label":["path=/containers/c1/start"]}"#.to_string(),
         );
         assert!(store.query(&query).unwrap().is_empty());
+    }
+
+    // Docker clients serialize filter selector sets as boolean-keyed objects
+    // (`{"type":{"container":true}}`), not arrays. A query path that only
+    // understood arrays silently ignored the filter and delivered events the
+    // caller asked to exclude — compose's monitor then booked events from
+    // unrelated projects into its watch set and never terminated.
+    #[test]
+    fn docker_event_query_applies_object_form_filters() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let mut store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        store
+            .append_with_context(
+                "POST",
+                "/containers/create",
+                201,
+                &HashMap::new(),
+                br#"{"Image":"alpine","Labels":{"com.docker.compose.project":"demo"}}"#,
+                br#"{"Id":"c1"}"#,
+            )
+            .unwrap();
+        store.append("DELETE", "/images/other", 200).unwrap();
+
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_string(),
+            r#"{"type":{"container":true}}"#.to_string(),
+        );
+        let events = store.query(&query).unwrap();
+        assert_eq!(events.len(), 1, "type filter must exclude image events");
+        assert_eq!(events[0].event_type, "container");
+
+        query.insert(
+            "filters".to_string(),
+            r#"{"type":{"container":true},"label":{"com.docker.compose.project=demo":true}}"#
+                .to_string(),
+        );
+        assert_eq!(
+            store.query(&query).unwrap().len(),
+            1,
+            "label filter must keep events carrying the label"
+        );
+
+        query.insert(
+            "filters".to_string(),
+            r#"{"type":{"container":true},"label":{"com.docker.compose.project=other":true}}"#
+                .to_string(),
+        );
+        assert!(
+            store.query(&query).unwrap().is_empty(),
+            "label filter must exclude events without the label"
+        );
+    }
+
+    // Without `since`, `/events` streams only events appended after the
+    // subscriber connects; the seeded cursor that implements this relies on
+    // `max_event_id` matching the last journaled event.
+    #[test]
+    fn docker_event_store_max_event_id_tracks_journal_tail() {
+        let temp = tempfile::tempdir().expect("event runtime");
+        let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        assert_eq!(store.max_event_id(), 0, "empty journal has no tail");
+
+        let mut store = store;
+        store.append("POST", "/containers/create", 201).unwrap();
+        store.append("POST", "/containers/c1/start", 200).unwrap();
+        let tail = store.max_event_id();
+        assert!(tail > 0, "journal tail must advance with appended events");
+
+        let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
+        assert_eq!(reopened.max_event_id(), tail, "tail survives a reopen");
     }
 
     #[test]

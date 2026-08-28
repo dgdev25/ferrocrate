@@ -3559,7 +3559,7 @@ impl ContainerRuntime {
             "start",
             &record.id,
             &record.image,
-            std::iter::empty::<(&str, String)>(),
+            container_event_attributes(Some(&record), &[]),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -4223,7 +4223,7 @@ impl ContainerRuntime {
             "stop",
             id,
             &record.image,
-            std::iter::empty::<(&str, String)>(),
+            container_event_attributes(Some(&record), &[]),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -4342,7 +4342,10 @@ impl ContainerRuntime {
             "kill",
             id,
             &record.image,
-            [("signal", signal_name)],
+            container_event_attributes(
+                Some(&record),
+                &[("signal", signal_name.to_string())],
+            ),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -5313,7 +5316,7 @@ impl ContainerRuntime {
             if stop_existing { "restart" } else { "start" },
             id,
             &record.image,
-            std::iter::empty::<(&str, String)>(),
+            container_event_attributes(Some(&record), &[]),
         );
 
         if let Some(config) = record.health.clone() {
@@ -8455,14 +8458,20 @@ fn supervise_child(
             }
             Err(_) => "exited".to_string(),
         };
+        let event_record = store.get(&container_id).ok().flatten();
+        let event_image = event_record
+            .as_ref()
+            .map(|record| record.image.clone())
+            .unwrap_or_default();
         emit_docker_container_event(
             &runtime_dir,
             "die",
             &container_id,
-            persisted_restart_image(&store, &container_id)
-                .as_deref()
-                .unwrap_or_default(),
-            [("exitCode", exit_code.to_string())],
+            &event_image,
+            container_event_attributes(
+                event_record.as_ref(),
+                &[("exitCode", exit_code.to_string())],
+            ),
         );
         let observed_oom_kills = oom_kill_count(&container_id);
         if observed_oom_kills > oom_kills {
@@ -8470,10 +8479,8 @@ fn supervise_child(
                 &runtime_dir,
                 "oom",
                 &container_id,
-                persisted_restart_image(&store, &container_id)
-                    .as_deref()
-                    .unwrap_or_default(),
-                std::iter::empty::<(&str, String)>(),
+                &event_image,
+                container_event_attributes(event_record.as_ref(), &[]),
             );
         }
 
@@ -8678,23 +8685,24 @@ fn supervise_child(
         }
         restart_count += 1;
         oom_kills = oom_kill_count(&container_id);
+        let event_record = store.get(&container_id).ok().flatten();
+        let event_image = event_record
+            .as_ref()
+            .map(|record| record.image.clone())
+            .unwrap_or_default();
         emit_docker_container_event(
             &runtime_dir,
             "restart",
             &container_id,
-            persisted_restart_image(&store, &container_id)
-                .as_deref()
-                .unwrap_or_default(),
-            std::iter::empty::<(&str, String)>(),
+            &event_image,
+            container_event_attributes(event_record.as_ref(), &[]),
         );
         emit_docker_container_event(
             &runtime_dir,
             "start",
             &container_id,
-            persisted_restart_image(&store, &container_id)
-                .as_deref()
-                .unwrap_or_default(),
-            std::iter::empty::<(&str, String)>(),
+            &event_image,
+            container_event_attributes(event_record.as_ref(), &[]),
         );
     }
     let owns_registration = active_supervisors
@@ -8703,10 +8711,6 @@ fn supervise_child(
     if owns_registration {
         active_supervisors.remove(&container_id);
     }
-}
-
-fn persisted_restart_image(store: &SqliteContainerStore, id: &str) -> Option<String> {
-    store.get(id).ok().flatten().map(|record| record.image)
 }
 
 fn oom_kill_count(id: &str) -> u64 {
@@ -8741,6 +8745,31 @@ fn emit_docker_container_event<I, K, V>(
     if let Ok(mut journal) = crate::docker_events::DockerEventJournal::open(runtime_dir) {
         let _ = journal.append_container(action, id, image, attributes);
     }
+}
+
+/// Docker stamps container lifecycle events with the container's name and
+/// full label set. Clients attribute events to a project or service through
+/// those labels (compose's event monitor filters on `com.docker.compose.*`),
+/// so a lifecycle event without them is invisible to such clients.
+fn container_event_attributes(
+    record: Option<&ContainerRecord>,
+    extra: &[(&str, String)],
+) -> Vec<(String, String)> {
+    let mut attributes: Vec<(String, String)> = Vec::new();
+    if let Some(record) = record {
+        if let Some(name) = record.name.as_deref() {
+            if !name.is_empty() {
+                attributes.push(("name".to_string(), name.to_string()));
+            }
+        }
+        for (key, value) in &record.labels {
+            attributes.push((key.clone(), value.clone()));
+        }
+    }
+    for (key, value) in extra {
+        attributes.push((key.to_string(), value.clone()));
+    }
+    attributes
 }
 
 fn parse_capabilities(entries: &[String]) -> Vec<caps::Capability> {
@@ -14217,7 +14246,7 @@ fn run_health_checks(
                             "health_status: healthy",
                             &id,
                             &record.image,
-                            std::iter::empty::<(&str, String)>(),
+                            container_event_attributes(Some(&record), &[]),
                         );
                     }
                 }
@@ -14243,7 +14272,7 @@ fn run_health_checks(
                                     "health_status: unhealthy",
                                     &id,
                                     &record.image,
-                                    std::iter::empty::<(&str, String)>(),
+                                    container_event_attributes(Some(&record), &[]),
                                 );
                                 // The supervisor owns the ordinary restart path. Only
                                 // terminate a verified current workload; a persisted PID
@@ -15951,6 +15980,42 @@ mod tests {
         runtime
             .stop(&record.id, std::time::Duration::from_millis(50))
             .expect("stop after nonzero exit should be idempotent");
+    }
+
+    // Lifecycle events must carry the container's name and labels: clients
+    // attribute events to a project or service through them (compose filters
+    // on `com.docker.compose.*`), so an unlabeled event is invisible to them.
+    #[test]
+    fn container_event_attributes_carry_name_and_labels() {
+        let mut record = ContainerRecord::authorization_candidate(
+            "abc123".to_string(),
+            "alpine:latest".to_string(),
+        );
+        record.name = Some("demo-web-1".to_string());
+        record.labels = [
+            ("com.docker.compose.project".to_string(), "demo".to_string()),
+            ("com.docker.compose.service".to_string(), "web".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let attributes = super::container_event_attributes(
+            Some(&record),
+            &[("exitCode", "17".to_string())],
+        );
+        let get = |key: &str| {
+            attributes
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(get("name").as_deref(), Some("demo-web-1"));
+        assert_eq!(get("com.docker.compose.project").as_deref(), Some("demo"));
+        assert_eq!(get("com.docker.compose.service").as_deref(), Some("web"));
+        assert_eq!(get("exitCode").as_deref(), Some("17"));
+        assert!(
+            super::container_event_attributes(None, &[]).is_empty(),
+            "a missing record must contribute no attributes"
+        );
     }
 
     #[test]

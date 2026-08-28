@@ -1107,6 +1107,48 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 }
 
 #[test]
+fn docker_events_until_replays_history_and_closes_the_stream() {
+    let harness = DaemonHarness::spawn();
+    let (status, _) =
+        harness.request("POST", "/volumes/create", r#"{"Name":"events-until-volume"}"#);
+    assert_eq!(status, 201);
+    // The `until` bound carries second precision, so the bound must land in a
+    // later second than the event's nanosecond timestamp or the event reads as
+    // "after the bound" and the replay comes back empty.
+    thread::sleep(Duration::from_secs(2));
+
+    // `until` without `since` is a replay request: Docker answers with the
+    // journal up to the bound, then ends the response.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    // Read the stream like a client that keeps its side open: a half-close
+    // from the test client would end the exchange before the daemon's own
+    // stream termination is exercised.
+    let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+        .write_all(
+            format!("GET /events?until={now}&follow=1 HTTP/1.1\r\nHost: docker\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("write events request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("daemon must close the stream once the until bound is reached");
+    let body = String::from_utf8_lossy(&response).to_string();
+    assert!(body.contains("200 OK"), "{body}");
+    assert!(body.contains("\"ID\":\"events-until-volume\""), "{body}");
+    // The chunked response must end with the terminating zero chunk. A client
+    // that reads to EOF (`docker events --until`) blocks forever otherwise.
+    assert!(body.ends_with("0\r\n\r\n"), "{body:?}");
+}
+
+#[test]
 fn docker_api_create_retains_anonymous_volume_targets() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request(

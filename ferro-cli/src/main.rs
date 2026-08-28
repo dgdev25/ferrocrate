@@ -193,6 +193,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrocrate", version, about = "FerroCrate CLI")]
@@ -25556,17 +25557,22 @@ fn stream_docker_events(
     // keeps history (previous runs' container creates, for example) out of
     // the stream; a client cannot tell a replayed event from a live one, and
     // lifecycle bookkeeping built on the stream breaks when history is
-    // re-delivered.
-    let mut cursor: Option<u64> = if query.contains_key("since") {
+    // re-delivered. `until` without `since` means "everything up to this
+    // timestamp", so it replays from the journal start like a `since` call.
+    let until_nanos = match query.get("until") {
+        Some(bound) => Some(parse_event_time_bound(bound, "until")?),
+        None => None,
+    };
+    let mut cursor: Option<u64> = if query.contains_key("since") || until_nanos.is_some() {
         None
     } else {
-        Some(
-            state
-                .events
-                .lock()
-                .map_err(|error| format!("docker: event store lock poisoned: {error}"))?
-                .max_event_id(),
-        )
+        // The tail is `None` on an empty journal: there is nothing to skip, so
+        // the subscriber gets every event from the first one on.
+        state
+            .events
+            .lock()
+            .map_err(|error| format!("docker: event store lock poisoned: {error}"))?
+            .max_event_id()
     };
     loop {
         let events = state
@@ -25589,6 +25595,23 @@ fn stream_docker_events(
                 .map_err(|error| error.to_string())?;
         }
         stream.flush().map_err(|error| error.to_string())?;
+        // Docker closes the stream once the `until` bound is reached: an
+        // `until` in the past is a pure replay, an `until` in the future is a
+        // tail that ends at that timestamp. Leaving the stream open blocks
+        // every client that reads to EOF (`docker events --until`, and docker
+        // compose's failure diagnostics).
+        if until_nanos.is_some_and(|bound| {
+            bound
+                <= SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos() as u64)
+                    .unwrap_or(u64::MAX)
+        }) {
+            return stream
+                .write_all(b"0\r\n\r\n")
+                .and_then(|_| stream.flush())
+                .map_err(|error| error.to_string());
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
 }

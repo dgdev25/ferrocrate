@@ -17778,13 +17778,24 @@ impl DockerCompatState {
         build_id: &str,
         request: buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
     ) -> Result<Arc<BuildkitBuild>, String> {
+        let build = self.buildkit_build(build_id)?;
         let is_dockerfile = request.frontend == "dockerfile.v0"
             || (request.frontend == "gateway.v0"
                 && request.frontend_opt.get("source").map(String::as_str) == Some("dockerfile.v0"));
-        if !is_dockerfile || request.definition.is_some() {
+        // The BuildKit client frontend reads the Dockerfile through Inputs,
+        // then submits its generated LLB here. Inputs has already produced
+        // the Dockerfile result (including its lint warnings), so this is not
+        // an arbitrary LLB solve.
+        let is_prepared_client_llb = request.frontend.is_empty()
+            && request.definition.is_some()
+            && build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .is_some();
+        if !(is_dockerfile && request.definition.is_none()) && !is_prepared_client_llb {
             return Err("buildkit gateway: only dockerfile.v0 frontend solves are supported".to_string());
         }
-        let build = self.buildkit_build(build_id)?;
         let mut callback = build
             .gateway_solve
             .lock()
@@ -24580,13 +24591,22 @@ async fn handle_buildkit_control_request(
             .wait_for_buildkit_build(build_id, Duration::from_secs(3))
             .await?;
         let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
-        let result = execute_buildkit_frontend(
-            state.as_ref(),
-            execution.clone(),
-            build.as_ref(),
-            &solve,
-        )
-        .await;
+        let result = if solve.frontend.is_empty() && solve.definition.is_some() {
+            build
+                .result
+                .lock()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                .clone()
+                .ok_or_else(|| "buildkit gateway: client LLB solve has no prepared Dockerfile result".to_string())
+        } else {
+            execute_buildkit_frontend(
+                state.as_ref(),
+                execution.clone(),
+                build.as_ref(),
+                &solve,
+            )
+            .await
+        };
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -34276,6 +34296,40 @@ volumes:
             "gateway.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_gateway_accepts_client_llb_after_inputs_prepared_the_result() {
+        use super::buildkit_proto::{moby::buildkit::v1::frontend, pb::Definition};
+        use super::buildkit_proto::moby::buildkit::v1::SolveRequest;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        let build = state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "client-build".to_string(),
+                session: "session-id".to_string(),
+                ..Default::default()
+            })
+            .expect("register outer solve");
+        *build.result.lock().expect("result") = Some(super::BuildkitBuildResult {
+            image_name: "local/build:lint".to_string(),
+            image_digest: "sha256:lint".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+        });
+
+        state
+            .record_buildkit_gateway_solve(
+                "client-build",
+                frontend::SolveRequest {
+                    definition: Some(Definition::default()),
+                    ..Default::default()
+                },
+            )
+            .expect("client LLB after prepared inputs is accepted");
     }
 
     #[test]

@@ -1,52 +1,52 @@
-{"app":"actix-basics","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"info","status":"pass","exit":0,"ms":2305,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2107,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"build","status":"pass","exit":0,"ms":2305,"stderr_tail":"b 0.1s done\n#12 exporting manifest list sha256:e3f3147915d98b4c1d688483cc00c41bf9d459243642ce428170a0c62372db62 0.1s done\n#12 naming to docker.io/bench/actix-basics:latest\n#12 naming to docker.io/bench/actix-basics:latest done\n#12 unpacking to docker.io/bench/actix-basics:latest 0.0s done\n#12 DONE 0.3s\n\nView build details: docker-desktop://dashboard/build/default/default/rwxfietnp0zbllsjevgqefz9f\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"images","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"save","status":"pass","exit":0,"ms":2705,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"load","status":"pass","exit":0,"ms":903,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"logs","status":"pass","exit":0,"ms":105,"stderr_tail":"ix_server::builder] starting 32 workers\n[2026-08-28T02:21:32Z INFO  actix_server::server] Actix runtime found; starting in Actix runtime\n[2026-08-28T02:21:32Z INFO  actix_server::server] starting service: \"actix-web-service-0.0.0.0:8080\", workers: 32, listening on: 0.0.0.0:8080\n[2026-08-28T02:21:32Z INFO  actix_web::middleware::logger] 172.17.0.1 \"GET / HTTP/1.1\" 200 12 \"-\" \"curl/8.18.0\" 0.000024\n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"top","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"exec","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"diff","status":"pass","exit":0,"ms":2004,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"pause","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"restart","status":"pass","exit":0,"ms":10411,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10311,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"start","status":"pass","exit":0,"ms":206,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"commit","status":"pass","exit":0,"ms":3905,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"export","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"kill","status":"pass","exit":0,"ms":305,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2506,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":1104,"stderr_tail":" Image actix-basics-app Building \n Image actix-basics-app Built \n Network actix-basics_default Creating \n Network actix-basics_default Creating \n Network actix-basics_default Created \n Network actix-basics_default Created \n Container actix-basics-app-1 Creating \n Container actix-basics-app-1 Created \n Container actix-basics-app-1 Starting \n Container actix-basics-app-1 Started \n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":10610,"stderr_tail":" Container actix-basics-app-1 Stopping \n Container actix-basics-app-1 Stopped \n Container actix-basics-app-1 Removing \n Container actix-basics-app-1 Removed \n Network actix-basics_default Removing \n Network actix-basics_default Removed \n","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":804,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"events","status":"pass","exit":0,"ms":5107,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2705,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
-{"app":"actix-basics","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T02:21Z","head":"fd9f2fd8"}
+{"app":"actix-basics","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"info","status":"pass","exit":0,"ms":1904,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":3106,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"build","status":"pass","exit":0,"ms":2104,"stderr_tail":"6:1494816a8224a4be689c1df7872a3d96df96e53813fd62aa8fd9b92d6180a740 done\n#12 exporting manifest list sha256:70908cbe7939ace0fc86216dcd6bbf2390b8ca573ef828c484a3c15b055496a2 done\n#12 naming to docker.io/bench/actix-basics:latest done\n#12 unpacking to docker.io/bench/actix-basics:latest done\n#12 DONE 0.1s\n\nView build details: docker-desktop://dashboard/build/default/default/lxzmhp5aqckxv73o62fwsk4q9\n","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"images","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"tag","status":"pass","exit":0,"ms":2005,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"save","status":"pass","exit":0,"ms":1905,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"load","status":"pass","exit":0,"ms":904,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":903,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"health","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"ix_server::builder] starting 32 workers\n[2026-08-28T08:51:35Z INFO  actix_server::server] Actix runtime found; starting in Actix runtime\n[2026-08-28T08:51:35Z INFO  actix_server::server] starting service: \"actix-web-service-0.0.0.0:8080\", workers: 32, listening on: 0.0.0.0:8080\n[2026-08-28T08:51:35Z INFO  actix_web::middleware::logger] 172.17.0.1 \"GET / HTTP/1.1\" 200 12 \"-\" \"curl/8.18.0\" 0.000027\n","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"exec","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"diff","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"restart","status":"pass","exit":0,"ms":10424,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10811,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"start","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"rename","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"commit","status":"pass","exit":0,"ms":3605,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"export","status":"pass","exit":0,"ms":603,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"kill","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"rm","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2705,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":1805,"stderr_tail":" Image actix-basics-app Building \n Image actix-basics-app Built \n Network actix-basics_default Creating \n Network actix-basics_default Creating \n Network actix-basics_default Created \n Network actix-basics_default Created \n Container actix-basics-app-1 Creating \n Container actix-basics-app-1 Created \n Container actix-basics-app-1 Starting \n Container actix-basics-app-1 Started \n","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":10612,"stderr_tail":" Container actix-basics-app-1 Stopping \n Container actix-basics-app-1 Stopped \n Container actix-basics-app-1 Removing \n Container actix-basics-app-1 Removed \n Network actix-basics_default Removing \n Network actix-basics_default Removed \n","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":1205,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"events","status":"pass","exit":0,"ms":5106,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2503,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":603,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}
+{"app":"actix-basics","engine":"docker","step":"search","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-28T08:51Z","head":"e7145b7d"}

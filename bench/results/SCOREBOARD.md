@@ -1,37 +1,37 @@
 # Real-app bench scoreboard
 
-Generated 2026-08-28 02:56Z from the newest result file per app and engine.
+Generated 2026-08-28 09:46Z from the newest result file per app and engine.
 Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.
 
 | App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |
 |---|---|---:|---:|---:|---:|---:|---:|
-| actix-basics | 2026-08-28T02:21Z | 51/52 | 52/52 | 1 | 0 | 0 | 0 |
-| battleships | 2026-08-28T02:24Z | 54/57 | 57/57 | 3 | 0 | 0 | 0 |
-| docker-flask | 2026-08-28T02:26Z | 14/52 | 18/52 | 5 | 0 | 33 | 0 |
-| docker-todo | 2026-08-28T02:29Z | 19/52 | 52/52 | 33 | 0 | 0 | 0 |
-| fastapi-fullstack | 2026-08-28T02:34Z | 14/47 | 14/47 | 0 | 0 | 33 | 0 |
-| flask-tutorial | 2026-08-28T02:35Z | 54/57 | 57/57 | 3 | 0 | 0 | 0 |
-| gin-basic | 2026-08-28T02:37Z | 51/52 | 52/52 | 1 | 0 | 0 | 0 |
-| gitea | 2026-08-28T02:38Z | 21/52 | 52/52 | 31 | 0 | 0 | 0 |
-| kutt | 2026-08-28T02:40Z | 17/52 | 19/52 | 2 | 0 | 33 | 0 |
-| mdn-static | 2026-08-28T02:43Z | 46/52 | 52/52 | 6 | 0 | 0 | 0 |
-| microblog | 2026-08-28T02:47Z | 14/47 | 14/47 | 0 | 1 | 32 | 0 |
-| node-getting-started | 2026-08-28T02:47Z | 51/52 | 52/52 | 1 | 0 | 0 | 0 |
+| actix-basics | 2026-08-28T08:51Z | 50/52 | 52/52 | 2 | 0 | 0 | 0 |
+| battleships | 2026-08-28T08:58Z | 53/57 | 57/57 | 4 | 0 | 0 | 0 |
+| docker-flask | 2026-08-28T09:01Z | 14/52 | 19/52 | 5 | 0 | 33 | 0 |
+| docker-todo | 2026-08-28T09:03Z | 39/52 | 52/52 | 13 | 0 | 0 | 0 |
+| fastapi-fullstack | 2026-08-28T09:12Z | 14/47 | 14/47 | 0 | 0 | 33 | 0 |
+| flask-tutorial | 2026-08-28T09:12Z | 54/57 | 57/57 | 3 | 0 | 0 | 0 |
+| gin-basic | 2026-08-28T09:14Z | 49/52 | 52/52 | 3 | 0 | 0 | 0 |
+| gitea | 2026-08-28T09:17Z | 21/52 | 52/52 | 31 | 0 | 0 | 0 |
+| kutt | 2026-08-28T09:19Z | 18/52 | 19/52 | 1 | 0 | 33 | 0 |
+| mdn-static | 2026-08-28T09:22Z | 42/52 | 52/52 | 10 | 0 | 0 | 0 |
+| microblog | 2026-08-28T09:27Z | 14/47 | 14/47 | 0 | 1 | 32 | 0 |
+| node-getting-started | 2026-08-28T09:27Z | 50/52 | 52/52 | 2 | 0 | 0 | 0 |
 | scratch | 2026-08-27T00:22Z | 16/47 | 16/47 | 0 | 0 | 31 | 0 |
-| spring-petclinic | 2026-08-28T02:50Z | 19/52 | 51/52 | 32 | 0 | 1 | 0 |
-| uptime-kuma | 2026-08-28T02:53Z | 18/57 | 19/57 | 1 | 0 | 38 | 0 |
+| spring-petclinic | 2026-08-28T09:30Z | 19/52 | 51/52 | 32 | 0 | 1 | 0 |
+| uptime-kuma | 2026-08-28T09:35Z | 18/57 | 19/57 | 1 | 0 | 38 | 0 |
 
 ## By group (Ferrocrate)
 
 | Group | Pass | Product | App/env | Boundary |
 |---|---:|---:|---:|---:|
 | engine | 44 | 0 | 0 | 1 |
-| image | 74 | 21 | 0 | 40 |
-| lifecycle | 127 | 80 | 0 | 138 |
+| image | 81 | 14 | 0 | 40 |
+| lifecycle | 131 | 76 | 0 | 138 |
 | data | 15 | 0 | 0 | 5 |
-| network | 49 | 3 | 1 | 7 |
-| compose | 42 | 12 | 0 | 1 |
-| errors | 36 | 3 | 0 | 6 |
+| network | 50 | 2 | 1 | 7 |
+| compose | 43 | 11 | 0 | 1 |
+| errors | 35 | 4 | 0 | 6 |
 | extras | 72 | 0 | 0 | 3 |
 | other | 0 | 0 | 0 | 0 |
 
@@ -40,278 +40,228 @@ Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Bounda
 | App | Step | Exit | Ferrocrate stderr (tail) |
 |---|---|---:|---|
 | actix-basics | start | 1 | `` |
+| actix-basics | kill | 1 | `kill: bench-actix-basics-r: cannot kill container: 41d1c7d12c90823c7529ed015b1f03a823eda43afd5628fa0240fbf1248ab829: container 41d1c7d12c90823c7529ed015b1f03a82` |
 | battleships | start | 1 | `` |
-| battleships | commit | 1 | `2026-08-28T02:26:30.800187Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
+| battleships | commit | 1 | `2026-08-28T09:00:59.308672Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
 error: commit: bind and tmpfs` |
+| battleships | kill | 1 | `kill: bench-battleships-r: cannot kill container: 3b3b29952328bbfcab7c80356e091c8f5bced3b52c99fce353e5a1dae6283a00: container 3b3b29952328bbfcab7c80356e091c8f5b` |
 | battleships | rmi-committed | 1 | `rmi: bench/battleships:committed: rmi: not found registry-1.docker.io/bench/battleships:committed
-2026-08-28T02:26:33.042485Z ERROR ferro_cli::linux_cli: rmi: 1` |
-| docker-flask | compose-up | 1 | `2026-08-28T02:27:23.324672Z ERROR ferro_cli::linux_cli: compose parse error: services.worker.entrypoint: invalid type: sequence, expected a string at line 94 co` |
+2026-08-28T09:01:00.402526Z ERROR ferro_cli::linux_cli: rmi: 1` |
+| docker-flask | compose-up | 1 | `2026-08-28T09:01:53.708391Z ERROR ferro_cli::linux_cli: compose validation error: service 'css' must specify image or build
+error: compose validation error: ser` |
 | docker-flask | compose-health | 1 | `` |
-| docker-flask | compose-ps | 1 | `2026-08-28T02:29:24.549353Z ERROR ferro_cli::linux_cli: compose parse error: services.worker.entrypoint: invalid type: sequence, expected a string at line 94 co` |
-| docker-flask | compose-logs | 1 | `2026-08-28T02:29:24.672688Z ERROR ferro_cli::linux_cli: compose parse error: services.worker.entrypoint: invalid type: sequence, expected a string at line 94 co` |
-| docker-flask | compose-down | 1 | `2026-08-28T02:29:24.805776Z ERROR ferro_cli::linux_cli: compose parse error: services.worker.entrypoint: invalid type: sequence, expected a string at line 94 co` |
-| docker-todo | build | 1 | `2026-08-28T02:31:31.343927Z ERROR ferro_cli::linux_cli: invalid Dockerfile: RUN /bin/sh -c npm run test failed with status exit status: 1
---- stdout ---
-
---- st` |
-| docker-todo | image-inspect | 1 | `2026-08-28T02:31:31.528359Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/docker-todo:latest
-error: image inspect: not found r` |
-| docker-todo | history | 1 | `2026-08-28T02:31:31.648860Z ERROR ferro_cli::linux_cli: history: not found registry-1.docker.io/bench/docker-todo:latest
-error: history: not found registry-1.do` |
-| docker-todo | tag | 1 | `2026-08-28T02:31:31.778630Z ERROR ferro_cli::linux_cli: source image not found: registry-1.docker.io/bench/docker-todo:latest
-error: source image not found: reg` |
-| docker-todo | save | 1 | `2026-08-28T02:31:31.912727Z ERROR ferro_cli::linux_cli: docker: unknown image bench/docker-todo:latest
-error: docker: unknown image bench/docker-todo:latest
-` |
-| docker-todo | rmi-tag | 1 | `rmi: bench/docker-todo:bench-tag: rmi: not found registry-1.docker.io/bench/docker-todo:bench-tag
-2026-08-28T02:31:32.024615Z ERROR ferro_cli::linux_cli: rmi: 1` |
-| docker-todo | load | 1 | `2026-08-28T02:31:32.145125Z ERROR ferro_cli::linux_cli: docker: load read failed: No such file or directory (os error 2)
-error: docker: load read failed: No suc` |
-| docker-todo | run-detached | 1 | `:"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/docker-todo","Action":"pull"}]}]}
-
-error: run: pull image registry-1.docker.i` |
+| docker-flask | compose-ps | 1 | `2026-08-28T09:03:54.841273Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build
+error: compose validation error: ` |
+| docker-flask | compose-logs | 1 | `2026-08-28T09:03:54.967117Z ERROR ferro_cli::linux_cli: compose validation error: service 'web' must specify image or build
+error: compose validation error: ser` |
+| docker-flask | compose-down | 1 | `2026-08-28T09:03:55.096690Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build
+error: compose validation error: ` |
 | docker-todo | health | 1 | `` |
-| docker-todo | logs | 1 | `2026-08-28T02:32:03.500791Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | inspect | 1 | `2026-08-28T02:32:03.613696Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | top | 1 | `2026-08-28T02:32:03.739091Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | stats | 1 | `2026-08-28T02:32:03.853607Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | exec | 1 | `2026-08-28T02:32:03.978586Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | cp-out | 1 | `2026-08-28T02:32:04.120633Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | cp-in | 1 | `2026-08-28T02:32:04.246495Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | diff | 1 | `2026-08-28T02:32:04.370345Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | pause | 1 | `pause: bench-docker-todo: container not found: bench-docker-todo
-2026-08-28T02:32:04.489934Z ERROR ferro_cli::linux_cli: pause: 1 container operation(s) failed
-` |
-| docker-todo | unpause | 1 | `unpause: bench-docker-todo: container not found: bench-docker-todo
-2026-08-28T02:32:04.638792Z ERROR ferro_cli::linux_cli: unpause: 1 container operation(s) fai` |
-| docker-todo | restart | 1 | `restart: bench-docker-todo: container not found: bench-docker-todo
-2026-08-28T02:32:04.778986Z ERROR ferro_cli::linux_cli: restart: 1 container operation(s) fai` |
-| docker-todo | stop | 1 | `stop: bench-docker-todo: container not found: bench-docker-todo
-2026-08-28T02:32:04.887897Z ERROR ferro_cli::linux_cli: stop: 1 container operation(s) failed
-er` |
-| docker-todo | start | 1 | `start: bench-docker-todo: container not found: bench-docker-todo
-2026-08-28T02:32:05.015151Z ERROR ferro_cli::linux_cli: start: 1 container operation(s) failed
-` |
-| docker-todo | rename | 1 | `2026-08-28T02:32:05.133473Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo
-error: container not found: bench-docker-todo
-` |
-| docker-todo | commit | 1 | `2026-08-28T02:32:05.280469Z ERROR ferro_cli::linux_cli: commit: container not found: bench-docker-todo-r
-error: commit: container not found: bench-docker-todo-r` |
-| docker-todo | export | 1 | `2026-08-28T02:32:05.406447Z ERROR ferro_cli::linux_cli: container not found: bench-docker-todo-r
-error: container not found: bench-docker-todo-r
-` |
-| docker-todo | kill | 1 | `kill: bench-docker-todo-r: container not found: bench-docker-todo-r
-2026-08-28T02:32:05.519680Z ERROR ferro_cli::linux_cli: kill: 1 container operation(s) faile` |
-| docker-todo | wait | 1 | `wait: bench-docker-todo-r: container not found: bench-docker-todo-r
-2026-08-28T02:32:05.651464Z ERROR ferro_cli::linux_cli: wait: 1 container operation(s) faile` |
-| docker-todo | rm | 1 | `rm: bench-docker-todo-r: container not found: bench-docker-todo-r
-2026-08-28T02:32:05.891038Z ERROR ferro_cli::linux_cli: rm: 1 container operation(s) failed
-er` |
-| docker-todo | rmi-committed | 1 | `rmi: bench/docker-todo:committed: rmi: not found registry-1.docker.io/bench/docker-todo:committed
-2026-08-28T02:32:06.002619Z ERROR ferro_cli::linux_cli: rmi: 1` |
-| docker-todo | network-run | 1 | `:"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/docker-todo","Action":"pull"}]}]}
-
-error: run: pull image registry-1.docker.i` |
-| docker-todo | compose-up | 1 | `ks (os error 40); client prerequisite failed: invalid Dockerfile: RUN /bin/sh -c npm run test failed with status exit status: 1
---- stdout ---
-
---- stderr ---
-b` |
+| docker-todo | top | 1 | `2026-08-28T09:07:53.024524Z ERROR ferro_cli::linux_cli: container b9a450498544552e72ad32a1ad06927cb0ce34009df963d65ca4570ceb692a65 is not running
+error: contain` |
+| docker-todo | exec | 1 | `2026-08-28T09:07:53.267730Z ERROR ferro_cli::linux_cli: container b9a450498544552e72ad32a1ad06927cb0ce34009df963d65ca4570ceb692a65 is not running
+error: contain` |
+| docker-todo | cp-out | 1 | `2026-08-28T09:07:53.389354Z ERROR ferro_cli::linux_cli: docker: archive path is unavailable: No such file or directory (os error 2)
+error: docker: archive path ` |
+| docker-todo | cp-in | 1 | `2026-08-28T09:07:53.593590Z ERROR ferro_cli::linux_cli: container b9a450498544552e72ad32a1ad06927cb0ce34009df963d65ca4570ceb692a65 is not running
+error: contain` |
+| docker-todo | pause | 1 | `pause: bench-docker-todo: cgroup error: io error: No such process (os error 3)
+2026-08-28T09:07:53.909447Z ERROR ferro_cli::linux_cli: pause: 1 container operat` |
+| docker-todo | unpause | 1 | `unpause: bench-docker-todo: cgroup error: io error: No such process (os error 3)
+2026-08-28T09:07:54.060164Z ERROR ferro_cli::linux_cli: unpause: 1 container op` |
+| docker-todo | restart | 1 | `` |
+| docker-todo | start | 1 | `` |
+| docker-todo | kill | 1 | `kill: bench-docker-todo-r: cannot kill container: b9a450498544552e72ad32a1ad06927cb0ce34009df963d65ca4570ceb692a65: container b9a450498544552e72ad32a1ad06927cb0` |
+| docker-todo | compose-up | 1 | `90c4fd1143c09f76d9d55 pid=2432154 network_backend=ebpf
+2026-08-28T09:10:11.203278Z  WARN ferro_core::runtime: [rollback] container 7daa4bd0d46812208b0352fe23796` |
 | docker-todo | compose-health | 1 | `` |
-| docker-todo | err-port-in-use | 1 | `docker-todo","Action":"pull"}]}]}
-
-error: run: pull image registry-1.docker.io/bench/docker-todo:latest failed: registry error: registry returned HTTP 401: {"er` |
+| docker-todo | err-port-in-use | 1 | `2026-08-28T09:12:15.674184Z ERROR ferro_cli::linux_cli: io error: Connection reset by peer (os error 104)
+error: io error: Connection reset by peer (os error 10` |
 | flask-tutorial | start | 1 | `` |
-| flask-tutorial | commit | 1 | `2026-08-28T02:36:59.451397Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
+| flask-tutorial | commit | 1 | `2026-08-28T09:14:40.745414Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
 error: commit: bind and tmpfs` |
 | flask-tutorial | rmi-committed | 1 | `rmi: bench/flask-tutorial:committed: rmi: not found registry-1.docker.io/bench/flask-tutorial:committed
-2026-08-28T02:37:00.286165Z ERROR ferro_cli::linux_cli: ` |
+2026-08-28T09:14:41.756979Z ERROR ferro_cli::linux_cli: ` |
 | gin-basic | start | 1 | `` |
-| gitea | build | 1 | `2026-08-28T02:39:51.398049Z ERROR ferro_cli::linux_cli: unsupported Dockerfile instruction: Dockerfile syntax directive is not supported: docker/dockerfile:1
-er` |
-| gitea | image-inspect | 1 | `2026-08-28T02:39:51.665132Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/gitea:latest
+| gin-basic | kill | 1 | `kill: bench-gin-basic-r: cannot kill container: f53e5204d14ddef4d614949c94bbc05cde9e12316962a71b57d88da3cac9cf29: container f53e5204d14ddef4d614949c94bbc05cde9e` |
+| gin-basic | err-port-in-use | 1 | `2026-08-28T09:17:50.221070Z ERROR ferro_cli::linux_cli: io error: Connection reset by peer (os error 104)
+error: io error: Connection reset by peer (os error 10` |
+| gitea | build | 1 | `2026-08-28T09:19:07.329045Z ERROR ferro_cli::linux_cli: invalid Dockerfile: FROM --platform must use OS/architecture form
+error: invalid Dockerfile: FROM --plat` |
+| gitea | image-inspect | 1 | `2026-08-28T09:19:07.569948Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/gitea:latest
 error: image inspect: not found registr` |
-| gitea | history | 1 | `2026-08-28T02:39:51.795239Z ERROR ferro_cli::linux_cli: history: not found registry-1.docker.io/bench/gitea:latest
+| gitea | history | 1 | `2026-08-28T09:19:07.687397Z ERROR ferro_cli::linux_cli: history: not found registry-1.docker.io/bench/gitea:latest
 error: history: not found registry-1.docker.i` |
-| gitea | tag | 1 | `2026-08-28T02:39:51.934334Z ERROR ferro_cli::linux_cli: source image not found: registry-1.docker.io/bench/gitea:latest
+| gitea | tag | 1 | `2026-08-28T09:19:07.810112Z ERROR ferro_cli::linux_cli: source image not found: registry-1.docker.io/bench/gitea:latest
 error: source image not found: registry-` |
-| gitea | save | 1 | `2026-08-28T02:39:52.061289Z ERROR ferro_cli::linux_cli: docker: unknown image bench/gitea:latest
+| gitea | save | 1 | `2026-08-28T09:19:07.935911Z ERROR ferro_cli::linux_cli: docker: unknown image bench/gitea:latest
 error: docker: unknown image bench/gitea:latest
 ` |
 | gitea | rmi-tag | 1 | `rmi: bench/gitea:bench-tag: rmi: not found registry-1.docker.io/bench/gitea:bench-tag
-2026-08-28T02:39:52.177315Z ERROR ferro_cli::linux_cli: rmi: 1 container o` |
-| gitea | load | 1 | `2026-08-28T02:39:52.305429Z ERROR ferro_cli::linux_cli: docker: load read failed: No such file or directory (os error 2)
+2026-08-28T09:19:08.052964Z ERROR ferro_cli::linux_cli: rmi: 1 container o` |
+| gitea | load | 1 | `2026-08-28T09:19:08.172866Z ERROR ferro_cli::linux_cli: docker: load read failed: No such file or directory (os error 2)
 error: docker: load read failed: No suc` |
-| gitea | run-detached | 1 | `HORIZED","message":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gitea","Action":"pull"}]}]}
+| gitea | run-detached | 125 | `HORIZED","message":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gitea","Action":"pull"}]}]}
 
 error: run: pull image registr` |
 | gitea | health | 1 | `` |
-| gitea | logs | 1 | `2026-08-28T02:40:23.641322Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | logs | 1 | `2026-08-28T09:19:39.380047Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | inspect | 1 | `2026-08-28T02:40:23.759884Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | inspect | 1 | `2026-08-28T09:19:39.503352Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | top | 1 | `2026-08-28T02:40:23.885656Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | top | 1 | `2026-08-28T09:19:39.621090Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | stats | 1 | `2026-08-28T02:40:24.027337Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | stats | 1 | `2026-08-28T09:19:39.744263Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | exec | 1 | `2026-08-28T02:40:24.156065Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | exec | 1 | `2026-08-28T09:19:39.863993Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | cp-out | 1 | `2026-08-28T02:40:24.279191Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | cp-out | 1 | `2026-08-28T09:19:39.989779Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | cp-in | 1 | `2026-08-28T02:40:24.397991Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | cp-in | 1 | `2026-08-28T09:19:40.111823Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | diff | 1 | `2026-08-28T02:40:24.537719Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | diff | 1 | `2026-08-28T09:19:40.230930Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
 | gitea | pause | 1 | `pause: bench-gitea: container not found: bench-gitea
-2026-08-28T02:40:24.667414Z ERROR ferro_cli::linux_cli: pause: 1 container operation(s) failed
+2026-08-28T09:19:40.352861Z ERROR ferro_cli::linux_cli: pause: 1 container operation(s) failed
 error: pause` |
 | gitea | unpause | 1 | `unpause: bench-gitea: container not found: bench-gitea
-2026-08-28T02:40:24.775765Z ERROR ferro_cli::linux_cli: unpause: 1 container operation(s) failed
+2026-08-28T09:19:40.473446Z ERROR ferro_cli::linux_cli: unpause: 1 container operation(s) failed
 error: u` |
 | gitea | restart | 1 | `restart: bench-gitea: container not found: bench-gitea
-2026-08-28T02:40:24.900820Z ERROR ferro_cli::linux_cli: restart: 1 container operation(s) failed
+2026-08-28T09:19:40.596675Z ERROR ferro_cli::linux_cli: restart: 1 container operation(s) failed
 error: r` |
 | gitea | stop | 1 | `stop: bench-gitea: container not found: bench-gitea
-2026-08-28T02:40:25.017938Z ERROR ferro_cli::linux_cli: stop: 1 container operation(s) failed
+2026-08-28T09:19:40.719893Z ERROR ferro_cli::linux_cli: stop: 1 container operation(s) failed
 error: stop: 1` |
 | gitea | start | 1 | `start: bench-gitea: container not found: bench-gitea
-2026-08-28T02:40:25.138754Z ERROR ferro_cli::linux_cli: start: 1 container operation(s) failed
+2026-08-28T09:19:40.845514Z ERROR ferro_cli::linux_cli: start: 1 container operation(s) failed
 error: start` |
-| gitea | rename | 1 | `2026-08-28T02:40:25.261744Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
+| gitea | rename | 1 | `2026-08-28T09:19:40.967516Z ERROR ferro_cli::linux_cli: container not found: bench-gitea
 error: container not found: bench-gitea
 ` |
-| gitea | commit | 1 | `2026-08-28T02:40:25.382418Z ERROR ferro_cli::linux_cli: commit: container not found: bench-gitea-r
+| gitea | commit | 1 | `2026-08-28T09:19:41.086991Z ERROR ferro_cli::linux_cli: commit: container not found: bench-gitea-r
 error: commit: container not found: bench-gitea-r
 ` |
-| gitea | export | 1 | `2026-08-28T02:40:25.519301Z ERROR ferro_cli::linux_cli: container not found: bench-gitea-r
+| gitea | export | 1 | `2026-08-28T09:19:41.227143Z ERROR ferro_cli::linux_cli: container not found: bench-gitea-r
 error: container not found: bench-gitea-r
 ` |
 | gitea | kill | 1 | `kill: bench-gitea-r: container not found: bench-gitea-r
-2026-08-28T02:40:25.644037Z ERROR ferro_cli::linux_cli: kill: 1 container operation(s) failed
+2026-08-28T09:19:41.343109Z ERROR ferro_cli::linux_cli: kill: 1 container operation(s) failed
 error: kil` |
 | gitea | wait | 1 | `wait: bench-gitea-r: container not found: bench-gitea-r
-2026-08-28T02:40:25.776620Z ERROR ferro_cli::linux_cli: wait: 1 container operation(s) failed
+2026-08-28T09:19:41.467144Z ERROR ferro_cli::linux_cli: wait: 1 container operation(s) failed
 error: wai` |
 | gitea | rm | 1 | `rm: bench-gitea-r: container not found: bench-gitea-r
-2026-08-28T02:40:25.989486Z ERROR ferro_cli::linux_cli: rm: 1 container operation(s) failed
+2026-08-28T09:19:41.685661Z ERROR ferro_cli::linux_cli: rm: 1 container operation(s) failed
 error: rm: 1 c` |
 | gitea | rmi-committed | 1 | `rmi: bench/gitea:committed: rmi: not found registry-1.docker.io/bench/gitea:committed
-2026-08-28T02:40:26.116531Z ERROR ferro_cli::linux_cli: rmi: 1 container o` |
-| gitea | network-run | 1 | `HORIZED","message":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gitea","Action":"pull"}]}]}
+2026-08-28T09:19:41.807517Z ERROR ferro_cli::linux_cli: rmi: 1 container o` |
+| gitea | network-run | 125 | `HORIZED","message":"authentication required","detail":[{"Type":"repository","Class":"","Name":"bench/gitea","Action":"pull"}]}]}
 
 error: run: pull image registr` |
 | gitea | err-port-in-use | 1 | `Class":"","Name":"bench/gitea","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/gitea:latest failed: registry error: registry returned HT` |
-| kutt | compose-up | 1 | `2026-08-28T02:41:05.285410Z ERROR ferro_cli::linux_cli: invalid Dockerfile: base image not found: node:22-alpine
-error: invalid Dockerfile: base image not found` |
 | kutt | compose-health | 1 | `` |
 | mdn-static | health | 1 | `` |
+| mdn-static | top | 1 | `2026-08-28T09:23:56.085418Z ERROR ferro_cli::linux_cli: container 9bab95bf6d8d2b843db760a4d6b6c45fa1b0a5b000f82e981e0b9ac8cfcc3cb8 is not running
+error: contain` |
+| mdn-static | exec | 1 | `2026-08-28T09:23:56.328594Z ERROR ferro_cli::linux_cli: container 9bab95bf6d8d2b843db760a4d6b6c45fa1b0a5b000f82e981e0b9ac8cfcc3cb8 is not running
+error: contain` |
+| mdn-static | cp-in | 1 | `2026-08-28T09:23:56.687036Z ERROR ferro_cli::linux_cli: container 9bab95bf6d8d2b843db760a4d6b6c45fa1b0a5b000f82e981e0b9ac8cfcc3cb8 is not running
+error: contain` |
 | mdn-static | pause | 1 | `pause: bench-mdn-static: cgroup error: io error: No such process (os error 3)
-2026-08-28T02:44:21.446997Z ERROR ferro_cli::linux_cli: pause: 1 container operati` |
+2026-08-28T09:23:56.954791Z ERROR ferro_cli::linux_cli: pause: 1 container operati` |
 | mdn-static | unpause | 1 | `unpause: bench-mdn-static: cgroup error: io error: No such process (os error 3)
-2026-08-28T02:44:21.566113Z ERROR ferro_cli::linux_cli: unpause: 1 container ope` |
+2026-08-28T09:23:57.080626Z ERROR ferro_cli::linux_cli: unpause: 1 container ope` |
 | mdn-static | restart | 1 | `` |
 | mdn-static | start | 1 | `` |
+| mdn-static | kill | 1 | `kill: bench-mdn-static-r: cannot kill container: 9bab95bf6d8d2b843db760a4d6b6c45fa1b0a5b000f82e981e0b9ac8cfcc3cb8: container 9bab95bf6d8d2b843db760a4d6b6c45fa1b` |
 | mdn-static | compose-health | 1 | `` |
 | node-getting-started | start | 1 | `` |
-| spring-petclinic | build | 1 | `2026-08-28T02:52:44.736320Z ERROR ferro_cli::linux_cli: invalid Dockerfile: COPY --from source is unavailable: No such file or directory (os error 2)
-error: inv` |
-| spring-petclinic | image-inspect | 1 | `2026-08-28T02:52:44.953516Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/spring-petclinic:latest
+| node-getting-started | kill | 1 | `kill: bench-node-getting-started-r: cannot kill container: 726add58b3aa80bd1577b9a404b2c208247c46cfbb05be642f4149712298e3d8: container 726add58b3aa80bd1577b9a40` |
+| spring-petclinic | build | 1 | `85b1137f82406f33e6f44bba79d6: registry (verified)
+layer sha256:f6795b7189ec73f2774735d97a688bf9205d69cf49ceeb539654ddd7d70efe53: registry (verified)
+2026-08-28T` |
+| spring-petclinic | image-inspect | 1 | `2026-08-28T09:33:52.959949Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/spring-petclinic:latest
 error: image inspect: not fo` |
-| spring-petclinic | history | 1 | `2026-08-28T02:52:45.072973Z ERROR ferro_cli::linux_cli: history: not found registry-1.docker.io/bench/spring-petclinic:latest
+| spring-petclinic | history | 1 | `2026-08-28T09:33:53.081686Z ERROR ferro_cli::linux_cli: history: not found registry-1.docker.io/bench/spring-petclinic:latest
 error: history: not found registry` |
-| spring-petclinic | tag | 1 | `2026-08-28T02:52:45.189018Z ERROR ferro_cli::linux_cli: source image not found: registry-1.docker.io/bench/spring-petclinic:latest
+| spring-petclinic | tag | 1 | `2026-08-28T09:33:53.204756Z ERROR ferro_cli::linux_cli: source image not found: registry-1.docker.io/bench/spring-petclinic:latest
 error: source image not found` |
-| spring-petclinic | save | 1 | `2026-08-28T02:52:45.311721Z ERROR ferro_cli::linux_cli: docker: unknown image bench/spring-petclinic:latest
+| spring-petclinic | save | 1 | `2026-08-28T09:33:53.340864Z ERROR ferro_cli::linux_cli: docker: unknown image bench/spring-petclinic:latest
 error: docker: unknown image bench/spring-petclinic:` |
 | spring-petclinic | rmi-tag | 1 | `rmi: bench/spring-petclinic:bench-tag: rmi: not found registry-1.docker.io/bench/spring-petclinic:bench-tag
-2026-08-28T02:52:45.431580Z ERROR ferro_cli::linux_c` |
-| spring-petclinic | load | 1 | `2026-08-28T02:52:45.548938Z ERROR ferro_cli::linux_cli: docker: load read failed: No such file or directory (os error 2)
+2026-08-28T09:33:53.461913Z ERROR ferro_cli::linux_c` |
+| spring-petclinic | load | 1 | `2026-08-28T09:33:53.599635Z ERROR ferro_cli::linux_cli: docker: load read failed: No such file or directory (os error 2)
 error: docker: load read failed: No suc` |
-| spring-petclinic | run-detached | 1 | `n required","detail":[{"Type":"repository","Class":"","Name":"bench/spring-petclinic","Action":"pull"}]}]}
+| spring-petclinic | run-detached | 125 | `n required","detail":[{"Type":"repository","Class":"","Name":"bench/spring-petclinic","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/sp` |
 | spring-petclinic | health | 1 | `` |
-| spring-petclinic | logs | 1 | `2026-08-28T02:53:16.853667Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | logs | 1 | `2026-08-28T09:34:26.213488Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | inspect | 1 | `2026-08-28T02:53:16.972131Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | inspect | 1 | `2026-08-28T09:34:26.353397Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | top | 1 | `2026-08-28T02:53:17.091010Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | top | 1 | `2026-08-28T09:34:26.464768Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | stats | 1 | `2026-08-28T02:53:17.210000Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | stats | 1 | `2026-08-28T09:34:26.588498Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | exec | 1 | `2026-08-28T02:53:17.331435Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | exec | 1 | `2026-08-28T09:34:26.711050Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | cp-out | 1 | `2026-08-28T02:53:17.452529Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | cp-out | 1 | `2026-08-28T09:34:26.842915Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | cp-in | 1 | `2026-08-28T02:53:17.572871Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | cp-in | 1 | `2026-08-28T09:34:26.961750Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | diff | 1 | `2026-08-28T02:53:17.692792Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+| spring-petclinic | diff | 1 | `2026-08-28T09:34:27.083460Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
 | spring-petclinic | pause | 1 | `pause: bench-spring-petclinic: container not found: bench-spring-petclinic
-2026-08-28T02:53:17.828105Z ERROR ferro_cli::linux_cli: pause: 1 container operation(` |
+2026-08-28T09:34:27.201051Z ERROR ferro_cli::linux_cli: pause: 1 container operation(` |
 | spring-petclinic | unpause | 1 | `unpause: bench-spring-petclinic: container not found: bench-spring-petclinic
-2026-08-28T02:53:17.961164Z ERROR ferro_cli::linux_cli: unpause: 1 container operat` |
+2026-08-28T09:34:27.318955Z ERROR ferro_cli::linux_cli: unpause: 1 container operat` |
 | spring-petclinic | restart | 1 | `restart: bench-spring-petclinic: container not found: bench-spring-petclinic
-2026-08-28T02:53:18.074397Z ERROR ferro_cli::linux_cli: restart: 1 container operat` |
+2026-08-28T09:34:27.449017Z ERROR ferro_cli::linux_cli: restart: 1 container operat` |
 | spring-petclinic | stop | 1 | `stop: bench-spring-petclinic: container not found: bench-spring-petclinic
-2026-08-28T02:53:18.191337Z ERROR ferro_cli::linux_cli: stop: 1 container operation(s)` |
+2026-08-28T09:34:27.644220Z ERROR ferro_cli::linux_cli: stop: 1 container operation(s)` |
 | spring-petclinic | start | 1 | `start: bench-spring-petclinic: container not found: bench-spring-petclinic
-2026-08-28T02:53:18.315285Z ERROR ferro_cli::linux_cli: start: 1 container operation(` |
-| spring-petclinic | rename | 1 | `2026-08-28T02:53:18.429790Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
+2026-08-28T09:34:27.770620Z ERROR ferro_cli::linux_cli: start: 1 container operation(` |
+| spring-petclinic | rename | 1 | `2026-08-28T09:34:27.872186Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic
 error: container not found: bench-spring-petclinic
 ` |
-| spring-petclinic | commit | 1 | `2026-08-28T02:53:18.549586Z ERROR ferro_cli::linux_cli: commit: container not found: bench-spring-petclinic-r
+| spring-petclinic | commit | 1 | `2026-08-28T09:34:27.994203Z ERROR ferro_cli::linux_cli: commit: container not found: bench-spring-petclinic-r
 error: commit: container not found: bench-spring-p` |
-| spring-petclinic | export | 1 | `2026-08-28T02:53:18.670511Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic-r
+| spring-petclinic | export | 1 | `2026-08-28T09:34:28.116355Z ERROR ferro_cli::linux_cli: container not found: bench-spring-petclinic-r
 error: container not found: bench-spring-petclinic-r
 ` |
 | spring-petclinic | kill | 1 | `kill: bench-spring-petclinic-r: container not found: bench-spring-petclinic-r
-2026-08-28T02:53:18.791713Z ERROR ferro_cli::linux_cli: kill: 1 container operatio` |
+2026-08-28T09:34:28.239313Z ERROR ferro_cli::linux_cli: kill: 1 container operatio` |
 | spring-petclinic | wait | 1 | `wait: bench-spring-petclinic-r: container not found: bench-spring-petclinic-r
-2026-08-28T02:53:18.912204Z ERROR ferro_cli::linux_cli: wait: 1 container operatio` |
+2026-08-28T09:34:28.361048Z ERROR ferro_cli::linux_cli: wait: 1 container operatio` |
 | spring-petclinic | rm | 1 | `rm: bench-spring-petclinic-r: container not found: bench-spring-petclinic-r
-2026-08-28T02:53:19.130328Z ERROR ferro_cli::linux_cli: rm: 1 container operation(s)` |
+2026-08-28T09:34:28.586869Z ERROR ferro_cli::linux_cli: rm: 1 container operation(s)` |
 | spring-petclinic | rmi-committed | 1 | `rmi: bench/spring-petclinic:committed: rmi: not found registry-1.docker.io/bench/spring-petclinic:committed
-2026-08-28T02:53:19.254029Z ERROR ferro_cli::linux_c` |
-| spring-petclinic | network-run | 1 | `n required","detail":[{"Type":"repository","Class":"","Name":"bench/spring-petclinic","Action":"pull"}]}]}
+2026-08-28T09:34:28.701840Z ERROR ferro_cli::linux_c` |
+| spring-petclinic | network-run | 125 | `n required","detail":[{"Type":"repository","Class":"","Name":"bench/spring-petclinic","Action":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/sp` |
-| spring-petclinic | compose-up | 1 | `_id=53ab09e4b07e6541ff87492822a5cc34c8a6e7976059e83d24f2468e30a385bf pid=705487 network_backend=ebpf
-2026-08-28T02:53:32.204688Z ERROR ferro_cli::linux_cli: com` |
+| spring-petclinic | compose-up | 1 | `d52e178f18efa619b4691c7d2b7f540ed274afa64cb5bf7588deb23ccb001 creation failed, cleaning up resources
+2026-08-28T09:35:27.643188Z ERROR ferro_cli::linux_cli: com` |
 | spring-petclinic | err-port-in-use | 1 | `ction":"pull"}]}]}
 
 error: run: pull image registry-1.docker.io/bench/spring-petclinic:latest failed: registry error: registry returned HTTP 401: {"errors":[{"c` |

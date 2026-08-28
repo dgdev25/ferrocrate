@@ -5216,6 +5216,11 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        // Rootless bridge containers create their netns with `unshare` and
+        // attach slirp to that launcher's namespace. The namespace vanishes
+        // at stop, so start must repeat that protocol rather than letting
+        // bubblewrap inherit the host netns.
+        let restart_rootless_slirp = requires_rootless_slirp_restart(&record);
         if record.command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
@@ -5290,7 +5295,7 @@ impl ContainerRuntime {
             record.workdir.as_deref(),
             record.user.as_deref(),
             record.netns.as_deref(),
-            false,
+            restart_rootless_slirp,
             seccomp_profile.as_ref(),
             record
                 .mounts
@@ -5403,6 +5408,40 @@ impl ContainerRuntime {
             LifecyclePhasePoint::LaunchIdentityDurable,
         )?;
         release_prepared_child(child_id)?;
+        if restart_rootless_slirp {
+            let api_socket = slirp_api_socket_path(&record.id)?;
+            let (helper_pid, helper_start_time) = match start_slirp4netns(child_id, Some(&api_socket)) {
+                Ok(helper) => helper,
+                Err(error) => {
+                    let _ = kill_pid(child_id);
+                    return Err(error);
+                }
+            };
+            record.slirp4netns_pid = Some(helper_pid);
+            record.slirp4netns_start_time = Some(helper_start_time);
+            let helper_record = record.clone();
+            let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
+                self.store.put_for_mutation(&record, reservation.operation_id)
+            } else {
+                self.store.put(&record)
+            };
+            if let Err(error) = persist_result {
+                let _ = kill_pid(child_id);
+                terminate_slirp4netns_helper(&helper_record);
+                return Err(error.into());
+            }
+            if let Err(error) = configure_slirp_host_forwards(&api_socket, &record.ports) {
+                let _ = kill_pid(child_id);
+                terminate_slirp4netns_helper(&helper_record);
+                return Err(error);
+            }
+            if let Ok(containers) = self.store.list() {
+                update_container_hosts(&self.runtime_dir, &containers)?;
+            }
+            // `unshare` and the ownership launcher each stop once. Forwarding
+            // must be ready before the second release can exec the workload.
+            release_prepared_child(child_id)?;
+        }
         let _ = log_event(
             &self.runtime_dir,
             make_event(
@@ -12427,6 +12466,17 @@ fn rootless_netns_enabled() -> bool {
     }
 }
 
+fn requires_rootless_slirp_restart(record: &ContainerRecord) -> bool {
+    requires_rootless_slirp_restart_for(
+        !nix::unistd::Uid::effective().is_root() && rootless_netns_enabled(),
+        record.slirp4netns_pid.is_some() && record.slirp4netns_start_time.is_some(),
+    )
+}
+
+fn requires_rootless_slirp_restart_for(rootless_netns: bool, had_slirp: bool) -> bool {
+    rootless_netns && had_slirp
+}
+
 fn seccomp_enabled() -> bool {
     std::env::var("FERROCRATE_SECCOMP")
         .map(|val| !(val == "0" || val.eq_ignore_ascii_case("false")))
@@ -17127,6 +17177,13 @@ mod tests {
         let second = super::slirp_api_socket_path(&"b".repeat(64)).expect("second socket");
         assert!(first.as_os_str().len() < 108, "{}", first.display());
         assert_ne!(first, second, "container sockets must not collide");
+    }
+
+    #[test]
+    fn rootless_slirp_restart_requires_a_prior_rootless_slirp_launch() {
+        assert!(super::requires_rootless_slirp_restart_for(true, true));
+        assert!(!super::requires_rootless_slirp_restart_for(true, false));
+        assert!(!super::requires_rootless_slirp_restart_for(false, true));
     }
 
     #[test]

@@ -727,14 +727,24 @@ fn build_one_stage(
             .ok_or_else(|| {
                 DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
             })?;
-        let source = safe_context_source(&source_root, &copy.src)?;
         let destination = resolve_copy_destination(workdir, &copy.dest);
-        let dest = safe_context_destination(&context_root, &destination)?;
-        copy_path_recursive(&source, &dest)?;
-        if let Some(owner) = copy.owner.as_ref() {
-            let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
-            let resolved = CopyOwner::Numeric(uid, gid);
-            apply_copy_owner_recursive(&dest, &resolved)?;
+        let destination_root = safe_context_destination(&context_root, &destination)?;
+        if copy.srcs.len() > 1 {
+            fs::create_dir_all(&destination_root)?;
+        }
+        for source_path in &copy.srcs {
+            let source = safe_context_source(&source_root, source_path)?;
+            let dest = if copy.srcs.len() > 1 {
+                destination_root.join(source.file_name().unwrap_or_default())
+            } else {
+                destination_root.clone()
+            };
+            copy_path_recursive(&source, &dest)?;
+            if let Some(owner) = copy.owner.as_ref() {
+                let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+                let resolved = CopyOwner::Numeric(uid, gid);
+                apply_copy_owner_recursive(&dest, &resolved)?;
+            }
         }
     }
 
@@ -788,13 +798,23 @@ fn build_one_stage(
                 .ok_or_else(|| {
                     DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
                 })?;
-            let source = safe_context_source(&source_root, &copy.src)?;
             let destination = resolve_copy_destination(workdir, &copy.dest);
-            let dest = safe_context_destination(&stage_root, &destination)?;
-            copy_path_recursive(&source, &dest)?;
-            if let Some(owner) = copy.owner.as_ref() {
-                let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
-                apply_copy_owner_recursive(&dest, &CopyOwner::Numeric(uid, gid))?;
+            let destination_root = safe_context_destination(&stage_root, &destination)?;
+            if copy.srcs.len() > 1 {
+                fs::create_dir_all(&destination_root)?;
+            }
+            for source_path in &copy.srcs {
+                let source = safe_context_source(&source_root, source_path)?;
+                let dest = if copy.srcs.len() > 1 {
+                    destination_root.join(source.file_name().unwrap_or_default())
+                } else {
+                    destination_root.clone()
+                };
+                copy_path_recursive(&source, &dest)?;
+                if let Some(owner) = copy.owner.as_ref() {
+                    let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+                    apply_copy_owner_recursive(&dest, &CopyOwner::Numeric(uid, gid))?;
+                }
             }
         }
         run_stage_commands(
@@ -2804,7 +2824,7 @@ fn file_matches_digest(path: &Path, expected: &str) -> bool {
 #[derive(Debug, Clone)]
 struct CopyFromSpec {
     from: String,
-    src: String,
+    srcs: Vec<String>,
     dest: String,
     owner: Option<CopyOwner>,
 }
@@ -3271,7 +3291,9 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
         .chain(stage.copy_from_after_run.iter())
     {
         append_stage_identity_str(buffer, "cf.from", &copy.from);
-        append_stage_identity_str(buffer, "cf.src", &copy.src);
+        for source in &copy.srcs {
+            append_stage_identity_str(buffer, "cf.src", source);
+        }
         append_stage_identity_str(buffer, "cf.dest", &copy.dest);
         append_stage_identity_owner(buffer, "cf.owner", &copy.owner);
     }
@@ -3629,8 +3651,11 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
     }
     Ok(Some(CopyFromSpec {
         from,
-        src: tokens[idx].to_string(),
-        dest: tokens[idx + 1].to_string(),
+        srcs: tokens[idx..tokens.len() - 1]
+            .iter()
+            .map(|source| (*source).to_string())
+            .collect(),
+        dest: tokens[tokens.len() - 1].to_string(),
         owner,
     }))
 }
@@ -7550,6 +7575,34 @@ mod tests {
             fs::read_to_string(stage_root(&runtime, 2).join("artifact")).unwrap(),
             "compiled"
         );
+    }
+
+    #[test]
+    fn copy_from_multiple_sources_preserves_each_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch AS source\nCOPY one /one\nCOPY two /two\nFROM scratch\nCOPY --from=source /one /two /out/\n",
+        )
+        .expect("dockerfile");
+        fs::write(temp.path().join("one"), "one").expect("one");
+        fs::write(temp.path().join("two"), "two").expect("two");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/copy-many:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("COPY --from multiple sources build");
+
+        assert_eq!(fs::read_to_string(stage_root(&runtime, 1).join("out/one")).unwrap(), "one");
+        assert_eq!(fs::read_to_string(stage_root(&runtime, 1).join("out/two")).unwrap(), "two");
     }
 
     #[test]

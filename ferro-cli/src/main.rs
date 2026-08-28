@@ -17914,11 +17914,13 @@ impl DockerEventStore {
         Ok(Self { journal, next_id })
     }
 
-    /// Highest event id currently in the journal, or 0 for an empty one.
+    /// Highest event id currently in the journal, or `None` for an empty one.
     /// Event streaming seeds its cursor here so a new subscriber receives
-    /// only events appended after it connected.
-    fn max_event_id(&self) -> u64 {
-        self.next_id.saturating_sub(1)
+    /// only events appended after it connected. An empty journal has no tail,
+    /// and a `Some(0)` seed would swallow the first appended event (id 0),
+    /// which is how a subscriber on a fresh daemon missed every event.
+    fn max_event_id(&self) -> Option<u64> {
+        self.next_id.checked_sub(1)
     }
 
     #[allow(dead_code)]
@@ -33592,13 +33594,19 @@ volumes:
     fn docker_event_store_max_event_id_tracks_journal_tail() {
         let temp = tempfile::tempdir().expect("event runtime");
         let store = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
-        assert_eq!(store.max_event_id(), 0, "empty journal has no tail");
+        assert_eq!(
+            store.max_event_id(),
+            None,
+            "empty journal has no tail; a Some(0) seed would swallow the first event"
+        );
 
         let mut store = store;
         store.append("POST", "/containers/create", 201).unwrap();
-        store.append("POST", "/containers/c1/start", 200).unwrap();
+        // Container start/stop/kill/restart are runtime-owned (S130), so the
+        // journal-tail probe uses routes that still append a request event.
+        store.append("POST", "/containers/c1/delete", 204).unwrap();
         let tail = store.max_event_id();
-        assert!(tail > 0, "journal tail must advance with appended events");
+        assert!(tail.is_some_and(|id| id > 0), "journal tail must advance with appended events");
 
         let reopened = DockerEventStore::open(temp.path().join("events.jsonl")).unwrap();
         assert_eq!(reopened.max_event_id(), tail, "tail survives a reopen");

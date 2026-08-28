@@ -1259,13 +1259,13 @@ fn docker_events_frames_carry_docker_canonical_attribute_types() {
 }
 
 /// The Docker CLI subscribes with `Accept: application/x-ndjson` and reads
-/// chunked-transfer frames. Read one chunk like a streaming client, verify
-/// the hex-size framing and the JSON payload, then drop the connection.
+/// chunked-transfer frames. Subscribe first, then trigger the event: a stream
+/// without `since` starts at the journal tail (S130), so an event created
+/// before the call never reaches it. Read one chunk like a streaming client,
+/// verify the hex-size framing and the JSON payload, then drop the connection.
 #[test]
 fn docker_events_follow_stream_uses_chunked_jsonl_framing() {
     let harness = DaemonHarness::spawn();
-    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"stream-volume"}"#);
-    assert_eq!(status, 201);
 
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon socket");
     stream
@@ -1276,6 +1276,11 @@ fn docker_events_follow_stream_uses_chunked_jsonl_framing() {
     stream
         .write_all(request.as_bytes())
         .expect("write events request");
+    // Give the daemon time to open the subscription before the event fires.
+    thread::sleep(Duration::from_millis(500));
+
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"stream-volume"}"#);
+    assert_eq!(status, 201);
 
     let mut buffered = Vec::new();
     let mut chunk = [0u8; 4096];

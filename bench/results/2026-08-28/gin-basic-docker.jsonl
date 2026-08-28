@@ -1,0 +1,52 @@
+{"app":"gin-basic","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"info","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2508,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"build","status":"pass","exit":0,"ms":2205,"stderr_tail":"a0acd0a0d19fdcb\n#12 exporting manifest list sha256:d67479238feab7a2b209b4dd35d50cdcf6c0b81101300ff4ba0acd0a0d19fdcb 0.2s done\n#12 naming to docker.io/bench/gin-basic:latest\n#12 naming to docker.io/bench/gin-basic:latest 0.0s done\n#12 unpacking to docker.io/bench/gin-basic:latest 0.0s done\n#12 DONE 0.5s\n\nView build details: docker-desktop://dashboard/build/default/default/wx15u8x0g98z3vx7o6bbegp0a\n","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"images","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"history","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"save","status":"pass","exit":0,"ms":903,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"load","status":"pass","exit":0,"ms":1004,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"ps","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"exec","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"diff","status":"pass","exit":0,"ms":803,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"restart","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"stop","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"start","status":"pass","exit":0,"ms":405,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"rename","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"commit","status":"pass","exit":0,"ms":1004,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"export","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"kill","status":"pass","exit":0,"ms":604,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"wait","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":3906,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":3905,"stderr_tail":" Image gin-basic-app Building \n Image gin-basic-app Built \n Network gin-basic_default Creating \n Network gin-basic_default Creating \n Network gin-basic_default Created \n Network gin-basic_default Created \n Container gin-basic-app-1 Creating \n Container gin-basic-app-1 Created \n Container gin-basic-app-1 Starting \n Container gin-basic-app-1 Started \n","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":1005,"stderr_tail":" Container gin-basic-app-1 Stopping \n Container gin-basic-app-1 Stopped \n Container gin-basic-app-1 Removing \n Container gin-basic-app-1 Removed \n Network gin-basic_default Removing \n Network gin-basic_default Removed \n","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":2307,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"events","status":"pass","exit":0,"ms":5107,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2305,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}
+{"app":"gin-basic","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T02:37Z","head":"fd9f2fd8"}

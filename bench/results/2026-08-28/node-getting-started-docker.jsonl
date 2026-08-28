@@ -1,0 +1,52 @@
+{"app":"node-getting-started","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"info","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1603,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"build","status":"pass","exit":0,"ms":303,"stderr_tail":"8e5a6dfe5977fa6c95da102ff01fb99cb89ba4a4a47b78358e2546b\n#10 exporting manifest list sha256:57b715a6c8e5a6dfe5977fa6c95da102ff01fb99cb89ba4a4a47b78358e2546b done\n#10 naming to docker.io/bench/node-getting-started:latest done\n#10 unpacking to docker.io/bench/node-getting-started:latest done\n#10 DONE 0.0s\n\nView build details: docker-desktop://dashboard/build/default/default/988wfgx4wu4yd5t7oc16p8za2\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"images","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"tag","status":"pass","exit":0,"ms":106,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"save","status":"pass","exit":0,"ms":1705,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"load","status":"pass","exit":0,"ms":604,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"health","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"ps","status":"pass","exit":0,"ms":205,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"diff","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"pause","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"restart","status":"pass","exit":0,"ms":11413,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10213,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"start","status":"pass","exit":0,"ms":1205,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"commit","status":"pass","exit":0,"ms":3807,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"export","status":"pass","exit":0,"ms":1004,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"rm","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2505,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":704,"stderr_tail":"-started-app Built \n Network node-getting-started_default Creating \n Network node-getting-started_default Creating \n Network node-getting-started_default Created \n Network node-getting-started_default Created \n Container node-getting-started-app-1 Creating \n Container node-getting-started-app-1 Created \n Container node-getting-started-app-1 Starting \n Container node-getting-started-app-1 Started \n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":10610,"stderr_tail":" Container node-getting-started-app-1 Stopping \n Container node-getting-started-app-1 Stopped \n Container node-getting-started-app-1 Removing \n Container node-getting-started-app-1 Removed \n Network node-getting-started_default Removing \n Network node-getting-started_default Removed \n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":803,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"events","status":"pass","exit":0,"ms":5108,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2506,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}

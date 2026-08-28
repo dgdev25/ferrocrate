@@ -12564,6 +12564,10 @@ fn docker_container_changes(runtime_dir: &Path, runtime: &ContainerRuntime, requ
             rootfs.join("etc/hostname"),
             rootfs.join("etc/hosts"),
         ])
+        // The runtime mounts proc, sys, dev and run into a started container
+        // after the baseline was captured, the same runtime-only mounts the
+        // commit and export paths already skip.
+        .chain(["proc", "sys", "dev", "run"].map(|mount| rootfs.join(mount)))
         .collect::<Vec<_>>();
     if rootfs.is_dir() && baseline.is_file() {
         let mut changes = rootfs_diff::diff(&rootfs, &baseline, &excluded)
@@ -32046,6 +32050,16 @@ volumes:
         std::fs::write(rootfs.join("etc").join("hosts"), b"127.0.0.1 localhost").expect("hosts");
         let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("injected diff");
         assert!(changes.is_empty(), "injected resolver files must not surface: {changes:?}");
+
+        // The runtime also mounts proc, sys, dev and run into a started
+        // container; those directories must not surface either, exactly like
+        // the commit and export paths already skip them.
+        for mount in ["proc", "sys", "dev", "run"] {
+            std::fs::create_dir_all(rootfs.join(mount).join("sub")).expect("runtime mount");
+            std::fs::write(rootfs.join(mount).join("sub").join("entry"), b"x").expect("mount entry");
+        }
+        let changes = docker_container_changes(temp.path(), &runtime, "fz48-app").expect("mount diff");
+        assert!(changes.is_empty(), "runtime mount dirs must not surface: {changes:?}");
 
         // User writes surface with Docker's absolute paths and change kinds:
         // a file added under an existing directory modifies the directory

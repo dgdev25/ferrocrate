@@ -4676,14 +4676,33 @@ impl ContainerRuntime {
         self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
             runtime.connect_network_authorized(proof, intent, id, &config)
         })?;
-        update_container_hosts(&self.runtime_dir, &self.store.list()?)
+        self.refresh_container_hosts_after_network_mutation();
+        Ok(())
     }
 
     pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
             runtime.disconnect_network_authorized(proof, intent, id, network_name)
         })?;
-        update_container_hosts(&self.runtime_dir, &self.store.list()?)
+        self.refresh_container_hosts_after_network_mutation();
+        Ok(())
+    }
+
+    /// Hosts projection is derived reconciliation, never the success boundary
+    /// of a durably published endpoint mutation. Reporting a projection I/O
+    /// failure as a failed connect/disconnect would make callers retry an
+    /// already-completed operation and record the wrong authorization result.
+    fn refresh_container_hosts_after_network_mutation(&self) {
+        let records = match self.store.list() {
+            Ok(records) => records,
+            Err(error) => {
+                log::warn!("network mutation published but hosts refresh could not list containers: {error}");
+                return;
+            }
+        };
+        if let Err(error) = update_container_hosts(&self.runtime_dir, &records) {
+            log::warn!("network mutation published but hosts refresh failed: {error}");
+        }
     }
 
     fn connect_network_authorized(

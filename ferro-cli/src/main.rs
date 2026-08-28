@@ -13018,7 +13018,12 @@ fn handle_rmi_authorized(
     let selector = normalize_selector(image).map_err(|err| ImageRemoveError::Other(err.to_string()))?;
     let record = resolve_reference(store, image)
         .map_err(|err| ImageRemoveError::Other(err.to_string()))?
-        .ok_or_else(|| ImageRemoveError::Other(format!("rmi: not found {}", selector.canonical())))?;
+        .ok_or_else(|| {
+            ImageRemoveError::Other(format!(
+                "No such image: {}",
+                docker_missing_image_reference(image, &selector)
+            ))
+        })?;
     match selector {
         ImageSelector::Named(canonical) => {
             let proof = authorization
@@ -13068,6 +13073,20 @@ fn handle_rmi_authorized(
             }
             Ok(())
         }
+    }
+}
+
+/// Docker reports the client-facing name, not our normalized registry name.
+/// It does, however, renders an omitted tag as `:latest`.
+fn docker_missing_image_reference(input: &str, selector: &ImageSelector) -> String {
+    let ImageSelector::Named(_) = selector else {
+        return input.to_string();
+    };
+    let repository = input.rsplit_once('/').map(|(_, value)| value).unwrap_or(input);
+    if !input.contains('@') && !repository.contains(':') {
+        format!("{input}:latest")
+    } else {
+        input.to_string()
     }
 }
 
@@ -23026,6 +23045,7 @@ fn docker_status_for_error(err: &str) -> u16 {
         return 409;
     }
     if lowered.contains("not found")
+        || lowered.contains("no such image")
         || lowered.contains("no such volume")
         || lowered.contains("unknown image")
         || lowered.contains("unknown container")
@@ -30879,6 +30899,25 @@ volumes:
         let authorization = test_surface_authorization(temp.path());
         let err = handle_rmi(&store, "", false, &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn rmi_missing_image_uses_docker_error_text_without_internal_registry_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let authorization = test_surface_authorization(temp.path());
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for (requested, expected) in [
+            ("missing", "missing:latest"),
+            ("missing:v2", "missing:v2"),
+            (digest.as_str(), digest.as_str()),
+        ] {
+            let error = handle_rmi(&store, requested, false, &authorization)
+                .expect_err("missing image removal must fail");
+            assert_eq!(error, format!("No such image: {expected}"));
+            assert_eq!(docker_status_for_error(&error), 404);
+            assert!(!error.contains("registry-1.docker.io"));
+        }
     }
 
     #[test]

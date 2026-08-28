@@ -13441,8 +13441,20 @@ fn handle_start(runtime: &ContainerRuntime, container: &str) -> Result<(), Strin
     }
     let resolved = resolve_container_id(runtime, container)?;
     runtime.start(&resolved).map_err(|err| err.to_string())?;
-    println!("start: {resolved}");
+    let record = runtime.inspect(&resolved).ok();
+    let name = record.as_ref().and_then(|record| record.name.as_deref());
+    println!("{}", docker_start_reference(name, container, &resolved));
     Ok(())
+}
+
+/// Docker's `start` echoes the reference the caller used: the container name
+/// when addressed by name, the 12-character id prefix otherwise.
+fn docker_start_reference(name: Option<&str>, requested: &str, resolved: &str) -> String {
+    if name == Some(requested) {
+        requested.to_string()
+    } else {
+        resolved.chars().take(12).collect()
+    }
 }
 
 fn handle_volume(
@@ -31830,6 +31842,30 @@ volumes:
         assert_eq!(record.status, "running");
         assert_eq!(record.pid, 0, "start must not spawn a second workload");
         assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    // S40: the start echo matches Docker. A name addressed by name comes back
+    // unchanged; an id comes back as the 12-character prefix.
+    #[test]
+    fn start_echo_uses_dockers_reference_rule() {
+        use crate::linux_cli::docker_start_reference;
+
+        let id = "70f18b597abf9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f9";
+        assert_eq!(
+            docker_start_reference(Some("fz40-app"), "fz40-app", id),
+            "fz40-app",
+            "a name addressed by name is echoed unchanged"
+        );
+        assert_eq!(
+            docker_start_reference(None, &id, id),
+            &id[..12],
+            "an id-addressed container echoes the truncated id"
+        );
+        assert_eq!(
+            docker_start_reference(Some("fz40-app"), &id, id),
+            &id[..12],
+            "a named container addressed by id still echoes the truncated id"
+        );
     }
 
     // S45: Docker's short flags are accepted: run -u/-w, logs -f,

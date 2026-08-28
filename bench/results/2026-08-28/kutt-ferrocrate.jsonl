@@ -1,52 +1,52 @@
-{"app":"kutt","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1905,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/node:22-slim\npull: image=registry-1.docker.io/library/node:22-slim\n","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":30327,"stderr_tail":"efbef6f9e333972a10ca323e700496a64e7ddcc3a6725e6afbbae52e690f4a4a: registry (verified)\nlayer sha256:a2980c1fee17dfd6263234b253955e0e9d5f38d47c0e71c001139897134899d0: registry (verified)\nlayer sha256:16da5a6403776464b5bf551ef294de57da242eac594527ea551a46e7f76ac2d6: registry (verified)\nrun: container_id=f00c385d387c99c524c6382e276e709f7b8680894bd671c1ed30d81b39187ab5 pid=2572660 network_backend=ebpf\n","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":121087,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
-{"app":"kutt","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:19Z","head":"e7145b7d"}
+{"app":"kutt","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1705,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/node:22-slim\npull: image=registry-1.docker.io/library/node:22-slim\n","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":4507,"stderr_tail":"run: container_id=8e74c02c1bb0dcb8a1846af63bdbb4f5e6c81c4aa3fea3f73d1c64cfc365df1d pid=2976176 network_backend=ebpf\n","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":120997,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}
+{"app":"kutt","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T10:05Z","head":"9e25e0b5"}

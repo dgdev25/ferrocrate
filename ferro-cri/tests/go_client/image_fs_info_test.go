@@ -55,7 +55,12 @@ func TestImageFsInfoDecodesWithGoGRPCClient(t *testing.T) {
 	}
 	defer conn.Close()
 
-	response, err := runtimeapi.NewImageServiceClient(conn).ImageFsInfo(ctx, &runtimeapi.ImageFsInfoRequest{})
+	imageService := runtimeapi.NewImageServiceClient(conn)
+	if _, err := imageService.ListImages(ctx, &runtimeapi.ListImagesRequest{}); err != nil {
+		t.Fatalf("ListImages must decode with google.golang.org/grpc: %v", err)
+	}
+
+	response, err := imageService.ImageFsInfo(ctx, &runtimeapi.ImageFsInfoRequest{})
 	if err != nil {
 		t.Fatalf("ImageFsInfo must decode with google.golang.org/grpc: %v", err)
 	}

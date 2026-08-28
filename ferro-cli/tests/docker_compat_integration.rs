@@ -3914,6 +3914,115 @@ fn docker_compat_pre_start_hijack_streams_foreground_output_after_start() {
 }
 
 #[test]
+fn docker_compat_pre_start_hijack_does_not_block_start_on_the_store_queue() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful foreground-attach fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/pre-start-store-queue:latest");
+    let body = r#"{"Image":"compat/pre-start-store-queue:latest","Cmd":["/bin/busybox","sh","-c","exit 7"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=pre-start-store-queue HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+
+    let mut attach = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    attach
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=0&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write attach request");
+
+    // Docker starts as soon as it has sent the upgrade request. The start
+    // transaction must not keep the store queue while it waits for the
+    // attach handler to publish its 101 response.
+    let starter = std::thread::scope(|scope| {
+        let harness_ref = &harness;
+        let id = id.clone();
+        let start = scope.spawn(move || {
+            harness_ref.request("POST", &format!("/v1.45/containers/{id}/start"))
+        });
+        attach
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set attach timeout");
+        let mut headers = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !headers.ends_with(b"\r\n\r\n") {
+            attach.read_exact(&mut byte).expect("read attach headers");
+            headers.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+            "headers={}",
+            String::from_utf8_lossy(&headers)
+        );
+        start.join().expect("start thread")
+    });
+    assert_eq!(starter.0, 204, "start response: {}", starter.1);
+}
+
+#[test]
+fn docker_compat_post_start_hijack_upgrades_before_log_files_exist() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful foreground-attach fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/post-start-hijack:latest");
+    let body = r#"{"Image":"compat/post-start-hijack:latest","Cmd":["/bin/busybox","sh","-c","sleep 2"],"HostConfig":{"NetworkMode":"none"}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=post-start-hijack HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response)
+        .expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response: {response}");
+
+    let mut attach = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    attach
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=0&stdout=1&stderr=0 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write attach request");
+    attach
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set attach timeout");
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !headers.ends_with(b"\r\n\r\n") {
+        attach.read_exact(&mut byte).expect("read attach headers");
+        headers.push(byte[0]);
+    }
+    assert!(
+        String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+        "headers={}",
+        String::from_utf8_lossy(&headers)
+    );
+}
+
+#[test]
 fn docker_compat_auto_remove_preserves_wait_exit_result() {
     if nix::unistd::geteuid().is_root() {
         eprintln!("skipping rootful auto-remove wait fixture");

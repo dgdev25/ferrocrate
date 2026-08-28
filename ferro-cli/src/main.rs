@@ -19445,10 +19445,12 @@ fn handle_docker_compat_connection(
         // creating the request-scoped runtime.  The lock is released before
         // streaming response bodies, so long-lived `/events` or log followers
         // never block unrelated API calls.
-        let _container_store_operation = state
-            .container_store_operations
-            .lock()
-            .map_err(|_| "docker: container store operation lock poisoned".to_string())?;
+        let mut container_store_operation = Some(
+            state
+                .container_store_operations
+                .lock()
+                .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+        );
         let runtime = daemon_request_scope(&daemon_runtime, origin.clone())
             .map_err(|error| error.to_string())?;
         let surface_authorization = runtime
@@ -20947,6 +20949,13 @@ fn handle_docker_compat_connection(
                         return Err(format!("docker: container start already in progress: {id}"));
                     }
                 }
+                // A Docker client sends the attach upgrade and /start as
+                // independent requests.  /start must wait until the attach
+                // handler has written its 101 response, but that handler
+                // itself queues on the store guard.  Keeping the guard here
+                // deadlocks the pair until the timeout, after which clients
+                // report the failed upgrade instead of the process exit code.
+                drop(container_store_operation.take());
                 if let Err(error) =
                     state.wait_for_pre_start_attaches(&id, Duration::from_secs(30))
                 {
@@ -20955,6 +20964,12 @@ fn handle_docker_compat_connection(
                     }
                     return Err(error);
                 }
+                container_store_operation = Some(
+                    state
+                        .container_store_operations
+                        .lock()
+                        .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+                );
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
                     ferro_core::container_store::HealthConfig {
@@ -22055,6 +22070,9 @@ fn handle_docker_compat_connection(
             _ => docker_error_response(404, "not found"),
         };
 
+        // Keep the guard alive for every ordinary request transaction. The
+        // pre-start attach wait above is the sole intentional handoff point.
+        let _container_store_operation = container_store_operation;
         Ok(response)
     })();
 
@@ -26545,8 +26563,13 @@ fn docker_websocket_upgrade_headers(key: &str) -> Vec<u8> {
 
 #[cfg(target_os = "linux")]
 fn docker_raw_stream(stdout: &str, stderr: &str) -> Vec<u8> {
+    docker_raw_stream_bytes(stdout.as_bytes(), stderr.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_raw_stream_bytes(stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(stdout.len() + stderr.len() + 16);
-    for (stream, payload) in [(1u8, stdout.as_bytes()), (2u8, stderr.as_bytes())] {
+    for (stream, payload) in [(1u8, stdout), (2u8, stderr)] {
         if payload.is_empty() {
             continue;
         }
@@ -26878,11 +26901,13 @@ fn stream_docker_attach(
     };
     if record.pid == 0 {
         if logs_requested {
-            let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
-            let frame = docker_attach_output(
+            let (stdout, stderr) = runtime
+                .logs_split_bytes(id)
+                .map_err(|error| error.to_string())?;
+            let frame = docker_attach_output_bytes(
                 record.tty,
-                if stdout_requested { &stdout } else { "" },
-                if stderr_requested { &stderr } else { "" },
+                if stdout_requested { &stdout } else { &[] },
+                if stderr_requested { &stderr } else { &[] },
             );
             stream
                 .write_all(&frame)
@@ -26891,20 +26916,21 @@ fn stream_docker_attach(
         }
         return Ok(());
     }
-    let (initial_stdout, initial_stderr) =
-        runtime.logs_split(id).map_err(|error| error.to_string())?;
+    let (initial_stdout, initial_stderr) = runtime
+        .logs_split_bytes(id)
+        .map_err(|error| error.to_string())?;
     if logs_requested && (!initial_stdout.is_empty() || !initial_stderr.is_empty()) {
-        let frame = docker_attach_output(
+        let frame = docker_attach_output_bytes(
             record.tty,
             if stdout_requested {
                 &initial_stdout
             } else {
-                ""
+                &[]
             },
             if stderr_requested {
                 &initial_stderr
             } else {
-                ""
+                &[]
             },
         );
         stream
@@ -26936,35 +26962,35 @@ fn stream_docker_attach(
     };
     if let Some(stdin) = stdin.as_mut() {
         if !initial_stdin.is_empty() {
-            use std::io::Write as _;
             stdin
                 .write_all(initial_stdin)
+                .and_then(|_| stdin.flush())
                 .map_err(|error| format!("docker: writing container stdin: {error}"))?;
-            stdin
-                .flush()
-                .map_err(|error| format!("docker: flushing container stdin: {error}"))?;
         }
     }
+    // An attach is full duplex.  A slow reader can fill the socket's output
+    // buffer while the Docker client is still uploading stdin; blocking in
+    // `write_all` then prevents us from seeing its CloseWrite and leaves the
+    // container's FIFO open forever.  Keep the upgraded socket nonblocking
+    // and queue output so input and output always make independent progress.
     stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .map_err(|error| error.to_string())?;
+        .set_nonblocking(true)
+        .map_err(|error| format!("docker: attach nonblocking setup failed: {error}"))?;
     let mut emitted_stdout = initial_stdout.len();
     let mut emitted_stderr = initial_stderr.len();
+    let mut pending_output = std::collections::VecDeque::new();
     let mut input = [0_u8; 16 * 1024];
-    // A non-interactive local run has no producer for the socket's input
-    // half. Do not pay the daemon-compatible 250 ms read timeout before each
-    // lifecycle observation on that path.
     let mut input_closed = !stdin_requested;
     let mut detach_matcher = DetachKeyMatcher::new(detach_keys.to_vec());
     let local_stream_started = Instant::now();
     let mut terminal_log_lengths = None;
     loop {
+        let mut input_progress = false;
         if !input_closed {
             match stream.read(&mut input) {
                 Ok(0) => {
                     let trailing = detach_matcher.finish();
                     if let Some(stdin) = stdin.as_mut() {
-                        use std::io::Write as _;
                         stdin.write_all(&trailing).map_err(|error| {
                             format!("docker: writing container stdin: {error}")
                         })?;
@@ -26973,29 +26999,24 @@ fn stream_docker_attach(
                     stdin = None;
                 }
                 Ok(size) => {
-                    use std::io::Write as _;
+                    input_progress = true;
                     let (forward, detached) = detach_matcher.feed(&input[..size]);
                     if let Some(stdin) = stdin.as_mut() {
-                        stdin.write_all(&forward).map_err(|error| {
+                        stdin.write_all(&forward).and_then(|_| stdin.flush()).map_err(|error| {
                             format!("docker: writing container stdin: {error}")
-                        })?;
-                        stdin.flush().map_err(|error| {
-                            format!("docker: flushing container stdin: {error}")
                         })?;
                     }
                     if detached {
                         return Ok(());
                     }
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
-        let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
+        let (stdout, stderr) = runtime
+            .logs_split_bytes(id)
+            .map_err(|error| error.to_string())?;
         if stdout.len() < emitted_stdout {
             emitted_stdout = 0;
         }
@@ -27003,25 +27024,33 @@ fn stream_docker_attach(
             emitted_stderr = 0;
         }
         if stdout.len() > emitted_stdout || stderr.len() > emitted_stderr {
-            let frame = docker_attach_output(
+            let frame = docker_attach_output_bytes(
                 record.tty,
                 if stdout_requested {
                     &stdout[emitted_stdout..]
                 } else {
-                    ""
+                    &[]
                 },
                 if stderr_requested {
                     &stderr[emitted_stderr..]
                 } else {
-                    ""
+                    &[]
                 },
             );
-            stream
-                .write_all(&frame)
-                .map_err(|error| error.to_string())?;
-            stream.flush().map_err(|error| error.to_string())?;
+            pending_output.extend(frame);
             emitted_stdout = stdout.len();
             emitted_stderr = stderr.len();
+        }
+        while !pending_output.is_empty() {
+            let (head, _) = pending_output.as_slices();
+            match stream.write(head) {
+                Ok(0) => return Err("docker: attach output socket closed".to_string()),
+                Ok(size) => {
+                    pending_output.drain(..size);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.to_string()),
+            }
         }
         // A hijacked Docker attach stream is tied to the container lifecycle.
         // Once the runtime has recorded a terminal state, all newly-appended
@@ -27032,11 +27061,11 @@ fn stream_docker_attach(
             current.status.as_str(),
             "created" | "running" | "restarting" | "paused"
         ) {
-            if !fast_local_exit
+            if pending_output.is_empty() && (!fast_local_exit
                 || local_attach_logs_drained(
                     &mut terminal_log_lengths,
                     (stdout.len(), stderr.len()),
-                )
+                ))
             {
                 return Ok(());
             }
@@ -27044,6 +27073,13 @@ fn stream_docker_attach(
             continue;
         }
         terminal_log_lengths = None;
+        if input_progress {
+            // Keep draining a piped stdin source while the client has data
+            // ready.  The normal lifecycle interval is useful only when the
+            // transport is idle; applying it per 16 KiB turns a large pipe
+            // into a deadlock-prone 64 KiB/s trickle.
+            continue;
+        }
         let interval = if fast_local_exit {
             local_attach_poll_interval(local_stream_started.elapsed())
         } else {
@@ -27083,12 +27119,17 @@ fn local_attach_logs_drained(
 
 #[cfg(target_os = "linux")]
 fn docker_attach_output(tty: bool, stdout: &str, stderr: &str) -> Vec<u8> {
+    docker_attach_output_bytes(tty, stdout.as_bytes(), stderr.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_attach_output_bytes(tty: bool, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     if tty {
         // Docker's TTY contract is a raw terminal stream: stdout and stderr
         // share one PTY and must not receive the non-TTY eight-byte headers.
-        return stdout.as_bytes().to_vec();
+        return stdout.to_vec();
     }
-    docker_raw_stream(stdout, stderr)
+    docker_raw_stream_bytes(stdout, stderr)
 }
 
 #[cfg(target_os = "linux")]

@@ -3988,13 +3988,24 @@ impl ContainerRuntime {
     /// Return stdout and stderr independently for Docker raw-stream framing.
     #[inline]
     pub fn logs_split(&self, id: &str) -> Result<(String, String), RuntimeError> {
+        let (stdout, stderr) = self.logs_split_bytes(id)?;
+        Ok((
+            String::from_utf8(stdout).map_err(|error| RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?,
+            String::from_utf8(stderr).map_err(|error| RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?,
+        ))
+    }
+
+    /// Return unmodified stdout and stderr bytes for Docker's hijacked attach
+    /// transport. Container output is not necessarily UTF-8.
+    #[inline]
+    pub fn logs_split_bytes(&self, id: &str) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
         let record = self
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
         ensure_log_readback_supported(&record)?;
-        let stdout = read_rotated_log(Path::new(&record.stdout_path))?;
-        let stderr = read_rotated_log(Path::new(&record.stderr_path))?;
+        let stdout = read_rotated_log_bytes(Path::new(&record.stdout_path))?;
+        let stderr = read_rotated_log_bytes(Path::new(&record.stderr_path))?;
         Ok((stdout, stderr))
     }
 
@@ -8060,18 +8071,18 @@ fn rotated_log_path(log_path: &Path, index: u32) -> PathBuf {
     log_path.with_file_name(name)
 }
 
-fn read_rotated_log(log_path: &Path) -> io::Result<String> {
-    let mut output = String::new();
+fn read_rotated_log_bytes(log_path: &Path) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
     // The bounded rotation set has no manifest. Read the largest suffix first
     // so callers see historical output in chronological order.
     for index in (1..=64).rev() {
         let path = rotated_log_path(log_path, index);
         if path.exists() {
-            output.push_str(&fs::read_to_string(path)?);
+            output.extend_from_slice(&fs::read(path)?);
         }
     }
     if log_path.exists() {
-        output.push_str(&fs::read_to_string(log_path)?);
+        output.extend_from_slice(&fs::read(log_path)?);
     }
     Ok(output)
 }

@@ -17715,6 +17715,10 @@ struct DockerCreateSpec {
     user: Option<String>,
     name: Option<String>,
     network_mode: String,
+    /// Explicit logical attachments. `None` migrates pending records written
+    /// before disconnect support by projecting their original network mode.
+    #[serde(default)]
+    network_attachments: Option<Vec<String>>,
     /// Host IPC is represented by the host shared-memory mount applied when
     /// the pending container starts.
     #[serde(default)]
@@ -17742,6 +17746,27 @@ struct DockerCreateSpec {
     restart_policy: String,
     #[serde(default)]
     created_at_unix: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl DockerCreateSpec {
+    fn effective_network_attachments(&self) -> Vec<String> {
+        self.network_attachments
+            .clone()
+            .unwrap_or_else(|| vec![self.network_mode.clone()])
+    }
+
+    fn start_network_mode(&self) -> &str {
+        if self
+            .effective_network_attachments()
+            .iter()
+            .any(|network| network == &self.network_mode)
+        {
+            &self.network_mode
+        } else {
+            "none"
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -18267,6 +18292,42 @@ struct DockerEventStore {
 }
 
 #[cfg(target_os = "linux")]
+fn write_pending_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "docker: pending state has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temp = parent.join(format!(
+        ".docker-pending.{}.{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp).map_err(|error| error.to_string())?;
+    use std::io::Write as _;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        error.to_string()
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
 impl DockerCompatState {
     fn new(runtime_dir: &Path) -> Result<Self, String> {
         let pending_path = runtime_dir.join("docker-pending.json");
@@ -18433,45 +18494,55 @@ impl DockerCompatState {
                 .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
             serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?
         };
-        let parent = self
-            .pending_path
-            .parent()
-            .ok_or_else(|| "docker: pending state has no parent".to_string())?;
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let temp = parent.join(format!(
-            ".docker-pending.{}.{}.tmp",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
+        write_pending_snapshot(&self.pending_path, &bytes)
+    }
+
+    fn disconnect_pending_network(
+        &self,
+        id: &str,
+        network_name: &str,
+        force: bool,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+        let previous_bytes =
+            serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?;
+        let spec = pending
+            .get_mut(id)
+            .ok_or_else(|| format!("docker: container not found: {id}"))?;
+        let previous = spec.network_attachments.clone();
+        let attachments = spec
+            .network_attachments
+            .get_or_insert_with(|| vec![spec.network_mode.clone()]);
+        let Some(index) = attachments
+            .iter()
+            .position(|attachment| attachment == network_name)
+        else {
+            return if force {
+                Ok(())
+            } else {
+                Err(format!(
+                    "container is not connected to network {network_name}"
+                ))
+            };
+        };
+        attachments.remove(index);
+        let bytes = serde_json::to_vec_pretty(&*pending).map_err(|error| error.to_string())?;
+        let publication = write_pending_snapshot(&self.pending_path, &bytes);
+        if let Err(error) = publication {
+            if let Some(spec) = pending.get_mut(id) {
+                spec.network_attachments = previous;
+            }
+            return match write_pending_snapshot(&self.pending_path, &previous_bytes) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(format!(
+                    "docker: pending disconnect publication failed: {error}; rollback failed: {rollback}"
+                )),
+            };
         }
-        let mut file = options.open(&temp).map_err(|error| error.to_string())?;
-        use std::io::Write as _;
-        if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error.to_string());
-        }
-        std::fs::rename(&temp, &self.pending_path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            error.to_string()
-        })?;
-        #[cfg(unix)]
-        std::fs::set_permissions(
-            &self.pending_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .map_err(|error| error.to_string())?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| error.to_string())
+        Ok(())
     }
 
     fn register_pre_start_attach(
@@ -21249,7 +21320,7 @@ fn handle_docker_compat_connection(
                     &volume_store,
                     &spec.image,
                     &spec.cmd,
-                    &spec.network_mode,
+                    spec.start_network_mode(),
                     &network_backend,
                     &run_inputs.path_binds,
                     &[],
@@ -22056,7 +22127,13 @@ fn handle_docker_compat_connection(
                     .trim_end_matches("/disconnect")
                     .trim_end_matches('/');
                 let request = parse_docker_network_disconnect_request(&request.body)?;
-                let id = resolve_container_id(&runtime, &request.container)?;
+                let id = {
+                    let pending = state
+                        .pending
+                        .lock()
+                        .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
+                    docker_resolve_id(&runtime, &pending, &request.container)?
+                };
                 let config = docker_named_endpoint_config(runtime_dir.as_ref(), network_name)?;
                 let permit = surface_authorization
                     .authorize_named(
@@ -22067,23 +22144,35 @@ fn handle_docker_compat_connection(
                         config.generation,
                     )
                     .map_err(|error| error.to_string())?;
-                let result = runtime.disconnect_network(&id, &config.network_name);
+                let result = if runtime.inspect(&id).is_ok() {
+                    runtime.disconnect_network(&id, &config.network_name).map_err(|error| {
+                        let unknown = matches!(
+                            error,
+                            ferro_core::runtime::RuntimeError::PostEffectPersistence(_)
+                        );
+                        (error.to_string(), unknown)
+                    })
+                } else {
+                    state
+                        .disconnect_pending_network(&id, &config.network_name, request.force)
+                        .map_err(|error| (error, false))
+                };
                 match result {
                     Ok(()) => {
                         permit.finish(true).map_err(|error| error.to_string())?;
                         http_response(200, &[], "text/plain")
                     }
-                    Err(error) if request.force && error.to_string().contains("not connected") => {
+                    Err((error, _)) if request.force && error.contains("not connected") => {
                         permit.finish(true).map_err(|finish| finish.to_string())?;
                         http_response(200, &[], "text/plain")
                     }
-                    Err(error) => {
-                        if matches!(error, ferro_core::runtime::RuntimeError::PostEffectPersistence(_)) {
+                    Err((error, unknown)) => {
+                        if unknown {
                             permit.finish_unknown().map_err(|finish| finish.to_string())?;
                         } else {
                             permit.finish(false).map_err(|finish| finish.to_string())?;
                         }
-                        return Err(error.to_string());
+                        return Err(error);
                     }
                 }
             }
@@ -23781,6 +23870,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         workdir,
         user,
         name,
+        network_attachments: Some(vec![network_mode.clone()]),
         network_mode,
         ipc_mode_host: host_config.ipc_mode.as_deref() == Some("host"),
         network_aliases,
@@ -24199,18 +24289,6 @@ fn docker_pending_list_entry(
         .filter_map(|entry| entry.split_once('='))
         .collect::<BTreeMap<_, _>>();
     let ports = parse_publish(&spec.publish)?;
-    let network = serde_json::json!({
-        "NetworkID": spec.network_mode,
-        "EndpointID": "",
-        "Gateway": "",
-        "IPAddress": "",
-        "IPPrefixLen": 0,
-        "IPv6Gateway": "",
-        "GlobalIPv6Address": "",
-        "GlobalIPv6PrefixLen": 0,
-        "MacAddress": "",
-        "DNSNames": [],
-    });
     Ok(serde_json::json!({
         "Id": id,
         "Image": spec.image,
@@ -24222,9 +24300,32 @@ fn docker_pending_list_entry(
         "Names": [format!("/{name}")],
         "Labels": labels,
         "Ports": docker_port_summaries(&ports),
-        "NetworkSettings": {"Networks": {spec.network_mode.clone(): network}},
+        "NetworkSettings": {"Networks": docker_pending_networks(spec)},
         "Mounts": docker_pending_mount_summaries(&spec.binds)?,
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn docker_pending_networks(spec: &DockerCreateSpec) -> serde_json::Value {
+    spec.effective_network_attachments()
+        .into_iter()
+        .map(|network| {
+            let value = serde_json::json!({
+                "NetworkID": network,
+                "EndpointID": "",
+                "Gateway": "",
+                "IPAddress": "",
+                "IPPrefixLen": 0,
+                "IPv6Gateway": "",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "MacAddress": "",
+                "DNSNames": [],
+            });
+            (network, value)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 #[cfg(target_os = "linux")]
@@ -24553,20 +24654,7 @@ fn docker_pending_inspect_payload(
             "GlobalIPv6PrefixLen": 0,
             "IPv6Gateway": "",
             "MacAddress": "",
-            "Networks": {
-                spec.network_mode.clone(): {
-                    "NetworkID": spec.network_mode,
-                    "EndpointID": "",
-                    "Gateway": "",
-                    "IPAddress": "",
-                    "IPPrefixLen": 0,
-                    "IPv6Gateway": "",
-                    "GlobalIPv6Address": "",
-                    "GlobalIPv6PrefixLen": 0,
-                    "MacAddress": "",
-                    "DNSNames": []
-                }
-            }
+            "Networks": docker_pending_networks(spec)
         },
         "State": {
             "Status": "created",
@@ -35098,6 +35186,7 @@ volumes:
             user: None,
             name: None,
             network_mode: "bridge".to_string(),
+            network_attachments: Some(vec!["bridge".to_string()]),
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
@@ -35328,6 +35417,7 @@ volumes:
                 user: None,
                 name: Some("fixture".to_string()),
                 network_mode: "bridge".to_string(),
+                network_attachments: Some(vec!["bridge".to_string()]),
                 ipc_mode_host: false,
                 network_aliases: Vec::new(),
                 tty: false,
@@ -35361,6 +35451,32 @@ volumes:
             .lock()
             .expect("reopened pending lock")
             .contains_key("dfixture"));
+    }
+
+    #[test]
+    fn pending_disconnect_restores_memory_when_atomic_publication_fails() {
+        let temp = tempfile::tempdir().expect("runtime");
+        let mut state = DockerCompatState::new(temp.path()).expect("state");
+        let id = docker_create_pending(
+            &state,
+            br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-net"}}"#,
+            Some("pending-rollback".to_string()),
+        )
+        .expect("pending create");
+        let invalid_target = temp.path().join("pending-target-is-a-directory");
+        std::fs::create_dir(&invalid_target).expect("invalid publication target");
+        state.pending_path = invalid_target;
+
+        let error = state
+            .disconnect_pending_network(&id, "app-net", false)
+            .expect_err("publication must fail");
+        assert!(error.contains("publication failed"), "{error}");
+        let pending = state.pending.lock().expect("pending lock");
+        assert_eq!(
+            pending[&id].effective_network_attachments(),
+            vec!["app-net"],
+            "failed persistence must not publish partial in-memory state"
+        );
     }
 
     #[test]
@@ -35408,6 +35524,7 @@ volumes:
             user: None,
             name: Some("frontend".to_string()),
             network_mode: "bridge".to_string(),
+            network_attachments: Some(vec!["bridge".to_string()]),
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
@@ -35549,6 +35666,7 @@ volumes:
             user: None,
             name: Some("pending".to_string()),
             network_mode: "bridge".to_string(),
+            network_attachments: Some(vec!["bridge".to_string()]),
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,

@@ -4525,6 +4525,91 @@ fn docker_compat_network_create_list_delete_routes_work() {
 }
 
 #[test]
+fn docker_compat_pending_disconnect_is_authorized_atomic_and_inspectable() {
+    let mut harness = DaemonHarness::spawn();
+    let network = serde_json::json!({
+        "Name": "pending-net",
+        "Driver": "bridge",
+        "IPAM": {"Config": [{"Subnet": "172.47.0.0/24", "Gateway": "172.47.0.1"}]}
+    });
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/create",
+        "application/json",
+        network.to_string().as_bytes(),
+    );
+    assert_eq!(status, 201, "network create response={body}");
+
+    let create = serde_json::json!({
+        "Image": "pending-only:latest",
+        "Cmd": ["true"],
+        "HostConfig": {"NetworkMode": "pending-net"},
+        "NetworkingConfig": {"EndpointsConfig": {"pending-net": {"Aliases": ["pending"]}}}
+    });
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=pending-disconnect",
+        "application/json",
+        create.to_string().as_bytes(),
+    );
+    assert_eq!(status, 201, "container create response={body}");
+
+    let inspect_networks = |harness: &DaemonHarness| {
+        let (status, body) =
+            harness.request("GET", "/v1.45/containers/pending-disconnect/json");
+        assert_eq!(status, 200, "inspect response={body}");
+        serde_json::from_str::<serde_json::Value>(&body)
+            .expect("inspect JSON")["NetworkSettings"]["Networks"]
+            .clone()
+    };
+    assert!(inspect_networks(&harness).get("pending-net").is_some());
+
+    let disconnect = br#"{"Container":"pending-disconnect","Force":false}"#;
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/pending-net/disconnect",
+        "application/json",
+        disconnect,
+    );
+    assert_eq!(status, 200, "disconnect response={body}");
+    assert_eq!(inspect_networks(&harness), serde_json::json!({}));
+
+    harness.restart();
+    assert_eq!(
+        inspect_networks(&harness),
+        serde_json::json!({}),
+        "disconnect must survive daemon restart"
+    );
+
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/pending-net/disconnect",
+        "application/json",
+        disconnect,
+    );
+    assert_ne!(status, 200, "non-force missing attachment response={body}");
+    assert!(body.contains("not connected"), "response={body}");
+
+    let forced = br#"{"Container":"pending-disconnect","Force":true}"#;
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/pending-net/disconnect",
+        "application/json",
+        forced,
+    );
+    assert_eq!(status, 200, "forced missing attachment response={body}");
+
+    let (status, body) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/absent-net/disconnect",
+        "application/json",
+        forced,
+    );
+    assert_ne!(status, 200, "force must not invent a missing network: {body}");
+    assert!(body.contains("not found absent-net"), "response={body}");
+}
+
+#[test]
 fn docker_compat_network_labels_persist_and_filter() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{

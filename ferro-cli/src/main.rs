@@ -6805,6 +6805,9 @@ fn persist_half_built_container(
     Ok(())
 }
 
+// Compose and the CLI surface every run knob, so the parameter count tracks
+// the flag set instead of an abstraction boundary.
+#[allow(clippy::too_many_arguments)]
 fn handle_run(
     runtime_dir: &Path,
     runtime: &ContainerRuntime,
@@ -9346,7 +9349,7 @@ fn dispatch_remote_socket(
                 "POST",
                 format!(
                     "/networks/{}/connect",
-                    percent_encode_path_component(&network)
+                    percent_encode_path_component(network)
                 ),
                 Some(body),
             )
@@ -9369,7 +9372,7 @@ fn dispatch_remote_socket(
                 "POST",
                 format!(
                     "/networks/{}/disconnect",
-                    percent_encode_path_component(&network)
+                    percent_encode_path_component(network)
                 ),
                 Some(body),
             )
@@ -20456,8 +20459,7 @@ fn handle_docker_compat_connection(
                         .pending
                         .lock()
                         .map_err(|error| format!("docker: pending lock poisoned: {error}"))?;
-                    let resolved = docker_resolve_id(&runtime, &pending, container)?;
-                    resolved
+                    docker_resolve_id(&runtime, &pending, container)?
                 };
                 let id = docker_compat_id("e", &state.next_id);
                 state
@@ -31872,12 +31874,12 @@ volumes:
             "a name addressed by name is echoed unchanged"
         );
         assert_eq!(
-            docker_start_reference(None, &id, id),
+            docker_start_reference(None, id, id),
             &id[..12],
             "an id-addressed container echoes the truncated id"
         );
         assert_eq!(
-            docker_start_reference(Some("fz40-app"), &id, id),
+            docker_start_reference(Some("fz40-app"), id, id),
             &id[..12],
             "a named container addressed by id still echoes the truncated id"
         );

@@ -32752,6 +32752,49 @@ volumes:
         assert!(err.contains("fz46-missing"), "got: {err}");
     }
 
+    // S168: a rename releases the old name, so the existing `rm -f` missing
+    // name contract also applies when that name previously belonged to a
+    // container.
+    #[test]
+    fn rm_force_on_a_renamed_containers_old_name_is_a_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let volume_store = LocalVolumeStore::open(temp.path()).expect("volume store");
+        let authorization = test_surface_authorization(temp.path());
+        let running: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz168-container",
+                "name": "fz168-old",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "running"
+            }))
+            .expect("decode running record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&running).expect("seed running record");
+
+        runtime.rename("fz168-container", "fz168-new").expect("rename");
+        handle_rm(
+            &runtime,
+            &volume_store,
+            &authorization,
+            "fz168-old",
+            true,
+            false,
+        )
+        .expect("rm -f on old name is a no-op");
+        assert_eq!(
+            runtime.inspect("fz168-container").expect("container remains").name.as_deref(),
+            Some("fz168-new")
+        );
+    }
+
     #[test]
     fn ps_reports_exited_after_kill_and_stop() {
         let temp = tempfile::tempdir().expect("tempdir");

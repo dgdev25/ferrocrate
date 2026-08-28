@@ -4340,8 +4340,12 @@ fn resolve_run_mount_target(workdir: &str, target: &str) -> Result<String, Docke
         ));
     }
     let base = workdir.trim_end_matches('/');
-    let base = if base.is_empty() { "/" } else { base };
-    validate_cache_target(&format!("{base}/{target}"))
+    let resolved = if base.is_empty() {
+        format!("/{target}")
+    } else {
+        format!("{base}/{target}")
+    };
+    validate_cache_target(&resolved)
 }
 
 fn validate_cache_id(id: &str) -> Result<String, DockerfileBuildError> {
@@ -9724,8 +9728,14 @@ mod tests {
         .expect("locked cache sharing parses");
         assert_eq!(locked.cache_mounts[0].sharing, CacheSharing::Locked);
 
-        for invalid in [
+        let relative = parse_run(
             "--mount=type=cache,target=relative echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("relative cache target resolves against the stage workdir");
+        assert_eq!(relative.cache_mounts[0].target, "/relative");
+
+        for invalid in [
             "--mount=type=cache,target=/tmp/../escape echo value",
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
             "--mount=type=cache,target=/tmp,source=seed echo value",

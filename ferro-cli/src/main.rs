@@ -5224,6 +5224,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                     user.as_deref(),
                     name.as_deref(),
                     &publish,
+                    false,
                     health_cmd.as_deref(),
                     health_interval,
                     health_timeout,
@@ -6835,6 +6836,7 @@ fn handle_run(
     user: Option<&str>,
     name: Option<&str>,
     publish: &[String],
+    publish_uses_bridge_network: bool,
     health_cmd: Option<&str>,
     health_interval: Option<u64>,
     health_timeout: Option<u64>,
@@ -6882,7 +6884,7 @@ fn handle_run(
     let effective_backend = network_backend
         .parse::<NetworkBackend>()
         .map_err(|err| err.to_string())?;
-    if !publish.is_empty() && effective_network != "bridge" {
+    if !publish.is_empty() && effective_network != "bridge" && !publish_uses_bridge_network {
         return Err("run: publish requires --network bridge".to_string());
     }
     if !ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
@@ -15361,6 +15363,17 @@ fn compose_rootless_network_mode(_logical: &str, leader_pid: Option<u32>) -> Str
 }
 
 #[cfg(target_os = "linux")]
+fn compose_publish_uses_bridge_network(
+    effective_network: &str,
+    logical_network: Option<&str>,
+    default_network: &str,
+) -> bool {
+    effective_network == "bridge"
+        || (effective_network.starts_with("container:pid:")
+            && logical_network == Some(default_network))
+}
+
+#[cfg(target_os = "linux")]
 fn compose_rootless_network_binding(
     runtime: &ContainerRuntime,
     service: &ComposeService,
@@ -15819,6 +15832,7 @@ fn handle_compose(
                     Some(&prepared.instance),
                     Some(&prepared.image),
                     Some(&effective_compose_network),
+                    logical_network.as_deref(),
                     &image_execution,
                 ) {
                     failures.push(format!("{} run failed: {error}", prepared.instance));
@@ -15850,7 +15864,7 @@ fn handle_compose(
                             record.name.as_deref() == Some(prepared.instance.as_str())
                                 && record.status == "running"
                         }) {
-                            rootless_network_leaders.insert(logical, record.pid);
+                            rootless_network_leaders.entry(logical).or_insert(record.pid);
                         }
                     }
                 }
@@ -16777,6 +16791,7 @@ fn run_compose_service(
     instance_override: Option<&str>,
     prepared_image: Option<&str>,
     network_override: Option<&str>,
+    logical_network: Option<&str>,
     image_execution: &ResolvedRunImageExecution,
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
@@ -16790,6 +16805,11 @@ fn run_compose_service(
         .map(str::to_string)
         .unwrap_or(compose_service_network(service, name, default_network)?);
     let requested_network = resolve_compose_network_mode(runtime, &requested_network)?;
+    let publish_uses_bridge_network = compose_publish_uses_bridge_network(
+        &requested_network,
+        logical_network,
+        default_network,
+    );
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
     let labels = compose_service_labels(service);
@@ -16847,6 +16867,7 @@ fn run_compose_service(
             image_execution.user.as_deref(),
             Some(&instance_name),
             &publish,
+            publish_uses_bridge_network,
             None,
             None,
             None,
@@ -21048,6 +21069,7 @@ fn handle_docker_compat_connection(
                     spec.user.as_deref(),
                     spec.name.as_deref(),
                     &spec.publish,
+                    false,
                     None,
                     None,
                     None,
@@ -30325,6 +30347,31 @@ volumes:
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn compose_publish_accepts_only_implicit_bridge_namespace_joins() {
+        assert!(super::compose_publish_uses_bridge_network(
+            "container:pid:4242",
+            Some("project_default"),
+            "project_default",
+        ));
+        assert!(!super::compose_publish_uses_bridge_network(
+            "container:pid:4242",
+            Some("container:db"),
+            "project_default",
+        ));
+        assert!(!super::compose_publish_uses_bridge_network(
+            "container:pid:4242",
+            None,
+            "project_default",
+        ));
+        assert!(!super::compose_publish_uses_bridge_network(
+            "container:pid:4242",
+            Some("other_bridge"),
+            "project_default",
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn rootless_compose_internal_pid_binding_is_validated() {
         let runtime_dir = tempfile::tempdir().expect("runtime directory");
         let binding = super::bind_run_network(runtime_dir.path(), "container:pid:4242", None, None)
@@ -33304,6 +33351,7 @@ volumes:
             None,
             None,
             &[],
+            false,
             None,
             None,
             None,
@@ -33362,6 +33410,7 @@ volumes:
             None,
             Some("fz42-half"),
             &[],
+            false,
             None,
             None,
             None,

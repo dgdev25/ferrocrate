@@ -1,0 +1,13 @@
+services:
+  web-one:
+    image: python:3.12-alpine
+    command: ["python", "-m", "http.server", "80"]
+    ports: ["18081:80"]
+  web-two:
+    image: python:3.12-alpine
+    command: ["python", "-m", "http.server", "80"]
+    ports: ["18082:80"]
+  web-three:
+    image: python:3.12-alpine
+    command: ["python", "-m", "http.server", "80"]
+    ports: ["18083:80"]

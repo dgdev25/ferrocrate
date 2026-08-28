@@ -1495,13 +1495,18 @@ fn docker_compat_recovered_watcher_does_not_restart_operator_kill() {
     assert_eq!(status, 204, "operator kill response={response}");
 
     // Keep observing past the watcher's poll interval. A recovered watcher
-    // must preserve `killed` as a terminal operator action even for `always`;
-    // it must not re-launch the process after detecting the missing identity.
+    // must preserve the operator kill as terminal even for `always`; it must
+    // not re-launch the process after detecting the missing identity. Docker
+    // reports the signalled container as `exited` with exit code 137.
     thread::sleep(Duration::from_millis(400));
     let final_state = inspect_container(&harness, &id);
     assert_eq!(
-        final_state["State"]["Status"], "killed",
+        final_state["State"]["Status"], "exited",
         "operator kill must not be converted into a restart: inspect={final_state}"
+    );
+    assert_eq!(
+        final_state["State"]["ExitCode"], 137,
+        "signalled container must report 128+SIGKILL: inspect={final_state}"
     );
 
     let (status, response) =

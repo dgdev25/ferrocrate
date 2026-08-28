@@ -2046,11 +2046,12 @@ impl ContainerRuntime {
             {
                 continue;
             }
+            let observed_exit_code = record.last_exit_code.unwrap_or(-1);
             match self.store.update_exit_for_process(
                 &record.id,
                 record.pid,
                 record.process_start_time,
-                -1,
+                observed_exit_code,
             ) {
                 Ok(_) | Err(ContainerStoreError::MutationConflict) => {}
                 Err(error) => return Err(error.into()),
@@ -2067,15 +2068,19 @@ impl ContainerRuntime {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
+            let Ok(Some(current)) = store.get(&record.id) else {
+                return;
+            };
+            // A kill that already ran persists `128 + signal` before this
+            // poller observes the missing identity; only a death no one
+            // recorded is unknown.
+            let observed_exit_code = current.last_exit_code.unwrap_or(-1);
             let _ = store.update_exit_for_process(
                 &record.id,
                 record.pid,
                 record.process_start_time,
-                -1,
+                observed_exit_code,
             );
-            let Ok(Some(current)) = store.get(&record.id) else {
-                return;
-            };
             // This poller reattaches a workload after daemon recovery, but it
             // must retain the regular supervisor's terminal-state semantics:
             // an explicit stop or kill is never a restart trigger, even when

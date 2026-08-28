@@ -35,8 +35,9 @@ done
 [ "$shrunk" -eq 1 ] && fail=1
 [ "$shrunk" -eq 0 ] && note "result file sizes" "no implausible shrinkage"
 
-# 3. Workspace tests. A single failure that passes alone is the known
-#    concurrent-load flake; report it but do not fail the gate on it.
+# 3. Workspace tests. Only the explicitly audited concurrent-load flakes are
+#    non-blocking. A new single-test failure is still a regression until it is
+#    isolated and understood; never let the failure count alone waive it.
 out=$(timeout 2400 cargo test --workspace 2>&1)
 p=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{p+=$4} END {print p+0}')
 f=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{f+=$6} END {print f+0}')
@@ -44,7 +45,15 @@ if [ "$f" -eq 0 ]; then
   note "workspace tests" "$p passed, 0 failed"
 elif [ "$f" -eq 1 ]; then
   name=$(echo "$out" | grep -E "^test .+ \.\.\. FAILED$" | head -1 | awk '{print $2}')
-  note "workspace tests" "$p passed, 1 failed ($name) — known load flake, not blocking"
+  case "$name" in
+    docker_compat_auto_remove_preserves_wait_exit_result|runtime::tests::slirp_reaper_leaves_a_recorded_container_helper_alone)
+      note "workspace tests" "$p passed, 1 failed ($name) — audited load flake, not blocking"
+      ;;
+    *)
+      note "workspace tests" "$p passed, 1 FAILED ($name) — not on audited flake allowlist"
+      fail=1
+      ;;
+  esac
 else
   note "workspace tests" "$p passed, $f FAILED"; fail=1
 fi

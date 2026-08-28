@@ -5277,6 +5277,9 @@ impl ContainerRuntime {
 
         if stop_existing {
             stop_existing_for_restart(&record, timeout)?;
+            if restart_rootless_slirp {
+                release_slirp4netns_for_restart(&record)?;
+            }
             cleanup_security_ebpf_monitor(&record.id)?;
             cleanup_apparmor_profile(&self.runtime_dir, &record.id)?;
         }
@@ -12324,6 +12327,34 @@ fn terminate_slirp4netns_helper(record: &ContainerRecord) {
     }
 }
 
+/// Stop the helper for the old network namespace and wait until it can no
+/// longer own host-forward sockets before starting the replacement helper.
+fn release_slirp4netns_for_restart(record: &ContainerRecord) -> Result<(), RuntimeError> {
+    let (Some(pid), Some(start_time)) = (record.slirp4netns_pid, record.slirp4netns_start_time)
+    else {
+        return Ok(());
+    };
+    terminate_slirp4netns_helper(record);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_start_time_for_pid(pid) == Some(start_time) {
+        let zombie = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(')').map(|(_, fields)| fields.to_string()))
+            .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
+            .is_some_and(|state| state == "Z");
+        if zombie {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(RuntimeError::InvalidState(format!(
+                "slirp4netns helper {pid} did not exit before restart"
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 /// Remove helpers whose socket namespace belongs to this runtime but whose
 /// exact process identity is absent from a live container record.
 fn reap_orphaned_slirp4netns_helpers(
@@ -17347,6 +17378,25 @@ mod tests {
         assert!(
             !status.success(),
             "helper must be terminated on terminal lifecycle"
+        );
+    }
+
+    #[test]
+    fn rootless_restart_releases_prior_slirp_helper_before_replacement() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn prior helper stand-in");
+        let mut record = fixture_container_record("slirp-restart", "running");
+        record.slirp4netns_pid = Some(child.id());
+        record.slirp4netns_start_time = super::process_start_time_for_pid(child.id());
+
+        super::release_slirp4netns_for_restart(&record).expect("release prior helper");
+
+        let status = child.wait().expect("wait prior helper stand-in");
+        assert!(
+            !status.success(),
+            "the prior helper must be gone before replacement networking starts"
         );
     }
 

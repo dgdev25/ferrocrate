@@ -4009,8 +4009,12 @@ impl ContainerRuntime {
     pub fn logs_split(&self, id: &str) -> Result<(String, String), RuntimeError> {
         let (stdout, stderr) = self.logs_split_bytes(id)?;
         Ok((
-            String::from_utf8(stdout).map_err(|error| RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?,
-            String::from_utf8(stderr).map_err(|error| RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?,
+            String::from_utf8(stdout).map_err(|error| {
+                RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?,
+            String::from_utf8(stderr).map_err(|error| {
+                RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?,
         ))
     }
 
@@ -4130,6 +4134,18 @@ impl ContainerRuntime {
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.add_pid(&group, record.pid)?;
         manager.freeze(&group)?;
+        if !crate::process_lifecycle::signal_process_group_verified(
+            record.pid,
+            record.process_start_time,
+            nix::sys::signal::Signal::SIGSTOP,
+        )? {
+            if !pid_identity_matches(&record) {
+                return Err(RuntimeError::InvalidState(
+                    "container workload identity is not verifiable".to_string(),
+                ));
+            }
+            signal_pid(record.pid, nix::sys::signal::Signal::SIGSTOP)?;
+        }
         self.persist_effect_status(proof, intent, id, "running", "paused")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -4169,6 +4185,18 @@ impl ContainerRuntime {
         let group = manager.create_group(&format!("ferrocrate/{id}"))?;
         manager.add_pid(&group, record.pid)?;
         manager.thaw(&group)?;
+        if !crate::process_lifecycle::signal_process_group_verified(
+            record.pid,
+            record.process_start_time,
+            nix::sys::signal::Signal::SIGCONT,
+        )? {
+            if !pid_identity_matches(&record) {
+                return Err(RuntimeError::InvalidState(
+                    "container workload identity is not verifiable".to_string(),
+                ));
+            }
+            signal_pid(record.pid, nix::sys::signal::Signal::SIGCONT)?;
+        }
         self.persist_effect_status(proof, intent, id, "paused", "running")?;
         let _ = log_event(
             &self.runtime_dir,
@@ -4240,6 +4268,11 @@ impl ContainerRuntime {
             let manager = CgroupV2Manager::new(&self.cgroup_root);
             let group = manager.create_group(&format!("ferrocrate/{id}"))?;
             manager.thaw(&group)?;
+            let _ = crate::process_lifecycle::signal_process_group_verified(
+                record.pid,
+                record.process_start_time,
+                nix::sys::signal::Signal::SIGCONT,
+            );
         }
         // Publish the manual-stop intent before the signal lands: the exit
         // publisher observes the same terminal state as this mutation, so the
@@ -4359,17 +4392,12 @@ impl ContainerRuntime {
             if !pid_identity_matches(&record) {
                 // The workload is gone; publish the killed state only.
             } else if signal == nix::sys::signal::Signal::SIGKILL {
-                for pid in crate::process_lifecycle::owned_descendants_deepest_first(record.pid) {
-                    if !pid_identity_matches(&record) {
-                        break;
-                    }
-                    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal);
-                }
-                if pid_identity_matches(&record) {
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(record.pid as i32),
-                        signal,
-                    );
+                if !crate::process_lifecycle::signal_process_group_verified(
+                    record.pid,
+                    record.process_start_time,
+                    signal,
+                )? {
+                    signal_pid(record.pid, signal)?;
                 }
             } else {
                 let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
@@ -4420,10 +4448,7 @@ impl ContainerRuntime {
             "kill",
             id,
             &record.image,
-            container_event_attributes(
-                Some(&record),
-                &[("signal", signal_name.to_string())],
-            ),
+            container_event_attributes(Some(&record), &[("signal", signal_name.to_string())]),
         );
         let _ = log_audit_event(
             &self.runtime_dir,
@@ -5410,18 +5435,20 @@ impl ContainerRuntime {
         release_prepared_child(child_id)?;
         if restart_rootless_slirp {
             let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
-            let (helper_pid, helper_start_time) = match start_slirp4netns(child_id, Some(&api_socket)) {
-                Ok(helper) => helper,
-                Err(error) => {
-                    let _ = kill_pid(child_id);
-                    return Err(error);
-                }
-            };
+            let (helper_pid, helper_start_time) =
+                match start_slirp4netns(child_id, Some(&api_socket)) {
+                    Ok(helper) => helper,
+                    Err(error) => {
+                        let _ = kill_pid(child_id);
+                        return Err(error);
+                    }
+                };
             record.slirp4netns_pid = Some(helper_pid);
             record.slirp4netns_start_time = Some(helper_start_time);
             let helper_record = record.clone();
             let persist_result = if let Some(reservation) = record.pending_mutation.as_ref() {
-                self.store.put_for_mutation(&record, reservation.operation_id)
+                self.store
+                    .put_for_mutation(&record, reservation.operation_id)
             } else {
                 self.store.put(&record)
             };
@@ -6726,8 +6753,9 @@ fn stop_existing_for_restart(
     timeout: Duration,
 ) -> Result<(), RuntimeError> {
     if pid_identity_matches(record) {
+        let workload_pid = crate::process_lifecycle::container_pid1_for_signal(record.pid);
         crate::process_lifecycle::stop_pid_verified(
-            record.pid,
+            workload_pid,
             record.pid,
             record.process_start_time,
             timeout,
@@ -7961,10 +7989,14 @@ struct ChildStdinRelay {
 }
 
 impl ChildStdinRelay {
-    fn shutdown_signal(&self) -> Arc<AtomicBool> { Arc::clone(&self.shutdown) }
+    fn shutdown_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
     fn drain(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -8139,27 +8171,42 @@ fn spawn_child_with_logs(
     };
     let child_id = child.id();
     let stdin_relay = if tty {
-        drop(fifo_input); drop(stdin_writer);
-        ChildStdinRelay { shutdown: stdin_shutdown, thread: None }
+        drop(fifo_input);
+        drop(stdin_writer);
+        ChildStdinRelay {
+            shutdown: stdin_shutdown,
+            thread: None,
+        }
     } else {
         let relay_shutdown = Arc::clone(&stdin_shutdown);
-        ChildStdinRelay { shutdown: stdin_shutdown, thread: Some(thread::spawn(move || {
-            let mut buffer = [0_u8; 16 * 1024];
-            loop {
-                match fifo_input.read(&mut buffer) {
-                    Ok(count) if count > 0 => if stdin_writer.write_all(&buffer[..count]).is_err() { break; },
-                    Ok(_) => {
-                        if relay_shutdown.load(Ordering::Acquire) { break; }
-                        thread::sleep(Duration::from_millis(5));
+        ChildStdinRelay {
+            shutdown: stdin_shutdown,
+            thread: Some(thread::spawn(move || {
+                let mut buffer = [0_u8; 16 * 1024];
+                loop {
+                    match fifo_input.read(&mut buffer) {
+                        Ok(count) if count > 0 => {
+                            if stdin_writer.write_all(&buffer[..count]).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {
+                            if relay_shutdown.load(Ordering::Acquire) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if relay_shutdown.load(Ordering::Acquire) {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        if relay_shutdown.load(Ordering::Acquire) { break; }
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
                 }
-            }
-        })) }
+            })),
+        }
     };
     let raw_pidfd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, child_id, 0) } as i32;
     if raw_pidfd < 0 {
@@ -8167,7 +8214,13 @@ fn spawn_child_with_logs(
     }
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
     wait_until_launch_stopped(child_id)?;
-    Ok((child_id, child, pidfd, ChildLogRelays::new(log_relays), stdin_relay))
+    Ok((
+        child_id,
+        child,
+        pidfd,
+        ChildLogRelays::new(log_relays),
+        stdin_relay,
+    ))
 }
 
 /// stdout/stderr with optional per-line timestamp resolution.
@@ -8741,7 +8794,9 @@ fn supervise_child(
             .unwrap_or(&restart_policy);
         // An explicit stop or kill publishes `exited` too, so the manual-stop
         // flag, not the status string, suppresses the restart loop.
-        if persisted_restart.as_ref().is_some_and(|record| record.user_stopped)
+        if persisted_restart
+            .as_ref()
+            .is_some_and(|record| record.user_stopped)
             || !should_restart(
                 effective_restart_policy,
                 &current_status,
@@ -8828,38 +8883,39 @@ fn supervise_child(
                 break;
             }
         };
-        let (pid, new_child, new_pidfd, new_log_relays, new_stdin_relay) = match spawn_child_with_logs(
-            command,
-            &stdout_path,
-            &stderr_path,
-            append,
-            tty,
-            rotation,
-            &runtime_dir,
-            &container_id,
-            &log_driver,
-        ) {
-            Ok(tuple) => tuple,
-            Err(error) => {
-                warn!(
-                    container = %container_id,
-                    error = %error,
-                    "restart supervisor stopping: respawn spawn failed"
-                );
-                if ai_enabled {
-                    log_ai_restart_lifecycle(
-                        &container_id,
-                        "ai_restart_failed",
-                        exit_code,
-                        restart_count,
-                        delay_secs,
-                        "spawn-child",
-                        None,
+        let (pid, new_child, new_pidfd, new_log_relays, new_stdin_relay) =
+            match spawn_child_with_logs(
+                command,
+                &stdout_path,
+                &stderr_path,
+                append,
+                tty,
+                rotation,
+                &runtime_dir,
+                &container_id,
+                &log_driver,
+            ) {
+                Ok(tuple) => tuple,
+                Err(error) => {
+                    warn!(
+                        container = %container_id,
+                        error = %error,
+                        "restart supervisor stopping: respawn spawn failed"
                     );
+                    if ai_enabled {
+                        log_ai_restart_lifecycle(
+                            &container_id,
+                            "ai_restart_failed",
+                            exit_code,
+                            restart_count,
+                            delay_secs,
+                            "spawn-child",
+                            None,
+                        );
+                    }
+                    break;
                 }
-                break;
-            }
-        };
+            };
         stdin_shutdown.insert(container_id.clone(), new_stdin_relay.shutdown_signal());
         if let Err(e) = update_pid_status(&store, &container_id, pid, "running") {
             warn!("failed to update pid status for {container_id}: {e}");
@@ -12443,7 +12499,9 @@ fn configure_slirp_host_forwards(
                         })?;
                     if let Some(error) = value.get("error") {
                         let holder = host_port_holder(mapping.host_port)
-                            .map(|holder| format!("; host port {} is held by {holder}", mapping.host_port))
+                            .map(|holder| {
+                                format!("; host port {} is held by {holder}", mapping.host_port)
+                            })
                             .unwrap_or_default();
                         return Err(RuntimeError::Network(format!(
                             "slirp4netns failed to add host forwarding: {error}{holder}"
@@ -12481,7 +12539,9 @@ fn host_port_holder(port: u16) -> Option<String> {
     let output = Command::new("ss").args(["-ltnp"]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let marker = format!(":{port}");
-    let line = text.lines().find(|line| line.contains(&marker) && line.contains("pid="))?;
+    let line = text
+        .lines()
+        .find(|line| line.contains(&marker) && line.contains("pid="))?;
     let process_start = line.find("((\"")? + 3;
     let process_end = line[process_start..].find('"')? + process_start;
     let pid_start = line.find("pid=")? + 4;
@@ -12489,7 +12549,11 @@ fn host_port_holder(port: u16) -> Option<String> {
         .find(|character: char| !character.is_ascii_digit())
         .map(|offset| pid_start + offset)
         .unwrap_or(line.len());
-    Some(format!("process {} (pid {})", &line[process_start..process_end], &line[pid_start..pid_end]))
+    Some(format!(
+        "process {} (pid {})",
+        &line[process_start..process_end],
+        &line[pid_start..pid_end]
+    ))
 }
 
 fn rootless_netns_enabled() -> bool {
@@ -16259,10 +16323,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let attributes = super::container_event_attributes(
-            Some(&record),
-            &[("exitCode", "17".to_string())],
-        );
+        let attributes =
+            super::container_event_attributes(Some(&record), &[("exitCode", "17".to_string())]);
         let get = |key: &str| {
             attributes
                 .iter()
@@ -17263,10 +17325,12 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        super::reap_orphaned_bwrap_launchers(runtime.path(), &store)
-            .expect("reap orphan launcher");
+        super::reap_orphaned_bwrap_launchers(runtime.path(), &store).expect("reap orphan launcher");
         let status = child.wait().expect("wait reaped launcher");
-        assert!(!status.success(), "orphaned bwrap launcher must be terminated");
+        assert!(
+            !status.success(),
+            "orphaned bwrap launcher must be terminated"
+        );
     }
 
     #[test]
@@ -18825,7 +18889,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     fn generated_container_ids_are_64_lowercase_hexadecimal_characters() {
         let id = super::generate_container_id();
         assert_eq!(id.len(), 64);
-        assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 
     #[test]
@@ -19919,18 +19985,19 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .unwrap();
-        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) = super::spawn_child_with_logs(
-            command,
-            &stdout,
-            &stderr,
-            false,
-            false,
-            None,
-            root.path(),
-            "launch-test",
-            "json-file",
-        )
-        .unwrap();
+        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) =
+            super::spawn_child_with_logs(
+                command,
+                &stdout,
+                &stderr,
+                false,
+                false,
+                None,
+                root.path(),
+                "launch-test",
+                "json-file",
+            )
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(
             !marker.exists(),
@@ -19965,18 +20032,19 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             false,
         )
         .expect("build command");
-        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) = super::spawn_child_with_logs(
-            command,
-            &stdout,
-            &stderr,
-            false,
-            true,
-            None,
-            root.path(),
-            "tty-test",
-            "json-file",
-        )
-        .expect("spawn PTY child");
+        let (pid, mut child, _pidfd, mut log_relays, mut stdin_relay) =
+            super::spawn_child_with_logs(
+                command,
+                &stdout,
+                &stderr,
+                false,
+                true,
+                None,
+                root.path(),
+                "tty-test",
+                "json-file",
+            )
+            .expect("spawn PTY child");
         super::release_prepared_child(pid).expect("release PTY child");
         assert!(child.wait().expect("wait PTY child").success());
         stdin_relay.drain();

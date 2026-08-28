@@ -205,6 +205,14 @@ fn ppid_from_stat(stat: &str) -> Option<u32> {
     fields.next().and_then(|ppid| ppid.parse::<u32>().ok())
 }
 
+fn pgrp_from_stat(stat: &str) -> Option<u32> {
+    let after = stat.rsplit(')').next()?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    fields.next().and_then(|pgrp| pgrp.parse::<u32>().ok())
+}
+
 /// Real-time UID of a process from `/proc/<pid>/status`, used to constrain
 /// signal-target resolution to processes owned by the caller. A PID that was
 /// recycled into another user's process must never be selected.
@@ -321,6 +329,57 @@ pub fn owned_descendants_deepest_first(root: u32) -> Vec<u32> {
     out
 }
 
+fn verified_owned_group_members(leader: u32, leader_start: Option<u64>) -> Option<Vec<(u32, u64)>> {
+    let expected_start = leader_start?;
+    if process_start_time_of(leader) != Some(expected_start)
+        || uid_of_pid(leader) != Some(own_uid())
+        || unsafe { nix::libc::getpgid(leader as i32) } != leader as i32
+    {
+        return None;
+    }
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if pgrp_from_stat(&stat) == Some(leader) && uid_of_pid(pid) == Some(own_uid()) {
+            if let Some(start) = process_start_time_of(pid) {
+                members.push((pid, start));
+            }
+        }
+    }
+    Some(members)
+}
+
+/// Signal a private container process group only while its leader retains the
+/// kernel identity captured at spawn and still owns a same-numbered PGID.
+pub fn signal_process_group_verified(
+    leader: u32,
+    leader_start: Option<u64>,
+    signal: Signal,
+) -> Result<bool, ProcessLifecycleError> {
+    if verified_owned_group_members(leader, leader_start).is_none() {
+        return Ok(false);
+    }
+    if let Err(err) = kill(Pid::from_raw(-(leader as i32)), signal) {
+        if err != nix::Error::from(Errno::ESRCH) {
+            return Err(ProcessLifecycleError::Signal(err));
+        }
+    }
+    Ok(true)
+}
+
+fn kill_verified_members(members: &[(u32, u64)]) {
+    for (pid, start) in members {
+        if process_start_time_of(*pid) == Some(*start) && uid_of_pid(*pid) == Some(own_uid()) {
+            let _ = kill(Pid::from_raw(*pid as i32), Signal::SIGKILL);
+        }
+    }
+}
+
 /// Kernel start time (clock ticks) of a process, or None when it is gone.
 pub fn process_start_time_of(pid: u32) -> Option<u64> {
     if pid == 0 {
@@ -352,7 +411,12 @@ pub fn stop_pid_verified(
         return Ok(());
     }
     if child == parent {
-        signal_pid(parent, Signal::SIGTERM)?;
+        let members = verified_owned_group_members(parent, parent_start);
+        if members.is_some() {
+            signal_process_group_verified(parent, parent_start, Signal::SIGTERM)?;
+        } else {
+            signal_pid(parent, Signal::SIGTERM)?;
+        }
         if timeout == Duration::MAX {
             while parent_identity_matches() {
                 thread::sleep(Duration::from_millis(10));
@@ -362,16 +426,29 @@ pub fn stop_pid_verified(
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if !parent_identity_matches() {
+                if let Some(members) = members.as_deref() {
+                    kill_verified_members(members);
+                }
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(10));
         }
         if parent_identity_matches() {
-            signal_pid(parent, Signal::SIGKILL)?;
+            if !signal_process_group_verified(parent, parent_start, Signal::SIGKILL)? {
+                signal_pid(parent, Signal::SIGKILL)?;
+            }
+        } else if let Some(members) = members.as_deref() {
+            kill_verified_members(members);
         }
         return Ok(());
     }
-    if !signal_pid_verified_parent(child, parent, Signal::SIGTERM)? {
+    let members = verified_owned_group_members(parent, parent_start);
+    let delivered = if members.is_some() {
+        signal_process_group_verified(parent, parent_start, Signal::SIGTERM)?
+    } else {
+        signal_pid_verified_parent(child, parent, Signal::SIGTERM)?
+    };
+    if !delivered {
         return Ok(()); // workload already exited
     }
     let deadline = Instant::now() + timeout;
@@ -389,16 +466,15 @@ pub fn stop_pid_verified(
     // Re-verify the launcher's identity first: if the PID was recycled
     // during the graceful wait, the subtree under it is not the container.
     if !parent_identity_matches() {
+        if let Some(members) = members.as_deref() {
+            kill_verified_members(members);
+        }
         return Ok(());
     }
-    for pid in owned_descendants_deepest_first(parent) {
-        if !parent_identity_matches() {
-            return Ok(());
+    if !signal_process_group_verified(parent, parent_start, Signal::SIGKILL)? {
+        if let Some(members) = members.as_deref() {
+            kill_verified_members(members);
         }
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-    }
-    if parent_identity_matches() {
-        let _ = kill(Pid::from_raw(parent as i32), Signal::SIGKILL);
     }
     Ok(())
 }

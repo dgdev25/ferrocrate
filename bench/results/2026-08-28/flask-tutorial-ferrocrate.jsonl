@@ -1,57 +1,57 @@
-{"app":"flask-tutorial","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1706,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/python:3.12-slim\npull: image=registry-1.docker.io/library/python:3.12-slim\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":4706,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":2006,"stderr_tail":"run: container_id=fce56f32014f49bc8f381c038836b0da345c790d049a32ed15cce77eac42861b pid=3919799 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"start","status":"fail","exit":1,"ms":30422,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"commit","status":"fail","exit":1,"ms":102,"stderr_tail":"2026-08-28T11:34:25.255403Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs\nerror: commit: bind and tmpfs mounts must be removed before committing the rootfs\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"kill","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"rmi-committed","status":"fail","exit":1,"ms":103,"stderr_tail":"rmi: bench/flask-tutorial:committed: rmi: not found registry-1.docker.io/bench/flask-tutorial:committed\n2026-08-28T11:34:26.377709Z ERROR ferro_cli::linux_cli: rmi: 1 container operation(s) failed\nerror: rmi: 1 container operation(s) failed\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"data-write","status":"pass","exit":0,"ms":1705,"stderr_tail":"run: container_id=5adfea1f6011674247f3fe88215b96f21afe62baa1571ae2415cb3c2fa9b7fac pid=3922282 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"data-read","status":"pass","exit":0,"ms":1505,"stderr_tail":"run: container_id=80482ace4ac5fb3d045cbe36d75fbea95281b6427f6645df8761b1b328b8f1a9 pid=3922472 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":3805,"stderr_tail":"run: container_id=e899b1e4e29f17a50b69d0a5e9586dd2734c3854f5aaf0bdcf827d2ad4e14413 pid=3922587 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":1704,"stderr_tail":"run: container_id=c3d5f7f55aaf4b9251edef1f198d4d9aca0daddd57690b2bd2f7c4cad3f33e7e pid=3922882 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":3205,"stderr_tail":"run: container_id=6a041f0355ccee60b4b1f6684631a468484af20b6f021fc79eb903e067a30ea9 pid=3923065 network_backend=ebpf\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
-{"app":"flask-tutorial","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1705,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/python:3.12-slim\npull: image=registry-1.docker.io/library/python:3.12-slim\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":703,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":4407,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":1504,"stderr_tail":"run: container_id=e5c25ab78560c51d7ca4cf5e3ad9eb10844bf50d5121d601833a855ba9ead994 pid=4167600 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"start","status":"fail","exit":1,"ms":30324,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"commit","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T12:20:27.185951Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs\nerror: commit: bind and tmpfs mounts must be removed before committing the rootfs\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"kill","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"rmi-committed","status":"fail","exit":1,"ms":105,"stderr_tail":"rmi: bench/flask-tutorial:committed: rmi: not found registry-1.docker.io/bench/flask-tutorial:committed\n2026-08-28T12:20:28.190452Z ERROR ferro_cli::linux_cli: rmi: 1 container operation(s) failed\nerror: rmi: 1 container operation(s) failed\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"data-write","status":"pass","exit":0,"ms":1404,"stderr_tail":"run: container_id=27580a7e0398573be9fabe9e20ad28da902066fdfe44e46d047d9fe30917c600 pid=4170173 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"data-read","status":"pass","exit":0,"ms":1504,"stderr_tail":"run: container_id=87b3b863214c0f95adbc6335f59b577157b2258e73ff16d95c138bc57de1be55 pid=4170309 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"volume-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":3707,"stderr_tail":"run: container_id=8f90fb8c75c8b5ccbb970455c3258388e57af53856915334735c998d3ce55bc6 pid=4170489 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":1605,"stderr_tail":"run: container_id=b503498bc60b7b13c2de889eb0d12ccb36ca92faf7745297422b2c68995fe364 pid=4170672 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":3305,"stderr_tail":"run: container_id=b97675afe05fe2169b5392e778dfe70ced082f2629c726a6e08ba1dd1fbb324e pid=4170895 network_backend=ebpf\n","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}
+{"app":"flask-tutorial","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:18Z","head":"f248ef53"}

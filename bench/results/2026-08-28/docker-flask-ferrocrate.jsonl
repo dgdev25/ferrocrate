@@ -1,52 +1,52 @@
-{"app":"docker-flask","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1705,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/python:3.13-slim\npull: image=registry-1.docker.io/library/python:3.13-slim\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"compose-up","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T11:25:08.840070Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build\nerror: compose validation error: service 'worker' must specify image or build\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":121084,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"compose-ps","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T11:27:10.073035Z ERROR ferro_cli::linux_cli: compose validation error: service 'web' must specify image or build\nerror: compose validation error: service 'web' must specify image or build\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"compose-logs","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T11:27:10.197004Z ERROR ferro_cli::linux_cli: compose validation error: service 'css' must specify image or build\nerror: compose validation error: service 'css' must specify image or build\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"compose-down","status":"fail","exit":1,"ms":102,"stderr_tail":"2026-08-28T11:27:10.321000Z ERROR ferro_cli::linux_cli: compose validation error: service 'js' must specify image or build\nerror: compose validation error: service 'js' must specify image or build\n","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
-{"app":"docker-flask","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:24Z","head":"d2c13996"}
+{"app":"docker-flask","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1605,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/python:3.13-slim\npull: image=registry-1.docker.io/library/python:3.13-slim\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-up","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T12:10:41.617070Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build\nerror: compose validation error: service 'worker' must specify image or build\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":120904,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-ps","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T12:12:42.656110Z ERROR ferro_cli::linux_cli: compose validation error: service 'js' must specify image or build\nerror: compose validation error: service 'js' must specify image or build\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-logs","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T12:12:42.778902Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build\nerror: compose validation error: service 'worker' must specify image or build\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-down","status":"fail","exit":1,"ms":103,"stderr_tail":"2026-08-28T12:12:42.897822Z ERROR ferro_cli::linux_cli: compose validation error: service 'web' must specify image or build\nerror: compose validation error: service 'web' must specify image or build\n","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}
+{"app":"docker-flask","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T12:10Z","head":"f248ef53"}

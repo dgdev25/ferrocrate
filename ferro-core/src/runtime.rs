@@ -17582,17 +17582,20 @@ mod tests {
             ])
             .spawn()
             .expect("start runtime A helper stand-in");
-        for _ in 0..50 {
-            if std::fs::read(format!("/proc/{}/cmdline", helper.id()))
-                .ok()
-                .is_some_and(|cmdline| super::slirp_api_socket_from_cmdline(&cmdline).is_some())
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Use an isolated proc fixture rather than the live host `/proc`.
+        // Other reaper tests run in parallel and create their own helpers;
+        // scanning the shared process table makes this ownership regression
+        // nondeterministic even though the runtime namespaces are disjoint.
+        let proc_root = tempfile::tempdir().expect("isolated proc root");
+        let process_dir = proc_root.path().join(helper.id().to_string());
+        std::fs::create_dir(&process_dir).expect("create process fixture");
+        std::fs::write(
+            process_dir.join("cmdline"),
+            format!("/usr/bin/slirp4netns\0--api-socket={}\0", socket.display()),
+        )
+        .expect("write helper cmdline fixture");
 
-        super::reap_orphaned_slirp4netns_helpers(runtime_b.path(), &store_b)
+        super::reap_orphaned_slirp4netns_helpers_in(runtime_b.path(), &store_b, proc_root.path())
             .expect("runtime B reaper");
         let status_after_runtime_b = helper.try_wait().expect("runtime A helper status");
         if status_after_runtime_b.is_none() {

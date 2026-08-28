@@ -1,57 +1,57 @@
-{"app":"uptime-kuma","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"info","status":"pass","exit":0,"ms":41050,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":9010,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"data-write","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"data-read","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"volume-ls","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"volume-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"volume-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":1004,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":24927,"stderr_tail":" Network uptime-kuma_default Creating \n Network uptime-kuma_default Creating \n Network uptime-kuma_default Created \n Network uptime-kuma_default Created \n Container uptime-kuma-uptime-kuma-1 Creating \n Container uptime-kuma-uptime-kuma-1 Created \n Container uptime-kuma-uptime-kuma-1 Starting \n Container uptime-kuma-uptime-kuma-1 Started \n","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":10109,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":17917,"stderr_tail":" Container uptime-kuma-uptime-kuma-1 Stopping \n Container uptime-kuma-uptime-kuma-1 Stopped \n Container uptime-kuma-uptime-kuma-1 Removing \n Container uptime-kuma-uptime-kuma-1 Removed \n Network uptime-kuma_default Removing \n Network uptime-kuma_default Removed \n","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"events","status":"pass","exit":0,"ms":5108,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2405,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
-{"app":"uptime-kuma","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T09:35Z","head":"e7145b7d"}
+{"app":"uptime-kuma","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"info","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2205,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"data-write","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"data-read","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"volume-ls","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"volume-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"volume-rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"compose-up","status":"fail","exit":1,"ms":903,"stderr_tail":"me-kuma-1 Creating \n Container uptime-kuma-uptime-kuma-1 Created \n Container uptime-kuma-uptime-kuma-1 Starting \nError response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint uptime-kuma-uptime-kuma-1 (c7efd4fa6c81695fd97bba9bafc3814ab6f08902e07391eeedd95fbf9dffe1a7): failed to bind host port 0.0.0.0:3001/tcp: address already in use\n","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"compose-health","status":"fail","exit":1,"ms":120898,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":403,"stderr_tail":" Container uptime-kuma-uptime-kuma-1 Stopping \n Container uptime-kuma-uptime-kuma-1 Stopped \n Container uptime-kuma-uptime-kuma-1 Removing \n Container uptime-kuma-uptime-kuma-1 Removed \n Network uptime-kuma_default Removing \n Network uptime-kuma_default Removed \n","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"events","status":"pass","exit":0,"ms":5110,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1503,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}
+{"app":"uptime-kuma","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T11:49Z","head":"d2c13996"}

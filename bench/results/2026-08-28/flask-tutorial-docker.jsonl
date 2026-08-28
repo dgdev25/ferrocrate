@@ -1,57 +1,57 @@
-{"app":"flask-tutorial","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"info","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2104,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"build","status":"pass","exit":0,"ms":1904,"stderr_tail":"57\n#9 exporting manifest list sha256:483e69ac01060b005373eb9426ac349cbb78fe4eb682fc11226e63127759d857 0.1s done\n#9 naming to docker.io/bench/flask-tutorial:latest 0.0s done\n#9 unpacking to docker.io/bench/flask-tutorial:latest\n#9 unpacking to docker.io/bench/flask-tutorial:latest 0.0s done\n#9 DONE 0.5s\n\nView build details: docker-desktop://dashboard/build/default/default/y0r6qbsuvp0jkopm4weyfbdaq\n","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"images","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"tag","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"save","status":"pass","exit":0,"ms":1004,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"load","status":"pass","exit":0,"ms":2004,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"\u001b[31m\u001b[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.\u001b[0m\n * Running on all addresses (0.0.0.0)\n * Running on http://127.0.0.1:5000\n * Running on http://172.17.0.3:5000\n\u001b[33mPress CTRL+C to quit\u001b[0m\n172.17.0.1 - - [28/Aug/2026 09:12:47] \"GET / HTTP/1.1\" 200 -\n","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"top","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"diff","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"restart","status":"pass","exit":0,"ms":11416,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10410,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"start","status":"pass","exit":0,"ms":1304,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"commit","status":"pass","exit":0,"ms":2506,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"export","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"wait","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"rm","status":"pass","exit":0,"ms":1304,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"data-write","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"data-read","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"volume-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"volume-inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"volume-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2504,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":605,"stderr_tail":"_default Creating \n Volume tutorial_bench_flask-tutorial_instance Creating \n Volume tutorial_bench_flask-tutorial_instance Created \n Volume tutorial_bench_flask-tutorial_instance Created \n Network tutorial_default Created \n Network tutorial_default Created \n Container tutorial-app-1 Creating \n Container tutorial-app-1 Created \n Container tutorial-app-1 Starting \n Container tutorial-app-1 Started \n","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":11818,"stderr_tail":" Container tutorial-app-1 Stopping \n Container tutorial-app-1 Stopped \n Container tutorial-app-1 Removing \n Container tutorial-app-1 Removed \n Volume tutorial_bench_flask-tutorial_instance Removing \n Network tutorial_default Removing \n Volume tutorial_bench_flask-tutorial_instance Removed \n Network tutorial_default Removed \n","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":1711,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"events","status":"pass","exit":0,"ms":5048,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":5217,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
-{"app":"flask-tutorial","engine":"docker","step":"search","status":"pass","exit":0,"ms":603,"stderr_tail":"","run":"2026-08-28T09:12Z","head":"e7145b7d"}
+{"app":"flask-tutorial","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1605,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"build","status":"pass","exit":0,"ms":303,"stderr_tail":"6:60baa208415606746a777270b2c98031eb8154629b52aa2910e12a55dba44917\n#9 exporting manifest list sha256:60baa208415606746a777270b2c98031eb8154629b52aa2910e12a55dba44917 0.0s done\n#9 naming to docker.io/bench/flask-tutorial:latest done\n#9 unpacking to docker.io/bench/flask-tutorial:latest done\n#9 DONE 0.1s\n\nView build details: docker-desktop://dashboard/build/default/default/g9hbgymeveepmnnyl542ewo5q\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"images","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"save","status":"pass","exit":0,"ms":803,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"load","status":"pass","exit":0,"ms":703,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":302,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"health","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"logs","status":"pass","exit":0,"ms":104,"stderr_tail":"\u001b[31m\u001b[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.\u001b[0m\n * Running on all addresses (0.0.0.0)\n * Running on http://127.0.0.1:5000\n * Running on http://172.17.0.3:5000\n\u001b[33mPress CTRL+C to quit\u001b[0m\n172.17.0.1 - - [28/Aug/2026 11:32:45] \"GET / HTTP/1.1\" 200 -\n","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"diff","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"restart","status":"pass","exit":0,"ms":11410,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10312,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"start","status":"pass","exit":0,"ms":1204,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"rename","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"commit","status":"pass","exit":0,"ms":2205,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"export","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"data-write","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"data-read","status":"pass","exit":0,"ms":402,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"volume-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"volume-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"volume-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2504,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":502,"stderr_tail":"instance Creating \n Volume tutorial_bench_flask-tutorial_instance Creating \n Volume tutorial_bench_flask-tutorial_instance Created \n Volume tutorial_bench_flask-tutorial_instance Created \n Network tutorial_default Created \n Network tutorial_default Created \n Container tutorial-app-1 Creating \n Container tutorial-app-1 Created \n Container tutorial-app-1 Starting \n Container tutorial-app-1 Started \n","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":10611,"stderr_tail":" Container tutorial-app-1 Stopping \n Container tutorial-app-1 Stopped \n Container tutorial-app-1 Removing \n Container tutorial-app-1 Removed \n Volume tutorial_bench_flask-tutorial_instance Removing \n Network tutorial_default Removing \n Volume tutorial_bench_flask-tutorial_instance Removed \n Network tutorial_default Removed \n","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":804,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"events","status":"pass","exit":0,"ms":5107,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1904,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}
+{"app":"flask-tutorial","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T11:32Z","head":"d2c13996"}

@@ -1,52 +1,52 @@
-{"app":"mdn-static","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"info","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1604,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"build","status":"pass","exit":0,"ms":303,"stderr_tail":"d257ffa0a2143560cfd8ace5d19 done\n#7 exporting manifest list sha256:7858a8a6363ad94a975810c732925d468111088fa8d116b6427d4f0c3f8f8e2d done\n#7 naming to docker.io/bench/mdn-static:latest\n#7 naming to docker.io/bench/mdn-static:latest done\n#7 unpacking to docker.io/bench/mdn-static:latest done\n#7 DONE 0.1s\n\nView build details: docker-desktop://dashboard/build/default/default/a3a3izehh2z6wr7qjka9z9gvj\n","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"images","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"save","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"load","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"health","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"logs","status":"pass","exit":0,"ms":104,"stderr_tail":"8/28 09:22:50 [notice] 1#1: start worker process 55\n2026/08/28 09:22:50 [notice] 1#1: start worker process 56\n2026/08/28 09:22:50 [notice] 1#1: start worker process 57\n2026/08/28 09:22:50 [notice] 1#1: start worker process 58\n2026/08/28 09:22:50 [notice] 1#1: start worker process 59\n2026/08/28 09:22:50 [notice] 1#1: start worker process 60\n2026/08/28 09:22:50 [notice] 1#1: start worker process 61\n","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"top","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1106,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"exec","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"pause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"restart","status":"pass","exit":0,"ms":1404,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"stop","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"start","status":"pass","exit":0,"ms":1204,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"commit","status":"pass","exit":0,"ms":704,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"export","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"rm","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2905,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":603,"stderr_tail":" Image mdn-static-app Building \n Image mdn-static-app Built \n Network mdn-static_default Creating \n Network mdn-static_default Creating \n Network mdn-static_default Created \n Network mdn-static_default Created \n Container mdn-static-app-1 Creating \n Container mdn-static-app-1 Created \n Container mdn-static-app-1 Starting \n Container mdn-static-app-1 Started \n","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":605,"stderr_tail":" Container mdn-static-app-1 Stopping \n Container mdn-static-app-1 Stopped \n Container mdn-static-app-1 Removing \n Container mdn-static-app-1 Removed \n Network mdn-static_default Removing \n Network mdn-static_default Removed \n","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":904,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"events","status":"pass","exit":0,"ms":5108,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2206,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":1404,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
-{"app":"mdn-static","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T09:22Z","head":"e7145b7d"}
+{"app":"mdn-static","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"info","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":102,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2206,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"build","status":"pass","exit":0,"ms":1704,"stderr_tail":"33c87f88432ccc2d0\n#7 exporting manifest list sha256:0b3eadbe5707653ed5b0c48d26fc41d0aeb689e75f9141333c87f88432ccc2d0 0.1s done\n#7 naming to docker.io/bench/mdn-static:latest\n#7 naming to docker.io/bench/mdn-static:latest 0.0s done\n#7 unpacking to docker.io/bench/mdn-static:latest 0.0s done\n#7 DONE 0.4s\n\nView build details: docker-desktop://dashboard/build/default/default/irar8o84cv8y5wsg7fs3vh41t\n","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"images","status":"pass","exit":0,"ms":404,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"tag","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"save","status":"pass","exit":0,"ms":705,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"load","status":"pass","exit":0,"ms":1204,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"8/28 11:40:17 [notice] 1#1: start worker process 55\n2026/08/28 11:40:17 [notice] 1#1: start worker process 56\n2026/08/28 11:40:17 [notice] 1#1: start worker process 57\n2026/08/28 11:40:17 [notice] 1#1: start worker process 58\n2026/08/28 11:40:17 [notice] 1#1: start worker process 59\n2026/08/28 11:40:17 [notice] 1#1: start worker process 60\n2026/08/28 11:40:17 [notice] 1#1: start worker process 61\n","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"pause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"restart","status":"pass","exit":0,"ms":804,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"stop","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"start","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"commit","status":"pass","exit":0,"ms":904,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"export","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"kill","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"rm","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":3306,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":2605,"stderr_tail":" Image mdn-static-app Building \n Image mdn-static-app Built \n Network mdn-static_default Creating \n Network mdn-static_default Creating \n Network mdn-static_default Created \n Network mdn-static_default Created \n Container mdn-static-app-1 Creating \n Container mdn-static-app-1 Created \n Container mdn-static-app-1 Starting \n Container mdn-static-app-1 Started \n","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":903,"stderr_tail":" Container mdn-static-app-1 Stopping \n Container mdn-static-app-1 Stopped \n Container mdn-static-app-1 Removing \n Container mdn-static-app-1 Removed \n Network mdn-static_default Removing \n Network mdn-static_default Removed \n","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":1304,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"events","status":"pass","exit":0,"ms":5110,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1803,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}
+{"app":"mdn-static","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T11:40Z","head":"d2c13996"}

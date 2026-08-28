@@ -26233,8 +26233,13 @@ fn docker_websocket_upgrade_headers(key: &str) -> Vec<u8> {
 
 #[cfg(target_os = "linux")]
 fn docker_raw_stream(stdout: &str, stderr: &str) -> Vec<u8> {
+    docker_raw_stream_bytes(stdout.as_bytes(), stderr.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_raw_stream_bytes(stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(stdout.len() + stderr.len() + 16);
-    for (stream, payload) in [(1u8, stdout.as_bytes()), (2u8, stderr.as_bytes())] {
+    for (stream, payload) in [(1u8, stdout), (2u8, stderr)] {
         if payload.is_empty() {
             continue;
         }
@@ -26566,11 +26571,13 @@ fn stream_docker_attach(
     };
     if record.pid == 0 {
         if logs_requested {
-            let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
-            let frame = docker_attach_output(
+            let (stdout, stderr) = runtime
+                .logs_split_bytes(id)
+                .map_err(|error| error.to_string())?;
+            let frame = docker_attach_output_bytes(
                 record.tty,
-                if stdout_requested { &stdout } else { "" },
-                if stderr_requested { &stderr } else { "" },
+                if stdout_requested { &stdout } else { &[] },
+                if stderr_requested { &stderr } else { &[] },
             );
             stream
                 .write_all(&frame)
@@ -26579,20 +26586,21 @@ fn stream_docker_attach(
         }
         return Ok(());
     }
-    let (initial_stdout, initial_stderr) =
-        runtime.logs_split(id).map_err(|error| error.to_string())?;
+    let (initial_stdout, initial_stderr) = runtime
+        .logs_split_bytes(id)
+        .map_err(|error| error.to_string())?;
     if logs_requested && (!initial_stdout.is_empty() || !initial_stderr.is_empty()) {
-        let frame = docker_attach_output(
+        let frame = docker_attach_output_bytes(
             record.tty,
             if stdout_requested {
                 &initial_stdout
             } else {
-                ""
+                &[]
             },
             if stderr_requested {
                 &initial_stderr
             } else {
-                ""
+                &[]
             },
         );
         stream
@@ -26683,7 +26691,9 @@ fn stream_docker_attach(
                 Err(error) => return Err(error.to_string()),
             }
         }
-        let (stdout, stderr) = runtime.logs_split(id).map_err(|error| error.to_string())?;
+        let (stdout, stderr) = runtime
+            .logs_split_bytes(id)
+            .map_err(|error| error.to_string())?;
         if stdout.len() < emitted_stdout {
             emitted_stdout = 0;
         }
@@ -26691,17 +26701,17 @@ fn stream_docker_attach(
             emitted_stderr = 0;
         }
         if stdout.len() > emitted_stdout || stderr.len() > emitted_stderr {
-            let frame = docker_attach_output(
+            let frame = docker_attach_output_bytes(
                 record.tty,
                 if stdout_requested {
                     &stdout[emitted_stdout..]
                 } else {
-                    ""
+                    &[]
                 },
                 if stderr_requested {
                     &stderr[emitted_stderr..]
                 } else {
-                    ""
+                    &[]
                 },
             );
             stream
@@ -26771,12 +26781,17 @@ fn local_attach_logs_drained(
 
 #[cfg(target_os = "linux")]
 fn docker_attach_output(tty: bool, stdout: &str, stderr: &str) -> Vec<u8> {
+    docker_attach_output_bytes(tty, stdout.as_bytes(), stderr.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+fn docker_attach_output_bytes(tty: bool, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     if tty {
         // Docker's TTY contract is a raw terminal stream: stdout and stderr
         // share one PTY and must not receive the non-TTY eight-byte headers.
-        return stdout.as_bytes().to_vec();
+        return stdout.to_vec();
     }
-    docker_raw_stream(stdout, stderr)
+    docker_raw_stream_bytes(stdout, stderr)
 }
 
 #[cfg(target_os = "linux")]

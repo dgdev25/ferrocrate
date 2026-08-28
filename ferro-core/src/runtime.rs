@@ -5573,25 +5573,49 @@ impl ContainerRuntime {
                     ));
                 }
                 let relative = validate_archive_target(&target)?;
-                let selected = rootfs.join(&relative);
+                let matching_mount = record
+                    .mounts
+                    .iter()
+                    .filter_map(|mount| {
+                        let mount_target = Path::new(mount.target.trim_start_matches('/'));
+                        (relative == mount_target || relative.starts_with(mount_target))
+                            .then_some((mount_target.components().count(), mount, mount_target))
+                    })
+                    .max_by_key(|(depth, _, _)| *depth);
+                let (boundary, selected) = if let Some((_, mount, mount_target)) = matching_mount {
+                    if mount.read_only {
+                        return Err(RuntimeError::InvalidCommand(
+                            "archive target is a read-only persisted mount target".to_string(),
+                        ));
+                    }
+                    let boundary = Path::new(&mount.source).canonicalize().map_err(|error| {
+                        RuntimeError::InvalidCommand(format!(
+                            "archive mount source unavailable: {error}"
+                        ))
+                    })?;
+                    let remainder = relative
+                        .strip_prefix(mount_target)
+                        .expect("matching mount target must be a prefix");
+                    let selected = boundary.join(remainder);
+                    (boundary, selected)
+                } else {
+                    (rootfs.clone(), rootfs.join(&relative))
+                };
                 let selected = selected.canonicalize().map_err(|error| {
                     RuntimeError::InvalidCommand(format!("archive target unavailable: {error}"))
                 })?;
-                if !selected.starts_with(&rootfs) || !selected.is_dir() {
+                if !selected.starts_with(&boundary) || !selected.is_dir() {
                     return Err(RuntimeError::InvalidCommand(
                         "archive target must be an existing directory beneath the container rootfs"
                             .to_string(),
                     ));
                 }
-                if record.mounts.iter().any(|mount| {
-                    relative == Path::new(mount.target.trim_start_matches('/'))
-                        || relative.starts_with(mount.target.trim_start_matches('/'))
-                }) || record.tmpfs_mounts.iter().any(|mount| {
+                if record.tmpfs_mounts.iter().any(|mount| {
                     relative == Path::new(mount.target.trim_start_matches('/'))
                         || relative.starts_with(mount.target.trim_start_matches('/'))
                 }) {
                     return Err(RuntimeError::InvalidCommand(
-                        "archive target is a persisted mount target".to_string(),
+                        "archive target is a tmpfs mount target".to_string(),
                     ));
                 }
                 let mut temp = tempfile::NamedTempFile::new_in(&runtime.runtime_dir)?;

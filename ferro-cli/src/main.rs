@@ -12682,16 +12682,72 @@ fn docker_get_container_archive(runtime_dir: &Path, runtime: &ContainerRuntime, 
     let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
     let rootfs = runtime_dir.join("containers").join(&record.id).join("rootfs");
     if !rootfs.is_dir() { return Err(format!("docker: container rootfs is unavailable: {}", rootfs.display())); }
-    let selected = rootfs.join(relative).canonicalize().map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
-    if !selected.starts_with(&rootfs) { return Err("docker: archive path escapes the container rootfs".to_string()); }
-    let excluded = record.mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
-        .chain(record.tmpfs_mounts.iter().map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))).collect::<Vec<_>>();
-    let selected_relative = selected.strip_prefix(&rootfs).expect("canonical archive path must remain beneath rootfs");
-    if excluded.iter().any(|target| selected_relative == target || selected_relative.starts_with(target)) { return Err("docker: archive path is a persisted mount target".to_string()); }
+    let (boundary, selected, excluded) =
+        docker_archive_path_selection(&rootfs, &record, Path::new(relative))?;
     let mut archive = Vec::new(); let mut builder = tar::Builder::new(&mut archive);
-    append_export_archive_path(&mut builder, &rootfs, &selected, &excluded).map_err(|error| format!("docker: archive path: {error}"))?;
+    append_export_archive_path(&mut builder, &boundary, &selected, &excluded).map_err(|error| format!("docker: archive path: {error}"))?;
     builder.finish().map_err(|error| format!("docker: finish archive: {error}"))?; drop(builder);
     Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_archive_path_selection(
+    rootfs: &Path,
+    record: &ferro_core::container_store::ContainerRecord,
+    relative: &Path,
+) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), String> {
+    if record.tmpfs_mounts.iter().any(|mount| {
+        let target = Path::new(mount.target.trim_start_matches('/'));
+        relative == target || relative.starts_with(target)
+    }) {
+        return Err("docker: archive path is a tmpfs mount target".to_string());
+    }
+    let matching_mount = record
+        .mounts
+        .iter()
+        .filter_map(|mount| {
+            let target = Path::new(mount.target.trim_start_matches('/'));
+            (relative == target || relative.starts_with(target)).then_some((
+                target.components().count(),
+                mount,
+                target,
+            ))
+        })
+        .max_by_key(|(depth, _, _)| *depth);
+    let (boundary, selected, excluded) = if let Some((_, mount, target)) = matching_mount {
+        let boundary = Path::new(&mount.source)
+            .canonicalize()
+            .map_err(|error| format!("docker: archive mount source is unavailable: {error}"))?;
+        let remainder = relative
+            .strip_prefix(target)
+            .expect("matching mount target must be a prefix");
+        let selected = boundary
+            .join(remainder)
+            .canonicalize()
+            .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+        (boundary, selected, Vec::new())
+    } else {
+        let selected = rootfs
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
+        let excluded = record
+            .mounts
+            .iter()
+            .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+            .chain(
+                record
+                    .tmpfs_mounts
+                    .iter()
+                    .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
+            )
+            .collect::<Vec<_>>();
+        (rootfs.to_path_buf(), selected, excluded)
+    };
+    if !selected.starts_with(&boundary) {
+        return Err("docker: archive path escapes its container filesystem boundary".to_string());
+    }
+    Ok((boundary, selected, excluded))
 }
 
 #[cfg(target_os = "linux")]
@@ -12745,8 +12801,7 @@ fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, so
         (Some((container, path)), None) => {
             let archive = docker_get_container_archive(runtime_dir, runtime, container, path)?;
             let target = Path::new(destination);
-            if target.exists() && target.is_dir() { tar::Archive::new(Cursor::new(archive)).unpack(target).map_err(|error| format!("docker: cp extract failed: {error}"))?; }
-            else { let parent = target.parent().unwrap_or_else(|| Path::new(".")); std::fs::create_dir_all(parent).map_err(|error| format!("docker: cp create destination: {error}"))?; tar::Archive::new(Cursor::new(archive)).unpack(parent).map_err(|error| format!("docker: cp extract failed: {error}"))?; }
+            extract_container_archive_to_host(&archive, target)?;
             Ok(())
         }
         (None, Some((container, path))) => {
@@ -12804,6 +12859,63 @@ fn docker_copy_container_path(runtime_dir: &Path, runtime: &ContainerRuntime, so
         }
         _ => Err("docker: cp requires exactly one CONTAINER:PATH operand".to_string()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn extract_container_archive_to_host(archive: &[u8], target: &Path) -> Result<(), String> {
+    let absolute_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("docker: cp resolve destination: {error}"))?
+            .join(target)
+    };
+    let mut component_path = PathBuf::new();
+    for component in absolute_target.components() {
+        component_path.push(component.as_os_str());
+        match std::fs::symlink_metadata(&component_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "docker: cp destination contains a symlink: {}",
+                    component_path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("docker: cp inspect destination: {error}")),
+        }
+    }
+    if target.is_dir() {
+        tar::Archive::new(Cursor::new(archive))
+            .unpack(target)
+            .map_err(|error| format!("docker: cp extract failed: {error}"))?;
+        return Ok(());
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("docker: cp create destination: {error}"))?;
+    let parent = parent.canonicalize()
+        .map_err(|error| format!("docker: cp destination parent is unavailable: {error}"))?;
+    let stage = tempfile::tempdir_in(&parent)
+        .map_err(|error| format!("docker: cp create extraction stage: {error}"))?;
+    tar::Archive::new(Cursor::new(archive))
+        .unpack(stage.path())
+        .map_err(|error| format!("docker: cp extract failed: {error}"))?;
+    let mut entries = std::fs::read_dir(stage.path())
+        .map_err(|error| format!("docker: cp inspect extracted archive: {error}"))?;
+    let extracted = entries.next()
+        .transpose()
+        .map_err(|error| format!("docker: cp inspect extracted archive: {error}"))?
+        .ok_or_else(|| "docker: cp archive contains no entries".to_string())?;
+    if entries.next().is_some() {
+        return Err("docker: cp archive contains multiple top-level entries".to_string());
+    }
+    let target_name = target.file_name()
+        .ok_or_else(|| "docker: cp destination has no filename".to_string())?;
+    let destination = parent.join(target_name);
+    std::fs::rename(extracted.path(), &destination)
+        .map_err(|error| format!("docker: cp install destination: {error}"))?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -20034,13 +20146,24 @@ fn handle_docker_compat_connection(
                         rootfs.display()
                     ));
                 }
-                let selected = rootfs.join(archive_path.trim_start_matches('/'));
-                let selected = selected
-                    .canonicalize()
-                    .map_err(|error| format!("docker: archive path is unavailable: {error}"))?;
-                if !selected.starts_with(&rootfs) {
-                    return Err("docker: archive path escapes the container rootfs".to_string());
-                }
+                let selected = if created {
+                    let selected = rootfs.join(archive_path.trim_start_matches('/'));
+                    let selected = selected.canonicalize().map_err(|error| {
+                        format!("docker: archive path is unavailable: {error}")
+                    })?;
+                    if !selected.starts_with(&rootfs) {
+                        return Err("docker: archive path escapes the container rootfs".to_string());
+                    }
+                    selected
+                } else {
+                    let record = runtime.inspect(&id).map_err(|error| error.to_string())?;
+                    let (_, selected, _) = docker_archive_path_selection(
+                        &rootfs,
+                        &record,
+                        Path::new(archive_path.trim_start_matches('/')),
+                    )?;
+                    selected
+                };
                 let archive = if created {
                     docker_get_created_container_archive(runtime_dir.as_ref(), &id, archive_path)?
                 } else {
@@ -28742,6 +28865,305 @@ mod tests {
             std::fs::read_to_string(rootfs.join("tmp/dir/nested.txt")).expect("copied directory"),
             "directory copied in"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cp_into_named_volume_uses_the_persisted_mount_source() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let volume = temp.path().join("volumes/data/_data");
+        std::fs::create_dir_all(&volume).expect("volume source");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "copy-volume-target",
+                "pid": 0,
+                "image": "example.invalid/copy:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited",
+                "mounts": [{
+                    "source": volume,
+                    "target": "app/data",
+                    "read_only": false
+                }]
+            }))
+            .expect("container record");
+        store.put(&record).expect("store record");
+        std::fs::create_dir_all(temp.path().join("containers/copy-volume-target/rootfs/app/data"))
+            .expect("container mount target");
+        let source = temp.path().join("README.md");
+        std::fs::write(&source, "named volume probe\n").expect("source file");
+
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            source.to_str().expect("source path"),
+            "copy-volume-target:/app/data/README-probe.md",
+        )
+        .expect("copy file into named volume");
+
+        assert_eq!(
+            std::fs::read_to_string(volume.join("README-probe.md")).expect("volume file"),
+            "named volume probe\n"
+        );
+
+        let tree = temp.path().join("tree");
+        std::fs::create_dir_all(tree.join("sub")).expect("source tree");
+        std::fs::write(tree.join("sub/nested.txt"), "volume tree\n").expect("nested source");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            tree.to_str().expect("tree path"),
+            "copy-volume-target:/app/data/renamed-tree",
+        )
+        .expect("copy renamed directory into named volume");
+        assert_eq!(
+            std::fs::read_to_string(volume.join("renamed-tree/sub/nested.txt"))
+                .expect("volume tree file"),
+            "volume tree\n"
+        );
+
+        let copied_out = temp.path().join("volume-copy-out.txt");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-volume-target:/app/data/README-probe.md",
+            copied_out.to_str().expect("copy-out path"),
+        )
+        .expect("copy file out of named volume");
+        assert_eq!(
+            std::fs::read_to_string(copied_out).expect("copied-out volume file"),
+            "named volume probe\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cp_out_to_missing_file_uses_the_requested_destination_name() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "copy-out-name",
+                "pid": 0,
+                "image": "example.invalid/copy:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited"
+            }))
+            .expect("container record");
+        store.put(&record).expect("store record");
+        let rootfs = temp.path().join("containers/copy-out-name/rootfs/app");
+        std::fs::create_dir_all(&rootfs).expect("container app");
+        std::fs::write(rootfs.join("README-probe.md"), "renamed probe\n")
+            .expect("container source");
+        let destination = temp.path().join("battleships-README-probe.md");
+
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-out-name:/app/README-probe.md",
+            destination.to_str().expect("destination path"),
+        )
+        .expect("copy file out with renamed destination");
+
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("renamed destination"),
+            "renamed probe\n"
+        );
+        assert!(
+            !temp.path().join("README-probe.md").exists(),
+            "source basename must not be created beside renamed destination"
+        );
+
+        let existing_directory = temp.path().join("existing-directory");
+        std::fs::create_dir(&existing_directory).expect("existing host directory");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-out-name:/app/README-probe.md",
+            existing_directory.to_str().expect("existing directory path"),
+        )
+        .expect("copy file into existing host directory");
+        assert_eq!(
+            std::fs::read_to_string(existing_directory.join("README-probe.md"))
+                .expect("file under existing directory"),
+            "renamed probe\n"
+        );
+
+        std::fs::write(&destination, "old contents").expect("seed existing file");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-out-name:/app/README-probe.md",
+            destination.to_str().expect("existing destination path"),
+        )
+        .expect("replace existing host file");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("replaced host file"),
+            "renamed probe\n"
+        );
+
+        std::fs::create_dir_all(rootfs.join("tree/sub")).expect("container source tree");
+        std::fs::write(rootfs.join("tree/sub/nested.txt"), "container tree\n")
+            .expect("container tree file");
+        let renamed_tree = temp.path().join("renamed-tree-out");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-out-name:/app/tree",
+            renamed_tree.to_str().expect("renamed tree path"),
+        )
+        .expect("copy directory to renamed missing destination");
+        assert_eq!(
+            std::fs::read_to_string(renamed_tree.join("sub/nested.txt"))
+                .expect("renamed directory content"),
+            "container tree\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cp_round_trips_through_a_bind_mount_source() {
+        let temp = configured_cli_runtime("disabled");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("container store");
+        let bind_source = temp.path().join("host-bind");
+        std::fs::create_dir(&bind_source).expect("bind source");
+        let record: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "copy-bind-target",
+                "pid": 0,
+                "image": "example.invalid/copy:latest",
+                "command": ["true"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "exited",
+                "mounts": [{
+                    "source": bind_source,
+                    "target": "mnt/bind",
+                    "read_only": false
+                }]
+            }))
+            .expect("container record");
+        store.put(&record).expect("store record");
+        std::fs::create_dir_all(temp.path().join("containers/copy-bind-target/rootfs/mnt/bind"))
+            .expect("container bind target");
+        let source = temp.path().join("bind-in.txt");
+        std::fs::write(&source, "bind payload\n").expect("bind input");
+
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            source.to_str().expect("bind input path"),
+            "copy-bind-target:/mnt/bind/renamed-in.txt",
+        )
+        .expect("copy into bind mount");
+        assert_eq!(
+            std::fs::read_to_string(bind_source.join("renamed-in.txt")).expect("bind source file"),
+            "bind payload\n"
+        );
+
+        let output = temp.path().join("renamed-out.txt");
+        super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            "copy-bind-target:/mnt/bind/renamed-in.txt",
+            output.to_str().expect("bind output path"),
+        )
+        .expect("copy out of bind mount");
+        assert_eq!(
+            std::fs::read_to_string(output).expect("bind output"),
+            "bind payload\n"
+        );
+
+        let mut read_only = record;
+        read_only.id = "copy-read-only-bind".to_string();
+        read_only.mounts[0].read_only = true;
+        store.put(&read_only).expect("store read-only record");
+        std::fs::create_dir_all(
+            temp.path()
+                .join("containers/copy-read-only-bind/rootfs/mnt/bind"),
+        )
+        .expect("read-only bind target");
+        let error = super::docker_copy_container_path(
+            temp.path(),
+            &runtime,
+            source.to_str().expect("bind input path"),
+            "copy-read-only-bind:/mnt/bind/rejected.txt",
+        )
+        .expect_err("read-only bind copy must fail");
+        assert!(error.contains("read-only"), "{error}");
+        assert!(!bind_source.join("rejected.txt").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cp_host_extraction_rejects_traversal_and_symlink_destinations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut malicious = tar::Header::new_gnu();
+        malicious.set_size(3);
+        malicious.set_mode(0o644);
+        malicious.set_path("escape").expect("placeholder path");
+        let name = b"../escape.txt\0";
+        malicious.as_old_mut().name[..name.len()].copy_from_slice(name);
+        malicious.set_cksum();
+        let mut archive = tar::Builder::new(Vec::new());
+        archive
+            .append(&malicious, std::io::Cursor::new(b"bad".as_slice()))
+            .expect("malicious entry");
+        let archive = archive.into_inner().expect("finish malicious archive");
+        let destination_root = temp.path().join("destination-root");
+        std::fs::create_dir(&destination_root).expect("destination root");
+        let error = super::extract_container_archive_to_host(
+            &archive,
+            &destination_root.join("requested.txt"),
+        )
+        .expect_err("traversal archive must be rejected");
+        assert!(error.contains("docker: cp"), "{error}");
+        assert!(!temp.path().join("escape.txt").exists());
+
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).expect("real destination parent");
+        std::os::unix::fs::symlink(&real, temp.path().join("linked"))
+            .expect("symlink destination parent");
+        let mut benign = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        benign
+            .append_data(
+                &mut header,
+                "source.txt",
+                std::io::Cursor::new(b"ok".as_slice()),
+            )
+            .expect("benign entry");
+        let benign = benign.into_inner().expect("finish benign archive");
+        let error = super::extract_container_archive_to_host(
+            &benign,
+            &temp.path().join("linked/destination.txt"),
+        )
+        .expect_err("symlinked destination parent must be rejected");
+        assert!(error.contains("symlink"), "{error}");
+        assert!(!real.join("destination.txt").exists());
     }
 
     #[test]

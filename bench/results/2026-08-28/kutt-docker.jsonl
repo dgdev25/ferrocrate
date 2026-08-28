@@ -1,52 +1,52 @@
-{"app":"kutt","engine":"docker","step":"version","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"info","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2305,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":5407,"stderr_tail":"kutt_db_data_sqlite Creating \n Volume kutt_db_data_sqlite Creating \n Volume kutt_custom Created \n Volume kutt_custom Created \n Volume kutt_db_data_sqlite Created \n Volume kutt_db_data_sqlite Created \n Network kutt_default Created \n Network kutt_default Created \n Container kutt-server-1 Creating \n Container kutt-server-1 Created \n Container kutt-server-1 Starting \n Container kutt-server-1 Started \n","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":6108,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":1805,"stderr_tail":" Container kutt-server-1 Stopping \n Container kutt-server-1 Stopped \n Container kutt-server-1 Removing \n Container kutt-server-1 Removed \n Volume kutt_db_data_sqlite Removing \n Volume kutt_custom Removing \n Network kutt_default Removing \n Volume kutt_custom Removed \n Volume kutt_db_data_sqlite Removed \n Network kutt_default Removed \n","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"events","status":"pass","exit":0,"ms":5109,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2206,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
-{"app":"kutt","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T02:40Z","head":"fd9f2fd8"}
+{"app":"kutt","engine":"docker","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"info","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1504,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":1303,"stderr_tail":"ting \n Volume kutt_custom Creating \n Network kutt_default Creating \n Volume kutt_db_data_sqlite Created \n Volume kutt_db_data_sqlite Created \n Volume kutt_custom Created \n Volume kutt_custom Created \n Network kutt_default Created \n Network kutt_default Created \n Container kutt-server-1 Creating \n Container kutt-server-1 Created \n Container kutt-server-1 Starting \n Container kutt-server-1 Started \n","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":3105,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":1104,"stderr_tail":" Container kutt-server-1 Stopping \n Container kutt-server-1 Stopped \n Container kutt-server-1 Removing \n Container kutt-server-1 Removed \n Volume kutt_custom Removing \n Volume kutt_db_data_sqlite Removing \n Network kutt_default Removing \n Volume kutt_custom Removed \n Volume kutt_db_data_sqlite Removed \n Network kutt_default Removed \n","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"events","status":"pass","exit":0,"ms":5109,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1704,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}
+{"app":"kutt","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T11:37Z","head":"d2c13996"}

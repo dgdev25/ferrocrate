@@ -1,47 +1,47 @@
-{"app":"microblog","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"info","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":1703,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":106,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"network-run","status":"fail","exit":125,"ms":704,"stderr_tail":"Unable to find image 'bench/microblog:latest' locally\ndocker: Error response from daemon: pull access denied for bench/microblog, repository does not exist or may require 'docker login'\n\nRun 'docker run --help' for more information\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":205,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"events","status":"pass","exit":0,"ms":5110,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":2906,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"microblog","engine":"docker","step":"search","status":"pass","exit":0,"ms":504,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"microblog","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"network-run","status":"fail","exit":125,"ms":703,"stderr_tail":"Unable to find image 'bench/microblog:latest' locally\ndocker: Error response from daemon: pull access denied for bench/microblog, repository does not exist or may require 'docker login'\n\nRun 'docker run --help' for more information\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":302,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"events","status":"pass","exit":0,"ms":5109,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":1904,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"microblog","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}

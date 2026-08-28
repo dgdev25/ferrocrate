@@ -1,52 +1,52 @@
-{"app":"node-getting-started","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":106,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"app-retriage2/run/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-retriage2/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1805,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/node:22-slim\npull: image=registry-1.docker.io/library/node:22-slim\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":405,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":106,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":1404,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":9814,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":2704,"stderr_tail":"run: container_id=d39a8a711c6be3dd4ba8db3e7c3e12c23d7941ccc5643d6a1408628c19fc998d pid=653079 network_backend=ebpf\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":103,"stderr_tail":"2026-08-28T02:49:15.683576Z  WARN ferro_core::runtime: [reconcile] container d39a8a711c6be3dd4ba8db3e7c3e12c23d7941ccc5643d6a1408628c19fc998d had stale running pid 653470, marking exited\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"start","status":"fail","exit":1,"ms":30329,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"2026-08-28T02:49:46.163918Z  WARN ferro_core::runtime: [reconcile] container d39a8a711c6be3dd4ba8db3e7c3e12c23d7941ccc5643d6a1408628c19fc998d had stale running pid 653679, marking exited\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"commit","status":"pass","exit":0,"ms":9616,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"kill","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"rmi-committed","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":4307,"stderr_tail":"run: container_id=212409054aae9d2ea151d92b85d44affadddad3a2b9939ab864553dd4dd874fb pid=664483 network_backend=ebpf\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":2907,"stderr_tail":"run: container_id=b3b4837d81659bbbe257a9ac1d3c83655311a38dadf88e1f42e1af46c7e3b422 pid=665896 network_backend=ebpf\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":5208,"stderr_tail":"run: container_id=61520798dbd8e36901e005ea48e3be9881dd3007a1426b051090004b410e11df pid=666989 network_backend=ebpf\n","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
-{"app":"node-getting-started","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T02:47Z","head":"fd9f2fd8"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"un/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/run/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/app-bench-refresh3/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":1805,"stderr_tail":"pull: fetching image=registry-1.docker.io/library/node:22-slim\npull: image=registry-1.docker.io/library/node:22-slim\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":1304,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":8011,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":2305,"stderr_tail":"run: container_id=442505590ebcbe509fe205454e0920bb0af0b5c4d270503c869b197b80724514 pid=3976725 network_backend=ebpf\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":203,"stderr_tail":"2026-08-28T11:46:11.346391Z  WARN ferro_core::runtime: [reconcile] container 442505590ebcbe509fe205454e0920bb0af0b5c4d270503c869b197b80724514 had stale running pid 3976916, marking exited\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"start","status":"fail","exit":1,"ms":30430,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":202,"stderr_tail":"2026-08-28T11:46:42.025168Z  WARN ferro_core::runtime: [reconcile] container 442505590ebcbe509fe205454e0920bb0af0b5c4d270503c869b197b80724514 had stale running pid 3976950, marking exited\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"commit","status":"pass","exit":0,"ms":7107,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"kill","status":"fail","exit":1,"ms":102,"stderr_tail":"kill: bench-node-getting-started-r: cannot kill container: 442505590ebcbe509fe205454e0920bb0af0b5c4d270503c869b197b80724514: container 442505590ebcbe509fe205454e0920bb0af0b5c4d270503c869b197b80724514 is not running\n2026-08-28T11:46:49.686017Z ERROR ferro_cli::linux_cli: kill: 1 container operation(s) failed\nerror: kill: 1 container operation(s) failed\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"rmi-committed","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":4506,"stderr_tail":"run: container_id=9269b74070ddd803f5861dc4cc04ee8180049bcfeda4edd0f4946caf9b37df30 pid=3978479 network_backend=ebpf\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":2404,"stderr_tail":"run: container_id=c99a79a0cfb113b0b95eab28d6af720d6220f9655ac189e5d6a88056346d6a43 pid=3978687 network_backend=ebpf\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":5009,"stderr_tail":"run: container_id=1106e26dc80426f8cff8be7080532ef422b9523c7b7a632f951d6bd606993ec2 pid=3978923 network_backend=ebpf\n","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":202,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}
+{"app":"node-getting-started","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-28T11:44Z","head":"d2c13996"}

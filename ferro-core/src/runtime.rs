@@ -1630,6 +1630,9 @@ pub enum LifecyclePhasePoint {
     TmpfsKernelEffect,
     ReadonlyKernelEffect,
     NetworkKernelEffect,
+    /// Terminal network detach has validated and projected metadata, but has
+    /// not yet CAS-published the detached endpoint or touched cleanup.
+    NetworkDetachPrePublish,
     NetworkResourcesCreatedBeforeOwnership,
     CgroupKernelEffect,
     SpawnPrepared,
@@ -4673,14 +4676,33 @@ impl ContainerRuntime {
         self.mediate_existing(Action::NetworkAttach, id, move |runtime, proof, intent| {
             runtime.connect_network_authorized(proof, intent, id, &config)
         })?;
-        update_container_hosts(&self.runtime_dir, &self.store.list()?)
+        self.refresh_container_hosts_after_network_mutation();
+        Ok(())
     }
 
     pub fn disconnect_network(&self, id: &str, network_name: &str) -> Result<(), RuntimeError> {
         self.mediate_existing(Action::NetworkDetach, id, |runtime, proof, intent| {
             runtime.disconnect_network_authorized(proof, intent, id, network_name)
         })?;
-        update_container_hosts(&self.runtime_dir, &self.store.list()?)
+        self.refresh_container_hosts_after_network_mutation();
+        Ok(())
+    }
+
+    /// Hosts projection is derived reconciliation, never the success boundary
+    /// of a durably published endpoint mutation. Reporting a projection I/O
+    /// failure as a failed connect/disconnect would make callers retry an
+    /// already-completed operation and record the wrong authorization result.
+    fn refresh_container_hosts_after_network_mutation(&self) {
+        let records = match self.store.list() {
+            Ok(records) => records,
+            Err(error) => {
+                log::warn!("network mutation published but hosts refresh could not list containers: {error}");
+                return;
+            }
+        };
+        if let Err(error) = update_container_hosts(&self.runtime_dir, &records) {
+            log::warn!("network mutation published but hosts refresh failed: {error}");
+        }
     }
 
     fn connect_network_authorized(
@@ -4935,9 +4957,11 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
-        if !matches!(record.status.as_str(), "running" | "paused") {
+        let live = matches!(record.status.as_str(), "running" | "paused");
+        let terminal = matches!(record.status.as_str(), "stopped" | "exited" | "killed");
+        if !live && !terminal {
             return Err(RuntimeError::InvalidState(
-                "network disconnect requires a running or paused container".into(),
+                "network disconnect requires a running, paused, or stopped container".into(),
             ));
         }
         let endpoint = record
@@ -4949,51 +4973,63 @@ impl ContainerRuntime {
                     "container is not connected to network {network_name}"
                 ))
             })?;
-        let ownership = endpoint.ownership.as_ref().ok_or_else(|| {
-            RuntimeError::Network(format!(
-                "network endpoint {network_name} has no durable kernel ownership"
-            ))
-        })?;
-        verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
-        let netns_name = record.netns.as_deref().ok_or_else(|| {
-            RuntimeError::Network("container has no durable network namespace".into())
-        })?;
-        let source_cidr = ownership.source_cidr.as_deref().ok_or_else(|| {
-            RuntimeError::Network(format!(
-                "network endpoint {network_name} has no durable source subnet"
-            ))
-        })?;
-        run_cmd(&ip_netns_exec(
-            netns_name,
-            &[
-                "ip",
-                "route",
-                "add",
-                "unreachable",
-                source_cidr,
-                "metric",
-                "42760",
-            ],
-        ))?;
-        if let Err(error) = run_cmd(&[
-            "ip".into(),
-            "link".into(),
-            "delete".into(),
-            ownership.host_interface.clone(),
-        ]) {
-            let _ = run_cmd_allow_missing(&ip_netns_exec(
+        if let Some(ownership) = endpoint.ownership.as_ref() {
+            if ownership.owner_id != id
+                || ownership.network_id.as_deref() != Some(network_name)
+                || endpoint.namespace_identity != ownership.namespace_identity
+            {
+                return Err(RuntimeError::Network(format!(
+                    "network endpoint {network_name} has foreign ownership metadata"
+                )));
+            }
+        }
+        if live {
+            let ownership = endpoint.ownership.as_ref().ok_or_else(|| {
+                RuntimeError::Network(format!(
+                    "network endpoint {network_name} has no durable kernel ownership"
+                ))
+            })?;
+            verify_container_kernel_ownership(record.netns.as_deref(), ownership, true)?;
+            let netns_name = record.netns.as_deref().ok_or_else(|| {
+                RuntimeError::Network("container has no durable network namespace".into())
+            })?;
+            let source_cidr = ownership.source_cidr.as_deref().ok_or_else(|| {
+                RuntimeError::Network(format!(
+                    "network endpoint {network_name} has no durable source subnet"
+                ))
+            })?;
+            run_cmd(&ip_netns_exec(
                 netns_name,
                 &[
                     "ip",
                     "route",
-                    "del",
+                    "add",
                     "unreachable",
                     source_cidr,
                     "metric",
                     "42760",
                 ],
-            ));
-            return Err(error);
+            ))?;
+            if let Err(error) = run_cmd(&[
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                ownership.host_interface.clone(),
+            ]) {
+                let _ = run_cmd_allow_missing(&ip_netns_exec(
+                    netns_name,
+                    &[
+                        "ip",
+                        "route",
+                        "del",
+                        "unreachable",
+                        source_cidr,
+                        "metric",
+                        "42760",
+                    ],
+                ));
+                return Err(error);
+            }
         }
         take_network_endpoint(&mut record, network_name).ok_or_else(|| {
             RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
@@ -5006,9 +5042,61 @@ impl ContainerRuntime {
             .ok_or_else(|| {
                 RuntimeError::PostEffectPersistence(ContainerStoreError::MutationConflict)
             })?;
+        if terminal {
+            self.phase_hook.reached(
+                "network.disconnect",
+                LifecyclePhasePoint::NetworkDetachPrePublish,
+            )?;
+        }
         self.store
             .put_for_mutation(&record, operation_id)
-            .map_err(RuntimeError::PostEffectPersistence)
+            .map_err(RuntimeError::PostEffectPersistence)?;
+
+        // A terminal detach is first and foremost a durable logical state
+        // transition. Never kill a helper or delete a kernel object before
+        // that transition is published: a failed CAS would otherwise leave
+        // the attachment recorded after its resources had been destroyed.
+        // Once publication succeeds, stale terminal resources are cleanup
+        // only. Failure is logged rather than reported as an operation
+        // failure, because the requested detach is already durable.
+        if terminal {
+            if let Err(error) = release_slirp4netns_for_restart(&record) {
+                log::warn!(
+                    "terminal network detach persisted for container {id}, but helper cleanup failed: {error}"
+                );
+            }
+            if let Some(ownership) = endpoint.ownership.as_ref() {
+                match verify_container_kernel_ownership(
+                    record.netns.as_deref(),
+                    ownership,
+                    false,
+                ) {
+                    Ok(true) => match interface_ifindex_optional(&ownership.host_interface) {
+                        Ok(Some(_)) => {
+                            if let Err(error) = run_cmd_allow_missing(&[
+                                "ip".into(),
+                                "link".into(),
+                                "delete".into(),
+                                ownership.host_interface.clone(),
+                            ]) {
+                                log::warn!(
+                                    "terminal network detach persisted for container {id}, but veth cleanup failed: {error}"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => log::warn!(
+                            "terminal network detach persisted for container {id}, but veth identity lookup failed: {error}"
+                        ),
+                    },
+                    Ok(false) => {}
+                    Err(error) => log::warn!(
+                        "terminal network detach persisted for container {id}; refusing unverified kernel cleanup: {error}"
+                    ),
+                }
+            }
+        }
+        Ok(())
     }
 
     fn start_from_reconciliation(&self, id: &str) -> Result<(), RuntimeError> {
@@ -15287,8 +15375,8 @@ mod tests {
     };
     use crate::cgroups::{CpuMax, ResourceLimits};
     use crate::container_store::{
-        now_unix, ContainerRecord, MutationReservation, NetworkEndpointRecord, PortMappingRecord,
-        RestartPolicy,
+        now_unix, ContainerRecord, KernelObjectIdentityRecord, MutationReservation,
+        NetworkEndpointRecord, NetworkOwnershipRecord, PortMappingRecord, RestartPolicy,
     };
     use crate::image_manifest::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
     use crate::image_store::LocalImageStore;
@@ -15301,6 +15389,7 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Barrier, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn eight_concurrent_runtime_file_creates_are_idempotent() {
@@ -15838,6 +15927,30 @@ mod tests {
         action: String,
         phase: LifecyclePhasePoint,
         signal_socket: std::path::PathBuf,
+    }
+
+    struct TerminalDetachCasConflict {
+        store: crate::sqlite_container_store::SqliteContainerStore,
+        id: String,
+    }
+
+    impl LifecyclePhaseHook for TerminalDetachCasConflict {
+        fn reached(&self, action: &str, phase: LifecyclePhasePoint) -> Result<(), RuntimeError> {
+            if action == "network.disconnect"
+                && phase == LifecyclePhasePoint::NetworkDetachPrePublish
+            {
+                let record = self
+                    .store
+                    .get(&self.id)?
+                    .ok_or_else(|| RuntimeError::ContainerNotFound(self.id.clone()))?;
+                let operation = record
+                    .pending_mutation
+                    .ok_or(crate::container_store::ContainerStoreError::MutationConflict)?;
+                self.store
+                    .finish_mutation(&self.id, operation.operation_id)?;
+            }
+            Ok(())
+        }
     }
 
     impl LifecyclePhaseHook for ProcessBarrier {
@@ -19310,6 +19423,418 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         assert_eq!(removed.network_name, "frontend");
         assert_eq!(record.network_endpoints.len(), 1);
         assert_eq!(record.network_endpoints[0].network_name, "backend");
+    }
+
+    fn logical_named_endpoint(network_name: &str) -> NetworkEndpointRecord {
+        NetworkEndpointRecord {
+            network_name: network_name.to_string(),
+            endpoint_id: format!("logical-{network_name}"),
+            interface_name: "eth1".to_string(),
+            ipv4_address: None,
+            ipv6_address: None,
+            aliases: Vec::new(),
+            generation: 1,
+            namespace_identity: None,
+            network_backend: None,
+            ownership: None,
+        }
+    }
+
+    #[test]
+    fn rootless_stop_disconnect_inspect_removes_logical_attachment() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("rootless-detach", "running");
+        record.namespace_owned = false;
+        record.network_name = Some("app".to_string());
+        record.ip_address = None;
+        record.network_endpoints = vec![logical_named_endpoint("app")];
+        runtime.store.put(&record).expect("seed rootless record");
+
+        runtime
+            .stop(&record.id, Duration::ZERO)
+            .expect("stop rootless workload");
+        assert_eq!(runtime.inspect(&record.id).expect("inspect stop").status, "exited");
+        runtime
+            .disconnect_network(&record.id, "app")
+            .expect("detach stopped logical endpoint");
+
+        let inspected = runtime.inspect(&record.id).expect("inspect detach");
+        assert!(inspected.effective_network_endpoints().is_empty());
+        assert!(inspected.network_name.is_none());
+        assert!(inspected.pending_mutation.is_none());
+        assert_eq!(inspected.mutation_generation, 3);
+    }
+
+    #[test]
+    fn terminal_disconnect_tolerates_missing_owned_kernel_state() {
+        for status in ["stopped", "exited", "killed"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+            let mut record = fixture_container_record(status, status);
+            record.netns = Some(format!("missing-{status}"));
+            record.network_name = Some("app".to_string());
+            record.network_endpoints = vec![NetworkEndpointRecord {
+                namespace_identity: Some(KernelObjectIdentityRecord {
+                    device: 999_999,
+                    inode: 999_999,
+                }),
+                ownership: Some(NetworkOwnershipRecord {
+                    schema_version: 3,
+                    owner_id: record.id.clone(),
+                    network_id: Some("app".to_string()),
+                    host_interface: format!("vm{status}"),
+                    host_ifindex: Some(999_999),
+                    namespace_identity: Some(KernelObjectIdentityRecord {
+                        device: 999_999,
+                        inode: 999_999,
+                    }),
+                    managed_interface: None,
+                    managed_ifindex: None,
+                    loopback_ifindex: None,
+                    bridge_ifindex: None,
+                    source_cidr: Some("172.31.0.0/24".to_string()),
+                    bridge: None,
+                    firewall_id: None,
+                    firewall_marker: None,
+                    firewall_expected_state: None,
+                    ebpf_pin_path: None,
+                    external_ipv4: None,
+                    next_hop_mac: None,
+                    snat_port_start: None,
+                    snat_port_end: None,
+                    object_sha256: None,
+                    object_abi: None,
+                    ebpf_filters: Vec::new(),
+                    ebpf_pins: Vec::new(),
+                }),
+                ..logical_named_endpoint("app")
+            }];
+            runtime.store.put(&record).expect("seed terminal record");
+
+            runtime
+                .disconnect_network(&record.id, "app")
+                .unwrap_or_else(|error| panic!("status {status}: {error}"));
+            assert!(runtime
+                .inspect(&record.id)
+                .expect("inspect")
+                .effective_network_endpoints()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn running_disconnect_still_requires_verified_kernel_ownership() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("live-unowned", "running");
+        record.network_name = Some("app".to_string());
+        record.network_endpoints = vec![logical_named_endpoint("app")];
+        runtime.store.put(&record).expect("seed running record");
+
+        let error = runtime
+            .disconnect_network(&record.id, "app")
+            .expect_err("live detach must verify ownership");
+        assert!(error.to_string().contains("no durable kernel ownership"));
+        assert_eq!(
+            runtime
+                .inspect(&record.id)
+                .expect("inspect")
+                .effective_network_endpoints()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_disconnect_rejects_foreign_endpoint_ownership() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("foreign-detach", "exited");
+        let identity = KernelObjectIdentityRecord {
+            device: 1,
+            inode: 2,
+        };
+        record.netns = Some("foreign-detach".to_string());
+        record.network_name = Some("app".to_string());
+        record.network_endpoints = vec![NetworkEndpointRecord {
+            namespace_identity: Some(identity),
+            ownership: Some(NetworkOwnershipRecord {
+                schema_version: 3,
+                owner_id: "another-container".to_string(),
+                network_id: Some("app".to_string()),
+                host_interface: "vforeign".to_string(),
+                host_ifindex: Some(42),
+                namespace_identity: Some(identity),
+                managed_interface: None,
+                managed_ifindex: None,
+                loopback_ifindex: None,
+                bridge_ifindex: None,
+                source_cidr: Some("172.31.0.0/24".to_string()),
+                bridge: None,
+                firewall_id: None,
+                firewall_marker: None,
+                firewall_expected_state: None,
+                ebpf_pin_path: None,
+                external_ipv4: None,
+                next_hop_mac: None,
+                snat_port_start: None,
+                snat_port_end: None,
+                object_sha256: None,
+                object_abi: None,
+                ebpf_filters: Vec::new(),
+                ebpf_pins: Vec::new(),
+            }),
+            ..logical_named_endpoint("app")
+        }];
+        runtime.store.put(&record).expect("seed foreign record");
+
+        let error = runtime
+            .disconnect_network(&record.id, "app")
+            .expect_err("foreign ownership must fail closed");
+        assert!(error.to_string().contains("foreign ownership"));
+        assert_eq!(
+            runtime
+                .inspect(&record.id)
+                .expect("inspect")
+                .effective_network_endpoints()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn running_disconnect_tears_down_verified_veth_and_persists_detach() {
+        if !nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP: running detach fixture requires root");
+            return;
+        }
+        let suffix = std::process::id() % 100_000;
+        let namespace = format!("s183n{suffix}");
+        let host = format!("s183h{suffix}");
+        let peer = format!("s183p{suffix}");
+        let run_ip = |args: &[&str]| std::process::Command::new("ip").args(args).status();
+        let namespace_created = run_ip(&["netns", "add", &namespace])
+            .is_ok_and(|status| status.success());
+        if !namespace_created {
+            eprintln!("SKIP: host cannot create a network namespace");
+            return;
+        }
+        struct NamespaceCleanup(String);
+        impl Drop for NamespaceCleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("ip")
+                    .args(["netns", "del", &self.0])
+                    .status();
+            }
+        }
+        let _cleanup = NamespaceCleanup(namespace.clone());
+        assert!(
+            run_ip(&["link", "add", &host, "type", "veth", "peer", "name", &peer])
+                .is_ok_and(|status| status.success()),
+            "create veth fixture"
+        );
+        assert!(
+            run_ip(&["link", "set", &peer, "netns", &namespace])
+                .is_ok_and(|status| status.success()),
+            "move veth peer"
+        );
+
+        let namespace_metadata = std::fs::symlink_metadata(super::netns::netns_path(&namespace))
+            .expect("namespace identity");
+        let identity = KernelObjectIdentityRecord {
+            device: namespace_metadata.dev(),
+            inode: namespace_metadata.ino(),
+        };
+        let host_ifindex = super::interface_ifindex(&host).expect("host veth identity");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let mut record = fixture_container_record("running-detach", "running");
+        record.netns = Some(namespace.clone());
+        record.namespace_identity = Some(identity);
+        record.network_name = Some("app".to_string());
+        record.network_endpoints = vec![NetworkEndpointRecord {
+            namespace_identity: Some(identity),
+            ownership: Some(NetworkOwnershipRecord {
+                schema_version: 3,
+                owner_id: record.id.clone(),
+                network_id: Some("app".to_string()),
+                host_interface: host.clone(),
+                host_ifindex: Some(host_ifindex),
+                namespace_identity: Some(identity),
+                managed_interface: None,
+                managed_ifindex: None,
+                loopback_ifindex: None,
+                bridge_ifindex: None,
+                source_cidr: Some("172.31.0.0/24".to_string()),
+                bridge: None,
+                firewall_id: None,
+                firewall_marker: None,
+                firewall_expected_state: None,
+                ebpf_pin_path: None,
+                external_ipv4: None,
+                next_hop_mac: None,
+                snat_port_start: None,
+                snat_port_end: None,
+                object_sha256: None,
+                object_abi: None,
+                ebpf_filters: Vec::new(),
+                ebpf_pins: Vec::new(),
+            }),
+            ..logical_named_endpoint("app")
+        }];
+        runtime.store.put(&record).expect("seed running record");
+
+        runtime
+            .disconnect_network(&record.id, "app")
+            .expect("running detach");
+        assert!(super::interface_ifindex_optional(&host)
+            .expect("host lookup")
+            .is_none());
+        assert!(runtime
+            .inspect(&record.id)
+            .expect("inspect")
+            .effective_network_endpoints()
+            .is_empty());
+    }
+
+    #[test]
+    fn terminal_disconnect_cas_failure_leaves_helper_and_veth_untouched() {
+        if !nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP: terminal detach order fixture requires root");
+            return;
+        }
+        let suffix = std::process::id() % 100_000;
+        let namespace = format!("s183c{suffix}");
+        let host = format!("s183d{suffix}");
+        let peer = format!("s183e{suffix}");
+        let run_ip = |args: &[&str]| std::process::Command::new("ip").args(args).status();
+        if !run_ip(&["netns", "add", &namespace]).is_ok_and(|status| status.success()) {
+            eprintln!("SKIP: host cannot create a network namespace");
+            return;
+        }
+        struct NamespaceCleanup(String);
+        impl Drop for NamespaceCleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("ip")
+                    .args(["netns", "del", &self.0])
+                    .status();
+            }
+        }
+        let _namespace_cleanup = NamespaceCleanup(namespace.clone());
+        assert!(
+            run_ip(&["link", "add", &host, "type", "veth", "peer", "name", &peer])
+                .is_ok_and(|status| status.success()),
+            "create veth fixture"
+        );
+        assert!(
+            run_ip(&["link", "set", &peer, "netns", &namespace])
+                .is_ok_and(|status| status.success()),
+            "move veth peer"
+        );
+        let namespace_metadata = std::fs::symlink_metadata(super::netns::netns_path(&namespace))
+            .expect("namespace identity");
+        let identity = KernelObjectIdentityRecord {
+            device: namespace_metadata.dev(),
+            inode: namespace_metadata.ino(),
+        };
+        let mut helper = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("helper stand-in");
+        let temp = tempfile::tempdir().expect("runtime");
+        let policy = temp.path().join("policy.toml");
+        std::fs::write(
+            &policy,
+            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+        )
+        .expect("write policy");
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600))
+            .expect("secure policy");
+        let store = crate::sqlite_container_store::SqliteContainerStore::open(
+            temp.path().join("containers.db"),
+        )
+        .expect("store");
+        let id = "terminal-cas-order";
+        let gate = std::sync::Arc::new(AuthorizationGate::new(std::sync::Arc::new(
+            PolicyStore::load(&policy).expect("load policy"),
+        )));
+        let runtime = ContainerRuntime::new_with_authorization_and_phase_hook(
+            temp.path(),
+            gate,
+            None,
+            std::sync::Arc::new(TerminalDetachCasConflict {
+                store,
+                id: id.to_string(),
+            }),
+        )
+        .expect("runtime");
+        let mut record = fixture_container_record(id, "exited");
+        record.netns = Some(namespace);
+        record.namespace_identity = Some(identity);
+        record.network_name = Some("app".to_string());
+        record.slirp4netns_pid = Some(helper.id());
+        record.slirp4netns_start_time = super::process_start_time_for_pid(helper.id());
+        record.network_endpoints = vec![NetworkEndpointRecord {
+            namespace_identity: Some(identity),
+            ownership: Some(NetworkOwnershipRecord {
+                schema_version: 3,
+                owner_id: id.to_string(),
+                network_id: Some("app".to_string()),
+                host_interface: host.clone(),
+                host_ifindex: Some(super::interface_ifindex(&host).expect("veth identity")),
+                namespace_identity: Some(identity),
+                managed_interface: None,
+                managed_ifindex: None,
+                loopback_ifindex: None,
+                bridge_ifindex: None,
+                source_cidr: Some("172.31.0.0/24".to_string()),
+                bridge: None,
+                firewall_id: None,
+                firewall_marker: None,
+                firewall_expected_state: None,
+                ebpf_pin_path: None,
+                external_ipv4: None,
+                next_hop_mac: None,
+                snat_port_start: None,
+                snat_port_end: None,
+                object_sha256: None,
+                object_abi: None,
+                ebpf_filters: Vec::new(),
+                ebpf_pins: Vec::new(),
+            }),
+            ..logical_named_endpoint("app")
+        }];
+        runtime.store.put(&record).expect("seed terminal record");
+
+        let error = runtime
+            .disconnect_network(id, "app")
+            .expect_err("forced terminal publication conflict");
+        assert!(matches!(error, RuntimeError::PostEffectPersistence(_)));
+        assert!(
+            super::process_start_time_for_pid(helper.id()).is_some(),
+            "failed publication must not terminate the helper"
+        );
+        assert!(
+            super::interface_ifindex_optional(&host)
+                .expect("veth lookup")
+                .is_some(),
+            "failed publication must not delete the verified veth"
+        );
+        assert_eq!(
+            runtime
+                .inspect(id)
+                .expect("inspect after failed publication")
+                .effective_network_endpoints()
+                .len(),
+            1,
+            "failed publication must retain the attachment"
+        );
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(helper.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = helper.wait();
     }
 
     #[test]

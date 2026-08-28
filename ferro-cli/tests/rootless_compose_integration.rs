@@ -13,6 +13,7 @@
 //! that permits nested user+network namespaces.
 
 use std::fs;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -283,7 +284,7 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
 }
 
 #[test]
-fn rootless_compose_services_share_the_project_network_namespace() {
+fn rootless_compose_short_lived_first_service_keeps_named_network_and_ports_alive() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
         return;
     }
@@ -294,7 +295,7 @@ fn rootless_compose_services_share_the_project_network_namespace() {
     let workspace = project.join("workspace");
     fs::create_dir_all(&workspace).expect("workspace");
     let compose = compose_fixture(
-        "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/leader; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    networks: [appnet]\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/follower; sleep 30\"]\n    volumes:\n      - ./workspace:/data\n    networks: [appnet]\n    depends_on:\n      leader:\n        condition: service_started\nnetworks:\n  appnet: {}\n",
+        "services:\n  leader:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/leader\"]\n    volumes:\n      - ./workspace:/data\n    networks: [appnet]\n  follower:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"readlink /proc/self/ns/net > /data/follower; exec httpd -f -p 18080\"]\n    volumes:\n      - ./workspace:/data\n    ports: [\"18081:18080\", \"18082:18080\"]\n    networks: [appnet]\n    depends_on:\n      leader:\n        condition: service_started\nnetworks:\n  appnet: {}\n",
     );
     fs::create_dir_all(&project).expect("project");
     fs::write(project.join("compose.yml"), compose).expect("compose file");
@@ -357,6 +358,17 @@ fn rootless_compose_services_share_the_project_network_namespace() {
             String::from_utf8_lossy(&inspect.stderr)
         );
     }
+    for port in [18081, 18082] {
+        let mut port_live = false;
+        for _ in 0..50 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                port_live = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(port_live, "published port {port} stopped after the first service exited");
+    }
     let down = Command::new(binary)
         .current_dir(&project)
         .env("FERROCRATE_HOME", &runtime)
@@ -371,6 +383,25 @@ fn rootless_compose_services_share_the_project_network_namespace() {
         "rootless shared-network compose down failed: {}",
         String::from_utf8_lossy(&down.stderr)
     );
+    assert!(
+        TcpStream::connect(("127.0.0.1", 18081)).is_err(),
+        "compose down left the rootless published port reachable"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", 18082)).is_err(),
+        "compose down left the second rootless published port reachable"
+    );
+    let leases = runtime.join("rootless-network-leases.json");
+    if leases.exists() {
+        let registry: serde_json::Value = serde_json::from_slice(
+            &fs::read(&leases).expect("read rootless network lease registry"),
+        )
+        .expect("parse rootless network lease registry");
+        assert!(
+            registry["leases"].as_array().is_some_and(Vec::is_empty),
+            "compose down left rootless lease ownership behind: {registry}"
+        );
+    }
     assert_eq!(
         fs::read_to_string(workspace.join("leader")).expect("leader namespace"),
         fs::read_to_string(workspace.join("follower")).expect("follower namespace")

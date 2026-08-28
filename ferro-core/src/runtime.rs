@@ -38,6 +38,72 @@ pub struct NamedNetworkEndpointConfig {
     pub ipv6_gateway_cidr: Option<String>,
     pub aliases: Vec<String>,
 }
+
+/// Identity of a project-owned rootless Compose network.  The opaque
+/// generation and both process start times make a stale coordinator unable to
+/// delete or signal a later lease that reused its logical network name.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RootlessNetworkLease {
+    pub id: String,
+    pub generation: String,
+    pub owner_pid: u32,
+    pub owner_start_time: u64,
+    pub slirp_pid: u32,
+    pub slirp_start_time: u64,
+}
+
+/// Result of acquiring a project-network lease.  Callers use `created` to
+/// decide whether a failed service attempt may tear the lease down.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootlessNetworkLeaseAcquisition {
+    pub lease: RootlessNetworkLease,
+    pub created: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RootlessNetworkForward {
+    mapping: PortMappingRecord,
+    slirp_id: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum RootlessNetworkLeaseState {
+    Reserved,
+    Active,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RootlessNetworkLeaseEntry {
+    key: String,
+    id: String,
+    generation: String,
+    state: RootlessNetworkLeaseState,
+    owner_pid: Option<u32>,
+    owner_start_time: Option<u64>,
+    slirp_pid: Option<u32>,
+    slirp_start_time: Option<u64>,
+    #[serde(default)]
+    forwards: Vec<RootlessNetworkForward>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct RootlessNetworkLeaseRegistry {
+    #[serde(default = "rootless_network_lease_registry_version")]
+    schema_version: u32,
+    #[serde(default)]
+    leases: Vec<RootlessNetworkLeaseEntry>,
+}
+
+#[cfg(target_os = "linux")]
+const fn rootless_network_lease_registry_version() -> u32 {
+    1
+}
 use crate::container_store::{
     now_unix, ContainerMountRecord, ContainerRecord, ContainerStoreError,
     ContainerTmpfsMountRecord, CreationProvenance, EbpfFilterOwnershipRecord,
@@ -94,7 +160,9 @@ use ferro_net::ebpf::{
 use ferro_net::ebpf_abi::{EndpointKey, EndpointValue, PortKey, PortValue};
 use ferro_net::netns;
 use ferro_net::portmap::{build_network_plan as build_portmap_plan, NetworkPlan};
-use ferro_net::rootless::{build_hostfwd_request, build_slirp4netns_cmd, RootlessNetConfig};
+use ferro_net::rootless::{
+    build_hostfwd_request, build_remove_hostfwd_request, build_slirp4netns_cmd, RootlessNetConfig,
+};
 use ferro_net::subnet::network_cidr_v4;
 use ferro_net::veth;
 use ferro_net::BackendProbe;
@@ -12370,6 +12438,516 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
     Ok((helper_pid, helper_start_time))
 }
 
+#[cfg(target_os = "linux")]
+struct RootlessNetworkLeaseLock {
+    _file: fs::File,
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_registry_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("rootless-network-leases.json")
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_lock_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("rootless-network-leases.lock")
+}
+
+#[cfg(target_os = "linux")]
+#[allow(deprecated)]
+fn acquire_rootless_network_lease_lock(
+    runtime_dir: &Path,
+) -> Result<RootlessNetworkLeaseLock, RuntimeError> {
+    fs::create_dir_all(runtime_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(rootless_network_lease_lock_path(runtime_dir))?;
+    flock(file.as_raw_fd(), FlockArg::LockExclusive)
+        .map_err(|error| RuntimeError::Io(io::Error::from_raw_os_error(error as i32)))?;
+    Ok(RootlessNetworkLeaseLock { _file: file })
+}
+
+#[cfg(target_os = "linux")]
+fn load_rootless_network_lease_registry(
+    runtime_dir: &Path,
+) -> Result<RootlessNetworkLeaseRegistry, RuntimeError> {
+    let path = rootless_network_lease_registry_path(runtime_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(RootlessNetworkLeaseRegistry {
+                schema_version: rootless_network_lease_registry_version(),
+                leases: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let registry: RootlessNetworkLeaseRegistry = serde_json::from_slice(&bytes).map_err(|error| {
+        RuntimeError::InvalidState(format!(
+            "parse rootless network lease registry {}: {error}",
+            path.display()
+        ))
+    })?;
+    if registry.schema_version != rootless_network_lease_registry_version() {
+        return Err(RuntimeError::InvalidState(format!(
+            "unsupported rootless network lease registry schema {}",
+            registry.schema_version
+        )));
+    }
+    let mut ids = HashSet::new();
+    let mut active_keys = HashSet::new();
+    for entry in &registry.leases {
+        if uuid::Uuid::parse_str(&entry.id).is_err()
+            || uuid::Uuid::parse_str(&entry.generation).is_err()
+            || entry.key.trim().is_empty()
+            || !ids.insert(entry.id.as_str())
+            || (entry.state == RootlessNetworkLeaseState::Active
+                && !active_keys.insert(entry.key.as_str()))
+        {
+            return Err(RuntimeError::InvalidState(
+                "rootless network lease registry has invalid or ambiguous entries".into(),
+            ));
+        }
+    }
+    Ok(registry)
+}
+
+#[cfg(target_os = "linux")]
+fn save_rootless_network_lease_registry(
+    runtime_dir: &Path,
+    registry: &RootlessNetworkLeaseRegistry,
+) -> Result<(), RuntimeError> {
+    let path = rootless_network_lease_registry_path(runtime_dir);
+    let payload = serde_json::to_vec_pretty(registry).map_err(|error| {
+        RuntimeError::InvalidState(format!("encode rootless network lease registry: {error}"))
+    })?;
+    crate::fs_atomic::write_atomic(&path, &payload).map_err(RuntimeError::Io)
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_from_entry(
+    entry: &RootlessNetworkLeaseEntry,
+) -> Option<RootlessNetworkLease> {
+    (entry.state == RootlessNetworkLeaseState::Active).then_some(RootlessNetworkLease {
+        id: entry.id.clone(),
+        generation: entry.generation.clone(),
+        owner_pid: entry.owner_pid?,
+        owner_start_time: entry.owner_start_time?,
+        slirp_pid: entry.slirp_pid?,
+        slirp_start_time: entry.slirp_start_time?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_identity_matches(lease: &RootlessNetworkLease) -> bool {
+    process_start_time_for_pid(lease.owner_pid) == Some(lease.owner_start_time)
+        && process_start_time_for_pid(lease.slirp_pid) == Some(lease.slirp_start_time)
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_key_is_valid(key: &str) -> bool {
+    !key.trim().is_empty()
+        && key.len() <= 256
+        && key.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ')
+}
+
+#[cfg(target_os = "linux")]
+fn signal_verified_lease_process(
+    pid: u32,
+    expected_start_time: u64,
+    signal: nix::sys::signal::Signal,
+    process_group: bool,
+) -> Result<(), RuntimeError> {
+    if process_start_time_for_pid(pid) != Some(expected_start_time) {
+        return Ok(());
+    }
+    let raw_target = if process_group && unsafe { nix::libc::getpgid(pid as i32) } == pid as i32 {
+        -(pid as i32)
+    } else {
+        pid as i32
+    };
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw_target), signal) {
+        Ok(()) => Ok(()),
+        Err(error) if error == Errno::ESRCH => Ok(()),
+        Err(error) => Err(RuntimeError::Io(io::Error::from_raw_os_error(error as i32))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_rootless_network_lease_processes(
+    entry: &RootlessNetworkLeaseEntry,
+) -> Result<(), RuntimeError> {
+    if let (Some(pid), Some(start_time)) = (entry.slirp_pid, entry.slirp_start_time) {
+        signal_verified_lease_process(pid, start_time, nix::sys::signal::Signal::SIGKILL, false)?;
+    }
+    if let (Some(pid), Some(start_time)) = (entry.owner_pid, entry.owner_start_time) {
+        signal_verified_lease_process(pid, start_time, nix::sys::signal::Signal::SIGKILL, true)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_rootless_network_lease_owner() -> Result<(Child, u32, u64), RuntimeError> {
+    nested_bubblewrap_diagnostic().map_err(|error| {
+        RuntimeError::InvalidCommand(format!(
+            "rootless bridge networking is unavailable on this host: {error}"
+        ))
+    })?;
+    let unshare = crate::rootless::trusted_executable_path("unshare").ok_or_else(|| {
+        RuntimeError::InvalidCommand(
+            "rootless network leases require a trusted root-owned unshare executable".into(),
+        )
+    })?;
+    let sleep = crate::rootless::trusted_executable_path("sleep").ok_or_else(|| {
+        RuntimeError::InvalidCommand(
+            "rootless network leases require a trusted root-owned sleep executable".into(),
+        )
+    })?;
+    let mut command = Command::new(unshare);
+    command
+        .args(["--user", "--map-root-user", "--net", "--"])
+        .arg(sleep)
+        .arg("infinity")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            close_inherited_helper_fds();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let Some(start_time) = process_start_time_for_pid(pid) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease owner has no stable process identity".into(),
+        ));
+    };
+    let host_netns = fs::read_link("/proc/self/ns/net")?;
+    let owner_netns = PathBuf::from(format!("/proc/{pid}/ns/net"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if fs::read_link(&owner_netns)
+            .map(|namespace| namespace != host_netns)
+            .unwrap_or(false)
+        {
+            return Ok((child, pid, start_time));
+        }
+        if child.try_wait()?.is_some() {
+            return Err(RuntimeError::InvalidState(
+                "rootless network lease owner exited before namespace setup".into(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(RuntimeError::InvalidState(
+        "rootless network lease owner did not create a network namespace".into(),
+    ))
+}
+
+/// Acquire a project-owned rootless namespace/slirp lease.  The registry lock
+/// spans reservation, process creation, and stable publication, so a runtime
+/// opener/reaper cannot observe the slirp helper as unowned in between.
+#[cfg(target_os = "linux")]
+pub fn acquire_rootless_network_lease(
+    runtime_dir: &Path,
+    key: &str,
+) -> Result<RootlessNetworkLeaseAcquisition, RuntimeError> {
+    if nix::unistd::Uid::effective().is_root() {
+        return Err(RuntimeError::InvalidState(
+            "rootless network leases require an unprivileged caller".into(),
+        ));
+    }
+    if !rootless_network_lease_key_is_valid(key) {
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease key is invalid".into(),
+        ));
+    }
+    let _lock = acquire_rootless_network_lease_lock(runtime_dir)?;
+    let mut registry = load_rootless_network_lease_registry(runtime_dir)?;
+    if let Some(index) = registry.leases.iter().position(|entry| entry.key == key) {
+        let entry = registry.leases[index].clone();
+        if let Some(lease) = rootless_network_lease_from_entry(&entry) {
+            if rootless_network_lease_identity_matches(&lease) {
+                return Ok(RootlessNetworkLeaseAcquisition {
+                    lease,
+                    created: false,
+                });
+            }
+        }
+        stop_rootless_network_lease_processes(&entry)?;
+        registry.leases.remove(index);
+        save_rootless_network_lease_registry(runtime_dir, &registry)?;
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let generation = uuid::Uuid::new_v4().to_string();
+    let mut entry = RootlessNetworkLeaseEntry {
+        key: key.to_string(),
+        id: id.clone(),
+        generation: generation.clone(),
+        state: RootlessNetworkLeaseState::Reserved,
+        owner_pid: None,
+        owner_start_time: None,
+        slirp_pid: None,
+        slirp_start_time: None,
+        forwards: Vec::new(),
+    };
+    registry.leases.push(entry.clone());
+    save_rootless_network_lease_registry(runtime_dir, &registry)?;
+
+    let (mut child, owner_pid, owner_start_time) = match start_rootless_network_lease_owner() {
+        Ok(owner) => owner,
+        Err(error) => {
+            registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+            let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
+            return Err(error);
+        }
+    };
+    entry.owner_pid = Some(owner_pid);
+    entry.owner_start_time = Some(owner_start_time);
+    if let Some(current) = registry
+        .leases
+        .iter_mut()
+        .find(|candidate| candidate.id == id && candidate.generation == generation)
+    {
+        *current = entry.clone();
+    }
+    if let Err(error) = save_rootless_network_lease_registry(runtime_dir, &registry) {
+        let _ = signal_verified_lease_process(
+            owner_pid,
+            owner_start_time,
+            nix::sys::signal::Signal::SIGKILL,
+            true,
+        );
+        let _ = child.wait();
+        return Err(error);
+    }
+    if process_start_time_for_pid(owner_pid) != Some(owner_start_time) {
+        registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+        let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease owner changed before slirp attachment".into(),
+        ));
+    }
+    let api_socket = slirp_api_socket_path(runtime_dir, &id)?;
+    let (slirp_pid, slirp_start_time) = match start_slirp4netns(owner_pid, Some(&api_socket)) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = signal_verified_lease_process(
+                owner_pid,
+                owner_start_time,
+                nix::sys::signal::Signal::SIGKILL,
+                true,
+            );
+            let _ = child.wait();
+            registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+            let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
+            return Err(error);
+        }
+    };
+    entry.slirp_pid = Some(slirp_pid);
+    entry.slirp_start_time = Some(slirp_start_time);
+    if let Some(current) = registry
+        .leases
+        .iter_mut()
+        .find(|candidate| candidate.id == id && candidate.generation == generation)
+    {
+        *current = entry.clone();
+    }
+    if let Err(error) = save_rootless_network_lease_registry(runtime_dir, &registry) {
+        let _ = stop_rootless_network_lease_processes(&entry);
+        let _ = child.wait();
+        return Err(error);
+    }
+    let lease = RootlessNetworkLease {
+        id,
+        generation,
+        owner_pid,
+        owner_start_time,
+        slirp_pid,
+        slirp_start_time,
+    };
+    if !rootless_network_lease_identity_matches(&lease) {
+        let _ = stop_rootless_network_lease_processes(&entry);
+        let _ = child.wait();
+        registry
+            .leases
+            .retain(|candidate| candidate.id != lease.id || candidate.generation != lease.generation);
+        let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease process changed before stable publication".into(),
+        ));
+    }
+    entry.state = RootlessNetworkLeaseState::Active;
+    if let Some(current) = registry
+        .leases
+        .iter_mut()
+        .find(|candidate| candidate.id == lease.id && candidate.generation == lease.generation)
+    {
+        *current = entry;
+    }
+    if let Err(error) = save_rootless_network_lease_registry(runtime_dir, &registry) {
+        let _ = stop_rootless_network_lease_processes(
+            registry
+                .leases
+                .iter()
+                .find(|candidate| candidate.id == lease.id && candidate.generation == lease.generation)
+                .expect("lease remains in locked registry"),
+        );
+        let _ = child.wait();
+        return Err(error);
+    }
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(RootlessNetworkLeaseAcquisition {
+        lease,
+        created: true,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn rootless_network_lease_alive(lease: &RootlessNetworkLease) -> bool {
+    rootless_network_lease_identity_matches(lease)
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_entry_matches(
+    entry: &RootlessNetworkLeaseEntry,
+    lease: &RootlessNetworkLease,
+) -> bool {
+    entry.state == RootlessNetworkLeaseState::Active
+        && entry.id == lease.id
+        && entry.generation == lease.generation
+        && entry.owner_pid == Some(lease.owner_pid)
+        && entry.owner_start_time == Some(lease.owner_start_time)
+        && entry.slirp_pid == Some(lease.slirp_pid)
+        && entry.slirp_start_time == Some(lease.slirp_start_time)
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_network_lease_entry_identity_matches(
+    entry: &RootlessNetworkLeaseEntry,
+    lease: &RootlessNetworkLease,
+) -> bool {
+    entry.id == lease.id
+        && entry.generation == lease.generation
+        && entry.owner_pid == Some(lease.owner_pid)
+        && entry.owner_start_time == Some(lease.owner_start_time)
+        && entry.slirp_pid == Some(lease.slirp_pid)
+        && entry.slirp_start_time == Some(lease.slirp_start_time)
+}
+
+/// Transactionally install every requested forward on an exact live lease.
+/// If any add or the registry publication fails, this call removes the forwards
+/// it installed and leaves previously-recorded forwards untouched.
+#[cfg(target_os = "linux")]
+pub fn add_rootless_network_lease_forwards(
+    runtime_dir: &Path,
+    lease: &RootlessNetworkLease,
+    mappings: &[PortMappingRecord],
+) -> Result<(), RuntimeError> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    let _lock = acquire_rootless_network_lease_lock(runtime_dir)?;
+    let mut registry = load_rootless_network_lease_registry(runtime_dir)?;
+    if !registry
+        .leases
+        .iter()
+        .any(|entry| rootless_network_lease_entry_matches(entry, lease))
+    {
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease identity is stale".into(),
+        ));
+    }
+    if !rootless_network_lease_identity_matches(lease) {
+        return Err(RuntimeError::InvalidState(
+            "rootless network lease is no longer alive".into(),
+        ));
+    }
+    let socket = slirp_api_socket_path(runtime_dir, &lease.id)?;
+    let ids = match configure_slirp_host_forwards_with_ids(&socket, mappings) {
+        Ok(ids) => ids,
+        Err(error) => return Err(error),
+    };
+    let additions = mappings
+        .iter()
+        .cloned()
+        .zip(ids.iter().copied())
+        .map(|(mapping, slirp_id)| RootlessNetworkForward { mapping, slirp_id })
+        .collect::<Vec<_>>();
+    let current = registry
+        .leases
+        .iter_mut()
+        .find(|candidate| rootless_network_lease_entry_matches(candidate, lease))
+        .expect("locked lease cannot disappear");
+    current.forwards.extend(additions);
+    if let Err(error) = save_rootless_network_lease_registry(runtime_dir, &registry) {
+        let rollback = remove_slirp_host_forwards(&socket, &ids)
+            .err()
+            .map(|failure| format!("; forwarding rollback failed: {failure}"))
+            .unwrap_or_default();
+        return Err(RuntimeError::InvalidState(format!(
+            "publish rootless network forwards: {error}{rollback}"
+        )));
+    }
+    Ok(())
+}
+
+/// Stop one exact project-network lease.  The complete stable identity is a
+/// CAS boundary: an old Compose invocation cannot tear down a successor that
+/// reused the same logical network key.
+#[cfg(target_os = "linux")]
+pub fn stop_rootless_network_lease(
+    runtime_dir: &Path,
+    lease: &RootlessNetworkLease,
+) -> Result<(), RuntimeError> {
+    let _lock = acquire_rootless_network_lease_lock(runtime_dir)?;
+    let mut registry = load_rootless_network_lease_registry(runtime_dir)?;
+    let index = registry
+        .leases
+        .iter()
+        .position(|entry| rootless_network_lease_entry_identity_matches(entry, lease))
+        .ok_or_else(|| RuntimeError::InvalidState("rootless network lease identity is stale".into()))?;
+    let mut entry = registry.leases[index].clone();
+    let socket = slirp_api_socket_path(runtime_dir, &lease.id)?;
+    // Persist the teardown reservation before the helper can become orphaned.
+    if entry.state == RootlessNetworkLeaseState::Active {
+        entry.state = RootlessNetworkLeaseState::Reserved;
+        registry.leases[index] = entry.clone();
+        save_rootless_network_lease_registry(runtime_dir, &registry)?;
+    }
+    if process_start_time_for_pid(lease.slirp_pid) == Some(lease.slirp_start_time) {
+        let forward_ids = entry
+            .forwards
+            .iter()
+            .map(|forward| forward.slirp_id)
+            .collect::<Vec<_>>();
+        remove_slirp_host_forwards(&socket, &forward_ids)?;
+    }
+    stop_rootless_network_lease_processes(&entry)?;
+    registry.leases.remove(index);
+    save_rootless_network_lease_registry(runtime_dir, &registry)?;
+    match fs::remove_file(socket) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Unix-domain socket paths are limited to `sun_path` (usually 108 bytes).
 /// Container storage may deliberately live under a long isolated directory, so
 /// keep slirp control sockets in a short, per-user host runtime directory.
@@ -12451,6 +13029,7 @@ fn reap_orphaned_slirp4netns_helpers(
     runtime_dir: &Path,
     store: &SqliteContainerStore,
 ) -> Result<(), RuntimeError> {
+    let _lock = acquire_rootless_network_lease_lock(runtime_dir)?;
     reap_orphaned_slirp4netns_helpers_in(runtime_dir, store, Path::new("/proc"))
 }
 
@@ -12468,10 +13047,20 @@ fn reap_orphaned_slirp4netns_helpers_in(
     proc_root: &Path,
 ) -> Result<(), RuntimeError> {
     let records = store.list()?;
-    let owned_sockets = records
+    let mut owned_sockets = records
         .iter()
         .filter_map(|record| slirp_api_socket_path(runtime_dir, &record.id).ok())
         .collect::<HashSet<_>>();
+    // A durable reservation is intentionally enough to retain its socket:
+    // lease creation writes it before starting slirp, and the caller holds the
+    // same registry lock until it either becomes active or is rolled back.
+    // This closes the old cross-runtime reaper window without guessing at an
+    // unrelated helper outside this runtime's socket namespace.
+    for entry in load_rootless_network_lease_registry(runtime_dir)?.leases {
+        if let Ok(socket) = slirp_api_socket_path(runtime_dir, &entry.id) {
+            owned_sockets.insert(socket);
+        }
+    }
     let owned_directory = slirp_api_socket_path(runtime_dir, "probe")?
         .parent()
         .expect("slirp socket always has a parent")
@@ -12595,65 +13184,100 @@ fn configure_slirp_host_forwards(
     api_socket: &Path,
     mappings: &[PortMappingRecord],
 ) -> Result<(), RuntimeError> {
-    if mappings.is_empty() {
-        return Ok(());
-    }
-    for mapping in mappings {
-        let request =
-            build_hostfwd_request(mapping.host_port, mapping.container_port, &mapping.protocol)
-                .map_err(|error| RuntimeError::Network(error.to_string()))?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut last_error = None;
-        let mut configured = false;
-        while Instant::now() < deadline {
-            match UnixStream::connect(api_socket) {
-                Ok(mut stream) => {
-                    stream.write_all(&request)?;
-                    stream.shutdown(std::net::Shutdown::Write)?;
-                    let mut response = Vec::new();
-                    stream.read_to_end(&mut response)?;
-                    let value: serde_json::Value =
-                        serde_json::from_slice(&response).map_err(|error| {
-                            RuntimeError::Network(format!(
-                                "invalid slirp4netns API response: {error}"
-                            ))
-                        })?;
-                    if let Some(error) = value.get("error") {
-                        let holder = host_port_holder(mapping.host_port)
-                            .map(|holder| {
-                                format!("; host port {} is held by {holder}", mapping.host_port)
-                            })
-                            .unwrap_or_default();
-                        return Err(RuntimeError::Network(format!(
-                            "slirp4netns failed to add host forwarding: {error}{holder}"
-                        )));
-                    }
-                    if value
-                        .get("return")
-                        .and_then(|result| result.get("id"))
-                        .is_none()
-                    {
-                        return Err(RuntimeError::Network(
-                            "slirp4netns host forwarding response omitted an id".to_string(),
-                        ));
-                    }
-                    configured = true;
-                    break;
-                }
-                Err(error) => last_error = Some(error),
+    configure_slirp_host_forwards_with_ids(api_socket, mappings).map(|_| ())
+}
+
+fn slirp_api_request(api_socket: &Path, request: &[u8]) -> Result<serde_json::Value, RuntimeError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match UnixStream::connect(api_socket) {
+            Ok(mut stream) => {
+                stream.write_all(request)?;
+                stream.shutdown(std::net::Shutdown::Write)?;
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response)?;
+                return serde_json::from_slice(&response).map_err(|error| {
+                    RuntimeError::Network(format!("invalid slirp4netns API response: {error}"))
+                });
             }
-            thread::sleep(Duration::from_millis(25));
+            Err(error) => last_error = Some(error),
         }
-        if !configured {
-            return Err(RuntimeError::Network(format!(
-                "slirp4netns API socket did not become ready: {}",
-                last_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "timeout".to_string())
-            )));
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(RuntimeError::Network(format!(
+        "slirp4netns API socket did not become ready: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "timeout".to_string())
+    )))
+}
+
+fn configure_slirp_host_forwards_with_ids(
+    api_socket: &Path,
+    mappings: &[PortMappingRecord],
+) -> Result<Vec<u64>, RuntimeError> {
+    let mut ids = Vec::with_capacity(mappings.len());
+    for mapping in mappings {
+        let result = (|| {
+            let request = build_hostfwd_request(
+                mapping.host_port,
+                mapping.container_port,
+                &mapping.protocol,
+            )
+            .map_err(RuntimeError::Network)?;
+            let value = slirp_api_request(api_socket, &request)?;
+            if let Some(error) = value.get("error") {
+                let holder = host_port_holder(mapping.host_port)
+                    .map(|holder| format!("; host port {} is held by {holder}", mapping.host_port))
+                    .unwrap_or_default();
+                return Err(RuntimeError::Network(format!(
+                    "slirp4netns failed to add host forwarding: {error}{holder}"
+                )));
+            }
+            value
+                .get("return")
+                .and_then(|result| result.get("id"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|id| *id != 0)
+                .ok_or_else(|| {
+                    RuntimeError::Network(
+                        "slirp4netns host forwarding response omitted an id".into(),
+                    )
+                })
+        })();
+        match result {
+            Ok(id) => ids.push(id),
+            Err(error) => {
+                let rollback = remove_slirp_host_forwards(api_socket, &ids)
+                    .err()
+                    .map(|failure| format!("; forwarding rollback failed: {failure}"))
+                    .unwrap_or_default();
+                return Err(RuntimeError::InvalidState(format!("{error}{rollback}")));
+            }
         }
     }
-    Ok(())
+    Ok(ids)
+}
+
+fn remove_slirp_host_forwards(api_socket: &Path, ids: &[u64]) -> Result<(), RuntimeError> {
+    let mut failures = Vec::new();
+    for id in ids.iter().rev() {
+        let request = build_remove_hostfwd_request(*id).map_err(RuntimeError::Network)?;
+        match slirp_api_request(api_socket, &request) {
+            Ok(value) if value.get("error").is_none() => {}
+            Ok(value) => failures.push(format!("{id}: {value}")),
+            Err(error) => failures.push(format!("{id}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(RuntimeError::Network(format!(
+            "failed to remove rootless host forwards: {}",
+            failures.join("; ")
+        )))
+    }
 }
 
 fn host_port_holder(port: u16) -> Option<String> {
@@ -17477,6 +18101,33 @@ mod tests {
             !status.success(),
             "orphaned bwrap launcher must be terminated"
         );
+    }
+
+    #[test]
+    fn rootless_network_lease_teardown_cas_rejects_a_successor() {
+        let lease = super::RootlessNetworkLease {
+            id: "00000000-0000-4000-8000-000000000001".to_string(),
+            generation: "00000000-0000-4000-8000-000000000002".to_string(),
+            owner_pid: 100,
+            owner_start_time: 200,
+            slirp_pid: 300,
+            slirp_start_time: 400,
+        };
+        let successor = super::RootlessNetworkLeaseEntry {
+            key: "compose-test".to_string(),
+            id: "00000000-0000-4000-8000-000000000003".to_string(),
+            generation: "00000000-0000-4000-8000-000000000004".to_string(),
+            state: super::RootlessNetworkLeaseState::Active,
+            owner_pid: Some(100),
+            owner_start_time: Some(200),
+            slirp_pid: Some(300),
+            slirp_start_time: Some(400),
+            forwards: Vec::new(),
+        };
+        assert!(!super::rootless_network_lease_entry_identity_matches(
+            &successor, &lease
+        ));
+        assert!(!super::rootless_network_lease_entry_matches(&successor, &lease));
     }
 
     #[test]

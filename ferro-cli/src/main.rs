@@ -15246,6 +15246,52 @@ struct ResolvedRunImageExecution {
 struct ComposeNetworkOwnership {
     project: String,
     networks: Vec<String>,
+    #[serde(default)]
+    rootless_networks: Vec<RootlessComposeNetwork>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RootlessComposeNetwork {
+    network: String,
+    lease: ferro_core::runtime::RootlessNetworkLease,
+}
+
+/// Cleans up only coordinators which never gained a workload.  This covers
+/// every early-return path in Compose-up (authorization, image preparation,
+/// dependencies, and forwarding) without risking an active project's lease.
+#[cfg(target_os = "linux")]
+struct RootlessComposeLeaseCleanup {
+    runtime_dir: PathBuf,
+    unused: Vec<ferro_core::runtime::RootlessNetworkLease>,
+}
+
+#[cfg(target_os = "linux")]
+impl RootlessComposeLeaseCleanup {
+    fn new(runtime_dir: PathBuf) -> Self {
+        Self { runtime_dir, unused: Vec::new() }
+    }
+
+    fn track(&mut self, lease: ferro_core::runtime::RootlessNetworkLease) {
+        self.unused.push(lease);
+    }
+
+    fn keep(&mut self, lease: &ferro_core::runtime::RootlessNetworkLease) {
+        self.unused.retain(|candidate| candidate != lease);
+    }
+
+    fn disarm(&mut self) {
+        self.unused.clear();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for RootlessComposeLeaseCleanup {
+    fn drop(&mut self) {
+        for lease in self.unused.iter().rev() {
+            let _ = ferro_core::runtime::stop_rootless_network_lease(&self.runtime_dir, lease);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -15532,6 +15578,7 @@ fn ensure_compose_networks(
             ownership.push(ComposeNetworkOwnership {
                 project: project_key,
                 networks,
+                rootless_networks: Vec::new(),
             });
         }
         ownership.sort_by(|left, right| left.project.cmp(&right.project));
@@ -15541,52 +15588,109 @@ fn ensure_compose_networks(
 }
 
 #[cfg(target_os = "linux")]
-fn compose_rootless_network_mode(_logical: &str, leader_pid: Option<u32>) -> String {
-    leader_pid
-        .map(|pid| format!("container:pid:{pid}"))
-        .unwrap_or_else(|| "bridge".to_string())
+fn rootless_compose_network_needs_lease(service: &ComposeService) -> bool {
+    if nix::unistd::Uid::effective().is_root() {
+        return false;
+    }
+    match service.network_mode.as_deref() {
+        Some("host" | "none" | "wireguard") => false,
+        Some(mode) if mode.starts_with("container:") => false,
+        _ => true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_compose_network_lease_key(project: &ComposeProject, network: &str) -> String {
+    let project_key = compose_project_key(project);
+    let digest = Sha256::digest([project_key.as_bytes(), b"\0", network.as_bytes()].concat());
+    let suffix = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("compose-{suffix}")
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_rootless_compose_network_lease(
+    project: &ComposeProject,
+    runtime_dir: &Path,
+    network: &str,
+) -> Result<ferro_core::runtime::RootlessNetworkLeaseAcquisition, String> {
+    let acquisition = ferro_core::runtime::acquire_rootless_network_lease(
+        runtime_dir,
+        &rootless_compose_network_lease_key(project, network),
+    )
+    .map_err(|error| error.to_string())?;
+    let project_key = compose_project_key(project);
+    let mut ownership = load_compose_network_ownership(runtime_dir)?;
+    let entry = if let Some(entry) = ownership.iter_mut().find(|entry| entry.project == project_key) {
+        entry
+    } else {
+        ownership.push(ComposeNetworkOwnership {
+            project: project_key.clone(),
+            networks: Vec::new(),
+            rootless_networks: Vec::new(),
+        });
+        ownership.last_mut().expect("project ownership was inserted")
+    };
+    entry.rootless_networks.retain(|entry| entry.network != network);
+    entry.rootless_networks.push(RootlessComposeNetwork {
+        network: network.to_string(),
+        lease: acquisition.lease.clone(),
+    });
+    entry.rootless_networks.sort_by(|left, right| left.network.cmp(&right.network));
+    ownership.sort_by(|left, right| left.project.cmp(&right.project));
+    if let Err(error) = save_compose_network_ownership(runtime_dir, &ownership) {
+        if acquisition.created {
+            let _ = ferro_core::runtime::stop_rootless_network_lease(runtime_dir, &acquisition.lease);
+        }
+        return Err(error);
+    }
+    Ok(acquisition)
+}
+
+#[cfg(target_os = "linux")]
+fn compose_project_network_binding(
+    owners: &HashMap<String, ferro_core::runtime::RootlessNetworkLease>,
+    service: &str,
+    network: &str,
+) -> Result<String, String> {
+    let lease = owners.get(network).ok_or_else(|| {
+        format!("compose: project network lease for {network} was not provisioned before service {service}")
+    })?;
+    if !ferro_core::runtime::rootless_network_lease_alive(lease) {
+        return Err(format!("compose: project network lease for {network} is no longer alive"));
+    }
+    Ok(format!("container:pid:{}", lease.owner_pid))
 }
 
 #[cfg(target_os = "linux")]
 fn compose_publish_uses_bridge_network(
     effective_network: &str,
-    logical_network: Option<&str>,
-    default_network: &str,
+    lease_backed_network: bool,
 ) -> bool {
-    effective_network == "bridge"
-        || (effective_network.starts_with("container:pid:")
-            && logical_network == Some(default_network))
+    effective_network == "bridge" || (lease_backed_network && effective_network.starts_with("container:pid:"))
 }
 
 #[cfg(target_os = "linux")]
 fn compose_rootless_network_binding(
-    runtime: &ContainerRuntime,
+    _runtime: &ContainerRuntime,
     service: &ComposeService,
     name: &str,
     default_network: &str,
-    leaders: &HashMap<String, u32>,
+    leases: &HashMap<String, ferro_core::runtime::RootlessNetworkLease>,
 ) -> Result<(String, Option<String>), String> {
     let logical = compose_service_network(service, name, default_network)?;
     if nix::unistd::Uid::effective().is_root()
         || matches!(logical.as_str(), "host" | "none" | "wireguard")
+        || logical.starts_with("container:")
     {
         return Ok((logical, None));
     }
-    if let Some(pid) = leaders.get(&logical) {
-        return Ok((
-            compose_rootless_network_mode(&logical, Some(*pid)),
-            Some(logical),
-        ));
-    }
-    if let Ok(records) = runtime.list() {
-        if let Some(record) = records
-            .into_iter()
-            .find(|record| record.name.as_deref() == Some(name) && record.status == "running")
-        {
-            return Ok((format!("container:pid:{}", record.pid), Some(logical)));
-        }
-    }
-    Ok((compose_rootless_network_mode(&logical, None), Some(logical)))
+    Ok((
+        compose_project_network_binding(leases, name, &logical)?,
+        Some(logical),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -15636,6 +15740,25 @@ fn remove_owned_compose_networks(
                 .map_err(|error| error.to_string())?;
             execute_network_remove(runtime_dir, &record, &associations, permit)?;
         }
+    }
+    // Rootless project networks have no kernel bridge record.  Their durable
+    // coordinator is nevertheless owned by this Compose project and must be
+    // torn down only after every namespace consumer has gone away.
+    for owned in &entry.rootless_networks {
+        let binding = format!("container:pid:{}", owned.lease.owner_pid);
+        if associations.iter().any(|container| {
+            container
+                .effective_network_endpoints()
+                .iter()
+                .any(|endpoint| endpoint.network_name == binding)
+        }) {
+            return Err(format!(
+                "compose: cannot remove rootless network {} while containers remain attached",
+                owned.network
+            ));
+        }
+        ferro_core::runtime::stop_rootless_network_lease(runtime_dir, &owned.lease)
+            .map_err(|error| format!("compose: remove rootless network {}: {error}", owned.network))?;
     }
     if rootless_compose {
         save_networks(runtime_dir, &records)?;
@@ -15799,7 +15922,38 @@ fn handle_compose(
                 &surface_authorization,
             )?;
             let mut failures = Vec::new();
-            let mut rootless_network_leaders = HashMap::<String, u32>::new();
+            // A project network is owned by a dedicated coordinator, rather
+            // than by whichever application service happens to start first.
+            // In particular, a short-lived migration service must not tear
+            // down the namespace while its followers are still joining it.
+            let mut rootless_network_leases = HashMap::<
+                String,
+                ferro_core::runtime::RootlessNetworkLease,
+            >::new();
+            let mut rootless_lease_cleanup = RootlessComposeLeaseCleanup::new(runtime_dir());
+            for prepared_service in &prepared {
+                let service = project
+                    .compose
+                    .services
+                    .get(&prepared_service.name)
+                    .ok_or_else(|| format!("compose: missing service {}", prepared_service.name))?;
+                if !rootless_compose_network_needs_lease(service) {
+                    continue;
+                }
+                let logical = compose_service_network(service, &prepared_service.name, &default_network)?;
+                if rootless_network_leases.contains_key(&logical) {
+                    continue;
+                }
+                match ensure_rootless_compose_network_lease(&project, &runtime_dir(), &logical) {
+                    Ok(acquisition) => {
+                        if acquisition.created {
+                            rootless_lease_cleanup.track(acquisition.lease.clone());
+                        }
+                        rootless_network_leases.insert(logical, acquisition.lease);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             let prepared_names: Vec<String> = prepared
                 .iter()
                 .map(|prepared| prepared.instance.clone())
@@ -15816,7 +15970,7 @@ fn handle_compose(
                         service,
                         &prepared.name,
                         &default_network,
-                        &rootless_network_leaders,
+                        &rootless_network_leases,
                     )?;
                 let mut mutations = prepared
                     .prerequisites
@@ -16017,7 +16171,9 @@ fn handle_compose(
                     Some(&prepared.instance),
                     Some(&prepared.image),
                     Some(&effective_compose_network),
-                    logical_network.as_deref(),
+                    logical_network
+                        .as_ref()
+                        .is_some_and(|network| rootless_network_leases.contains_key(network)),
                     &image_execution,
                 ) {
                     failures.push(format!("{} run failed: {error}", prepared.instance));
@@ -16044,19 +16200,36 @@ fn handle_compose(
                         prepared.instance
                     ));
                 } else if let Some(logical) = logical_network {
-                    if let Ok(records) = runtime.list() {
-                        if let Some(record) = records.into_iter().find(|record| {
-                            record.name.as_deref() == Some(prepared.instance.as_str())
-                                && record.status == "running"
-                        }) {
-                            rootless_network_leaders.entry(logical).or_insert(record.pid);
-                        }
+                    let lease = rootless_network_leases
+                        .get(&logical)
+                        .expect("logical rootless network has a pre-provisioned lease");
+                    let mappings = parse_publish(&compose_service_ports(service))?;
+                    if let Err(error) = ferro_core::runtime::add_rootless_network_lease_forwards(
+                        &runtime_dir(),
+                        lease,
+                        &mappings,
+                    ) {
+                        let rollback = resolve_container_id(runtime, &prepared.instance)
+                            .and_then(|id| {
+                                runtime.kill(&id).map_err(|failure| failure.to_string())?;
+                                runtime.remove(&id).map_err(|failure| failure.to_string())
+                            })
+                            .err()
+                            .map(|failure| format!("; rollback failed: {failure}"))
+                            .unwrap_or_default();
+                        failures.push(format!(
+                            "{} rootless network forwarding failed: {error}{rollback}",
+                            prepared.instance
+                        ));
+                    } else {
+                        rootless_lease_cleanup.keep(lease);
                     }
                 }
             }
             if !failures.is_empty() {
                 return Err(format!("compose partial result: {}", failures.join("; ")));
             }
+            rootless_lease_cleanup.disarm();
             if !detach {
                 // Attached up keeps this process alive while project
                 // containers run, mirroring Docker's attached semantics. The
@@ -16976,7 +17149,7 @@ fn run_compose_service(
     instance_override: Option<&str>,
     prepared_image: Option<&str>,
     network_override: Option<&str>,
-    logical_network: Option<&str>,
+    lease_backed_network: bool,
     image_execution: &ResolvedRunImageExecution,
 ) -> Result<(), String> {
     let image = if let Some(image) = prepared_image {
@@ -16992,8 +17165,7 @@ fn run_compose_service(
     let requested_network = resolve_compose_network_mode(runtime, &requested_network)?;
     let publish_uses_bridge_network = compose_publish_uses_bridge_network(
         &requested_network,
-        logical_network,
-        default_network,
+        lease_backed_network,
     );
     let cmd = compose_service_command(service);
     let env = compose_service_env(project_dir, service)?;
@@ -31034,39 +31206,36 @@ volumes:
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn rootless_compose_named_network_uses_slirp_leader_or_shared_namespace() {
-        assert_eq!(
-            super::compose_rootless_network_mode("project_default", None),
-            "bridge"
-        );
-        assert_eq!(
-            super::compose_rootless_network_mode("project_default", Some(4242)),
-            "container:pid:4242"
-        );
+    fn rootless_compose_network_lease_selection_preserves_special_modes() {
+        let bridge: ferro_compose::Service = serde_json::from_value(serde_json::json!({}))
+            .expect("bridge service");
+        let explicit_bridge: ferro_compose::Service =
+            serde_json::from_value(serde_json::json!({"network_mode": "bridge"}))
+                .expect("explicit bridge service");
+        let shared: ferro_compose::Service =
+            serde_json::from_value(serde_json::json!({"network_mode": "container:db"}))
+                .expect("shared network service");
+        if !nix::unistd::Uid::effective().is_root() {
+            assert!(super::rootless_compose_network_needs_lease(&bridge));
+            assert!(super::rootless_compose_network_needs_lease(&explicit_bridge));
+            assert!(!super::rootless_compose_network_needs_lease(&shared));
+        }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn compose_publish_accepts_only_implicit_bridge_namespace_joins() {
+    fn compose_publish_accepts_only_lease_backed_bridge_namespace_joins() {
         assert!(super::compose_publish_uses_bridge_network(
             "container:pid:4242",
-            Some("project_default"),
-            "project_default",
+            true,
         ));
         assert!(!super::compose_publish_uses_bridge_network(
             "container:pid:4242",
-            Some("container:db"),
-            "project_default",
+            false,
         ));
         assert!(!super::compose_publish_uses_bridge_network(
-            "container:pid:4242",
-            None,
-            "project_default",
-        ));
-        assert!(!super::compose_publish_uses_bridge_network(
-            "container:pid:4242",
-            Some("other_bridge"),
-            "project_default",
+            "host",
+            true,
         ));
     }
 
@@ -31299,6 +31468,7 @@ volumes:
         let ownership = vec![super::ComposeNetworkOwnership {
             project: "/tmp/project/compose.yaml".to_string(),
             networks: vec!["app-net".to_string(), "db-net".to_string()],
+            rootless_networks: Vec::new(),
         }];
         super::save_compose_network_ownership(runtime_dir.path(), &ownership)
             .expect("save ownership");

@@ -97,6 +97,19 @@ pub fn build_hostfwd_request(
     .map_err(|error| error.to_string())
 }
 
+/// Build the matching slirp4netns request to remove a forwarding rule by the
+/// opaque ID returned from `add_hostfwd`.
+pub fn build_remove_hostfwd_request(id: u64) -> Result<Vec<u8>, String> {
+    if id == 0 {
+        return Err("rootless forwarding id must be non-zero".to_string());
+    }
+    serde_json::to_vec(&json!({
+        "execute": "remove_hostfwd",
+        "arguments": { "id": id },
+    }))
+    .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_slirp4netns_cmd, RootlessNetConfig};
@@ -253,5 +266,14 @@ mod tests {
     #[test]
     fn rejects_unsupported_host_forward_protocol() {
         assert!(super::build_hostfwd_request(8080, 80, "sctp").is_err());
+    }
+
+    #[test]
+    fn builds_remove_host_forward_request() {
+        let request = super::build_remove_hostfwd_request(42).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(value["execute"], "remove_hostfwd");
+        assert_eq!(value["arguments"]["id"], 42);
+        assert!(super::build_remove_hostfwd_request(0).is_err());
     }
 }

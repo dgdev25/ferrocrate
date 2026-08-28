@@ -19139,10 +19139,12 @@ fn handle_docker_compat_connection(
         // creating the request-scoped runtime.  The lock is released before
         // streaming response bodies, so long-lived `/events` or log followers
         // never block unrelated API calls.
-        let _container_store_operation = state
-            .container_store_operations
-            .lock()
-            .map_err(|_| "docker: container store operation lock poisoned".to_string())?;
+        let mut container_store_operation = Some(
+            state
+                .container_store_operations
+                .lock()
+                .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+        );
         let runtime = daemon_request_scope(&daemon_runtime, origin.clone())
             .map_err(|error| error.to_string())?;
         let surface_authorization = runtime
@@ -20641,6 +20643,13 @@ fn handle_docker_compat_connection(
                         return Err(format!("docker: container start already in progress: {id}"));
                     }
                 }
+                // A Docker client sends the attach upgrade and /start as
+                // independent requests.  /start must wait until the attach
+                // handler has written its 101 response, but that handler
+                // itself queues on the store guard.  Keeping the guard here
+                // deadlocks the pair until the timeout, after which clients
+                // report the failed upgrade instead of the process exit code.
+                drop(container_store_operation.take());
                 if let Err(error) =
                     state.wait_for_pre_start_attaches(&id, Duration::from_secs(30))
                 {
@@ -20649,6 +20658,12 @@ fn handle_docker_compat_connection(
                     }
                     return Err(error);
                 }
+                container_store_operation = Some(
+                    state
+                        .container_store_operations
+                        .lock()
+                        .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+                );
                 let health = spec.health.as_ref();
                 let health_override = health.map(|value| {
                     ferro_core::container_store::HealthConfig {
@@ -21740,6 +21755,9 @@ fn handle_docker_compat_connection(
             _ => docker_error_response(404, "not found"),
         };
 
+        // Keep the guard alive for every ordinary request transaction. The
+        // pre-start attach wait above is the sole intentional handoff point.
+        let _container_store_operation = container_store_operation;
         Ok(response)
     })();
 

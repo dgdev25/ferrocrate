@@ -409,6 +409,72 @@ fn rootless_compose_short_lived_first_service_keeps_named_network_and_ports_aliv
 }
 
 #[test]
+fn rootless_compose_explicit_bridge_keeps_published_port_alive() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(
+        project.join("compose.yml"),
+        compose_fixture(
+            "services:\n  web:\n    image: alpine:3.20\n    network_mode: bridge\n    command: [\"sh\", \"-c\", \"exec httpd -f -p 18080\"]\n    ports: [\"18083:18080\"]\n",
+        ),
+    )
+    .expect("compose file");
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+    let compose = |action: &str| {
+        Command::new(binary)
+            .current_dir(&project)
+            .env("FERROCRATE_HOME", &runtime)
+            .env("FERROCRATE_RUNTIME_DIR", &runtime)
+            .env("FERROCRATE_ROOTLESS_NETNS", "1")
+            .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+            .args(["compose", "--file", "compose.yml", action])
+            .output()
+            .expect("run compose")
+    };
+    let up = Command::new(binary)
+        .current_dir(&project)
+        .env("FERROCRATE_HOME", &runtime)
+        .env("FERROCRATE_RUNTIME_DIR", &runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["compose", "--file", "compose.yml", "up", "--detach"])
+        .output()
+        .expect("compose up");
+    assert!(
+        up.status.success(),
+        "explicit bridge rootless compose up failed: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let mut port_live = false;
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", 18083)).is_ok() {
+            port_live = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(port_live, "explicit rootless bridge port never became reachable");
+    let down = compose("down");
+    assert!(
+        down.status.success(),
+        "explicit bridge rootless compose down failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", 18083)).is_err(),
+        "explicit rootless bridge port survived compose down"
+    );
+}
+
+#[test]
 fn rootless_run_mounts_bind_and_named_volumes() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
         return;

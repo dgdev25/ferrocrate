@@ -3649,6 +3649,11 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if record.status == "paused" {
+            return Err(RuntimeError::InvalidState(
+                "unpause the container before exec".into(),
+            ));
+        }
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             if options.user.is_some() {
@@ -3817,6 +3822,11 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if record.status == "paused" {
+            return Err(RuntimeError::InvalidState(
+                "unpause the container before exec".into(),
+            ));
+        }
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
             let mounts = record
@@ -3879,6 +3889,11 @@ impl ContainerRuntime {
             .store
             .get(id)?
             .ok_or_else(|| RuntimeError::ContainerNotFound(id.to_string()))?;
+        if record.status == "paused" {
+            return Err(RuntimeError::InvalidState(
+                "unpause the container before exec".into(),
+            ));
+        }
         let rootfs = self.runtime_dir.join("containers").join(id).join("rootfs");
         let result = if tty {
             if !nix::unistd::Uid::effective().is_root() && rootfs.is_dir() {
@@ -4194,6 +4209,15 @@ impl ContainerRuntime {
             self.persist_user_stopped(proof, id, true)?;
             return Ok(());
         }
+        let was_paused = record.status == "paused";
+        // Docker unpauses as part of stopping. A frozen workload cannot
+        // observe TERM (or the later KILL), so thaw the cgroup before the
+        // signal path and publish the matching paused -> exited transition.
+        if was_paused && pid_identity_matches(&record) {
+            let manager = CgroupV2Manager::new(&self.cgroup_root);
+            let group = manager.create_group(&format!("ferrocrate/{id}"))?;
+            manager.thaw(&group)?;
+        }
         // Publish the manual-stop intent before the signal lands: the exit
         // publisher observes the same terminal state as this mutation, so the
         // restart supervisor needs the flag to hold its place.
@@ -4226,7 +4250,12 @@ impl ContainerRuntime {
         // reach the terminal state `exited`. The stop cause stays in the
         // event/audit log and in `user_stopped`.
         self.persist_effect_status_with_user_stopped(
-            proof, intent, id, "running", "exited", true,
+            proof,
+            intent,
+            id,
+            if was_paused { "paused" } else { "running" },
+            "exited",
+            true,
         )?;
         let _ = log_event(
             &self.runtime_dir,
@@ -5164,10 +5193,15 @@ impl ContainerRuntime {
         if record.command.is_empty() {
             return Err(RuntimeError::MissingCommand);
         }
-        if !stop_existing && matches!(record.status.as_str(), "running" | "paused") {
-            // Docker's `start` on a running or paused container is a no-op
-            // that reports success. Re-spawning the workload would orphan the
-            // live process and leave two supervisors on one record.
+        if !stop_existing && record.status == "paused" {
+            return Err(RuntimeError::InvalidState(
+                "cannot start a paused container, try unpause instead".into(),
+            ));
+        }
+        if !stop_existing && record.status == "running" {
+            // Docker's `start` on a running container is a no-op that reports
+            // success. Re-spawning the workload would orphan the live process
+            // and leave two supervisors on one record.
             return Ok(());
         }
         // Reconciliation restarts do not go through a child supervisor, so

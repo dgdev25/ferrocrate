@@ -14660,6 +14660,16 @@ fn handle_exec(
     }
     let resolved = resolve_container_id(runtime, container)?;
     require_live_container(runtime, &resolved)?;
+    if runtime
+        .inspect(&resolved)
+        .map_err(|err| format!("container {resolved} lookup failed: {err}"))?
+        .status
+        == "paused"
+    {
+        return Err(format!(
+            "container {resolved} is paused, unpause the container before exec"
+        ));
+    }
     let result = if interactive {
         let mut input = Vec::new();
         std::io::stdin()
@@ -32567,6 +32577,54 @@ volumes:
         assert_eq!(record.status, "running");
         assert_eq!(record.pid, 0, "start must not spawn a second workload");
         assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    // S166: Docker stops a paused container by unpausing internally, but
+    // refuses both exec and start until it has been explicitly unpaused.
+    #[test]
+    fn paused_container_stop_exec_and_start_follow_docker_contract() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let paused: ferro_core::container_store::ContainerRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "fz166-paused",
+                "name": "fz166-paused",
+                "pid": 0,
+                "image": "alpine:3.20",
+                "command": ["sleep", "300"],
+                "created_at_unix": 1,
+                "stdout_path": "stdout",
+                "stderr_path": "stderr",
+                "status": "paused"
+            }))
+            .expect("decode paused record");
+        let store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(temp.path().join("containers.db"))
+                .expect("container store");
+        store.put(&paused).expect("seed paused record");
+
+        let exec = handle_exec(
+            &runtime,
+            "fz166-paused",
+            &["true".to_string()],
+            &[],
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect_err("exec refuses a paused container");
+        assert!(exec.contains("unpause the container before exec"), "got: {exec}");
+
+        let start = crate::linux_cli::handle_start(&runtime, "fz166-paused")
+            .expect_err("start refuses a paused container");
+        assert!(start.contains("cannot start a paused container"), "got: {start}");
+
+        handle_stop(&runtime, "fz166-paused", 1).expect("stop unpauses and exits the container");
+        assert_eq!(
+            runtime.inspect("fz166-paused").expect("inspect stopped record").status,
+            "exited"
+        );
     }
 
     // S40: the start echo matches Docker. A name addressed by name comes back

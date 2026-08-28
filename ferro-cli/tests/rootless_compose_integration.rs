@@ -152,13 +152,15 @@ fn rootless_run_stop_disconnect_and_inspect_removes_attachment() {
         "rootless run failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
+    // Detached `run` deliberately writes only the bare ID to stdout so it is
+    // safe to capture from scripts; the decorated diagnostic is on stderr.
     let id = String::from_utf8_lossy(&run.stdout)
         .lines()
-        .find_map(|line| {
-            line.split_once("container_id=")
-                .map(|(_, id)| id.trim().to_string())
-        })
-        .expect("run container id");
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .expect("run container id")
+        .to_string();
+    assert_eq!(id.len(), 64, "detached run must print a full container ID");
     let stop = cli(&["stop", &id]);
     assert!(
         stop.status.success(),
@@ -171,7 +173,7 @@ fn rootless_run_stop_disconnect_and_inspect_removes_attachment() {
         "disconnect failed: {}",
         String::from_utf8_lossy(&disconnect.stderr)
     );
-    let inspect = cli(&["inspect", &id]);
+    let inspect = cli(&["inspect", "--format", "json", &id]);
     assert!(
         inspect.status.success(),
         "inspect failed: {}",
@@ -179,11 +181,13 @@ fn rootless_run_stop_disconnect_and_inspect_removes_attachment() {
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&inspect.stdout).expect("inspect JSON payload");
-    assert_eq!(payload["State"]["Status"], "exited");
+    assert_eq!(payload["status"], "exited");
     assert!(
-        payload["NetworkSettings"]["Networks"]
-            .as_object()
-            .is_none_or(|networks| !networks.contains_key("s183-rootless-net")),
+        payload["network_endpoints"]
+            .as_array()
+            .is_none_or(|endpoints| endpoints.iter().all(|endpoint| {
+                endpoint["network_name"] != "s183-rootless-net"
+            })),
         "detached endpoint remains in inspect: {payload}"
     );
 }

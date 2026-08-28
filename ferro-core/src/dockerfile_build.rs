@@ -2957,7 +2957,11 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 }
             }
             "RUN" => {
-                let run = parse_run(&interpolated, &stage.shell)?;
+                let run = parse_run_with_workdir(
+                    &interpolated,
+                    &stage.shell,
+                    stage.workdir.as_deref().unwrap_or("/"),
+                )?;
                 stage.run.push(run);
             }
             "ARG" => {
@@ -4019,7 +4023,16 @@ fn parse_healthcheck_duration(name: &str, value: &str) -> Result<u64, Dockerfile
     Ok(nanos)
 }
 
+#[cfg(test)]
 fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildError> {
+    parse_run_with_workdir(raw, shell, "/")
+}
+
+fn parse_run_with_workdir(
+    raw: &str,
+    shell: &[String],
+    workdir: &str,
+) -> Result<RunSpec, DockerfileBuildError> {
     let trimmed = raw.trim();
     let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
     let mut cache_mounts = Vec::new();
@@ -4114,9 +4127,12 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("cache mount requires target".to_string())
                 })?;
-                let target = validate_cache_target(target)?;
-                let id = id.unwrap_or(target.trim_start_matches('/'));
-                let id = validate_cache_id(id)?;
+                let target = resolve_run_mount_target(workdir, target)?;
+                let id = match id {
+                    Some(id) => id.to_string(),
+                    None => format!("target-{}", hex::encode(Sha256::digest(target.as_bytes()))),
+                };
+                let id = validate_cache_id(&id)?;
                 cache_mounts.push(CacheMount {
                     target,
                     id,
@@ -4224,7 +4240,7 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
                 let target = target.ok_or_else(|| {
                     DockerfileBuildError::Invalid("bind mount requires target".to_string())
                 })?;
-                let target = validate_cache_target(target)?;
+                let target = resolve_run_mount_target(workdir, target)?;
                 if bind_mounts
                     .iter()
                     .any(|mount: &BindMount| mount.target == target)
@@ -4305,6 +4321,31 @@ fn validate_cache_target(target: &str) -> Result<String, DockerfileBuildError> {
         ));
     }
     Ok(target.trim_end_matches('/').to_string())
+}
+
+/// BuildKit resolves relative cache and bind mount targets against the current
+/// stage workdir. Normalize them while rejecting parent traversal before a
+/// target can reach the rootfs mount setup.
+fn resolve_run_mount_target(workdir: &str, target: &str) -> Result<String, DockerfileBuildError> {
+    if target.starts_with('/') {
+        return validate_cache_target(target);
+    }
+    if target.is_empty()
+        || Path::new(target)
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "cache mount target must not contain parent traversal".to_string(),
+        ));
+    }
+    let base = workdir.trim_end_matches('/');
+    let resolved = if base.is_empty() {
+        format!("/{target}")
+    } else {
+        format!("{base}/{target}")
+    };
+    validate_cache_target(&resolved)
 }
 
 fn validate_cache_id(id: &str) -> Result<String, DockerfileBuildError> {
@@ -6862,7 +6903,8 @@ mod tests {
         export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
-        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
+        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_run_with_workdir,
+        parse_stages,
         parse_stop_signal, prepare_dockerfile_build, prepare_dockerfile_build_with_contexts,
         prune_build_cache, registry_cache_descriptor, registry_cache_reference,
         reject_cache_path_symlinks, resolve_copy_owner, run_stage_worker_pool, save_build_cache,
@@ -6980,6 +7022,24 @@ mod tests {
         let error = parse_stages("FROM scratch\nWORKDIR ../../escape\n")
             .expect_err("WORKDIR must not escape image root");
         assert!(error.to_string().contains("escapes the image root"));
+    }
+
+    #[test]
+    fn run_mount_targets_resolve_relative_to_workdir_without_parent_traversal() {
+        let run = parse_run_with_workdir(
+            "--mount=type=bind,source=package.json,target=package.json --mount=type=cache,target=.cache echo value",
+            &["/bin/sh".into(), "-c".into()],
+            "/usr/src/app",
+        )
+        .expect("relative bind and cache mount targets parse");
+        assert_eq!(run.bind_mounts[0].target, "/usr/src/app/package.json");
+        assert_eq!(run.cache_mounts[0].target, "/usr/src/app/.cache");
+        assert!(parse_run_with_workdir(
+            "--mount=type=bind,source=package.json,target=../package.json echo value",
+            &["/bin/sh".into(), "-c".into()],
+            "/usr/src/app",
+        )
+        .is_err());
     }
 
     #[test]
@@ -9670,8 +9730,14 @@ mod tests {
         .expect("locked cache sharing parses");
         assert_eq!(locked.cache_mounts[0].sharing, CacheSharing::Locked);
 
-        for invalid in [
+        let relative = parse_run(
             "--mount=type=cache,target=relative echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("relative cache target resolves against the stage workdir");
+        assert_eq!(relative.cache_mounts[0].target, "/relative");
+
+        for invalid in [
             "--mount=type=cache,target=/tmp/../escape echo value",
             "--mount=type=cache,target=/tmp,id=bad/slash echo value",
             "--mount=type=cache,target=/tmp,source=seed echo value",

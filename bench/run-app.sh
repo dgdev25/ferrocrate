@@ -55,7 +55,20 @@ if [ -z "$COMPOSE_PORT" ] && [ "$HAS_COMPOSE" = 1 ]; then
 fi
 COMPOSE_PORT="${COMPOSE_PORT:-$PORT}"
 VOLS=""; FIRST_VOL=""; for d in $DATA_PATHS; do v="bench_${APP}_$(basename $d):/app/$d"; VOLS="$VOLS -v $v"; [ -z "$FIRST_VOL" ] && FIRST_VOL="$v"; done
-ENVS=""; for kv in $ENV_LIST; do ENVS="$ENVS -e ${kv/: /=}"; done
+ENV_ARGS=()
+if [ "$ENV_LIST" != "{}" ] && [ -n "$ENV_LIST" ]; then
+  env_body="${ENV_LIST#\{}"; env_body="${env_body%\}}"
+  IFS=',' read -r -a env_pairs <<< "$env_body"
+  for kv in "${env_pairs[@]}"; do
+    kv="${kv#"${kv%%[![:space:]]*}"}"; kv="${kv%"${kv##*[![:space:]]}"}"
+    key="${kv%%:*}"; value="${kv#*:}"
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"; value="${value%\"}"
+    [ -n "$key" ] || { echo "invalid manifest env entry: $kv" >&2; exit 2; }
+    ENV_ARGS+=( -e "$key=$value" )
+  done
+fi
 IMG="bench/$APP:latest"
 
 # --- engines ---
@@ -65,7 +78,7 @@ run_engine() {
     docker)     CLI="docker"; COMPOSE="docker compose";;
     ferrocrate) CLI="$BENCH/ferro-adapter.sh"; COMPOSE="$BENCH/ferro-adapter.sh compose";;
   esac
-  export CLI COMPOSE ENGINE APP IMG PORT CPORT HEALTH VOLS ENVS FIRST_VOL CTX WORK HAS_COMPOSE SKIP BASE_IMAGE BUILD_FILE_ARG COMPOSE_PORT
+  export CLI COMPOSE ENGINE APP IMG PORT CPORT HEALTH VOLS FIRST_VOL CTX WORK HAS_COMPOSE SKIP BASE_IMAGE BUILD_FILE_ARG COMPOSE_PORT
   step() { local name="$1"; shift; local st ex t0 t1 tail
     if [[ " $SKIP " == *" $name "* ]]; then printf '{"app":"%s","engine":"%s","step":"%s","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"%s","head":"%s"}\n' "$APP" "$ENGINE" "$name" "$RUN" "$HEAD" >> "$OUT"; echo "SKIP $name"; return; fi
     t0=$(( ${EPOCHREALTIME/./} / 1000 )); timeout "${STEP_TIMEOUT:-600}" "$@" > "$WORK/$name.out" 2> "$WORK/$name.err"; ex=$?; t1=$(( ${EPOCHREALTIME/./} / 1000 ))

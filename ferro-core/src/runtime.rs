@@ -111,7 +111,7 @@ use nix::errno::Errno;
 use nix::fcntl::{flock, FlockArg};
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
@@ -121,7 +121,7 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
@@ -3497,7 +3497,7 @@ impl ContainerRuntime {
         }
         release_prepared_child(child_id)?;
         if use_slirp {
-            let api_socket = container_dir.join("slirp4netns.sock");
+            let api_socket = slirp_api_socket_path(&record.id)?;
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
                     rollback.slirp_process = Some((helper_pid, helper_start_time));
@@ -11960,6 +11960,19 @@ fn start_slirp4netns(pid: u32, api_socket: Option<&Path>) -> Result<(u32, u64), 
     Ok((helper_pid, helper_start_time))
 }
 
+/// Unix-domain socket paths are limited to `sun_path` (usually 108 bytes).
+/// Container storage may deliberately live under a long isolated directory, so
+/// keep slirp control sockets in a short, per-user host runtime directory.
+fn slirp_api_socket_path(container_id: &str) -> Result<PathBuf, RuntimeError> {
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let directory = std::env::temp_dir().join(format!("ferrocrate-slirp-{uid}"));
+    fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let digest = hex::encode(Sha256::digest(container_id.as_bytes()));
+    Ok(directory.join(format!("{}.sock", &digest[..24])))
+}
+
 fn close_inherited_helper_fds() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -12003,12 +12016,15 @@ fn reap_orphaned_slirp4netns_helpers(
 /// transitional state while creation is being committed; neither makes its
 /// runtime directory or helper an orphan.
 fn reap_orphaned_slirp4netns_helpers_in(
-    runtime_dir: &Path,
+    _runtime_dir: &Path,
     store: &SqliteContainerStore,
     proc_root: &Path,
 ) -> Result<(), RuntimeError> {
-    let containers_dir = runtime_dir.join("containers");
     let records = store.list()?;
+    let owned_sockets = records
+        .iter()
+        .filter_map(|record| slirp_api_socket_path(&record.id).ok())
+        .collect::<HashSet<_>>();
     for entry in fs::read_dir(proc_root)?.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
@@ -12019,22 +12035,11 @@ fn reap_orphaned_slirp4netns_helpers_in(
         let Some(socket) = slirp_api_socket_from_cmdline(&cmdline) else {
             continue;
         };
-        let socket = Path::new(socket);
-        let Ok(relative) = socket.strip_prefix(&containers_dir) else {
-            continue;
-        };
-        let mut components = relative.components();
-        let Some(std::path::Component::Normal(id)) = components.next() else {
-            continue;
-        };
-        if components.next().is_some() || socket.file_name() != Some(OsStr::new("slirp4netns.sock"))
-        {
+        let socket = PathBuf::from(socket);
+        if socket.parent() != slirp_api_socket_path("probe")?.parent() {
             continue;
         }
-        let owned = records
-            .iter()
-            .any(|record| record.id.as_bytes() == id.as_bytes());
-        if !owned {
+        if !owned_sockets.contains(&socket) {
             if let Err(error) = kill_pid(pid) {
                 log::warn!("failed to reap orphaned slirp4netns helper {pid}: {error}");
             }
@@ -16883,6 +16888,14 @@ mod tests {
     }
 
     #[test]
+    fn slirp_api_socket_stays_within_unix_socket_limit_for_long_runtime_paths() {
+        let first = super::slirp_api_socket_path(&"a".repeat(64)).expect("first socket");
+        let second = super::slirp_api_socket_path(&"b".repeat(64)).expect("second socket");
+        assert!(first.as_os_str().len() < 108, "{}", first.display());
+        assert_ne!(first, second, "container sockets must not collide");
+    }
+
+    #[test]
     fn bwrap_reaper_kills_a_launcher_without_a_container_record() {
         let runtime = tempfile::tempdir().expect("runtime root");
         let store = crate::sqlite_container_store::SqliteContainerStore::open(
@@ -16944,13 +16957,7 @@ mod tests {
         let record = fixture_container_record("recorded-helper", "created");
         store.put(&record).expect("persist recorded container");
 
-        let socket = runtime
-            .path()
-            .join("containers")
-            .join(&record.id)
-            .join("slirp4netns.sock");
-        std::fs::create_dir_all(socket.parent().expect("socket parent"))
-            .expect("helper directory");
+        let socket = super::slirp_api_socket_path(&record.id).expect("short helper socket");
         let mut helper = std::process::Command::new("bash")
             .args([
                 "-c",

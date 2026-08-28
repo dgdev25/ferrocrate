@@ -17778,7 +17778,10 @@ impl DockerCompatState {
         build_id: &str,
         request: buildkit_proto::moby::buildkit::v1::frontend::SolveRequest,
     ) -> Result<Arc<BuildkitBuild>, String> {
-        if request.frontend != "dockerfile.v0" || request.definition.is_some() {
+        let is_dockerfile = request.frontend == "dockerfile.v0"
+            || (request.frontend == "gateway.v0"
+                && request.frontend_opt.get("source").map(String::as_str) == Some("dockerfile.v0"));
+        if !is_dockerfile || request.definition.is_some() {
             return Err("buildkit gateway: only dockerfile.v0 frontend solves are supported".to_string());
         }
         let build = self.buildkit_build(build_id)?;
@@ -24725,14 +24728,33 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
             "source.local",
             "source.local.unique",
             "source.local.sessionid",
+            "source.local.includepatterns",
+            "source.local.followpaths",
+            "source.local.excludepatterns",
             "source.local.sharedkeyhint",
+            "source.git",
+            "source.git.keepgitdir",
+            "source.git.fullurl",
+            "source.http",
+            "source.http.checksum",
+            "source.http.perm",
+            "soruce.http.uidgid",
+            "source.buildop.llbfilename",
             "exec.meta.base",
             "exec.meta.network",
             "exec.meta.proxyenv",
             "exec.mount.bind",
+            "exec.mount.cache",
+            "exec.mount.cache.sharing",
+            "exec.mount.selector",
+            "exec.mount.tmpfs",
+            "exec.mount.secret",
             "file.base",
             "constraints",
             "platform",
+            "meta.ignorecache",
+            "meta.description",
+            "meta.exportcache",
         ]
         .into_iter()
         .map(enabled)
@@ -24914,7 +24936,16 @@ async fn execute_buildkit_frontend(
         .filter(|name| !name.is_empty())
         .unwrap_or("local/build:latest")
         .to_string();
-    let platform = request.frontend_opt.get("platform").cloned();
+    // The classic executor materializes one platform at a time.  BuildKit
+    // clients commonly request a comma-separated platform list even for
+    // check-only solves; use its first requested platform here rather than
+    // handing the whole list to the single-platform parser.
+    let platform = request
+        .frontend_opt
+        .get("platform")
+        .and_then(|platforms| platforms.split(',').next())
+        .filter(|platform| !platform.is_empty())
+        .map(str::to_owned);
     // Registry pulls and the classic build executor are synchronous.  Running
     // them on this h2 request runtime makes reqwest's blocking client try to
     // tear down its private Tokio runtime from an async context, which aborts
@@ -24987,13 +25018,30 @@ async fn execute_buildkit_frontend(
 #[cfg(target_os = "linux")]
 fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
     let mut instructions = Vec::new();
+    let mut heredoc_terminator = None;
     for (index, line) in dockerfile.lines().enumerate() {
         let trimmed = line.trim();
+        if let Some(terminator) = heredoc_terminator.as_deref() {
+            if trimmed == terminator {
+                heredoc_terminator = None;
+            }
+            continue;
+        }
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let keyword = trimmed.split_whitespace().next().unwrap_or("");
         instructions.push((index + 1, keyword.to_string(), trimmed.to_string()));
+        if let Some(marker) = trimmed.split("<<").nth(1) {
+            let terminator = marker
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"']);
+            if !terminator.is_empty() {
+                heredoc_terminator = Some(terminator.to_string());
+            }
+        }
     }
     let uppercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_uppercase()).count();
     let lowercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_lowercase()).count();
@@ -34210,11 +34258,11 @@ volumes:
             .record_buildkit_gateway_solve(
                 "build-ref",
                 frontend::SolveRequest {
-                    frontend: "dockerfile.v0".to_string(),
-                    frontend_opt: HashMap::from([(
-                        "filename".to_string(),
-                        "Dockerfile.custom".to_string(),
-                    )]),
+                    frontend: "gateway.v0".to_string(),
+                    frontend_opt: HashMap::from([
+                        ("source".to_string(), "dockerfile.v0".to_string()),
+                        ("filename".to_string(), "Dockerfile.custom".to_string()),
+                    ]),
                     ..Default::default()
                 },
             )
@@ -34225,7 +34273,7 @@ volumes:
 
         assert_eq!(
             build.gateway_solve.lock().expect("gateway solve").as_ref().expect("callback").frontend,
-            "dockerfile.v0"
+            "gateway.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
     }
@@ -34287,10 +34335,20 @@ volumes:
         ] {
             assert!(frontend_caps.contains(required), "missing frontend cap {required}");
         }
-        assert!(pong
+        let llb_caps = pong
             .llb_caps
             .iter()
-            .any(|cap| cap.enabled && cap.id == "source.local.sessionid"));
+            .filter(|cap| cap.enabled)
+            .map(|cap| cap.id.as_str())
+            .collect::<HashSet<_>>();
+        for required in [
+            "source.local.sessionid",
+            "source.local.followpaths",
+            "source.local.excludepatterns",
+            "meta.description",
+        ] {
+            assert!(llb_caps.contains(required), "missing LLB cap {required}");
+        }
     }
 
     #[test]

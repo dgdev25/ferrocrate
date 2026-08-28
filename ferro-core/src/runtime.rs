@@ -17451,10 +17451,10 @@ mod tests {
         .expect("container store");
         let rootfs = runtime.path().join("containers/orphan/rootfs");
         std::fs::create_dir_all(&rootfs).expect("orphan rootfs");
-        let mut child = std::process::Command::new("bash")
+        let mut child = std::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a bwrap python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "exec -a bwrap /usr/bin/python3 -c 'import time; time.sleep(60)' \"$@\"",
                 "bwrap",
                 "--bind",
                 rootfs.to_str().expect("rootfs path"),
@@ -17527,10 +17527,10 @@ mod tests {
 
         let socket =
             super::slirp_api_socket_path(runtime.path(), &record.id).expect("short helper socket");
-        let mut helper = std::process::Command::new("bash")
+        let mut helper = std::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "exec -a /usr/bin/slirp4netns /usr/bin/python3 -c 'import time; time.sleep(60)' \"$@\"",
                 "slirp4netns",
                 &format!("--api-socket={}", socket.display()),
             ])
@@ -17573,10 +17573,10 @@ mod tests {
 
         let socket = super::slirp_api_socket_path(runtime_a.path(), &record.id)
             .expect("short helper socket");
-        let mut helper = std::process::Command::new("bash")
+        let mut helper = std::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "exec -a /usr/bin/slirp4netns /usr/bin/python3 -c 'import time; time.sleep(60)' \"$@\"",
                 "slirp4netns",
                 &format!("--api-socket={}", socket.display()),
             ])
@@ -17617,10 +17617,10 @@ mod tests {
         .expect("container store");
         let socket = super::slirp_api_socket_path(runtime.path(), "orphaned-helper")
             .expect("short helper socket");
-        let mut helper = std::process::Command::new("bash")
+        let mut helper = std::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "exec -a /usr/bin/slirp4netns /usr/bin/python3 -c 'import time; time.sleep(60)' \"$@\"",
                 "slirp4netns",
                 &format!("--api-socket={}", socket.display()),
             ])
@@ -17653,10 +17653,10 @@ mod tests {
         let legacy_socket = std::env::temp_dir()
             .join(format!("ferrocrate-slirp-{uid}"))
             .join("legacy-unscoped.sock");
-        let mut helper = std::process::Command::new("bash")
+        let mut helper = std::process::Command::new("/bin/bash")
             .args([
                 "-c",
-                "exec -a /usr/bin/slirp4netns python3 -c 'import time; time.sleep(60)' \"$@\"",
+                "exec -a /usr/bin/slirp4netns /usr/bin/python3 -c 'import time; time.sleep(60)' \"$@\"",
                 "slirp4netns",
                 &format!("--api-socket={}", legacy_socket.display()),
             ])

@@ -82,9 +82,10 @@ use ferro_core::image_manifest::{
     parse_image_manifest, Descriptor, ImageManifest, OCI_IMAGE_CONFIG_MEDIA_TYPE,
     OCI_IMAGE_LAYER_GZIP_MEDIA_TYPE, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
-use ferro_core::image_store::LocalImageStore;
+use ferro_core::image_store::{ImageStoreError, LocalImageStore};
 use ferro_core::image_tagging::{
-    canonicalize_reference, execute_image_tag_authorized, prepare_image_tag, resolve_reference,
+    canonicalize_reference, execute_image_tag_authorized, normalize_selector, prepare_image_tag,
+    resolve_reference, ImageSelector,
 };
 use ferro_core::layer_compression::{open_decompressed_layer_reader, CompressionFormat};
 use ferro_core::registry::{parse_image_reference, RegistryAuth, RegistryClient};
@@ -5392,8 +5393,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 &container,
                 &repository,
             ),
-            Commands::Rmi { force: _, images } => handle_multiple_containers(&images, "rmi", |image| {
-                handle_rmi(&image_store, image, &surface_authorization)
+            Commands::Rmi { force, images } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image, force, &surface_authorization)
             }),
             Commands::ImagePrune { filters, all, .. } => {
                 // `-a` is Docker's sugar for the dangling=false selector.
@@ -5404,8 +5405,8 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 let container_keys = docker_image_container_references(&runtime);
                 handle_image_prune(&image_store, &surface_authorization, &filters, &container_keys)
             }
-            Commands::Image { command: ImageCommands::Rm { images, .. } } => handle_multiple_containers(&images, "rmi", |image| {
-                handle_rmi(&image_store, image, &surface_authorization)
+            Commands::Image { command: ImageCommands::Rm { force, images } } => handle_multiple_containers(&images, "rmi", |image| {
+                handle_rmi(&image_store, image, force, &surface_authorization)
             }),
             Commands::Image { command: ImageCommands::Prune { filters, all, .. } } => {
                 let mut filters = filters.clone();
@@ -6888,7 +6889,7 @@ fn handle_run(
         return Err("run: publish requires --network bridge".to_string());
     }
     if !ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
-        parse_image_reference(image).map_err(|error| error.to_string())?;
+        normalize_selector(image).map_err(|error| error.to_string())?;
     }
     let origin = runtime
         .request_origin()
@@ -6912,7 +6913,7 @@ fn handle_run(
     } else {
         image.to_string()
     };
-    parse_image_reference(&effective_image).map_err(|error| error.to_string())?;
+    normalize_selector(&effective_image).map_err(|error| error.to_string())?;
     ensure_image_present(store, &effective_image, &origin, &surface_authorization)?;
     let limits = build_limits(memory_max, cpu_quota, cpu_period, pids_max)?;
     let mounts = parse_bind_mounts(bind_mounts)?;
@@ -8699,14 +8700,13 @@ fn dispatch_remote_socket(
         )
         .and_then(|body| print_remote_image_inspect(&body, format)),
         Commands::Tag { source, target } => (|| -> Result<(), String> {
-            let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
             let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
             let (repo, tag) = split_reference(&target);
             request(
                 "POST",
                 format!(
                     "/images/{}/tag?repo={}&tag={}",
-                    percent_encode_path_component(&source),
+                    percent_encode_path_component(source),
                     percent_encode_path_component(repo),
                     percent_encode_path_component(tag)
                 ),
@@ -8724,10 +8724,9 @@ fn dispatch_remote_socket(
                 .and_then(|body| print_json(body, "json"))
         })(),
         Commands::Rmi { force, images } => handle_multiple_containers(images, "rmi", |image| {
-            let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
             request(
                 "DELETE",
-                format!("/images/{}?force={force}", percent_encode_path_component(&canonical)),
+                format!("/images/{}?force={force}", percent_encode_path_component(image)),
             )
             .map(|_| ())
         }),
@@ -10683,14 +10682,17 @@ fn ensure_image_present(
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    parse_image_reference(image).map_err(|err| err.to_string())?;
-    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
-    let existing = resolve_reference(store, &canonical).map_err(|err| err.to_string())?;
+    let selector = normalize_selector(image).map_err(|err| err.to_string())?;
+    let existing = resolve_reference(store, image).map_err(|err| err.to_string())?;
     if existing.is_some() {
         return Ok(());
     }
-    handle_pull_authorized(store, &canonical, false, origin, authorization)
-        .map_err(|error| format_image_pull_error(&canonical, &error))
+    if selector.is_local_only() {
+        return Err(format!("run: image {image} was not found locally"));
+    }
+    let canonical = selector.canonical();
+    handle_pull_authorized(store, canonical, false, origin, authorization)
+        .map_err(|error| format_image_pull_error(canonical, &error))
 }
 
 fn format_image_pull_error(image: &str, reason: &str) -> String {
@@ -11279,11 +11281,15 @@ fn prefetch_dockerfile_bases(
     for base in ferro_core::dockerfile_build::dockerfile_external_base_images(dockerfile)
         .map_err(|error| error.to_string())?
     {
+        let selector = normalize_selector(&base).map_err(|error| error.to_string())?;
         if resolve_reference(store, &base)
             .map_err(|error| error.to_string())?
             .is_some()
         {
             continue;
+        }
+        if selector.is_local_only() {
+            return Err(format!("build: base image not found locally: {base}"));
         }
         let parsed = parse_image_reference(&base).map_err(|error| error.to_string())?;
         let supplied_auth = session_auth.and_then(|auth| auth.get(&parsed.registry));
@@ -11967,10 +11973,10 @@ fn handle_images(
 }
 
 fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
-    let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
-    let reference = resolve_reference(store, &canonical)
+    let selector = normalize_selector(image).map_err(|error| error.to_string())?;
+    let reference = resolve_reference(store, image)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("history: not found {canonical}"))?;
+        .ok_or_else(|| format!("history: not found {}", selector.canonical()))?;
     let manifest = parse_image_manifest(&reference.manifest_json)
         .map_err(|error| format!("history: invalid image manifest: {error}"))?;
     let history = manifest
@@ -12015,10 +12021,10 @@ fn handle_history(store: &LocalImageStore, image: &str, format: &str) -> Result<
 }
 
 fn handle_image_inspect(runtime_dir: &Path, store: &LocalImageStore, image: &str, format: &str) -> Result<(), String> {
-    let canonical = canonicalize_reference(image).map_err(|error| error.to_string())?;
-    let reference = resolve_reference(store, &canonical)
+    let selector = normalize_selector(image).map_err(|error| error.to_string())?;
+    let reference = resolve_reference(store, image)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("image inspect: not found {canonical}"))?;
+        .ok_or_else(|| format!("image inspect: not found {}", selector.canonical()))?;
     let payload = docker_image_inspect_payload(runtime_dir, store, &reference)?;
     if format == "json" {
         println!(
@@ -12957,10 +12963,9 @@ fn handle_tag(
     target: &str,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    let source = canonicalize_reference(source).map_err(|error| error.to_string())?;
     let target = canonicalize_reference(target).map_err(|error| error.to_string())?;
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    let plan = prepare_image_tag(store, &source, &target).map_err(|error| error.to_string())?;
+    let plan = prepare_image_tag(store, source, &target).map_err(|error| error.to_string())?;
     let permit = authorization
         .authorize_image_tag_plan(&origin, &plan)
         .map_err(|error| error.to_string())?;
@@ -12972,33 +12977,98 @@ fn handle_tag(
 fn handle_rmi(
     store: &LocalImageStore,
     image: &str,
+    force: bool,
     authorization: &SurfaceAuthorization,
 ) -> Result<(), String> {
-    parse_image_reference(image).map_err(|err| err.to_string())?;
     let origin = RequestOrigin::cli_current().map_err(|error| error.to_string())?;
-    handle_rmi_authorized(store, image, &origin, authorization)
+    handle_rmi_authorized(store, image, force, &origin, authorization)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug)]
+enum ImageRemoveError {
+    Store(ImageStoreError),
+    Other(String),
+}
+
+impl std::fmt::Display for ImageRemoveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::Other(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for ImageRemoveError {}
+
+impl From<ImageStoreError> for ImageRemoveError {
+    fn from(error: ImageStoreError) -> Self {
+        Self::Store(error)
+    }
 }
 
 fn handle_rmi_authorized(
     store: &LocalImageStore,
     image: &str,
+    force: bool,
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
-) -> Result<(), String> {
-    let canonical = canonicalize_reference(image).map_err(|err| err.to_string())?;
-    let record = resolve_reference(store, &canonical)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| format!("rmi: not found {canonical}"))?;
-    let proof = authorization
-        .authorize_image_binding(
-            origin,
-            AuthorizationAction::ImageDelete,
-            &canonical,
-            &record.digest,
-            1,
-        )
-        .map_err(|error| error.to_string())?;
-    execute_image_delete(store, &canonical, &record.digest, proof)
+) -> Result<(), ImageRemoveError> {
+    let selector = normalize_selector(image).map_err(|err| ImageRemoveError::Other(err.to_string()))?;
+    let record = resolve_reference(store, image)
+        .map_err(|err| ImageRemoveError::Other(err.to_string()))?
+        .ok_or_else(|| ImageRemoveError::Other(format!("rmi: not found {}", selector.canonical())))?;
+    match selector {
+        ImageSelector::Named(canonical) => {
+            let proof = authorization
+                .authorize_image_binding(
+                    origin,
+                    AuthorizationAction::ImageDelete,
+                    &canonical,
+                    &record.digest,
+                    1,
+                )
+                .map_err(|error| ImageRemoveError::Other(error.to_string()))?;
+            execute_image_delete(store, &canonical, &record.digest, proof)
+                .map_err(ImageRemoveError::Other)
+        }
+        ImageSelector::IdPrefix(_) => {
+            let plan = store.prepare_digest_delete(&record.digest, force)?;
+            let mut permits = Vec::with_capacity(plan.references().len());
+            for reference in plan.references() {
+                match authorization.authorize_image_binding(
+                    origin,
+                    AuthorizationAction::ImageDelete,
+                    reference,
+                    plan.digest(),
+                    1,
+                ) {
+                    Ok(permit) => permits.push(permit),
+                    Err(error) => {
+                        let mut cleanup_error = None;
+                        for permit in permits {
+                            if let Err(finish) = permit.finish(false) {
+                                cleanup_error.get_or_insert(finish);
+                            }
+                        }
+                        if let Some(finish) = cleanup_error {
+                            return Err(ImageRemoveError::Other(finish.to_string()));
+                        }
+                        return Err(ImageRemoveError::Other(error.to_string()));
+                    }
+                }
+            }
+            let digest = plan.digest().to_string();
+            let removed = store.execute_digest_delete_authorized(plan, permits)?;
+            if removed {
+                println!("rmi: removed {digest}");
+            } else {
+                println!("rmi: not found {digest}");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn execute_image_delete(
@@ -13007,8 +13077,7 @@ fn execute_image_delete(
     digest: &str,
     permit: SurfacePermit,
 ) -> Result<(), String> {
-    let removed = store
-        .remove_reference_authorized(canonical, digest, permit)
+    let removed = store.remove_reference_authorized(canonical, digest, permit)
         .map_err(|err| err.to_string())?;
     if removed {
         println!("rmi: removed {canonical}");
@@ -15305,6 +15374,10 @@ fn prepare_compose_service(
         .map_err(|error| error.to_string())?
         .is_none()
     {
+        let selector = normalize_selector(&image).map_err(|error| error.to_string())?;
+        if selector.is_local_only() {
+            return Err(format!("compose: image {image} was not found locally"));
+        }
         prerequisites.push(ComposePrerequisite::ImagePull(
             ferro_core::image_fetch::inspect_image_binding(&image)
                 .map_err(|error| error.to_string())?,
@@ -22082,8 +22155,15 @@ fn handle_docker_compat_connection(
             }
             ("DELETE", path) if path.starts_with("/images/") => {
                 let reference = percent_decode_path_segment(path.trim_start_matches("/images/"))?;
-                handle_rmi_authorized(&store, &reference, &origin, &surface_authorization)?;
-                http_response(200, b"[]", "application/json")
+                let force = parse_docker_bool_query(query.get("force"), "force")?;
+                match handle_rmi_authorized(&store, &reference, force, &origin, &surface_authorization) {
+                    Ok(()) => http_response(200, b"[]", "application/json"),
+                    Err(ImageRemoveError::Store(ImageStoreError::DeleteConflict(digest))) => {
+                        let message = ImageStoreError::DeleteConflict(digest).to_string();
+                        docker_error_response(409, &message)
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
             }
             ("POST", "/volumes/create") => {
                 let body: serde_json::Value = serde_json::from_slice(&request.body)
@@ -25565,11 +25645,16 @@ async fn execute_buildkit_frontend(
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
     for base in &external_bases {
+        let selector = normalize_selector(base)
+            .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?;
         if resolve_reference(execution.store.as_ref(), base)
             .map_err(|error| format!("buildkit solve: inspect base failed: {error}"))?
             .is_some()
         {
             continue;
+        }
+        if selector.is_local_only() {
+            return Err(format!("buildkit solve: base image not found locally: {base}"));
         }
         let registry = parse_image_reference(base)
             .map_err(|error| format!("buildkit solve: invalid base image: {error}"))?
@@ -30427,7 +30512,7 @@ volumes:
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");
         let authorization = test_surface_authorization(temp.path());
-        let err = handle_rmi(&store, "", &authorization).expect_err("invalid image");
+        let err = handle_rmi(&store, "", false, &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
     }
 

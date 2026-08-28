@@ -38,6 +38,22 @@ impl ImageReferenceWritePlan {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageDeletePlan {
+    digest: String,
+    references: Vec<String>,
+}
+
+impl ImageDeletePlan {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn references(&self) -> &[String] {
+        &self.references
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ImageStoreError {
     #[error("failed to open image store: {0}")]
@@ -54,6 +70,14 @@ pub enum ImageStoreError {
     Decode(#[source] serde_json::Error),
     #[error("image authorization binding failed: {0}")]
     Authorization(String),
+    #[error("multiple images match prefix: {0}")]
+    AmbiguousIdPrefix(String),
+    #[error("conflict: unable to delete {0} because it has multiple references; use force")]
+    DeleteConflict(String),
+    #[error("image not found: {0}")]
+    DeleteNotFound(String),
+    #[error("image delete inventory changed after authorization")]
+    DeleteInventoryChanged,
 }
 
 #[derive(Clone)]
@@ -250,7 +274,10 @@ impl LocalImageStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(error) => return Err(error.into()),
         }
-        let requested_digest = reference.rsplit_once('@').map(|(_, digest)| digest);
+        let requested_digest = reference
+            .strip_prefix("sha256:")
+            .map(|_| reference)
+            .or_else(|| reference.rsplit_once('@').map(|(_, digest)| digest));
         if let Some(digest) = requested_digest {
             match db.query_row(
                 "SELECT reference, digest, manifest_media_type, manifest_json, created_at_unix
@@ -258,7 +285,12 @@ impl LocalImageStore {
                 params![digest],
                 image_record_from_row,
             ) {
-                Ok(record) => return Ok(Some(record)),
+                Ok(mut record) => {
+                    if reference.contains('@') {
+                        record.reference = reference.to_string();
+                    }
+                    return Ok(Some(record));
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -266,15 +298,66 @@ impl LocalImageStore {
         Ok(None)
     }
 
-    fn remove_reference(&self, reference: &str) -> Result<bool, ImageStoreError> {
+    pub fn resolve_id_prefix(&self, prefix: &str) -> Result<Option<ImageRecord>, ImageStoreError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        let pattern = format!("sha256:{}%", prefix.to_ascii_lowercase());
+        let mut statement = db.prepare(
+            "SELECT reference, digest, manifest_media_type, manifest_json, created_at_unix
+             FROM image_digests WHERE lower(digest) LIKE ?1 ORDER BY digest LIMIT 2",
+        )?;
+        let records = statement
+            .query_map(params![pattern], image_record_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => Ok(Some(record.clone())),
+            _ => Err(ImageStoreError::AmbiguousIdPrefix(prefix.to_string())),
+        }
+    }
+
+    fn remove_reference_if_digest(
+        &self,
+        reference: &str,
+        digest: &str,
+    ) -> Result<bool, ImageStoreError> {
         let db = self
             .db
             .lock()
             .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
         Ok(db.execute(
-            "DELETE FROM image_references WHERE reference = ?1",
-            params![reference],
+            "DELETE FROM image_references WHERE reference = ?1 AND digest = ?2",
+            params![reference, digest],
         )? > 0)
+    }
+
+    pub fn prepare_digest_delete(
+        &self,
+        digest: &str,
+        force: bool,
+    ) -> Result<ImageDeletePlan, ImageStoreError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+        let mut statement = db.prepare(
+            "SELECT reference FROM image_references WHERE digest = ?1 ORDER BY reference",
+        )?;
+        let references = statement
+            .query_map(params![digest], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        if references.is_empty() {
+            return Err(ImageStoreError::DeleteNotFound(digest.to_string()));
+        }
+        if !force && references.len() != 1 {
+            return Err(ImageStoreError::DeleteConflict(digest.to_string()));
+        }
+        Ok(ImageDeletePlan {
+            digest: digest.to_string(),
+            references,
+        })
     }
 
     pub fn remove_reference_authorized(
@@ -296,7 +379,7 @@ impl LocalImageStore {
                 "image digest does not match executor".to_string(),
             ));
         }
-        match self.remove_reference(reference) {
+        match self.remove_reference_if_digest(reference, digest) {
             Ok(removed) => {
                 permit
                     .finish(true)
@@ -307,6 +390,84 @@ impl LocalImageStore {
                 permit
                     .finish(false)
                     .map_err(|finish| ImageStoreError::Authorization(finish.to_string()))?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn execute_digest_delete_authorized(
+        &self,
+        plan: ImageDeletePlan,
+        permits: Vec<crate::authorization::surface::SurfacePermit>,
+    ) -> Result<bool, ImageStoreError> {
+        if plan.references.is_empty() {
+            finish_image_delete_permits(permits, false)?;
+            return Err(ImageStoreError::DeleteNotFound(plan.digest));
+        }
+        if plan.references.len() != permits.len() {
+            finish_image_delete_permits(permits, false)?;
+            return Err(ImageStoreError::Authorization(
+                "image delete authorization set does not match planned inventory".to_string(),
+            ));
+        }
+        let validation = plan.references.iter().zip(&permits).try_for_each(
+            |(reference, permit)| -> Result<(), ImageStoreError> {
+                crate::authorization::surface::SurfaceAuthorization::validate_execution(
+                    permit,
+                    crate::authorization::Action::ImageDelete,
+                    crate::authorization::ResourceKind::Image,
+                    reference,
+                    1,
+                )
+                .map_err(|error| ImageStoreError::Authorization(error.to_string()))?;
+                if permit.proof().canonical().image_digest() != Some(plan.digest.as_str()) {
+                    return Err(ImageStoreError::Authorization(
+                        "image delete digest does not match executor".to_string(),
+                    ));
+                }
+                Ok(())
+            },
+        );
+        if let Err(error) = validation {
+            finish_image_delete_permits(permits, false)?;
+            return Err(error);
+        }
+        let result = (|| {
+            let mut db = self
+                .db
+                .lock()
+                .map_err(|error| ImageStoreError::Lock(error.to_string()))?;
+            let transaction = db.transaction()?;
+            let current = {
+                let mut statement = transaction.prepare(
+                    "SELECT reference FROM image_references WHERE digest = ?1 ORDER BY reference",
+                )?;
+                let rows = statement
+                    .query_map(params![plan.digest], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()?;
+                rows
+            };
+            if current != plan.references {
+                return Err(ImageStoreError::DeleteInventoryChanged);
+            }
+            let references = transaction.execute(
+                "DELETE FROM image_references WHERE digest = ?1",
+                params![plan.digest],
+            )?;
+            let records = transaction.execute(
+                "DELETE FROM image_digests WHERE digest = ?1",
+                params![plan.digest],
+            )?;
+            transaction.commit()?;
+            Ok(references > 0 || records > 0)
+        })();
+        match result {
+            Ok(removed) => {
+                finish_image_delete_permits(permits, true)?;
+                Ok(removed)
+            }
+            Err(error) => {
+                finish_image_delete_permits(permits, false)?;
                 Err(error)
             }
         }
@@ -428,6 +589,19 @@ impl LocalImageStore {
     }
 }
 
+fn finish_image_delete_permits(
+    permits: Vec<crate::authorization::surface::SurfacePermit>,
+    succeeded: bool,
+) -> Result<(), ImageStoreError> {
+    let mut first_error = None;
+    for permit in permits {
+        if let Err(error) = permit.finish(succeeded) {
+            first_error.get_or_insert_with(|| ImageStoreError::Authorization(error.to_string()));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -437,7 +611,8 @@ fn now_unix() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageStoreError, LocalImageStore};
+    use super::{ImageDeletePlan, ImageStoreError, LocalImageStore};
+    use rusqlite::params;
 
     #[test]
     fn reference_write_preparation_is_side_effect_free_and_checks_manifest() {
@@ -538,6 +713,26 @@ mod tests {
     }
 
     #[test]
+    fn repository_digest_lookup_preserves_the_requested_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let digest = format!("sha256:{}", "d".repeat(64));
+        store
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                "registry.one/team/app:latest",
+                &digest,
+                "test",
+                "{}",
+            )
+            .unwrap();
+        let requested = format!("registry.two/other/app@{digest}");
+        let record = store.resolve_reference(&requested).unwrap().unwrap();
+        assert_eq!(record.reference, requested);
+        assert_eq!(record.digest, digest);
+    }
+
+    #[test]
     fn lists_and_removes_references() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("open store");
@@ -566,7 +761,10 @@ mod tests {
         assert_eq!(listed.len(), 2);
 
         let removed = store
-            .remove_reference("docker.io/library/alpine:latest")
+            .remove_reference_if_digest(
+                "docker.io/library/alpine:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
             .expect("remove reference");
         assert!(removed);
 
@@ -606,6 +804,164 @@ mod tests {
         assert_eq!(removed, 2);
         let listed = store.list_references().expect("list");
         assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn digest_delete_requires_force_authorizes_inventory_and_rejects_drift() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+        let digest = format!("sha256:{}", "d".repeat(64));
+        for reference in ["registry.example/acme/app:one", "registry.example/acme/app:two"] {
+            store
+                .put_reference(&authority, reference, &digest, "test", "{}")
+                .unwrap();
+        }
+        assert!(matches!(
+            store.prepare_digest_delete(&digest, false),
+            Err(ImageStoreError::DeleteConflict(_))
+        ));
+
+        let plan = store.prepare_digest_delete(&digest, true).unwrap();
+        assert_eq!(
+            plan.references(),
+            [
+                "registry.example/acme/app:one".to_string(),
+                "registry.example/acme/app:two".to_string()
+            ]
+        );
+        let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+        let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
+        let wrong_permits = plan
+            .references()
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                auth.authorize_image_binding(
+                    &origin,
+                    crate::authorization::Action::ImageDelete,
+                    if index == 1 { "registry.example/acme/not-authorized:latest" } else { reference },
+                    &digest,
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            store.execute_digest_delete_authorized(plan, wrong_permits),
+            Err(ImageStoreError::Authorization(_))
+        ));
+        assert_eq!(store.list_references().unwrap().len(), 2);
+
+        let plan = store.prepare_digest_delete(&digest, true).unwrap();
+        let permits = plan
+            .references()
+            .iter()
+            .map(|reference| {
+                auth.authorize_image_binding(
+                    &origin,
+                    crate::authorization::Action::ImageDelete,
+                    reference,
+                    &digest,
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        store
+            .put_reference(
+                &authority,
+                "registry.example/acme/app:concurrent",
+                &digest,
+                "test",
+                "{}",
+            )
+            .unwrap();
+        assert!(matches!(
+            store.execute_digest_delete_authorized(plan, permits),
+            Err(ImageStoreError::DeleteInventoryChanged)
+        ));
+        assert_eq!(store.list_references().unwrap().len(), 3);
+
+        let plan = store.prepare_digest_delete(&digest, true).unwrap();
+        let permits = plan
+            .references()
+            .iter()
+            .map(|reference| {
+                auth.authorize_image_binding(
+                    &origin,
+                    crate::authorization::Action::ImageDelete,
+                    reference,
+                    &digest,
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(store
+            .execute_digest_delete_authorized(plan, permits)
+            .unwrap());
+        assert!(store.list_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn digest_delete_rejects_zero_reference_planning_and_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let digest = format!("sha256:{}", "e".repeat(64));
+        {
+            let db = store.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO image_digests (digest, reference, manifest_media_type, manifest_json, created_at_unix) VALUES (?1, 'detached', 'test', '{}', 0)",
+                params![digest],
+            )
+            .unwrap();
+        }
+        for force in [false, true] {
+            assert!(matches!(
+                store.prepare_digest_delete(&digest, force),
+                Err(ImageStoreError::DeleteNotFound(found)) if found == digest
+            ));
+        }
+        let empty_plan = ImageDeletePlan { digest: digest.clone(), references: Vec::new() };
+        assert!(matches!(
+            store.execute_digest_delete_authorized(empty_plan, Vec::new()),
+            Err(ImageStoreError::DeleteNotFound(found)) if found == digest
+        ));
+        assert!(store.resolve_reference(&digest).unwrap().is_some());
+    }
+
+    #[test]
+    fn digest_delete_rejects_removed_retargeted_substituted_and_added_inventory() {
+        for drift in ["removed", "retargeted", "substituted", "added"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = LocalImageStore::open(temp.path()).unwrap();
+            let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
+            let digest = format!("sha256:{}", "d".repeat(64));
+            let other = format!("sha256:{}", "f".repeat(64));
+            let original = "registry.example/acme/app:original";
+            store.put_reference(&authority, original, &digest, "test", "{}").unwrap();
+            let plan = store.prepare_digest_delete(&digest, true).unwrap();
+            let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
+            let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
+            let permits = plan.references().iter().map(|reference| {
+                auth.authorize_image_binding(&origin, crate::authorization::Action::ImageDelete, reference, &digest, 1).unwrap()
+            }).collect();
+
+            match drift {
+                "removed" => assert!(store.remove_reference_if_digest(original, &digest).unwrap()),
+                "retargeted" => store.put_reference(&authority, original, &other, "test", "{}").unwrap(),
+                "substituted" => {
+                    assert!(store.remove_reference_if_digest(original, &digest).unwrap());
+                    store.put_reference(&authority, "registry.example/acme/app:replacement", &digest, "test", "{}").unwrap();
+                }
+                "added" => store.put_reference(&authority, "registry.example/acme/app:added", &digest, "test", "{}").unwrap(),
+                _ => unreachable!(),
+            }
+
+            assert!(matches!(store.execute_digest_delete_authorized(plan, permits), Err(ImageStoreError::DeleteInventoryChanged)), "drift={drift}");
+            assert!(store.resolve_reference(&digest).unwrap().is_some(), "digest metadata removed for drift={drift}");
+        }
     }
 
     #[test]

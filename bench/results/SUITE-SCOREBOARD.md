@@ -3,11 +3,11 @@
 | Suite | Ferro tests | Docker tests | Ferro pass | Product fail | Fail on both | Not run | Note |
 |---|---:|---:|---:|---:|---:|---:|---|
 | buildkit-dockerfile | 1259 | 2562 | 660 | 506 | 22 | 1048 | 1048 Docker cases absent from the Ferrocrate run |
-| cli-e2e | 108 | 113 | 34 | 10 | 59 | 2 | 2 Docker cases absent from the Ferrocrate run |
+| cli-e2e | 108 | 113 | 32 | 12 | 55 | 2 | 2 Docker cases absent from the Ferrocrate run |
 | compose-e2e | 270 | 284 | 23 | 231 | 0 | 8 | 8 Docker cases absent from the Ferrocrate run |
 | critest | 144 | — | 6 | 0 | 0 | 0 |  |
 | moby-integration | 628 | 845 | 10 | 130 | 59 | 266 | 266 Docker cases absent from the Ferrocrate run |
 | oci-runtime | — | — | — | — | no Ferrocrate run |
 
-Product failures across suites: 877
+Product failures across suites: 879
 Docker cases never run on Ferrocrate: 1324 (missing coverage, not passes)

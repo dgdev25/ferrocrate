@@ -14,6 +14,37 @@ pub enum ImageTaggingError {
     Authorization(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImageSelector {
+    Named(String),
+    IdPrefix(String),
+}
+
+impl ImageSelector {
+    pub fn canonical(&self) -> &str {
+        match self {
+            Self::Named(value) | Self::IdPrefix(value) => value,
+        }
+    }
+
+    pub fn is_local_only(&self) -> bool {
+        matches!(self, Self::IdPrefix(_))
+    }
+}
+
+pub fn normalize_selector(reference: &str) -> Result<ImageSelector, ImageTaggingError> {
+    let bare = reference.strip_prefix("sha256:").unwrap_or(reference);
+    let sha256 = reference.starts_with("sha256:");
+    let id_shaped = bare.len() >= 4
+        && bare.len() <= 64
+        && bare.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (!sha256 || bare.len() == 64);
+    if id_shaped {
+        return Ok(ImageSelector::IdPrefix(bare.to_ascii_lowercase()));
+    }
+    Ok(ImageSelector::Named(canonicalize_reference(reference)?))
+}
+
 #[derive(Clone, Debug)]
 pub struct ImageTagPlan {
     source_reference: String,
@@ -41,11 +72,10 @@ pub fn prepare_image_tag(
     target_reference: &str,
 ) -> Result<ImageTagPlan, ImageTaggingError> {
     use sha2::{Digest, Sha256};
-    let source_reference = canonicalize_reference(source_reference)?;
+    let source = resolve_reference(store, source_reference)?
+        .ok_or_else(|| ImageTaggingError::SourceNotFound(source_reference.to_string()))?;
+    let source_reference = source.digest.clone();
     let target_reference = canonicalize_reference(target_reference)?;
-    let source = store
-        .resolve_reference(&source_reference)?
-        .ok_or_else(|| ImageTaggingError::SourceNotFound(source_reference.clone()))?;
     let manifest_digest: [u8; 32] = Sha256::digest(source.manifest_json.as_bytes()).into();
     let mut hash = Sha256::new();
     hash.update(b"ferrocrate/image-tag-plan/v1");
@@ -72,8 +102,11 @@ pub fn resolve_reference(
     store: &LocalImageStore,
     reference: &str,
 ) -> Result<Option<ImageRecord>, ImageTaggingError> {
-    let canonical = canonicalize_reference(reference)?;
-    let record = store.resolve_reference(&canonical)?;
+    let selector = normalize_selector(reference)?;
+    let record = match &selector {
+        ImageSelector::Named(canonical) => store.resolve_reference(canonical)?,
+        ImageSelector::IdPrefix(prefix) => store.resolve_id_prefix(prefix)?,
+    };
     Ok(record)
 }
 
@@ -159,7 +192,9 @@ pub fn execute_image_tag_authorized(
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_reference, resolve_reference, tag_image};
+    use super::{
+        canonicalize_reference, normalize_selector, resolve_reference, tag_image, ImageSelector,
+    };
     use crate::image_store::LocalImageStore;
 
     #[test]
@@ -215,5 +250,61 @@ mod tests {
         .expect_err("tagging should fail");
 
         assert!(err.to_string().contains("source image not found"));
+    }
+
+    #[test]
+    fn resolves_full_digest_forms_and_unique_abbreviations_without_registry_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        let digest = format!("sha256:abc123456789{}", "d".repeat(52));
+        store
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                "registry.example/team/app:latest",
+                &digest,
+                "test",
+                "{}",
+            )
+            .unwrap();
+
+        for selector in [
+            "abc1",
+            "ABC1",
+            digest.strip_prefix("sha256:").unwrap(),
+            &digest.strip_prefix("sha256:").unwrap().to_ascii_uppercase(),
+            digest.as_str(),
+            &format!("sha256:{}", digest.strip_prefix("sha256:").unwrap().to_ascii_uppercase()),
+        ] {
+            assert_eq!(
+                resolve_reference(&store, selector).unwrap().unwrap().digest,
+                digest
+            );
+        }
+        assert!(matches!(
+            normalize_selector("abcdefabcdef"),
+            Ok(ImageSelector::IdPrefix(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_ambiguous_id_prefixes_and_keeps_missing_ids_local_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path()).unwrap();
+        for (name, suffix) in [("one", "1"), ("two", "2")] {
+            store
+                .put_reference(
+                    &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                    &format!("registry.example/team/{name}:latest"),
+                    &format!("sha256:abcdefabcdef{suffix}{}", suffix.repeat(51)),
+                    "test",
+                    "{}",
+                )
+                .unwrap();
+        }
+        assert!(resolve_reference(&store, "abcdefabcdef")
+            .unwrap_err()
+            .to_string()
+            .contains("multiple images match prefix"));
+        assert!(resolve_reference(&store, "deadbeefdead").unwrap().is_none());
     }
 }

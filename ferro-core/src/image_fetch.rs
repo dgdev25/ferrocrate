@@ -663,7 +663,6 @@ pub fn resolve_layer_paths(
     runtime_dir: &Path,
     image: &str,
 ) -> Result<Vec<PathBuf>, ImageFetchError> {
-    parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     resolve_layer_paths_with_store(runtime_dir, image, &store)
 }
@@ -673,11 +672,9 @@ pub fn resolve_layer_paths_with_store(
     image: &str,
     store: &LocalImageStore,
 ) -> Result<Vec<PathBuf>, ImageFetchError> {
-    parse_image_reference(image)?;
-    let canonical = crate::image_tagging::canonicalize_reference(image)?;
-    let record = store
-        .resolve_reference(&canonical)?
-        .ok_or_else(|| crate::registry::RegistryError::InvalidReference(canonical.clone()))?;
+    let record = crate::image_tagging::resolve_reference(store, image)?
+        .ok_or_else(|| crate::registry::RegistryError::InvalidReference(image.to_string()))?;
+    let canonical = record.reference.clone();
 
     let manifest = parse_image_manifest(&record.manifest_json)?;
     if manifest.layers.is_empty() {
@@ -705,7 +702,6 @@ pub fn resolve_config_path(
     runtime_dir: &Path,
     image: &str,
 ) -> Result<Option<PathBuf>, ImageFetchError> {
-    parse_image_reference(image)?;
     let store = LocalImageStore::open(runtime_dir.join("images"))?;
     resolve_config_path_with_store(runtime_dir, image, &store)
 }
@@ -715,9 +711,7 @@ pub fn resolve_config_path_with_store(
     image: &str,
     store: &LocalImageStore,
 ) -> Result<Option<PathBuf>, ImageFetchError> {
-    parse_image_reference(image)?;
-    let canonical = crate::image_tagging::canonicalize_reference(image)?;
-    let record = store.resolve_reference(&canonical)?;
+    let record = crate::image_tagging::resolve_reference(store, image)?;
     let Some(record) = record else {
         return Ok(None);
     };
@@ -1234,5 +1228,40 @@ mod tests {
         let layer_path = blob_root
             .join("sha256_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
         assert!(!layer_path.exists());
+    }
+
+    #[test]
+    fn cross_repository_digest_lookup_fetches_missing_blobs_from_requested_repository() {
+        let source = Server::run();
+        let requested = Server::run();
+        let layer = b"repository-bound-layer";
+        let layer_digest = format!("sha256:{:x}", Sha256::digest(layer));
+        let config_digest = format!("sha256:{}", "a".repeat(64));
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":1}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{layer_digest}","size":{}}}]}}"#,
+            layer.len()
+        );
+        requested.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/v2/team/app/blobs/{layer_digest}"),
+            ))
+            .respond_with(status_code(200).body(layer.to_vec())),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalImageStore::open(temp.path().join("images")).unwrap();
+        store
+            .put_reference(
+                &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+                &format!("{}/team/app:latest", source.addr()),
+                &config_digest,
+                "application/vnd.oci.image.manifest.v1+json",
+                &manifest,
+            )
+            .unwrap();
+        let selector = format!("{}/team/app@{config_digest}", requested.addr());
+        let paths = super::resolve_layer_paths_with_store(temp.path(), &selector, &store)
+            .expect("missing blob is fetched through the requested repository");
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), layer);
     }
 }

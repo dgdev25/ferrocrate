@@ -1493,7 +1493,7 @@ fn immutable_image_manifest_reference(
     store: &LocalImageStore,
     image: &str,
 ) -> Result<String, RuntimeError> {
-    let Some(record) = store.resolve_reference(image)? else {
+    let Some(record) = crate::image_tagging::resolve_reference(store, image)? else {
         return Ok(image.to_owned());
     };
     let manifest_digest = format!(
@@ -1522,6 +1522,8 @@ pub enum RuntimeError {
     },
     #[error("image store error: {0}")]
     ImageStore(#[from] crate::image_store::ImageStoreError),
+    #[error("image selector error: {0}")]
+    ImageSelector(#[from] crate::image_tagging::ImageTaggingError),
     #[error("exec error: {0}")]
     Exec(#[from] crate::container_exec::ContainerExecError),
     #[error("process lifecycle error: {0}")]
@@ -2614,7 +2616,7 @@ impl ContainerRuntime {
         network_mode: &str,
         network_backend: NetworkBackend,
     ) -> Result<[u8; 32], RuntimeError> {
-        let pinned_image = match store.resolve_reference(image)? {
+        let pinned_image = match crate::image_tagging::resolve_reference(store, image)? {
             Some(record) => immutable_image_reference(&record.reference, &record.digest)?,
             None => image.to_owned(),
         };
@@ -2742,7 +2744,7 @@ impl ContainerRuntime {
             }
             LifecycleLock::acquire(&lock_path)?
         };
-        let pinned_image = match store.resolve_reference(image)? {
+        let pinned_image = match crate::image_tagging::resolve_reference(store, image)? {
             Some(record) => immutable_image_reference(&record.reference, &record.digest)?,
             None => image.to_owned(),
         };
@@ -20007,6 +20009,28 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 &manifest_json,
             )
             .expect("update manifest");
+    }
+
+    #[test]
+    fn signed_runtime_selection_resolves_bare_and_sha256_image_ids() {
+        let root = tempfile::tempdir().unwrap();
+        seed_image_store(root.path(), "registry.example/team/signed:latest");
+        let store = LocalImageStore::open(root.path().join("images")).unwrap();
+        let bare = "a".repeat(64);
+        let expected = super::immutable_image_manifest_reference(
+            &store,
+            "registry.example/team/signed:latest",
+        )
+        .unwrap();
+        assert_eq!(
+            super::immutable_image_manifest_reference(&store, &bare).unwrap(),
+            expected
+        );
+        assert_eq!(
+            super::immutable_image_manifest_reference(&store, &format!("sha256:{bare}")).unwrap(),
+            expected
+        );
+        assert!(expected.starts_with("registry.example/team/signed@sha256:"));
     }
 
     #[test]

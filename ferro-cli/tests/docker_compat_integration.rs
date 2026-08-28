@@ -965,6 +965,160 @@ fn docker_container_list_projects_identity_labels_ports_networks_and_mounts() {
 }
 
 #[test]
+fn s177_image_ids_work_over_http_and_execute_in_run_and_compose() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/s177:latest");
+    let (_, images) = harness.request("GET", "/v1.45/images/json");
+    let images: serde_json::Value = serde_json::from_str(&images).unwrap();
+    let digest = images.as_array().unwrap().iter()
+        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177:latest")))
+        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let bare = digest.strip_prefix("sha256:").unwrap();
+    let short = &bare[..12];
+    let upper_bare = bare.to_ascii_uppercase();
+    let upper_short = short.to_ascii_uppercase();
+
+    for selector in [bare, digest.as_str(), short, &upper_bare, &upper_short] {
+        let selector = selector.replace(':', "%3A");
+        assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/json")).0, 200);
+        assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/history")).0, 200);
+    }
+    for selector in [&upper_bare, &upper_short] {
+        let create = format!(r#"{{"Image":"{selector}","Cmd":["/bin/busybox","true"]}}"#);
+        let request = format!("POST /v1.45/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create}", create.len());
+        let (status, body) = harness.request_raw(&request);
+        assert_eq!(status, 201, "create by uppercase ID: {body}");
+        let container = serde_json::from_str::<serde_json::Value>(&body).unwrap()["Id"].as_str().unwrap().to_string();
+        assert_eq!(harness.request("POST", &format!("/v1.45/containers/{container}/start")).0, 204);
+    }
+    let remote = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remote")
+        .args(["image", "inspect", &upper_short])
+        .output().unwrap();
+    assert!(remote.status.success(), "remote inspect: {}", String::from_utf8_lossy(&remote.stderr));
+    assert_eq!(harness.request("GET", "/v1.45/images/DEADBEEFDEAD/json").0, 404);
+    harness.stop_daemon();
+    for selector in [&upper_bare, &upper_short] {
+        let direct = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("FERROCRATE_HOME", harness.runtime_dir())
+            .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-direct")
+            .args(["run", selector, "/bin/busybox", "true"]).output().unwrap();
+        assert!(direct.status.success(), "direct run: {}", String::from_utf8_lossy(&direct.stderr));
+        assert!(!String::from_utf8_lossy(&direct.stderr).contains("pull image"));
+    }
+    let missing = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-missing")
+        .args(["run", "DEADBEEFDEAD", "/bin/busybox", "true"]).output().unwrap();
+    let missing_error = String::from_utf8_lossy(&missing.stderr);
+    assert!(!missing.status.success());
+    assert!(missing_error.contains("was not found locally"), "{missing_error}");
+    assert!(!missing_error.contains("registry name"), "{missing_error}");
+
+    let compose_file = harness.runtime_dir().join("s177-compose.yml");
+    fs::write(&compose_file, format!("services:\n  full:\n    image: {upper_bare}\n    command: [/bin/busybox, sleep, \"2\"]\n  prefix:\n    image: {upper_short}\n    command: [/bin/busybox, sleep, \"2\"]\n")).unwrap();
+    let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-compose")
+        .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
+        .output().unwrap();
+    assert!(compose.status.success(), "compose up: {}", String::from_utf8_lossy(&compose.stderr));
+    assert!(!String::from_utf8_lossy(&compose.stderr).contains("pull image"));
+
+    harness.start_daemon();
+    assert_eq!(harness.request("POST", &format!("/v1.45/images/{short}/tag?repo=compat%2Fs177-copy&tag=stable")).0, 201);
+    assert_eq!(harness.request("DELETE", "/v1.45/images/compat%2Fs177-copy%3Astable").0, 200);
+}
+
+#[test]
+fn s177_id_removal_honors_force_locally_remotely_and_over_http() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/s177-remove:latest");
+    let (_, images) = harness.request("GET", "/v1.45/images/json");
+    let images: serde_json::Value = serde_json::from_str(&images).unwrap();
+    let digest = images.as_array().unwrap().iter()
+        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177-remove:latest")))
+        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let upper_prefix = digest.strip_prefix("sha256:").unwrap()[..12].to_ascii_uppercase();
+
+    harness.stop_daemon();
+    let local = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remove-local")
+        .args(["rmi", &upper_prefix]).output().unwrap();
+    assert!(local.status.success(), "local ID rmi: {}", String::from_utf8_lossy(&local.stderr));
+
+    harness.start_daemon();
+    build_local_busybox_image(&harness, "compat/s177-remove:latest");
+    assert_eq!(harness.request("POST", &format!("/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest")).0, 201);
+    let (status, body) = harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}"));
+    assert_ne!(status, 200, "non-force unexpectedly removed multi-tag image: {body}");
+    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 200);
+    assert_eq!(harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}?force=true")).0, 200);
+    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
+
+    build_local_busybox_image(&harness, "compat/s177-remove:latest");
+    assert_eq!(harness.request("POST", &format!("/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest")).0, 201);
+    let remote = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remove-remote")
+        .args(["rmi", "--force", &upper_prefix]).output().unwrap();
+    assert!(remote.status.success(), "remote forced ID rmi: {}", String::from_utf8_lossy(&remote.stderr));
+    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
+}
+
+#[test]
+fn s177_ambiguous_prefix_fails_through_cli_compose_and_http() {
+    let mut harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/s177-ambiguous:latest");
+    let (_, images) = harness.request("GET", "/v1.45/images/json");
+    let images: serde_json::Value = serde_json::from_str(&images).unwrap();
+    let digest = images.as_array().unwrap().iter()
+        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177-ambiguous:latest")))
+        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let bare = digest.strip_prefix("sha256:").unwrap();
+    let prefix = bare[..12].to_ascii_uppercase();
+    let replacement = if bare.ends_with('0') { '1' } else { '0' };
+    let competing = format!("sha256:{}{replacement}", &bare[..63]);
+    harness.stop_daemon();
+    let db = rusqlite::Connection::open(format!("{}.sqlite", harness.runtime_dir().join("images").display())).unwrap();
+    db.execute(
+        "INSERT INTO image_digests (digest, reference, manifest_media_type, manifest_json, created_at_unix) SELECT ?1, ?2, manifest_media_type, manifest_json, created_at_unix FROM image_digests WHERE digest = ?3",
+        rusqlite::params![competing, "registry-1.docker.io/compat/s177-competing:latest", digest],
+    ).unwrap();
+    db.execute(
+        "INSERT INTO image_references (reference, digest, manifest_media_type, manifest_json, created_at_unix) SELECT ?1, ?2, manifest_media_type, manifest_json, created_at_unix FROM image_digests WHERE digest = ?2",
+        rusqlite::params!["registry-1.docker.io/compat/s177-competing:latest", competing],
+    ).unwrap();
+    drop(db);
+
+    let direct = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-ambiguous-run")
+        .args(["run", &prefix, "/bin/busybox", "true"]).output().unwrap();
+    let direct_error = String::from_utf8_lossy(&direct.stderr);
+    assert!(!direct.status.success());
+    assert!(direct_error.contains("multiple images match prefix"), "{direct_error}");
+
+    let compose_file = harness.runtime_dir().join("s177-ambiguous.yml");
+    fs::write(&compose_file, format!("services:\n  app:\n    image: {prefix}\n    command: [/bin/busybox, \"true\"]\n")).unwrap();
+    let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-ambiguous-compose")
+        .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
+        .output().unwrap();
+    let compose_error = String::from_utf8_lossy(&compose.stderr);
+    assert!(!compose.status.success());
+    assert!(compose_error.contains("multiple images match prefix"), "{compose_error}");
+
+    harness.start_daemon();
+    let (status, body) = harness.request("GET", &format!("/v1.45/images/{prefix}/json"));
+    assert_ne!(status, 200, "ambiguous HTTP selector unexpectedly resolved: {body}");
+    assert!(body.contains("multiple images match prefix"), "{body}");
+}
+
+#[test]
 fn docker_compat_unknown_route_returns_docker_json_error() {
     let harness = DaemonHarness::spawn();
     let (status, body) = harness.request("GET", "/v1.45/does-not-exist");

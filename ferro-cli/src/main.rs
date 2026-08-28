@@ -11532,11 +11532,21 @@ fn resolve_run_command(
     entrypoint: Option<&str>,
     cmd: &[String],
 ) -> Result<Vec<String>, String> {
+    let entrypoint = entrypoint.map(parse_entrypoint).transpose()?;
+    resolve_run_command_with_entrypoint(image_config, entrypoint.as_deref(), cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_run_command_with_entrypoint(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&[String]>,
+    cmd: &[String],
+) -> Result<Vec<String>, String> {
     let image_config = image_config.get("config").unwrap_or(image_config);
     let image_entrypoint = image_config_command(image_config, "Entrypoint")?;
     let image_cmd = image_config_command(image_config, "Cmd")?;
     let mut effective = match entrypoint {
-        Some(entrypoint) => parse_entrypoint(entrypoint)?,
+        Some(entrypoint) => entrypoint.to_vec(),
         None => image_entrypoint,
     };
     if cmd.is_empty() {
@@ -11579,21 +11589,23 @@ fn resolve_compose_run_image_execution(
     image: &str,
     project_dir: &Path,
     service: &ComposeService,
-    entrypoint: Option<&str>,
+    entrypoint: Option<&[String]>,
     cmd: &[String],
 ) -> Result<ResolvedRunImageExecution, String> {
     let env = compose_service_env(project_dir, service)?;
-    resolve_run_image_execution(
-        runtime_dir,
-        store,
-        image,
+    let reference = resolve_reference(store, image)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("run: image config is unavailable for {image}"))?;
+    let (config, _) = docker_image_metadata(runtime_dir, store, &reference)?;
+    let mut execution = resolve_run_image_execution_from_config_with_compose_entrypoint(
+        &config,
         entrypoint,
         cmd,
         None,
         None,
-        &env,
-        compose_service_health_config(service)?,
-    )
+    )?;
+    apply_run_execution_overrides(&mut execution, &env, compose_service_health_config(service)?);
+    Ok(execution)
 }
 
 /// The one image-resolution path used by direct runs, Docker starts, and
@@ -11628,6 +11640,38 @@ fn resolve_run_image_execution_from_config(
         .map_err(|error| format!("run: serialize image config: {error}"))?;
     Ok(ResolvedRunImageExecution {
         command: resolve_run_command(image_config, entrypoint, cmd)?,
+        env: ferro_core::image_config::env_from_config(&config_json),
+        workdir: workdir.map(str::to_owned).or_else(|| {
+            config
+                .get("WorkingDir")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
+        user: user.map(str::to_owned).or_else(|| {
+            config
+                .get("User")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }),
+        health: ferro_core::image_config::healthcheck_from_config(&config_json),
+        volume_targets: image_config_volume_targets(image_config),
+        volume_mounts: Vec::new(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_run_image_execution_from_config_with_compose_entrypoint(
+    image_config: &serde_json::Value,
+    entrypoint: Option<&[String]>,
+    cmd: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<ResolvedRunImageExecution, String> {
+    let config = image_config.get("config").unwrap_or(image_config);
+    let config_json = serde_json::to_string(image_config)
+        .map_err(|error| format!("run: serialize image config: {error}"))?;
+    Ok(ResolvedRunImageExecution {
+        command: resolve_run_command_with_entrypoint(image_config, entrypoint, cmd)?,
         env: ferro_core::image_config::env_from_config(&config_json),
         workdir: workdir.map(str::to_owned).or_else(|| {
             config
@@ -16452,7 +16496,7 @@ fn run_compose_service(
             &labels,
             &[],
             &[],
-            service.entrypoint.as_deref(),
+            None,
             image_execution.workdir.as_deref(),
             image_execution.user.as_deref(),
             Some(&instance_name),
@@ -31996,6 +32040,21 @@ volumes:
             super::resolve_run_command(&config, Some("/bin/sh -c"), &["echo ok".to_string()])
                 .expect("CLI entrypoint override"),
             ["/bin/sh", "-c", "echo ok"]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compose_exec_form_entrypoint_preserves_each_argument() {
+        let config = serde_json::json!({"config": {"Cmd": ["default"]}});
+        assert_eq!(
+            super::resolve_run_command_with_entrypoint(
+                &config,
+                Some(&["/bin/sh".to_string(), "-c".to_string(), "echo one two".to_string()]),
+                &[],
+            )
+            .expect("Compose exec-form entrypoint"),
+            ["/bin/sh", "-c", "echo one two", "default"]
         );
     }
 

@@ -121,7 +121,8 @@ pub struct Service {
     pub command: Option<Command>,
 
     /// Entrypoint to use (overrides image ENTRYPOINT).
-    pub entrypoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_entrypoint")]
+    pub entrypoint: Option<Vec<String>>,
 
     /// Environment variables as key-value pairs or list.
     pub environment: Option<Environment>,
@@ -231,6 +232,29 @@ pub enum Command {
 
     /// Command as an array of arguments.
     List(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Entrypoint {
+    Shell(String),
+    List(Vec<String>),
+}
+
+/// Compose accepts both a scalar and exec-form list for `entrypoint`.
+/// Normalize both to the argv representation consumed by the launcher.
+fn deserialize_entrypoint<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Entrypoint>::deserialize(deserializer)?;
+    Ok(value.map(|value| match value {
+        Entrypoint::Shell(command) => command
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        Entrypoint::List(command) => command,
+    }))
 }
 
 /// Environment variables - either key-value map or list of assignments.
@@ -811,6 +835,29 @@ configs:
                 "-f".to_string(),
                 "http://localhost/up".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn parses_scalar_and_list_entrypoints_as_execution_arguments() {
+        let scalar = ComposeFile::parse(
+            "services:\n  web:\n    image: example\n    entrypoint: /bin/sh -c\n",
+            &HashMap::new(),
+        )
+        .expect("scalar entrypoint parses");
+        assert_eq!(
+            scalar.services["web"].entrypoint,
+            Some(vec!["/bin/sh".to_string(), "-c".to_string()])
+        );
+
+        let list = ComposeFile::parse(
+            "services:\n  web:\n    image: example\n    entrypoint: [\"/bin/sh\", \"-c\"]\n",
+            &HashMap::new(),
+        )
+        .expect("list entrypoint parses");
+        assert_eq!(
+            list.services["web"].entrypoint,
+            Some(vec!["/bin/sh".to_string(), "-c".to_string()])
         );
     }
 

@@ -15147,6 +15147,7 @@ fn compose_default_network_name_with_declared(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn prepare_compose_service(
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,

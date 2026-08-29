@@ -153,6 +153,101 @@ fn dockerfile_build_defaults_to_local_dockerfile() {
 }
 
 #[test]
+fn dockerfile_build_arg_bakes_the_supplied_value_into_image_labels() {
+    let runtime_dir = tempfile::tempdir().expect("runtime dir");
+    let context_dir = tempfile::tempdir().expect("context dir");
+    let dockerfile_path = context_dir.path().join("Dockerfile");
+    std::fs::write(
+        &dockerfile_path,
+        "FROM scratch\nARG RELEASE\nLABEL org.ferrocrate.s174.release=$RELEASE\n",
+    )
+    .expect("write dockerfile");
+
+    let tag = "local/s174-direct-build-arg:latest";
+    let build_output = run_build(
+        runtime_dir.path(),
+        context_dir.path(),
+        &dockerfile_path,
+        tag,
+        &["--build-arg", "RELEASE=2026.08"],
+    );
+    assert!(
+        build_output.status.success(),
+        "build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&build_output.stdout),
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let inspect = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
+        .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+        .args(["image", "inspect", tag, "--format", "json"])
+        .output()
+        .expect("inspect built image");
+    assert!(
+        inspect.status.success(),
+        "image inspect failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).expect("image inspect JSON");
+    assert_eq!(
+        payload["Config"]["Labels"]["org.ferrocrate.s174.release"],
+        "2026.08"
+    );
+}
+
+#[test]
+fn dockerfile_build_args_are_repeatable_and_leave_unset_args_at_their_defaults() {
+    let runtime_dir = tempfile::tempdir().expect("runtime dir");
+    let context_dir = tempfile::tempdir().expect("context dir");
+    let dockerfile_path = context_dir.path().join("Dockerfile");
+    std::fs::write(
+        &dockerfile_path,
+        "FROM scratch\nARG FIRST=default-first\nARG SECOND=default-second\nARG THIRD=default-third\nLABEL org.ferrocrate.first=$FIRST org.ferrocrate.second=$SECOND org.ferrocrate.third=$THIRD\n",
+    )
+    .expect("write dockerfile");
+
+    let tag = "local/s174-repeatable-build-args:latest";
+    let build_output = run_build(
+        runtime_dir.path(),
+        context_dir.path(),
+        &dockerfile_path,
+        tag,
+        &[
+            "--build-arg",
+            "FIRST=one",
+            "--build-arg",
+            "SECOND=two",
+            "--build-arg",
+            "UNUSED=value",
+        ],
+    );
+    assert!(
+        build_output.status.success(),
+        "unused build arguments must not fail the build: stdout={} stderr={}",
+        String::from_utf8_lossy(&build_output.stdout),
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let inspect = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", runtime_dir.path())
+        .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+        .args(["image", "inspect", tag, "--format", "json"])
+        .output()
+        .expect("inspect built image");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).expect("image inspect JSON");
+    assert_eq!(payload["Config"]["Labels"]["org.ferrocrate.first"], "one");
+    assert_eq!(payload["Config"]["Labels"]["org.ferrocrate.second"], "two");
+    assert_eq!(
+        payload["Config"]["Labels"]["org.ferrocrate.third"],
+        "default-third"
+    );
+}
+
+#[test]
 fn dockerfile_add_extracts_a_local_tar_archive() {
     let runtime_dir = tempfile::tempdir().expect("runtime dir");
     let context_dir = tempfile::tempdir().expect("context dir");

@@ -10959,7 +10959,15 @@ fn extract_docker_build_context_with_limits(
     limits: TransferArchiveLimits,
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut archive = tar::Archive::new(Cursor::new(archive));
+    // Compose sends the legacy `/build` context as a gzip-compressed tar.
+    // Docker also accepts an uncompressed tar, so select the decoder from the
+    // stream signature rather than relying on a client-specific header.
+    let reader: Box<dyn Read> = if archive.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(Cursor::new(archive)))
+    } else {
+        Box::new(Cursor::new(archive))
+    };
+    let mut archive = tar::Archive::new(reader);
     let mut files = 0usize;
     let mut total_bytes = 0u64;
     for entry in archive
@@ -35428,6 +35436,41 @@ volumes:
         assert!(
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_build_context_extraction_accepts_a_gzip_compressed_tar() {
+        use std::io::Write;
+
+        let mut tar = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("Dockerfile").expect("path");
+            header.set_size(b"FROM scratch\n".len() as u64);
+            header.set_cksum();
+            builder
+                .append(&header, &b"FROM scratch\n"[..])
+                .expect("append Dockerfile");
+            builder.finish().expect("finish tar");
+        }
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = flate2::write::GzEncoder::new(
+                &mut compressed,
+                flate2::Compression::default(),
+            );
+            encoder.write_all(&tar).expect("compress tar");
+            encoder.finish().expect("finish compression");
+        }
+
+        let destination = tempfile::tempdir().expect("context destination");
+        extract_docker_build_context(&compressed, destination.path()).expect("extract gzip tar");
+        assert_eq!(
+            std::fs::read_to_string(destination.path().join("Dockerfile")).expect("Dockerfile"),
+            "FROM scratch\n"
         );
     }
 

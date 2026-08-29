@@ -15963,15 +15963,12 @@ fn handle_compose(
                 if rootless_network_leases.contains_key(&logical) {
                     continue;
                 }
-                match ensure_rootless_compose_network_lease(&project, &runtime_dir(), &logical) {
-                    Ok(acquisition) => {
-                        if acquisition.created {
-                            rootless_lease_cleanup.track(acquisition.lease.clone());
-                        }
-                        rootless_network_leases.insert(logical, acquisition.lease);
-                    }
-                    Err(error) => return Err(error),
+                let acquisition =
+                    ensure_rootless_compose_network_lease(&project, &runtime_dir(), &logical)?;
+                if acquisition.created {
+                    rootless_lease_cleanup.track(acquisition.lease.clone());
                 }
+                rootless_network_leases.insert(logical, acquisition.lease);
             }
             let prepared_names: Vec<String> = prepared
                 .iter()

@@ -18130,6 +18130,94 @@ mod tests {
         assert!(!super::rootless_network_lease_entry_matches(&successor, &lease));
     }
 
+    /// S193 failure injection: a lease whose recorded process identity no
+    /// longer matches, or whose generation a successor already replaced, must
+    /// fail closed before any slirp forward is installed or recorded.
+    #[test]
+    fn rootless_network_lease_forward_install_rejects_stale_and_dead_leases() {
+        let runtime = tempfile::tempdir().expect("runtime root");
+        let mut helper = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn lease owner stand-in");
+        let start_time = super::process_start_time_for_pid(helper.id())
+            .expect("lease owner stand-in start time");
+        let entry = super::RootlessNetworkLeaseEntry {
+            key: "compose-failure-injection".to_string(),
+            id: "00000000-0000-4000-8000-00000000000a".to_string(),
+            generation: "00000000-0000-4000-8000-00000000000b".to_string(),
+            state: super::RootlessNetworkLeaseState::Active,
+            owner_pid: Some(helper.id()),
+            owner_start_time: Some(start_time + 1),
+            slirp_pid: Some(helper.id()),
+            slirp_start_time: Some(start_time),
+            forwards: Vec::new(),
+        };
+        let save = |leases: Vec<super::RootlessNetworkLeaseEntry>| {
+            super::save_rootless_network_lease_registry(
+                runtime.path(),
+                &super::RootlessNetworkLeaseRegistry {
+                    schema_version: super::rootless_network_lease_registry_version(),
+                    leases,
+                },
+            )
+            .expect("seed lease registry")
+        };
+        save(vec![entry.clone()]);
+        let lease = super::RootlessNetworkLease {
+            id: entry.id.clone(),
+            generation: entry.generation.clone(),
+            owner_pid: helper.id(),
+            owner_start_time: start_time + 1,
+            slirp_pid: helper.id(),
+            slirp_start_time: start_time,
+        };
+        let mappings = vec![PortMappingRecord {
+            host_port: 18097,
+            container_port: 8094,
+            protocol: "tcp".to_string(),
+        }];
+
+        let recycled = super::add_rootless_network_lease_forwards(
+            runtime.path(),
+            &lease,
+            &mappings,
+        )
+        .expect_err("a recycled process identity must be rejected");
+        assert!(
+            recycled.to_string().contains("no longer alive"),
+            "unexpected error for recycled identity: {recycled}"
+        );
+
+        let mut successor = entry.clone();
+        successor.generation = "00000000-0000-4000-8000-00000000000c".to_string();
+        successor.owner_start_time = Some(start_time);
+        save(vec![successor]);
+        let replaced = super::add_rootless_network_lease_forwards(
+            runtime.path(),
+            &lease,
+            &mappings,
+        )
+        .expect_err("a replaced lease generation must be rejected");
+        assert!(
+            replaced.to_string().contains("identity is stale"),
+            "unexpected error for replaced lease: {replaced}"
+        );
+
+        let registry = super::load_rootless_network_lease_registry(runtime.path())
+            .expect("reload lease registry");
+        assert!(
+            registry
+                .leases
+                .iter()
+                .all(|entry| entry.forwards.is_empty()),
+            "a rejected forward install must record no forwards: {registry:?}"
+        );
+
+        helper.kill().expect("kill lease owner stand-in");
+        helper.wait().expect("reap lease owner stand-in");
+    }
+
     #[test]
     fn terminal_lifecycle_reaps_the_verified_slirp_helper() {
         let mut child = std::process::Command::new("sleep")

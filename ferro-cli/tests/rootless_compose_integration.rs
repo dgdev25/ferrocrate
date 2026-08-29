@@ -596,6 +596,110 @@ fn rootless_compose_implicit_network_publishes_every_port_publishing_service() {
     }
 }
 
+/// S193 failure injection on the implicit default network: the first service
+/// is short-lived and exits before its followers join.  The project-owned
+/// rootless network lease, not the first container, owns the namespace, so the
+/// followers still start and their published ports stay reachable.
+#[test]
+fn rootless_compose_short_lived_first_service_keeps_implicit_network_ports_alive() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let follower = |name: &str, container_port: u16, host_port: u16, marker: &str| {
+        nc_http_service(name, container_port, host_port, marker)
+            + "    depends_on:\n      migrate:\n        condition: service_completed_successfully\n"
+    };
+    let compose = "services:\n".to_string()
+        + "  migrate:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo migrating; sleep 1\"]\n"
+        + &follower("web", 8094, 18097, "web-marker")
+        + &follower("second", 8095, 18098, "second-marker");
+    let project = rootless_compose_project_dir(root.path(), &compose);
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+
+    let up = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "up", "--detach"],
+    );
+    assert!(
+        !up.contains("compose partial result"),
+        "rootless compose up with a short-lived first service failed: {up}"
+    );
+
+    let mut statuses = Vec::new();
+    for _ in 0..40 {
+        let listing = rootless_compose_command(binary, &project, &runtime, &["ps", "--all"]);
+        statuses = rootless_compose_instance_statuses(&listing);
+        let followers_running = statuses
+            .iter()
+            .filter(|(instance, _)| instance != "migrate")
+            .all(|(_, status)| status == "running");
+        let migrate_exited = statuses
+            .iter()
+            .any(|(instance, status)| instance == "migrate" && status == "exited");
+        if followers_running && migrate_exited && statuses.len() == 3 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|(instance, _)| instance == "migrate")
+            .map(|(_, status)| status.as_str()),
+        Some("exited"),
+        "the short-lived first service never exited: {statuses:?}"
+    );
+    for (name, host_port, marker) in
+        [("web", 18097_u16, "web-marker"), ("second", 18098, "second-marker")]
+    {
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|(instance, _)| instance == name)
+                .map(|(_, status)| status.as_str()),
+            Some("running"),
+            "follower {name} did not reach running after the first service exited: {statuses:?}; up said {up}"
+        );
+        assert!(
+            published_port_answers(host_port, marker),
+            "published host port {host_port} died with the first service"
+        );
+    }
+
+    let down = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "down"],
+    );
+    assert!(
+        !down.contains("compose partial result"),
+        "rootless compose down failed: {down}"
+    );
+    for port in [18097, 18098] {
+        assert!(
+            http_exchange(port).is_none(),
+            "compose down left published port {port} reachable"
+        );
+    }
+    let leases = runtime.join("rootless-network-leases.json");
+    if leases.exists() {
+        let registry: serde_json::Value = serde_json::from_slice(&fs::read(&leases).expect("read lease registry"))
+            .expect("parse lease registry");
+        assert!(
+            registry["leases"].as_array().is_some_and(Vec::is_empty),
+            "compose down left the project lease behind: {registry}"
+        );
+    }
+}
+
 #[test]
 fn rootless_compose_explicit_bridge_keeps_published_port_alive() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {

@@ -2904,6 +2904,7 @@ struct CopySpec {
     parents: bool,
     excludes: Vec<String>,
     extract_archives: bool,
+    inline_content: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3026,7 +3027,7 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
     let mut current: Option<StageSpec> = None;
     let mut global_args: HashMap<String, String> = HashMap::new();
 
-    for raw_line in preprocess_dockerfile(contents)?.lines() {
+    for raw_line in dockerfile_instructions(contents)? {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -3187,6 +3188,59 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
 
     Ok(stages)
 }
+
+/// Consume BuildKit heredoc bodies before instruction dispatch. Bodies are
+/// deliberately appended to their introducing instruction so tokens such as
+/// `echo`, `BEGIN`, or a shebang can never be parsed as Dockerfile keywords.
+fn dockerfile_instructions(contents: &str) -> Result<Vec<String>, DockerfileBuildError> {
+    let prepared = preprocess_dockerfile(contents)?;
+    let lines = prepared.lines().collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let raw = lines[index];
+        let keyword = raw.trim().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+        if !matches!(keyword.as_str(), "RUN" | "COPY" | "ADD" | "ONBUILD") {
+            result.push(raw.to_string());
+            index += 1;
+            continue;
+        }
+        let markers = raw.split_whitespace().filter_map(|word| word.strip_prefix("<<")).map(|word| {
+            let (strip_tabs, word) = word.strip_prefix('-').map(|word| (true, word)).unwrap_or((false, word));
+            (word.trim_matches(|c| c == '\'' || c == '"').to_string(), strip_tabs)
+        }).filter(|(delimiter, _)| !delimiter.is_empty()).collect::<Vec<_>>();
+        if markers.is_empty() {
+            result.push(raw.to_string());
+            index += 1;
+            continue;
+        }
+        let mut logical = raw.to_string();
+        index += 1;
+        for (delimiter, strip_tabs) in markers {
+            let mut body = String::new();
+            let mut terminated = false;
+            while index < lines.len() {
+                let candidate = if strip_tabs { lines[index].trim_start_matches('\t') } else { lines[index] };
+                if candidate == delimiter {
+                    index += 1;
+                    terminated = true;
+                    break;
+                }
+                if !body.is_empty() { body.push('\n'); }
+                body.push_str(candidate);
+                index += 1;
+            }
+            if !terminated {
+                return Err(DockerfileBuildError::Invalid(format!("unterminated heredoc delimiter: {delimiter}")));
+            }
+            logical.push('\n');
+            logical.push_str(&body);
+        }
+        result.push(logical);
+    }
+    Ok(result)
+}
+
 
 fn build_stage_dependency_graph(
     stages: &[StageSpec],
@@ -3384,6 +3438,11 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
             append_stage_identity_str(buffer, "cp.exclude", exclude);
         }
         append_stage_identity_bool(buffer, "cp.extract", copy.extract_archives);
+        append_stage_identity_str(
+            buffer,
+            "cp.inline",
+            copy.inline_content.as_deref().unwrap_or("\0absent"),
+        );
     }
     match &stage.healthcheck {
         Some(health) => {
@@ -3727,6 +3786,21 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
 }
 
 fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError> {
+    if let Some((header, body)) = value.split_once('\n') {
+        let header = header.trim();
+        if let Some(marker) = header.split_whitespace().find(|word| word.starts_with("<<")) {
+            let delimiter = marker.trim_start_matches("<<").trim_start_matches('-').trim_matches(|c| c == '\'' || c == '"');
+            let mut tokens = header.split_whitespace().filter(|word| *word != marker).collect::<Vec<_>>();
+            if delimiter.is_empty() || tokens.is_empty() {
+                return Err(DockerfileBuildError::Invalid("COPY heredoc requires a destination".to_string()));
+            }
+            let dest = tokens.pop().unwrap().to_string();
+            if tokens.iter().any(|token| token.starts_with("--")) {
+                return Err(DockerfileBuildError::Unsupported("COPY heredoc flags are not supported".to_string()));
+            }
+            return Ok(Some(CopySpec { srcs: Vec::new(), dest, chmod: None, owner: None, checksum: None, parents: false, excludes: Vec::new(), extract_archives: false, inline_content: Some(body.to_string()) }));
+        }
+    }
     let tokens = value.split_whitespace().collect::<Vec<_>>();
     if tokens.is_empty() {
         return Ok(None);
@@ -3821,6 +3895,7 @@ fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError
         parents,
         excludes,
         extract_archives: false,
+        inline_content: None,
     }))
 }
 
@@ -4208,6 +4283,21 @@ fn parse_run_with_workdir(
     workdir: &str,
 ) -> Result<RunSpec, DockerfileBuildError> {
     let trimmed = raw.trim();
+    if let Some((header, body)) = trimmed.split_once('\n') {
+        if header.trim_start().starts_with("<<") {
+            let mut args = shell.to_vec();
+            args.push(body.to_string());
+            return Ok(RunSpec {
+                args,
+                _shell: true,
+                cache_mounts: Vec::new(),
+                secret_mounts: Vec::new(),
+                ssh_mounts: Vec::new(),
+                tmpfs_mounts: Vec::new(),
+                bind_mounts: Vec::new(),
+            });
+        }
+    }
     let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
     let mut cache_mounts = Vec::new();
     let mut secret_mounts = Vec::new();
@@ -6331,6 +6421,22 @@ fn copy_from_context(
     let remote_root = tempfile::tempdir()?;
     for spec in copies {
         let dest_root = dst_root.join(spec.dest.trim_start_matches('/'));
+        if let Some(content) = spec.inline_content.as_deref() {
+            if spec.dest.ends_with('/') {
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY heredoc destination must name a file".to_string(),
+                ));
+            }
+            if let Some(parent) = dest_root.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&dest_root, content)?;
+            if let Some(mode) = spec.chmod {
+                #[cfg(unix)]
+                fs::set_permissions(&dest_root, fs::Permissions::from_mode(mode))?;
+            }
+            continue;
+        }
         let sources = expand_copy_sources(src_root, &spec.srcs)?;
         let multiple = sources.len() > 1 || spec.dest.ends_with('/');
         if multiple {
@@ -7120,6 +7226,32 @@ mod tests {
             dockerfile_external_base_images(&dockerfile).unwrap(),
             vec!["alpine:3.20", "registry.example/app:1"]
         );
+    }
+
+    #[test]
+    fn heredoc_bodies_stay_with_run_copy_and_onbuild_instructions() {
+        let stages = parse_stages(
+            "FROM scratch\nRUN <<-EOF\n\t#!/bin/sh\n\techo ok\n\tEOF\nCOPY <<EOF /message\nhello $name \"quotes\"\nEOF\nONBUILD RUN <<EOF\necho later\nEOF\n",
+        )
+        .expect("heredoc Dockerfile parses");
+        assert_eq!(stages[0].run[0].args.last().unwrap(), "#!/bin/sh\necho ok");
+        assert_eq!(stages[0].copy_paths[0].inline_content.as_deref(), Some("hello  \"quotes\""));
+        assert_eq!(stages[0].onbuild[0], "RUN <<EOF\necho later");
+    }
+
+    #[test]
+    fn copy_heredoc_build_materializes_its_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY <<EOF /message\nhello\nEOF\n").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile, Some("local/copy-heredoc:latest"), &runtime,
+            CompressionFormat::Gzip, &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        ).expect("COPY heredoc build");
+        assert_eq!(fs::read_to_string(stage_root(&runtime, 0).join("message")).unwrap(), "hello");
     }
 
     #[test]
@@ -10423,6 +10555,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10455,6 +10588,7 @@ mod tests {
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10475,6 +10609,7 @@ mod tests {
                 parents: true,
                 excludes: Vec::new(),
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .expect_err("parent traversal must be rejected");
@@ -10502,6 +10637,7 @@ mod tests {
                 parents: false,
                 excludes: vec!["*.tmp".into(), "secret".into()],
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10522,6 +10658,7 @@ mod tests {
                 parents: false,
                 excludes: vec!["*.tmp".into()],
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10544,6 +10681,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .expect_err("a missing COPY source must fail");
@@ -10578,6 +10716,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: false,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10646,6 +10785,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
+                inline_content: None,
             }],
         )
         .unwrap();
@@ -10685,6 +10825,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
+                inline_content: None,
             }],
         )
         .expect_err("ADD archive traversal must fail closed");
@@ -10733,6 +10874,7 @@ mod tests {
                 parents: false,
                 excludes: Vec::new(),
                 extract_archives: true,
+                inline_content: None,
             }],
         )
         .unwrap();

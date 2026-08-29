@@ -1165,6 +1165,14 @@ pub enum ComposeCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum SystemCommands {
+    /// Show Docker-compatible disk usage.
+    Df {
+        /// Show the detailed per-resource tables.
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
+    /// Show daemon information.
+    Info,
     /// Remove unused container, image, build-cache, and network resources.
     Prune {
         /// Accepted for Docker CLI compatibility; this CLI never prompts.
@@ -5341,18 +5349,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             Commands::SystemDf { format } => {
                 let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
                     .map_err(|error| error.to_string())?;
-                let containers = runtime.list().map_err(|error| error.to_string())?;
-                let images = image_store
-                    .list_references()
-                    .map_err(|error| error.to_string())?;
-                let volumes = volume_store.list().map_err(|error| error.to_string())?;
-                let body = serde_json::json!({
-                    "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
-                    "Images": images.iter().map(|image| serde_json::json!({"Id": image.digest, "RepoTags": [image.reference], "Created": image.created_at_unix, "Size": docker_manifest_layer_size(&image.manifest_json), "SharedSize": 0, "Containers": containers.iter().filter(|container| container.image == image.reference).count()})).collect::<Vec<_>>(),
-                    "Containers": containers.iter().map(|container| serde_json::json!({"Id": container.id, "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(), "Image": container.image, "ImageID": "", "SizeRw": 0, "SizeRootFs": 0})).collect::<Vec<_>>(),
-                    "Volumes": volumes.iter().map(|volume| serde_json::json!({"Name": volume.name, "Mountpoint": volume.path, "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0}})).collect::<Vec<_>>(),
-                    "BuildCache": docker_build_cache_entries(&runtime_dir),
-                });
+                let body = docker_system_df_payload(&runtime_dir, &runtime, &image_store, &volume_store)?;
                 if format == "json" {
                     println!(
                         "{}",
@@ -5361,6 +5358,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 } else {
                     println!("{}", body);
                 }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::System { command: SystemCommands::Df { verbose } } => {
+                let volume_store = LocalVolumeStore::open(runtime_dir.join("volumes"))
+                    .map_err(|error| error.to_string())?;
+                let body = docker_system_df_payload(&runtime_dir, &runtime, &image_store, &volume_store)?;
+                print!("{}", format_docker_system_df(&body, verbose));
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Commands::System { command: SystemCommands::Info } => {
+                let body = docker_info_payload(&runtime, &image_store, PeerAuthMode::Pidfd)?;
+                print_docker_info(&body);
                 Ok(())
             }
             #[cfg(target_os = "linux")]
@@ -5508,7 +5519,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             #[cfg(target_os = "linux")]
             Commands::Info => {
                 let body = docker_info_payload(&runtime, &image_store, PeerAuthMode::Pidfd)?;
-                println!("Containers: {}\n Running: {}\n Paused: {}\n Stopped: {}\nImages: {}\nServer Version: {}\nStorage Driver: {}\nArchitecture: {}\nOperating System: {}", body["Containers"], body["ContainersRunning"], body["ContainersPaused"], body["ContainersStopped"], body["Images"], env!("CARGO_PKG_VERSION"), body["Driver"], body["Architecture"], body["OperatingSystem"]);
+                print_docker_info(&body);
                 Ok(())
             }
             #[cfg(target_os = "linux")]
@@ -8696,6 +8707,17 @@ fn dispatch_remote_socket(
             request("GET", "/system/df".to_string()).and_then(|body| print_json(body, format))
         }
         Commands::System {
+            command: SystemCommands::Df { verbose },
+        } => request("GET", "/system/df".to_string()).and_then(|body| {
+            let body: serde_json::Value = serde_json::from_slice(&body)
+                .map_err(|error| format!("remote system df returned invalid JSON: {error}"))?;
+            print!("{}", format_docker_system_df(&body, *verbose));
+            Ok(())
+        }),
+        Commands::System {
+            command: SystemCommands::Info,
+        } => request("GET", "/info".to_string()).and_then(|body| print_remote_info(&body)),
+        Commands::System {
             command: SystemCommands::Prune { volumes, all, orphans, .. },
         } => (|| -> Result<(), String> {
             if *orphans {
@@ -10017,6 +10039,12 @@ fn format_remote_volume_inspect_text(body: &[u8]) -> Result<String, String> {
 fn print_remote_info(body: &[u8]) -> Result<(), String> {
     let body: serde_json::Value = serde_json::from_slice(body)
         .map_err(|error| format!("remote info returned invalid JSON: {error}"))?;
+    print_docker_info(&body);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_docker_info(body: &serde_json::Value) {
     println!(
         "Containers: {}\n Running: {}\n Paused: {}\n Stopped: {}\nImages: {}\nServer Version: {}\nStorage Driver: {}\nArchitecture: {}\nOperating System: {}",
         body["Containers"],
@@ -10029,7 +10057,6 @@ fn print_remote_info(body: &[u8]) -> Result<(), String> {
         body["Architecture"],
         body["OperatingSystem"]
     );
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -23927,6 +23954,14 @@ fn docker_hub_search_results_from_value(
 const DOCKER_API_VERSION: &str = "1.45";
 
 #[cfg(target_os = "linux")]
+// `h2` 0.4 protects a connection from peers that queue excessive tiny DATA
+// frames before the application gets a chance to consume them. BuildKit's
+// filesync sender legitimately emits one small gRPC DATA frame per filesystem
+// entry, so keep the receive windows below that guard's burst budget. Capacity
+// is released as each packet is persisted, preserving streaming throughput.
+const BUILDKIT_H2_RECEIVE_WINDOW: u32 = 4 * 1024;
+
+#[cfg(target_os = "linux")]
 fn docker_version_payload() -> serde_json::Value {
     serde_json::json!({
         "Version": env!("CARGO_PKG_VERSION"), "ApiVersion": DOCKER_API_VERSION, "MinAPIVersion": "1.24",
@@ -27230,6 +27265,8 @@ async fn run_buildkit_control_session(
         send_buildkit_grpc_status(&mut outgoing, 0, None)
     });
     let handshake = h2::client::Builder::new()
+        .initial_window_size(BUILDKIT_H2_RECEIVE_WINDOW)
+        .initial_connection_window_size(BUILDKIT_H2_RECEIVE_WINDOW)
         .max_frame_size(16 * 1024)
         .handshake(daemon_io);
     let (requests, connection) = tokio::time::timeout(lifetime, handshake)

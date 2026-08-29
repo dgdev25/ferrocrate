@@ -120,8 +120,13 @@ fn rootless_compose_project_dir(root: &Path, compose: &str) -> PathBuf {
     project
 }
 
-fn rootless_compose_command(binary: &str, project: &Path, runtime: &Path, args: &[&str]) -> String {
-    let output = Command::new(binary)
+fn rootless_compose_command_output(
+    binary: &str,
+    project: &Path,
+    runtime: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(binary)
         .current_dir(project)
         .env("FERROCRATE_HOME", runtime)
         .env("FERROCRATE_RUNTIME_DIR", runtime)
@@ -129,7 +134,11 @@ fn rootless_compose_command(binary: &str, project: &Path, runtime: &Path, args: 
         .env("FERROCRATE_NETWORK_BACKEND", "iptables")
         .args(args)
         .output()
-        .expect("run ferro-cli compose");
+        .expect("run ferro-cli compose")
+}
+
+fn rootless_compose_command(binary: &str, project: &Path, runtime: &Path, args: &[&str]) -> String {
+    let output = rootless_compose_command_output(binary, project, runtime, args);
     [
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -383,6 +392,196 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
 }
 
 #[test]
+fn rootless_compose_creates_a_project_bind_volume_with_declared_options() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("project-bind-volume");
+    let source = project.join("source");
+    fs::create_dir_all(&source).expect("bind source");
+    fs::write(
+        project.join("compose.yml"),
+        compose_fixture(&format!(
+            "services:\n  writer:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"echo project-bind > /data/output; sleep 30\"]\n    volumes: [project-data:/data]\n    network_mode: none\nvolumes:\n  project-data:\n    driver: local\n    driver_opts:\n      type: none\n      o: bind\n      device: {}\n",
+            source.display()
+        )),
+    )
+    .expect("compose file");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+    let up = rootless_compose_command_output(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "up", "--detach"],
+    );
+    assert!(
+        up.status.success(),
+        "compose up failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&up.stdout),
+        String::from_utf8_lossy(&up.stderr)
+    );
+    for _ in 0..100 {
+        if source.join("output").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        fs::read_to_string(source.join("output")).expect("project bind output"),
+        "project-bind\n"
+    );
+
+    let volume = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &[
+            "volume",
+            "inspect",
+            "project-bind-volume_project-data",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        volume.contains("\"Driver\": \"local\""),
+        "volume inspect: {volume}"
+    );
+    assert!(
+        volume.contains("\"type\": \"none\""),
+        "volume inspect: {volume}"
+    );
+    assert!(
+        volume.contains("\"o\": \"bind\""),
+        "volume inspect: {volume}"
+    );
+    assert!(
+        volume.contains(&source.display().to_string()),
+        "volume inspect: {volume}"
+    );
+
+    let down = rootless_compose_command_output(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "down"],
+    );
+    assert!(
+        down.status.success(),
+        "compose down failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&down.stdout),
+        String::from_utf8_lossy(&down.stderr)
+    );
+}
+
+#[test]
+fn rootless_compose_inherited_build_bakes_all_build_args_and_runs_service() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = root.path().join("inherited-build");
+    let workspace = project.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        project.join("Dockerfile"),
+        format!(
+            "FROM {}\nARG FIRST\nARG SECOND\nLABEL org.ferrocrate.first=$FIRST org.ferrocrate.second=$SECOND\n",
+            rootless_test_image()
+        ),
+    )
+    .expect("dockerfile");
+    fs::write(
+        project.join("compose.yml"),
+        compose_fixture(
+            "x-build: &shared-build\n  build:\n    context: .\n    dockerfile: Dockerfile\n    args:\n      FIRST: one\n      SECOND: two\nservices:\n  css:\n    <<: *shared-build\n    command: [\"sh\", \"-c\", \"echo inherited-build > /data/output; sleep 30\"]\n    volumes: [./workspace:/data]\n    network_mode: none\n",
+        ),
+    )
+    .expect("compose file");
+
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+    let up = rootless_compose_command_output(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "up", "--detach"],
+    );
+    assert!(
+        up.status.success(),
+        "compose up failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&up.stdout),
+        String::from_utf8_lossy(&up.stderr)
+    );
+    for _ in 0..100 {
+        if workspace.join("output").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        fs::read_to_string(workspace.join("output")).expect("inherited service output"),
+        "inherited-build\n"
+    );
+    let ps = rootless_compose_command(binary, &project, &runtime, &["compose", "ps"]);
+    assert!(ps.contains("css"), "compose ps failed: {ps}");
+    let logs = rootless_compose_command(binary, &project, &runtime, &["compose", "logs", "css"]);
+    assert!(
+        logs.contains("inherited-build"),
+        "compose logs failed: {logs}"
+    );
+
+    let inspect = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &[
+            "image",
+            "inspect",
+            "local/compose-css:latest",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        inspect.contains("\"org.ferrocrate.first\": \"one\""),
+        "image inspect: {inspect}"
+    );
+    assert!(
+        inspect.contains("\"org.ferrocrate.second\": \"two\""),
+        "image inspect: {inspect}"
+    );
+
+    let down = rootless_compose_command_output(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "down"],
+    );
+    assert!(
+        down.status.success(),
+        "compose down failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&down.stdout),
+        String::from_utf8_lossy(&down.stderr)
+    );
+}
+
+#[test]
 fn rootless_compose_short_lived_first_service_keeps_named_network_and_ports_alive() {
     if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
         return;
@@ -466,7 +665,10 @@ fn rootless_compose_short_lived_first_service_keeps_named_network_and_ports_aliv
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(port_live, "published port {port} stopped after the first service exited");
+        assert!(
+            port_live,
+            "published port {port} stopped after the first service exited"
+        );
     }
     let down = Command::new(binary)
         .current_dir(&project)
@@ -656,9 +858,10 @@ fn rootless_compose_short_lived_first_service_keeps_implicit_network_ports_alive
         Some("exited"),
         "the short-lived first service never exited: {statuses:?}"
     );
-    for (name, host_port, marker) in
-        [("web", 18097_u16, "web-marker"), ("second", 18098, "second-marker")]
-    {
+    for (name, host_port, marker) in [
+        ("web", 18097_u16, "web-marker"),
+        ("second", 18098, "second-marker"),
+    ] {
         assert_eq!(
             statuses
                 .iter()
@@ -691,8 +894,9 @@ fn rootless_compose_short_lived_first_service_keeps_implicit_network_ports_alive
     }
     let leases = runtime.join("rootless-network-leases.json");
     if leases.exists() {
-        let registry: serde_json::Value = serde_json::from_slice(&fs::read(&leases).expect("read lease registry"))
-            .expect("parse lease registry");
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&leases).expect("read lease registry"))
+                .expect("parse lease registry");
         assert!(
             registry["leases"].as_array().is_some_and(Vec::is_empty),
             "compose down left the project lease behind: {registry}"
@@ -753,7 +957,10 @@ fn rootless_compose_explicit_bridge_keeps_published_port_alive() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert!(port_live, "explicit rootless bridge port never became reachable");
+    assert!(
+        port_live,
+        "explicit rootless bridge port never became reachable"
+    );
     let down = compose("down");
     assert!(
         down.status.success(),

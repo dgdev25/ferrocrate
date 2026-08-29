@@ -371,6 +371,9 @@ pub enum Commands {
         /// Bind a named Dockerfile build context (`name=path`); repeatable.
         #[arg(long = "build-context")]
         build_context: Vec<String>,
+        /// Set a build-time Dockerfile variable (`NAME=VALUE`); repeatable.
+        #[arg(long = "build-arg")]
+        build_arg: Vec<String>,
         /// Provide a Dockerfile secret (`id=NAME,src=PATH`); repeatable.
         #[arg(long = "secret")]
         secret: Vec<String>,
@@ -3815,6 +3818,7 @@ struct RemoteBuildRequest {
     cache_to_download: bool,
     build_context: Vec<String>,
     secrets: Vec<String>,
+    build_args: HashMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -4315,6 +4319,7 @@ fn prepare_remote_build(
     cache_to: Option<&str>,
     build_context: &[String],
     secrets: &[String],
+    build_args: &HashMap<String, String>,
 ) -> Result<PreparedRemoteBuild, String> {
     let source = ferrofile.or(dockerfile).unwrap_or("Dockerfile");
     let source = std::fs::canonicalize(source)
@@ -4447,6 +4452,7 @@ fn prepare_remote_build(
             cache_to_download,
             build_context: transferred_contexts,
             secrets: transferred_secrets,
+            build_args: build_args.clone(),
         },
         archive,
         cache_to: cache_to
@@ -5311,28 +5317,32 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_from,
                 cache_to,
                 build_context,
+                build_arg,
                 secret,
                 context,
-            } => handle_build(
-                &image_store,
-                &runtime
-                    .request_origin()
-                    .ok_or_else(|| "build: authenticated request origin unavailable".to_string())?,
-                &surface_authorization,
-                dockerfile.as_deref(),
-                ferrofile.as_deref(),
-                tag.as_deref(),
-                compress.as_str(),
-                image_format.as_str(),
-                embed_model.as_deref(),
-                platform.as_deref(),
-                cache_from.as_deref(),
-                cache_to.as_deref(),
-                &build_context,
-                &secret,
-                &HashMap::new(),
-                context.as_deref(),
-            ),
+            } => {
+                let build_args = parse_build_args(&build_arg)?;
+                handle_build(
+                    &image_store,
+                    &runtime
+                        .request_origin()
+                        .ok_or_else(|| "build: authenticated request origin unavailable".to_string())?,
+                    &surface_authorization,
+                    dockerfile.as_deref(),
+                    ferrofile.as_deref(),
+                    tag.as_deref(),
+                    compress.as_str(),
+                    image_format.as_str(),
+                    embed_model.as_deref(),
+                    platform.as_deref(),
+                    cache_from.as_deref(),
+                    cache_to.as_deref(),
+                    &build_context,
+                    &secret,
+                    &build_args,
+                    context.as_deref(),
+                )
+            }
             #[cfg(target_os = "linux")]
             Commands::BuildCachePrune {
                 max_entries,
@@ -8492,10 +8502,12 @@ fn dispatch_remote_socket(
             cache_from,
             cache_to,
             build_context,
+            build_arg,
             secret,
             context,
         } => {
             (|| -> Result<(), String> {
+                let build_args = parse_build_args(build_arg)?;
                 let native_route = ferrofile.is_some()
                     || context.is_some()
                     || compress != "gzip"
@@ -8504,6 +8516,7 @@ fn dispatch_remote_socket(
                     || cache_from.is_some()
                     || cache_to.is_some()
                     || !build_context.is_empty()
+                    || !build_args.is_empty()
                     || !secret.is_empty();
                 if native_route {
                     let prepared = prepare_remote_build(
@@ -8518,6 +8531,7 @@ fn dispatch_remote_socket(
                         cache_to.as_deref(),
                         build_context,
                         secret,
+                        &build_args,
                     )?;
                     let cache_to = prepared.cache_to.clone();
                     let payload = encode_metadata_archive(&prepared.request, &prepared.archive)?;
@@ -11590,6 +11604,26 @@ fn parse_build_contexts(values: &[String]) -> Result<HashMap<String, PathBuf>, S
         }
     }
     Ok(contexts)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_build_args(values: &[String]) -> Result<HashMap<String, String>, String> {
+    let mut build_args = HashMap::new();
+    for value in values {
+        let (name, argument) = match value.split_once('=') {
+            Some((name, argument)) => (name, Some(argument.to_string())),
+            None => (value.as_str(), std::env::var(value).ok()),
+        };
+        if name.is_empty() {
+            return Err(format!(
+                "build: invalid --build-arg {value:?}; argument name cannot be empty"
+            ));
+        }
+        if let Some(argument) = argument {
+            build_args.insert(name.to_string(), argument);
+        }
+    }
+    Ok(build_args)
 }
 
 #[cfg(target_os = "linux")]
@@ -20548,7 +20582,7 @@ fn handle_docker_compat_connection(
                     cache_to.as_deref(),
                     &build_context,
                     &secrets,
-                    &HashMap::new(),
+                    &request.build_args,
                     Some(workspace.path()),
                     None,
                 )?;
@@ -30794,6 +30828,7 @@ volumes:
                 cache_from,
                 cache_to,
                 build_context,
+                build_arg,
                 secret,
                 context,
             } => {
@@ -30807,6 +30842,7 @@ volumes:
                 assert!(cache_from.is_none());
                 assert!(cache_to.is_none());
                 assert!(build_context.is_empty());
+                assert!(build_arg.is_empty());
                 assert!(secret.is_empty());
                 assert!(context.is_none());
             }
@@ -30822,6 +30858,37 @@ volumes:
             Commands::Build { context, .. } => assert_eq!(context.as_deref(), Some(".")),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_accepts_multiple_build_args() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "build",
+            "--build-arg",
+            "FIRST=one",
+            "--build-arg",
+            "SECOND=two",
+            ".",
+        ])
+        .expect("repeatable Docker build arguments must parse");
+        let Commands::Build { build_arg, .. } = cli.command else {
+            panic!("build command")
+        };
+        assert_eq!(
+            super::parse_build_args(&build_arg).expect("valid build args"),
+            HashMap::from([
+                ("FIRST".to_string(), "one".to_string()),
+                ("SECOND".to_string(), "two".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn valueless_build_arg_leaves_an_unset_argument_at_its_dockerfile_default() {
+        let args = super::parse_build_args(&["FERROCRATE_TEST_UNSET_BUILD_ARG".to_string()])
+            .expect("a valueless Docker build argument is valid");
+        assert!(!args.contains_key("FERROCRATE_TEST_UNSET_BUILD_ARG"));
     }
 
     #[test]

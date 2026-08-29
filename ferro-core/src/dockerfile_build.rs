@@ -93,6 +93,7 @@ pub struct ImageBuildPlan {
     dockerfile_digest: [u8; 32],
     base_digests: Vec<(String, Option<String>)>,
     named_contexts: HashMap<String, PathBuf>,
+    build_args: HashMap<String, String>,
     stage_dependencies: Vec<Vec<usize>>,
     stage_batches: Vec<Vec<usize>>,
     stage_identities: Vec<String>,
@@ -140,14 +141,14 @@ pub fn prepare_dockerfile_build(
     compression: CompressionFormat,
     store: &LocalImageStore,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
-    prepare_dockerfile_build_with_contexts(
-        dockerfile_path,
-        tag,
-        runtime_dir,
-        compression,
-        store,
-        &HashMap::new(),
-    )
+    prepare_dockerfile_build_with_contexts(dockerfile_path, tag, runtime_dir, compression, store, &HashMap::new())
+}
+
+pub fn prepare_dockerfile_build_with_contexts_and_build_args(
+    dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
+    store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
+) -> Result<ImageBuildPlan, DockerfileBuildError> {
+    prepare_dockerfile_build_with_contexts_and_build_args_inner(dockerfile_path, tag, runtime_dir, compression, store, named_contexts, build_args)
 }
 
 /// Return registry-backed `FROM` references in first-use order.
@@ -188,13 +189,20 @@ pub fn prepare_dockerfile_build_with_contexts(
     store: &LocalImageStore,
     named_contexts: &HashMap<String, PathBuf>,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
+    prepare_dockerfile_build_with_contexts_and_build_args_inner(dockerfile_path, tag, runtime_dir, compression, store, named_contexts, &HashMap::new())
+}
+
+fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
+    dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
+    store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
+) -> Result<ImageBuildPlan, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
         ));
     }
     let dockerfile = fs::read_to_string(dockerfile_path)?;
-    let stages = parse_stages(&dockerfile)?;
+    let stages = parse_stages_with_build_args(&dockerfile, build_args)?;
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
@@ -227,6 +235,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         hash.update(value.as_bytes());
     }
     hash.update(dockerfile_digest);
+    for (key, value) in BTreeMap::from_iter(build_args.iter()) { hash.update(key.as_bytes()); hash.update(value.as_bytes()); }
     hash.update([match compression {
         CompressionFormat::None => 0,
         CompressionFormat::Gzip => 1,
@@ -272,6 +281,7 @@ pub fn prepare_dockerfile_build_with_contexts(
         dockerfile_digest,
         base_digests,
         named_contexts: canonicalize_named_contexts(named_contexts)?,
+        build_args: build_args.clone(),
         stage_dependencies,
         stage_batches,
         stage_identities,
@@ -893,6 +903,32 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     secrets: &HashMap<String, PathBuf>,
     authorization_plan_digest: Option<&str>,
 ) -> Result<BuildResult, DockerfileBuildError> {
+    build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        authority,
+        named_contexts,
+        secrets,
+        authorization_plan_digest,
+        &HashMap::new(),
+    )
+}
+
+pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    named_contexts: &HashMap<String, PathBuf>,
+    secrets: &HashMap<String, PathBuf>,
+    authorization_plan_digest: Option<&str>,
+    build_args: &HashMap<String, String>,
+) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
@@ -901,7 +937,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     let control = BuildControl::load()?;
 
     let dockerfile = fs::read_to_string(dockerfile_path)?;
-    let stages = parse_stages(&dockerfile)?;
+    let stages = parse_stages_with_build_args(&dockerfile, build_args)?;
     let context_dir = dockerfile_path
         .parent()
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
@@ -940,12 +976,13 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             )));
         }
     }
-    let cache_key = build_cache_key(
+    let cache_key = build_cache_key_with_build_args(
         &dockerfile,
         compression,
         &context_hash,
         &base_infos,
         BUILD_CACHE_PLATFORM,
+        build_args,
     );
     let base_digests = base_infos
         .iter()
@@ -1556,13 +1593,14 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
             "image build plan does not match authorization proof".to_string(),
         ));
     }
-    let observed = prepare_dockerfile_build_with_contexts(
+    let observed = prepare_dockerfile_build_with_contexts_and_build_args(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
         plan.compression,
         store,
         &plan.named_contexts,
+        &plan.build_args,
     )?;
     if observed.plan_digest != plan.plan_digest
         || observed.context_digest != plan.context_digest
@@ -1578,7 +1616,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
     }
     let authority = permit.mutation_authority();
     let authorization_plan_digest = hex::encode(plan.plan_digest());
-    match build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets(
+    match build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
@@ -1588,6 +1626,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
         &plan.named_contexts,
         secrets,
         Some(&authorization_plan_digest),
+        &plan.build_args,
     ) {
         Ok(result) => {
             permit
@@ -2560,6 +2599,7 @@ pub fn prune_build_cache(
 /// are single-platform today; the constant matches `build_config_json`.
 const BUILD_CACHE_PLATFORM: &str = "linux/amd64";
 
+#[cfg(test)]
 fn build_cache_key(
     dockerfile: &str,
     compression: CompressionFormat,
@@ -2567,8 +2607,26 @@ fn build_cache_key(
     base_infos: &[BaseImageInfo],
     platform: &str,
 ) -> String {
+    build_cache_key_with_build_args(
+        dockerfile,
+        compression,
+        context_hash,
+        base_infos,
+        platform,
+        &HashMap::new(),
+    )
+}
+
+fn build_cache_key_with_build_args(
+    dockerfile: &str,
+    compression: CompressionFormat,
+    context_hash: &str,
+    base_infos: &[BaseImageInfo],
+    platform: &str,
+    build_args: &HashMap<String, String>,
+) -> String {
     let mut buf = Vec::new();
-    buf.extend_from_slice(b"ferrocrate/build-cache/v3\0");
+    buf.extend_from_slice(b"ferrocrate/build-cache/v4\0");
     append_cache_key_field(&mut buf, dockerfile.as_bytes());
     append_cache_key_field(&mut buf, context_hash.as_bytes());
     append_cache_key_field(&mut buf, format!("{compression:?}").as_bytes());
@@ -2578,6 +2636,10 @@ fn build_cache_key(
             &mut buf,
             info.digest.as_deref().unwrap_or("scratch").as_bytes(),
         );
+    }
+    for (name, value) in BTreeMap::from_iter(build_args.iter()) {
+        append_cache_key_field(&mut buf, name.as_bytes());
+        append_cache_key_field(&mut buf, value.as_bytes());
     }
     hex::encode(rvf_crypto::shake256_256(&buf))
 }
@@ -2955,6 +3017,10 @@ fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, Doc
 }
 
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
+    parse_stages_with_build_args(contents, &HashMap::new())
+}
+
+fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, String>) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
     let mut global_args: HashMap<String, String> = HashMap::new();
@@ -3004,7 +3070,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
         }
 
         if current.is_none() && keyword == "ARG" {
-            let (name, value) = parse_arg(&value)?;
+            let (name, mut value) = parse_arg(&value)?;
+            if let Some(provided) = build_args.get(&name) { value = provided.clone(); }
             global_args.insert(name, value);
             continue;
         }
@@ -3047,7 +3114,8 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
                 stage.run.push(run);
             }
             "ARG" => {
-                let (name, value) = parse_arg(&interpolated)?;
+                let (name, mut value) = parse_arg(&interpolated)?;
+                if let Some(provided) = build_args.get(&name) { value = provided.clone(); }
                 stage.args.insert(name.clone(), value);
             }
             "ENV" => {
@@ -7010,7 +7078,8 @@ mod tests {
 
     use super::{
         apply_onbuild_triggers, build_cache_key, build_cache_path,
-        build_from_dockerfile_with_store_and_compression, build_journal_path,
+        build_from_dockerfile_with_store_and_compression,
+        build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerfile_external_base_images, dockerignore_matches, export_build_cache,
         export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
@@ -7018,7 +7087,8 @@ mod tests {
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_run_with_workdir,
         parse_stages, parse_stop_signal, prepare_dockerfile_build,
-        prepare_dockerfile_build_with_contexts, prune_build_cache, registry_cache_descriptor,
+        prepare_dockerfile_build_with_contexts,
+        prepare_dockerfile_build_with_contexts_and_build_args, prune_build_cache, registry_cache_descriptor,
         registry_cache_reference, reject_cache_path_symlinks, resolve_base_image,
         resolve_copy_owner,
         run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
@@ -7370,6 +7440,53 @@ mod tests {
             .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
+    }
+
+    #[test]
+    fn build_args_bake_multiple_values_into_the_image_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nARG FIRST=default-first\nARG SECOND=default-second\nENV FIRST=${FIRST} SECOND=${SECOND}\nLABEL org.ferrocrate.first=${FIRST} org.ferrocrate.second=${SECOND}\n",
+        )
+        .expect("write Dockerfile");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let build_args = HashMap::from([
+            ("FIRST".to_string(), "one".to_string()),
+            ("SECOND".to_string(), "two".to_string()),
+        ]);
+
+        let plan = prepare_dockerfile_build_with_contexts_and_build_args(
+            &dockerfile,
+            Some("local/build-args:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &HashMap::new(),
+            &build_args,
+        )
+        .expect("prepare build plan");
+        let permit = crate::authorization::surface::SurfaceAuthorization::compatibility()
+            .authorize_image_build_plan(
+                &crate::authorization::RequestOrigin::cli_current().expect("origin"),
+                &plan,
+            )
+            .expect("authorize build plan");
+        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
+            .expect("build image");
+        let config = fs::read_to_string(
+            runtime
+                .join("images")
+                .join("configs")
+                .join(result.config_digest.replace(':', "_")),
+        )
+        .expect("read image config");
+        let config: serde_json::Value = serde_json::from_str(&config).expect("parse image config");
+        assert_eq!(config["config"]["Env"], serde_json::json!(["FIRST=one", "SECOND=two"]));
+        assert_eq!(config["config"]["Labels"]["org.ferrocrate.first"], "one");
+        assert_eq!(config["config"]["Labels"]["org.ferrocrate.second"], "two");
     }
 
     #[test]

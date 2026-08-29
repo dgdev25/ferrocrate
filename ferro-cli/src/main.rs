@@ -15448,12 +15448,14 @@ fn prepare_compose_service(
         let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
         let dockerfile_path = project_dir.join(context).join(dockerfile);
         prefetch_dockerfile_bases(store, origin, authorization, &dockerfile_path, None)?;
-        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build(
+        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
             &dockerfile_path,
             Some(&image),
             &runtime_dir(),
             CompressionFormat::Gzip,
             store,
+            &HashMap::new(),
+            build.args.as_ref().unwrap_or(&HashMap::new()),
         )
         .map_err(|error| error.to_string())?;
         prerequisites.push(ComposePrerequisite::ImageBuild(plan));

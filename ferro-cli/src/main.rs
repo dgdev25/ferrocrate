@@ -26559,7 +26559,13 @@ async fn execute_buildkit_frontend(
             data: dockerfile_contents.as_bytes().to_vec(),
         });
     if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
-        let warnings = buildkit_lint_warnings(&dockerfile_contents);
+        let warnings = buildkit_lint_warnings_with_check(
+            &dockerfile_contents,
+            request
+                .frontend_opt
+                .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
+                .map(String::as_str),
+        );
         return Ok(BuildkitBuildResult {
             image_name: "local/build:lint".to_string(),
             image_digest: "sha256:lint".to_string(),
@@ -26571,7 +26577,13 @@ async fn execute_buildkit_frontend(
     }
     // Dockerfile checks are advisory: report them with the build result rather
     // than replacing the requested solve with a synthetic lint-only result.
-    let lint_warnings = buildkit_lint_warnings(&dockerfile_contents);
+    let lint_warnings = buildkit_lint_warnings_with_check(
+        &dockerfile_contents,
+        request
+            .frontend_opt
+            .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
+            .map(String::as_str),
+    );
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -26725,7 +26737,35 @@ fn buildkit_frontend_build_args(
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
+    buildkit_lint_warnings_with_check(dockerfile, None)
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warnings_with_check(
+    dockerfile: &str,
+    check_option: Option<&str>,
+) -> Vec<BuildkitLintWarning> {
+    let check_options = check_option.map(str::to_owned).unwrap_or_else(|| {
+        dockerfile
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("# check=")
+                .or_else(|| line.strip_prefix("#check="))
+        })
+        .flat_map(|options| options.split(';'))
+        .collect::<Vec<_>>()
+        .join(";")
+    });
+    let skipped_rules = check_options
+        .split(';')
+        .filter_map(|option| option.strip_prefix("skip="))
+        .flat_map(|rules| rules.split(','))
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+        .collect::<std::collections::HashSet<_>>();
     let mut instructions = Vec::new();
     let mut heredoc_terminator = None;
     for (index, line) in dockerfile.lines().enumerate() {
@@ -26781,6 +26821,20 @@ fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
                 }
             }
         }
+        if (keyword.eq_ignore_ascii_case("CMD") || keyword.eq_ignore_ascii_case("ENTRYPOINT"))
+            && text
+                .split_once(char::is_whitespace)
+                .is_some_and(|(_, arguments)| !arguments.trim_start().starts_with('['))
+        {
+            warnings.push(buildkit_lint_warning(
+                "JSONArgsRecommended",
+                "JSON arguments recommended for ENTRYPOINT/CMD to prevent unintended behavior related to OS signals",
+                format!(
+                    "JSON arguments recommended for {keyword} to prevent unintended behavior related to OS signals"
+                ),
+                *line,
+            ));
+        }
         for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
             let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
             if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
@@ -26794,6 +26848,11 @@ fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
         }
     }
     warnings
+        .into_iter()
+        .filter(|warning| {
+            !skipped_rules.contains("all") && !skipped_rules.contains(warning.rule_name.as_str())
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -35437,6 +35496,31 @@ volumes:
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_lint_checks_json_args_and_honors_skip_directives() {
+        let dockerfile = "FROM scratch\nCMD echo hello\n";
+        let warnings = super::buildkit_lint_warnings(dockerfile);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_name, "JSONArgsRecommended");
+        assert_eq!(
+            warnings[0].detail,
+            "JSON arguments recommended for CMD to prevent unintended behavior related to OS signals"
+        );
+
+        let skipped = super::buildkit_lint_warnings(
+            "# check=skip=JSONArgsRecommended\nFROM scratch\nCMD echo hello\n",
+        );
+        assert!(skipped.is_empty());
+
+        let selected_by_option = super::buildkit_lint_warnings_with_check(
+            "# check=skip=all\nFROM scratch\nCMD echo hello\n",
+            Some("skip=ConsistentInstructionCasing"),
+        );
+        assert_eq!(selected_by_option.len(), 1);
+        assert_eq!(selected_by_option[0].rule_name, "JSONArgsRecommended");
     }
 
     #[cfg(target_os = "linux")]

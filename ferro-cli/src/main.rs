@@ -20092,6 +20092,14 @@ fn daemon_request_scope(
 }
 
 #[cfg(target_os = "linux")]
+/// Reports whether a compatibility request must queue on the container-store
+/// operation guard. `/events` is the exception: Docker seeds a follower's
+/// cursor at connect time, so the subscription has to be established when the
+/// request arrives rather than after the in-flight store transaction finishes.
+fn docker_request_needs_store_guard(method: &str, path: &str) -> bool {
+    !(method == "GET" && path == "/events")
+}
+
 fn handle_docker_compat_connection(
     mut stream: UnixStream,
     runtime_dir: Arc<PathBuf>,
@@ -20156,12 +20164,18 @@ fn handle_docker_compat_connection(
         // it monitors, and that container can exit while this handler still
         // queues on the guard — the follower then never sees the `die` event
         // and `compose up` waits forever.
-        let mut container_store_operation = Some(
-            state
-                .container_store_operations
-                .lock()
-                .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
-        );
+        let is_event_subscription =
+            !docker_request_needs_store_guard(&request.method, &path);
+        let mut container_store_operation = if is_event_subscription {
+            None
+        } else {
+            Some(
+                state
+                    .container_store_operations
+                    .lock()
+                    .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+            )
+        };
         event_request = Some((
             request.method.clone(),
             path.clone(),
@@ -32720,6 +32734,20 @@ volumes:
         )
         .expect("default-shaped NetworkingConfig");
         assert_eq!(spec.network_mode, "bridge");
+    }
+
+    #[test]
+    fn event_subscription_is_exempt_from_the_container_store_guard() {
+        // Docker seeds an `/events` follower's cursor at connect time, so the
+        // subscription must not queue behind the in-flight store transaction.
+        // Every other compatibility request keeps its store-ordering place.
+        assert!(!super::docker_request_needs_store_guard("GET", "/events"));
+        assert!(super::docker_request_needs_store_guard(
+            "POST",
+            "/containers/create"
+        ));
+        assert!(super::docker_request_needs_store_guard("GET", "/containers/json"));
+        assert!(super::docker_request_needs_store_guard("GET", "/events/unknown"));
     }
 
     #[test]

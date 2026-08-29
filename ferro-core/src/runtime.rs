@@ -12571,7 +12571,7 @@ fn signal_verified_lease_process(
     };
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw_target), signal) {
         Ok(()) => Ok(()),
-        Err(error) if error == Errno::ESRCH => Ok(()),
+        Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(RuntimeError::Io(io::Error::from_raw_os_error(error as i32))),
     }
 }
@@ -12879,10 +12879,7 @@ pub fn add_rootless_network_lease_forwards(
         ));
     }
     let socket = slirp_api_socket_path(runtime_dir, &lease.id)?;
-    let ids = match configure_slirp_host_forwards_with_ids(&socket, mappings) {
-        Ok(ids) => ids,
-        Err(error) => return Err(error),
-    };
+    let ids = configure_slirp_host_forwards_with_ids(&socket, mappings)?;
     let additions = mappings
         .iter()
         .cloned()

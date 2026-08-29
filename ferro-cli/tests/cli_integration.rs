@@ -31,6 +31,67 @@ fn images_command_succeeds() {
     assert!(status.success());
 }
 
+#[test]
+fn docker_system_subcommands_print_docker_style_summaries() {
+    let (mut df, temp) = bin();
+    let df = df.args(["system", "df"]).output().expect("run system df");
+    assert!(
+        df.status.success(),
+        "system df failed: {}",
+        String::from_utf8_lossy(&df.stderr)
+    );
+    let df = String::from_utf8(df.stdout).expect("system df stdout utf8");
+    assert!(df.contains("TYPE"), "system df output={df}");
+    assert!(df.contains("RECLAIMABLE"), "system df output={df}");
+
+    let verbose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("HOME", temp.path())
+        .env("XDG_RUNTIME_DIR", temp.path())
+        .env("FERROCRATE_HOME", temp.path())
+        .env("FERROCRATE_RUNTIME_DIR", temp.path())
+        .env("FERROCRATE_IMAGE_STORE", temp.path().join("images"))
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["system", "df", "--verbose"])
+        .output()
+        .expect("run system df");
+    assert!(
+        verbose.status.success(),
+        "system df failed: {}",
+        String::from_utf8_lossy(&verbose.stderr)
+    );
+    let verbose = String::from_utf8(verbose.stdout).expect("system df stdout utf8");
+    assert!(
+        verbose.contains("Images space usage:"),
+        "system df output={verbose}"
+    );
+    assert!(
+        verbose.contains("Build cache usage:"),
+        "system df output={verbose}"
+    );
+
+    let info = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("HOME", temp.path())
+        .env("XDG_RUNTIME_DIR", temp.path())
+        .env("FERROCRATE_HOME", temp.path())
+        .env("FERROCRATE_RUNTIME_DIR", temp.path())
+        .env("FERROCRATE_IMAGE_STORE", temp.path().join("images"))
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .args(["system", "info"])
+        .output()
+        .expect("run system info");
+    assert!(
+        info.status.success(),
+        "system info failed: {}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let info = String::from_utf8(info.stdout).expect("system info stdout utf8");
+    assert!(info.contains("Containers:"), "system info output={info}");
+    assert!(
+        info.contains("Server Version:"),
+        "system info output={info}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn containers_command_succeeds() {
@@ -461,10 +522,12 @@ fn public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() 
         let store =
             ferro_core::volume_store::LocalVolumeStore::open(runtime.path().join("volumes"))
                 .expect("open production volume store");
-        assert!(store
-            .get(&format!("{mode}-volume"))
-            .expect("read volume")
-            .is_some());
+        assert!(
+            store
+                .get(&format!("{mode}-volume"))
+                .expect("read volume")
+                .is_some()
+        );
     }
 
     let runtime = configured_runtime("enforce");

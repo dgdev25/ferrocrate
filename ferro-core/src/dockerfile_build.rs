@@ -3235,7 +3235,7 @@ fn dockerfile_instructions(contents: &str) -> Result<Vec<String>, DockerfileBuil
     let mut index = 0;
     while index < lines.len() {
         let raw = lines[index];
-        let keyword = raw.trim().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+        let keyword = raw.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
         if !matches!(keyword.as_str(), "RUN" | "COPY" | "ADD" | "ONBUILD") {
             result.push(raw.to_string());
             index += 1;
@@ -6526,15 +6526,13 @@ fn copy_from_context(
                     source.display()
                 ))
             })?;
-            // Docker semantics: a source directory with a trailing slash
-            // contributes its CONTENTS (`COPY seed/ /out/` puts seed.txt in
-            // /out/), while a bare directory name is copied under its name.
-            // `.` names the build context itself. Like an explicitly
-            // trailing-slash directory it contributes its contents, so
-            // `WORKDIR /src` + `COPY . .` must place Cargo.toml at /src,
-            // never /src/src/Cargo.toml.
-            let copy_contents =
-                (src == "." || src == "./" || src.ends_with('/')) && source.is_dir();
+            // Docker copies a directory source's contents, regardless of
+            // whether the source spelling has a trailing slash. `.` names
+            // the build context itself, so `WORKDIR /src` + `COPY . .` must
+            // place Cargo.toml at /src; likewise `COPY frontend ./` must
+            // put frontend's files directly in the WORKDIR rather than
+            // creating a nested frontend/frontend directory.
+            let copy_contents = source.is_dir();
             let dest = if copy_contents {
                 dest_root.clone()
             } else if spec.parents {
@@ -6547,12 +6545,13 @@ fn copy_from_context(
             if copy_contents {
                 for entry in fs::read_dir(&source)? {
                     let entry = entry?;
+                    let name = entry.file_name();
                     copy_path_recursive_mode_with_excludes(
                         &entry.path(),
-                        &dest_root.join(entry.file_name()),
+                        &dest_root.join(&name),
                         spec.chmod,
                         &spec.excludes,
-                        Path::new(""),
+                        Path::new(&name),
                     )?;
                 }
                 continue;
@@ -7793,6 +7792,43 @@ mod tests {
         let stage = stage_root(&runtime, 0);
         assert!(stage.join("app/package.json").is_file());
         assert!(stage.join("app/package-lock.json").is_file());
+    }
+
+    #[test]
+    fn copy_directory_to_workdir_dot_keeps_directory_contents_at_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nWORKDIR /app/src/frontend\nCOPY src/frontend/package.json src/frontend/package-lock.json ./\nCOPY src/frontend ./\n",
+        )
+        .expect("dockerfile");
+        let frontend = temp.path().join("src/frontend");
+        fs::create_dir_all(&frontend).expect("frontend");
+        fs::write(frontend.join("package.json"), "{}").expect("package");
+        fs::write(frontend.join("package-lock.json"), "{}").expect("lock");
+        fs::write(frontend.join("tsconfig.json"), "{}").expect("tsconfig");
+
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        build_from_dockerfile_with_store_and_compression(
+            &dockerfile,
+            Some("local/workdir-directory-dot:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("build");
+
+        let frontend = stage_root(&runtime, 0).join("app/src/frontend");
+        assert!(frontend.join("package.json").is_file());
+        assert!(frontend.join("package-lock.json").is_file());
+        assert!(frontend.join("tsconfig.json").is_file());
+        assert!(
+            !frontend.join("frontend").exists(),
+            "directory source must contribute its contents, as Docker does"
+        );
     }
 
     #[test]

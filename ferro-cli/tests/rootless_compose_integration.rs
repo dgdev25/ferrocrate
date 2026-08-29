@@ -81,6 +81,105 @@ fn prepare_image(binary: &str, runtime: &Path, image: &str) {
     }
 }
 
+/// Sends an HTTP request to a published host port and returns the raw
+/// response.  Connecting is not enough: slirp4netns accepts the connection
+/// before it forwards, so only an application reply proves reachability.
+fn http_exchange(port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
+    stream.write_all(b"GET / HTTP/1.0\r\n\r\n").ok()?;
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 512];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => received.extend_from_slice(&chunk[..read]),
+        }
+    }
+    Some(String::from_utf8_lossy(&received).into_owned())
+}
+
+/// Polls until the published host port answers with the expected marker.
+fn published_port_answers(port: u16, marker: &str) -> bool {
+    for _ in 0..40 {
+        if http_exchange(port).is_some_and(|response| response.contains(marker)) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
+fn rootless_compose_project_dir(root: &Path, compose: &str) -> PathBuf {
+    let project = root.join("project");
+    fs::create_dir_all(&project).expect("project directory");
+    fs::write(project.join("compose.yml"), compose_fixture(compose)).expect("compose file");
+    project
+}
+
+fn rootless_compose_command(binary: &str, project: &Path, runtime: &Path, args: &[&str]) -> String {
+    let output = Command::new(binary)
+        .current_dir(project)
+        .env("FERROCRATE_HOME", runtime)
+        .env("FERROCRATE_RUNTIME_DIR", runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(args)
+        .output()
+        .expect("run ferro-cli compose");
+    [
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ]
+    .join("\n")
+}
+
+/// A single-connection HTTP responder.  BusyBox `nc -l` serves one connection
+/// per iteration, which is enough for the reachability probes below.
+fn nc_http_service(name: &str, container_port: u16, host_port: u16, marker: &str) -> String {
+    format!(
+        "  {name}:\n    image: alpine:3.20\n    command: [\"sh\", \"-c\", \"while :; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\n{marker}' | nc -l -p {container_port}; done\"]\n    ports: [\"{host_port}:{container_port}\"]\n"
+    )
+}
+
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+fn rootless_compose_instance_statuses(compose_output: &str) -> Vec<(String, String)> {
+    compose_output
+        .lines()
+        .filter_map(|line| {
+            let line = strip_ansi(line);
+            let name = line.split_whitespace().last()?;
+            let status = if line.contains("running") {
+                "running"
+            } else if line.contains("exited") {
+                "exited"
+            } else {
+                return None;
+            };
+            Some((name.to_string(), status.to_string()))
+        })
+        .collect()
+}
+
 /// Exercises the S183 terminal path with a real rootless workload.  This is
 /// deliberately opt-in because it requires the host's user/network namespace
 /// support and a trusted slirp4netns helper; a skipped capability is not a
@@ -406,6 +505,95 @@ fn rootless_compose_short_lived_first_service_keeps_named_network_and_ports_aliv
         fs::read_to_string(workspace.join("leader")).expect("leader namespace"),
         fs::read_to_string(workspace.join("follower")).expect("follower namespace")
     );
+}
+
+/// S189: a Compose project without a `networks:` block uses the implicit
+/// default bridge network.  Every service that publishes a port must start and
+/// stay reachable on its host port, not only the first one launched.
+#[test]
+fn rootless_compose_implicit_network_publishes_every_port_publishing_service() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_SHARED_COMPOSE_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    assert!(!nix::unistd::Uid::effective().is_root());
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let services = [
+        ("alpha", 8091_u16, 18094_u16, "alpha-marker"),
+        ("beta", 8092, 18095, "beta-marker"),
+        ("gamma", 8093, 18096, "gamma-marker"),
+    ];
+    let compose = services
+        .iter()
+        .map(|(name, container_port, host_port, marker)| {
+            nc_http_service(name, *container_port, *host_port, marker)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let project = rootless_compose_project_dir(root.path(), &format!("services:\n{compose}"));
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    prepare_image(binary, &runtime, &rootless_test_image());
+
+    let up = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "up", "--detach"],
+    );
+    assert!(
+        !up.contains("publish requires --network bridge"),
+        "a non-leader port-publishing service was rejected: {up}"
+    );
+    assert!(
+        !up.contains("compose partial result"),
+        "rootless implicit-network compose up failed: {up}"
+    );
+
+    let mut statuses = Vec::new();
+    for _ in 0..40 {
+        let listing = rootless_compose_command(binary, &project, &runtime, &["ps", "--all"]);
+        statuses = rootless_compose_instance_statuses(&listing);
+        if statuses.len() == services.len()
+            && statuses.iter().all(|(_, status)| status == "running")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    for (name, _, _, _) in services {
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|(instance, _)| instance == name)
+                .map(|(_, status)| status.as_str()),
+            Some("running"),
+            "service {name} did not reach running: {statuses:?}; up said {up}"
+        );
+    }
+    for (_, _, host_port, marker) in services {
+        assert!(
+            published_port_answers(host_port, marker),
+            "published host port {host_port} of service {marker} never answered"
+        );
+    }
+
+    let down = rootless_compose_command(
+        binary,
+        &project,
+        &runtime,
+        &["compose", "--file", "compose.yml", "down"],
+    );
+    assert!(
+        !down.contains("compose partial result"),
+        "rootless implicit-network compose down failed: {down}"
+    );
+    for (_, _, host_port, _) in services {
+        assert!(
+            http_exchange(host_port).is_none(),
+            "compose down left published port {host_port} reachable"
+        );
+    }
 }
 
 #[test]

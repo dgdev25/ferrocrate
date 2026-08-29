@@ -15245,6 +15245,27 @@ struct PreparedComposeService {
     prerequisites: Vec<ComposePrerequisite>,
 }
 
+#[cfg(target_os = "linux")]
+fn compose_project_volume_spec(
+    project_dir: &Path,
+    compose: &ferro_compose::ComposeFile,
+    source: &str,
+) -> Result<(String, String, BTreeMap<String, String>), String> {
+    let Some(definition) = compose.volumes.as_ref().and_then(|volumes| volumes.get(source)) else {
+        return Ok((source.to_string(), "local".to_string(), BTreeMap::new()));
+    };
+    let project = compose_default_network_name_with_declared(project_dir, compose.name.as_deref())
+        .map_err(|error| format!("compose: project volume name: {error}"))?
+        .strip_suffix("_default")
+        .unwrap_or_default()
+        .to_string();
+    Ok((
+        format!("{project}_{source}"),
+        definition.driver.clone().unwrap_or_else(|| "local".to_string()),
+        definition.driver_opts.clone(),
+    ))
+}
+
 /// Image-derived inputs that compose binds into a child run authorization.
 /// They are resolved before the child is authorized and then supplied to the
 /// launcher so the authorized request is the request that executes.
@@ -15412,6 +15433,7 @@ fn prepare_compose_service(
     origin: &RequestOrigin,
     authorization: &SurfaceAuthorization,
     project_dir: &Path,
+    compose: &ferro_compose::ComposeFile,
     name: String,
     instance: String,
     service: &ComposeService,
@@ -15455,15 +15477,17 @@ fn prepare_compose_service(
             if source.is_empty() || source.starts_with('.') || source.contains('/') {
                 continue;
             }
-            if planned_volumes.insert(source.to_string())
+            let (volume_name, driver, driver_opts) =
+                compose_project_volume_spec(project_dir, compose, source)?;
+            if planned_volumes.insert(volume_name.clone())
                 && volume_store
-                    .get(source)
+                    .get(&volume_name)
                     .map_err(|error| error.to_string())?
                     .is_none()
             {
                 prerequisites.push(ComposePrerequisite::VolumeCreate(
                     volume_store
-                        .prepare_create(source, "local", BTreeMap::new())
+                        .prepare_create(&volume_name, &driver, driver_opts)
                         .map_err(|error| error.to_string())?,
                 ));
             }
@@ -15927,6 +15951,7 @@ fn handle_compose(
                         &parent_origin,
                         &surface_authorization,
                         &project_dir,
+                        &project.compose,
                         name,
                         instance,
                         service,
@@ -17517,10 +17542,11 @@ fn compose_service_mounts(
                 }
                 continue;
             }
+            let (volume_name, _, _) = compose_project_volume_spec(project_dir, compose, source)?;
             let record = volume_store
-                .get(source)
+                .get(&volume_name)
                 .map_err(|err| err.to_string())?
-                .ok_or_else(|| format!("compose: volume prerequisite was not created: {source}"))?;
+                .ok_or_else(|| format!("compose: volume prerequisite was not created: {volume_name}"))?;
             let mode = parts.next().unwrap_or("");
             if mode.is_empty() {
                 out.push(format!("{}:{target}", record.path));
@@ -29898,6 +29924,34 @@ configs:
         assert!(mounts
             .iter()
             .any(|mount| mount.ends_with(":/etc/my-app.conf:ro")));
+    }
+
+    #[test]
+    fn compose_project_bind_volume_uses_project_name_and_driver_options() {
+        let temp = tempfile::tempdir().expect("project root");
+        let project_dir = temp.path().join("compose-e2e-project-volume-bind");
+        std::fs::create_dir_all(project_dir.join("source")).expect("bind source");
+        let compose = ComposeFile::parse(
+            &format!(
+                "services:\n  app:\n    image: busybox:latest\n    volumes: [project-data:/data]\nvolumes:\n  project-data:\n    driver: local\n    driver_opts:\n      type: none\n      o: bind\n      device: {}\n",
+                project_dir.join("source").display()
+            ),
+            &HashMap::new(),
+        )
+        .expect("parse compose bind volume");
+
+        let (name, driver, options) = super::compose_project_volume_spec(
+            &project_dir,
+            &compose,
+            "project-data",
+        )
+        .expect("project volume specification");
+
+        assert_eq!(name, "compose-e2e-project-volume-bind_project-data");
+        assert_eq!(driver, "local");
+        assert_eq!(options.get("type"), Some(&"none".to_string()));
+        assert_eq!(options.get("o"), Some(&"bind".to_string()));
+        assert_eq!(options.get("device"), Some(&project_dir.join("source").display().to_string()));
     }
 
     #[test]

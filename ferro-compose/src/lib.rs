@@ -17,7 +17,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -198,8 +198,15 @@ enum BuildRepr {
     Long {
         context: Option<String>,
         dockerfile: Option<String>,
-        args: Option<HashMap<String, String>>,
+        args: Option<BuildArgs>,
     },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BuildArgs {
+    Map(HashMap<String, String>),
+    List(Vec<String>),
 }
 
 impl From<BuildRepr> for Build {
@@ -217,7 +224,16 @@ impl From<BuildRepr> for Build {
             } => Self {
                 context,
                 dockerfile,
-                args,
+                args: args.map(|args| match args {
+                    BuildArgs::Map(args) => args,
+                    BuildArgs::List(args) => args
+                        .into_iter()
+                        .filter_map(|arg| {
+                            let (name, value) = arg.split_once('=')?;
+                            Some((name.to_string(), value.to_string()))
+                        })
+                        .collect(),
+                }),
             },
         }
     }
@@ -383,6 +399,10 @@ pub struct Network {
 pub struct Volume {
     /// Volume driver ("local", "nfs", etc.).
     pub driver: Option<String>,
+
+    /// Driver options passed when Compose creates the project volume.
+    #[serde(default)]
+    pub driver_opts: BTreeMap<String, String>,
 }
 
 /// Compose file-backed secret or config declaration.
@@ -456,7 +476,10 @@ impl ComposeFile {
     /// Returns [`ComposeError::Validation`] if the compose file is semantically invalid.
     pub fn parse(content: &str, env: &HashMap<String, String>) -> ComposeResult<Self> {
         let interpolated = interpolate_variables(content, env)?;
-        let compose: ComposeFile = serde_yaml::from_str(&interpolated)
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&interpolated)
+            .map_err(|err| ComposeError::Parse(err.to_string()))?;
+        expand_yaml_merges(&mut value).map_err(ComposeError::Parse)?;
+        let compose: ComposeFile = serde_yaml::from_value(value)
             .map_err(|err| ComposeError::Parse(err.to_string()))?;
         compose.validate()?;
         Ok(compose)
@@ -548,6 +571,43 @@ impl ComposeFile {
     }
 }
 
+/// Applies YAML's `<<` merge key before deserializing the Compose model.
+/// Docker Compose uses merge anchors heavily for shared build definitions;
+/// serde_yaml preserves the merge key but does not apply it during struct
+/// deserialization.
+fn expand_yaml_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
+    let serde_yaml::Value::Mapping(mapping) = value else {
+        return Ok(());
+    };
+
+    for child in mapping.values_mut() {
+        expand_yaml_merges(child)?;
+    }
+    let merge_key = serde_yaml::Value::String("<<".to_string());
+    let Some(merged) = mapping.remove(&merge_key) else {
+        return Ok(());
+    };
+    let sources = match merged {
+        serde_yaml::Value::Mapping(source) => vec![source],
+        serde_yaml::Value::Sequence(sources) => sources
+            .into_iter()
+            .map(|source| match source {
+                serde_yaml::Value::Mapping(source) => Ok(source),
+                _ => Err("YAML merge entries must be mappings".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("YAML merge value must be a mapping or sequence of mappings".to_string()),
+    };
+    for source in sources {
+        for (key, value) in source {
+            if !mapping.contains_key(&key) {
+                mapping.insert(key, value);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Interpolates ${VAR} and ${VAR:-default} syntax in compose content.
 fn interpolate_variables(content: &str, env: &HashMap<String, String>) -> ComposeResult<String> {
     let mut output = String::with_capacity(content.len());
@@ -623,6 +683,41 @@ services:
             DependsOn::Simple(list) => assert_eq!(list, &vec!["db".to_string()]),
             _ => panic!("unexpected depends_on"),
         }
+    }
+
+    #[test]
+    fn inherits_build_from_yaml_merge_anchor() {
+        let compose = ComposeFile::parse(
+            r#"
+x-assets: &assets
+  build:
+    context: .
+    target: assets
+    args: [NODE_ENV=production]
+services:
+  css:
+    <<: *assets
+    command: yarn build:css
+"#,
+            &HashMap::new(),
+        )
+        .expect("Docker Compose accepts services inheriting a build");
+
+        assert_eq!(
+            compose.services["css"]
+                .build
+                .as_ref()
+                .and_then(|build| build.context.as_deref()),
+            Some(".")
+        );
+        assert_eq!(
+            compose.services["css"]
+                .build
+                .as_ref()
+                .and_then(|build| build.args.as_ref())
+                .and_then(|args| args.get("NODE_ENV")),
+            Some(&"production".to_string())
+        );
     }
 
     #[test]

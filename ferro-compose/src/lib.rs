@@ -17,7 +17,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -383,6 +383,10 @@ pub struct Network {
 pub struct Volume {
     /// Volume driver ("local", "nfs", etc.).
     pub driver: Option<String>,
+
+    /// Driver options passed when Compose creates the project volume.
+    #[serde(default)]
+    pub driver_opts: BTreeMap<String, String>,
 }
 
 /// Compose file-backed secret or config declaration.

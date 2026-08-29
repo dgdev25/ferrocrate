@@ -182,6 +182,49 @@ fn logs_requires_container() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn logs_tail_prints_only_the_last_numbered_lines() {
+    let (mut cmd, temp) = bin();
+    let stdout = temp.path().join("numbered.stdout.log");
+    let stderr = temp.path().join("numbered.stderr.log");
+    fs::write(&stdout, "one\ntwo\nthree\nfour\n").expect("write numbered stdout");
+    fs::write(&stderr, "").expect("write numbered stderr");
+    let record: ferro_core::container_store::ContainerRecord =
+        serde_json::from_value(serde_json::json!({
+            "id": "numbered",
+            "name": "numbered",
+            "pid": 0,
+            "image": "fixture",
+            "command": ["emit-numbered-lines"],
+            "created_at_unix": 0,
+            "stdout_path": stdout,
+            "stderr_path": stderr,
+            "status": "exited"
+        }))
+        .expect("fixture container record");
+    ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        temp.path().join("containers.db"),
+    )
+    .expect("open fixture container store")
+    .put(&record)
+    .expect("persist fixture container");
+
+    let output = cmd
+        .args(["logs", "--tail", "2", "numbered"])
+        .output()
+        .expect("run ferro-cli logs --tail");
+    assert!(
+        output.status.success(),
+        "logs failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("UTF-8 output"),
+        "three\nfour\n"
+    );
+}
+
 #[test]
 fn pull_rejects_invalid_image() {
     let (mut cmd, _temp) = bin();

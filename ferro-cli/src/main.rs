@@ -590,6 +590,18 @@ pub enum Commands {
         format: String,
         #[arg(short = 'f', long)]
         follow: bool,
+        /// Number of lines to show from the end of the logs (default: all).
+        #[arg(short = 'n', long)]
+        tail: Option<String>,
+        /// Show logs since a Unix timestamp, RFC3339 timestamp, or duration.
+        #[arg(long)]
+        since: Option<String>,
+        /// Show logs before a Unix timestamp, RFC3339 timestamp, or duration.
+        #[arg(long)]
+        until: Option<String>,
+        /// Show timestamps.
+        #[arg(short = 't', long)]
+        timestamps: bool,
     },
     #[cfg(target_os = "linux")]
     /// Report container resource statistics.
@@ -5539,7 +5551,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 container,
                 format,
                 follow,
-            } => handle_logs(&runtime, &container, &format, follow),
+                tail,
+                since,
+                until,
+                timestamps,
+            } => handle_logs(
+                &runtime,
+                &container,
+                &format,
+                follow,
+                tail.as_deref(),
+                since.as_deref(),
+                until.as_deref(),
+                timestamps,
+            ),
             #[cfg(target_os = "linux")]
             Commands::Inspect { container, format } => {
                 handle_inspect(&runtime, &container, &format)
@@ -8988,7 +9013,37 @@ fn dispatch_remote_socket(
             container,
             format,
             follow,
+            tail,
+            since,
+            until,
+            timestamps,
         } => {
+            if *follow && (*timestamps || since.is_some() || until.is_some()) {
+                return Some(Err(
+                    "remote logs: --follow cannot be combined with --timestamps, --since, or --until"
+                        .to_string(),
+                ));
+            }
+            let mut query = String::from("stdout=1&stderr=1");
+            if let Some(tail) = tail.as_deref().filter(|value| value.parse::<usize>().is_ok()) {
+                query.push_str("&tail=");
+                query.push_str(&percent_encode_path_component(tail));
+            }
+            for (name, value) in [("since", since), ("until", until)] {
+                if let Some(value) = value {
+                    let bound = match cli_log_time_bound(value, name) {
+                        Ok(bound) => bound,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    query.push('&');
+                    query.push_str(name);
+                    query.push('=');
+                    query.push_str(&bound.to_string());
+                }
+            }
+            if *timestamps {
+                query.push_str("&timestamps=1");
+            }
             if *follow {
                 if format == "json" {
                     Err("remote logs: --follow cannot be combined with --format json".to_string())
@@ -8997,8 +9052,8 @@ fn dispatch_remote_socket(
                     // stream frames and sends TTY follow streams raw.
                     let mut demuxer = DockerLogFrameDemuxer::new();
                     let path = format!(
-                            "/containers/{}/logs?stdout=1&stderr=1&follow=1",
-                            percent_encode_path_component(container)
+                            "/containers/{}/logs?{query}&follow=1",
+                            percent_encode_path_component(container),
                         );
                     let mut on_chunk = |chunk: &[u8]| {
                             let (stdout, stderr) = demuxer.feed(chunk);
@@ -9023,8 +9078,8 @@ fn dispatch_remote_socket(
                 request(
                     "GET",
                     format!(
-                        "/containers/{}/logs?stdout=1&stderr=1",
-                        percent_encode_path_component(container)
+                        "/containers/{}/logs?{query}",
+                        percent_encode_path_component(container),
                     ),
                 )
                 .and_then(|body| {
@@ -13326,6 +13381,10 @@ fn handle_logs(
     container: &str,
     format: &str,
     follow: bool,
+    tail: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    timestamps: bool,
 ) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
@@ -13333,10 +13392,21 @@ fn handle_logs(
     if follow && format == "json" {
         return Err("logs: --follow cannot be combined with --format json".to_string());
     }
+    if follow && (timestamps || since.is_some() || until.is_some()) {
+        return Err(
+            "logs: --follow cannot be combined with --timestamps, --since, or --until"
+                .to_string(),
+        );
+    }
     let resolved = resolve_container_id(runtime, container)?;
     let mut emitted = 0usize;
     loop {
-        let logs = runtime.logs(&resolved).map_err(|err| err.to_string())?;
+        let logs = if timestamps || since.is_some() || until.is_some() {
+            cli_timestamped_logs(runtime, &resolved, since, until, timestamps)?
+        } else {
+            runtime.logs(&resolved).map_err(|err| err.to_string())?
+        };
+        let logs = cli_tail_logs(&logs, tail);
         if logs.len() < emitted {
             emitted = 0;
         }
@@ -13359,6 +13429,100 @@ fn handle_logs(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn cli_tail_logs(logs: &str, tail: Option<&str>) -> String {
+    let Some(tail) = tail else {
+        return logs.to_string();
+    };
+    // Docker CLI treats malformed and negative values as `all`, rather than
+    // rejecting the command before it reaches the daemon.
+    let Ok(count) = tail.parse::<usize>() else {
+        return logs.to_string();
+    };
+    if count == 0 {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = logs.lines().collect();
+    if lines.len() > count {
+        lines.drain(..lines.len() - count);
+    }
+    let mut result = lines.join("\n");
+    if logs.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn cli_log_time_bound(value: &str, name: &str) -> Result<u64, String> {
+    if let Ok(bound) = parse_docker_log_time_bound(value, name) {
+        return Ok(bound);
+    }
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(value) {
+        return u64::try_from(timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX))
+            .map_err(|_| format!("logs: invalid {name} timestamp: {value}"));
+    }
+    let (number, unit) = value
+        .trim()
+        .split_at(value.trim().find(|ch: char| !ch.is_ascii_digit() && ch != '.').unwrap_or(value.trim().len()));
+    let seconds = number
+        .parse::<f64>()
+        .map_err(|_| format!("logs: invalid {name} timestamp: {value}"))?;
+    let multiplier = match unit {
+        "ns" => 1e-9,
+        "us" | "µs" => 1e-6,
+        "ms" => 1e-3,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return Err(format!("logs: invalid {name} timestamp: {value}")),
+    };
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("logs: invalid {name} timestamp: {value}"));
+    }
+    let duration = (seconds * multiplier * 1_000_000_000.0) as u64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("logs: read clock: {error}"))?
+        .as_nanos()
+        .min(u64::MAX as u128) as u64;
+    Ok(now.saturating_sub(duration))
+}
+
+#[cfg(target_os = "linux")]
+fn cli_timestamped_logs(
+    runtime: &ContainerRuntime,
+    container: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    timestamps: bool,
+) -> Result<String, String> {
+    let since = since.map(|value| cli_log_time_bound(value, "since")).transpose()?;
+    let until = until.map(|value| cli_log_time_bound(value, "until")).transpose()?;
+    let (stdout, stderr) = runtime
+        .logs_timestamped_split(container)
+        .map_err(|error| error.to_string())?;
+    let mut output = String::new();
+    for lines in [stdout, stderr] {
+        let lines = lines.ok_or_else(|| {
+            "logs: timestamps/since/until require a complete per-line timestamp journal"
+                .to_string()
+        })?;
+        for line in lines {
+            let nanos = u64::try_from(line.nanos).unwrap_or(u64::MAX);
+            if since.is_some_and(|bound| nanos < bound) || until.is_some_and(|bound| nanos > bound) {
+                continue;
+            }
+            if timestamps {
+                output.push_str(&rfc3339_nanos(line.nanos));
+                output.push(' ');
+            }
+            output.push_str(&String::from_utf8_lossy(&line.bytes));
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(target_os = "linux")]
@@ -38047,15 +38211,37 @@ volumes:
     }
 
     #[test]
-    fn parses_logs_follow_flag() {
-        let cli = Cli::try_parse_from(["ferrocrate", "logs", "c1", "--follow"])
+    fn parses_logs_docker_compatible_selectors() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "logs",
+            "c1",
+            "--follow",
+            "--tail",
+            "5",
+            "--since",
+            "42m",
+            "--until",
+            "2026-08-29T17:22:53Z",
+            "--timestamps",
+        ])
             .expect("parse logs follow");
         match cli.command {
             Commands::Logs {
-                container, follow, ..
+                container,
+                follow,
+                tail,
+                since,
+                until,
+                timestamps,
+                ..
             } => {
                 assert_eq!(container, "c1");
                 assert!(follow);
+                assert_eq!(tail.as_deref(), Some("5"));
+                assert_eq!(since.as_deref(), Some("42m"));
+                assert_eq!(until.as_deref(), Some("2026-08-29T17:22:53Z"));
+                assert!(timestamps);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -38660,7 +38846,8 @@ volumes:
     fn logs_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_logs(&runtime, "", "text", false).expect_err("container required");
+        let err = handle_logs(&runtime, "", "text", false, None, None, None, false)
+            .expect_err("container required");
         assert!(err.contains("logs: container is required"));
     }
 

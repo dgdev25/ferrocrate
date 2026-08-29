@@ -26200,7 +26200,7 @@ async fn handle_buildkit_control_request(
                 .collect();
             let logs = result
                 .steps
-                .first()
+                .last()
                 .map(|step| {
                     use buildkit_proto::moby::buildkit::v1::VertexLog;
                     VertexLog {
@@ -26569,20 +26569,9 @@ async fn execute_buildkit_frontend(
             warnings,
         });
     }
-    // Dockerfile checks are advisory. They must be delivered even when this
-    // compatibility executor cannot materialize a deliberately-invalid lint
-    // fixture (for example an undefined COPY variable).
+    // Dockerfile checks are advisory: report them with the build result rather
+    // than replacing the requested solve with a synthetic lint-only result.
     let lint_warnings = buildkit_lint_warnings(&dockerfile_contents);
-    if !lint_warnings.is_empty() {
-        return Ok(BuildkitBuildResult {
-            image_name: "local/build:lint".to_string(),
-            image_digest: "sha256:lint".to_string(),
-            output: String::new(),
-            steps: Vec::new(),
-            metadata: HashMap::new(),
-            warnings: lint_warnings,
-        });
-    }
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -26692,6 +26681,9 @@ async fn execute_buildkit_frontend(
         .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))
         .collect::<String>();
     output.push_str(&build_output);
+    let (export_step, export_output) = buildkit_export_progress(&image_name);
+    steps.push(export_step);
+    output.push_str(&export_output);
     let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
@@ -26703,6 +26695,14 @@ async fn execute_buildkit_frontend(
         metadata: HashMap::new(),
         warnings: lint_warnings,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_export_progress(image_name: &str) -> (String, String) {
+    (
+        "exporting to image".to_string(),
+        format!("naming to {image_name} done\n"),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -35437,6 +35437,14 @@ volumes:
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_export_progress_reports_the_published_image_name() {
+        let (step, output) = super::buildkit_export_progress("example/simple:latest");
+        assert_eq!(step, "exporting to image");
+        assert_eq!(output, "naming to example/simple:latest done\n");
     }
 
     #[cfg(target_os = "linux")]

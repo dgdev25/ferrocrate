@@ -27770,6 +27770,7 @@ async fn receive_buildkit_local(
     let mut open_files: HashMap<u32, (std::fs::File, u64, u64)> = HashMap::new();
     let mut file_count = 0usize;
     let mut total_size = 0u64;
+    let mut sent_fin = false;
     std::fs::create_dir_all(destination)
         .map_err(|error| format!("buildkit filesync: create staging directory: {error}"))?;
     while let Some(chunk) = incoming.data().await {
@@ -27839,18 +27840,42 @@ async fn receive_buildkit_local(
                     }
                 }
                 Some(FsutilPacketType::Err) => return Err(format!("buildkit filesync: client error: {}", String::from_utf8_lossy(&packet.data))),
-                Some(FsutilPacketType::Fin) => break,
+                Some(FsutilPacketType::Fin) if sent_fin => {
+                    // Match grpc.ClientStream.CloseSend: half-close only after
+                    // the sender's reciprocal protocol FIN, then drain the
+                    // response to its clean gRPC end rather than dropping an
+                    // active h2 stream (which emits RST_STREAM/CANCEL).
+                    outgoing
+                        .send_data(Bytes::new(), true)
+                        .map_err(|error| format!("buildkit filesync: close request failed: {error}"))?;
+                    while let Some(chunk) = incoming.data().await {
+                        let chunk = chunk.map_err(|error| {
+                            format!("buildkit filesync: finish receive failed: {error}")
+                        })?;
+                        incoming.flow_control().release_capacity(chunk.len()).map_err(|error| {
+                            format!("buildkit filesync: finish flow control failed: {error}")
+                        })?;
+                    }
+                    return Ok(());
+                }
+                Some(FsutilPacketType::Fin) => {
+                    return Err("buildkit filesync: sender finished before receiver acknowledgement".to_string());
+                }
                 _ => return Err("buildkit filesync: invalid packet ordering".to_string()),
             }
         }
-        if listing_done && open_files.is_empty() {
+        if listing_done && open_files.is_empty() && !sent_fin {
             let fin = FsutilPacket { packet_type: FsutilPacketType::Fin as i32, stat: None, id: 0, data: Vec::new() };
-            outgoing.send_data(grpc_message(&fin), true)
+            outgoing.send_data(grpc_message(&fin), false)
                 .map_err(|error| format!("buildkit filesync: finish failed: {error}"))?;
-            return Ok(());
+            sent_fin = true;
         }
     }
-    Err("buildkit filesync: client disconnected before FIN".to_string())
+    if sent_fin {
+        Err("buildkit filesync: sender disconnected before FIN".to_string())
+    } else {
+        Err("buildkit filesync: client disconnected before FIN".to_string())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -38303,7 +38328,36 @@ volumes:
                     let packet = super::FsutilPacket { packet_type: super::FsutilPacketType::Data as i32, stat: None, id: 4, data: data.to_vec() };
                     outgoing.send_data(super::grpc_message(&packet), false).expect("file data");
                 }
-                let _ = incoming.data().await;
+                let receiver_fin = incoming
+                    .data()
+                    .await
+                    .expect("receiver protocol FIN")
+                    .expect("valid receiver protocol FIN");
+                let mut receiver_packets = receiver_fin.to_vec();
+                let receiver_packets = super::drain_grpc_packets(&mut receiver_packets)
+                    .expect("decode receiver protocol FIN");
+                assert!(receiver_packets.iter().any(|packet| {
+                    packet.packet_type == super::FsutilPacketType::Fin as i32
+                }));
+                assert!(
+                    !incoming.is_end_stream(),
+                    "the protocol FIN is not the gRPC half-close; the sender must acknowledge it"
+                );
+                let sender_fin = super::FsutilPacket {
+                    packet_type: super::FsutilPacketType::Fin as i32,
+                    stat: None,
+                    id: 0,
+                    data: Vec::new(),
+                };
+                outgoing
+                    .send_data(super::grpc_message(&sender_fin), false)
+                    .expect("sender protocol FIN");
+                while let Some(chunk) = incoming.data().await {
+                    chunk.expect("valid receiver half-close");
+                }
+                outgoing
+                    .send_data(super::Bytes::new(), true)
+                    .expect("complete sender response");
                 });
                 tokio::pin!(handler);
                 loop {

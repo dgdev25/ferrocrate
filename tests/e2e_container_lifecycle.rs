@@ -457,27 +457,33 @@ CMD ["cat", "/hello.txt"]
 
     #[test]
     #[ignore = "Requires container runtime"]
-    fn container_commit_creates_new_image() {
+    fn container_commit_excludes_bind_and_tmpfs_mounts() {
         if !should_run() {
             eprintln!("Skipping: container runtime not available");
             return;
         }
 
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let bind_dir = tempfile::tempdir().expect("bind dir");
 
         // Run container and make changes
         let run_output = ferro_cli()
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .args([
                 "run",
+                "-d",
                 "--name",
                 "commit-test",
+                "--bind",
+                &format!("{}:mnt/bind", bind_dir.path().display()),
+                "--tmpfs",
+                "/mnt/tmpfs",
                 "--network-backend",
                 "iptables",
                 "alpine:3.19",
                 "sh",
                 "-c",
-                "echo 'modified' > /modified.txt && sleep 60",
+                "echo 'modified' > /modified.txt && echo host > /mnt/bind/host-marker && echo tmpfs > /mnt/tmpfs/runtime-marker && sleep 60",
             ])
             .output()
             .expect("run");
@@ -487,7 +493,7 @@ CMD ["cat", "/hello.txt"]
 
         // Commit to new image
         let commit_output = ferro_cli()
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .args(["commit", "commit-test", "test/committed:v1"])
             .output()
             .expect("commit");
@@ -496,7 +502,7 @@ CMD ["cat", "/hello.txt"]
 
         // Verify new image exists
         let images_output = ferro_cli()
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .args(["images", "--format", "json"])
             .output()
             .expect("images");
@@ -507,13 +513,32 @@ CMD ["cat", "/hello.txt"]
             "Committed image should exist"
         );
 
+        let committed_run = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args([
+                "run",
+                "--network",
+                "none",
+                "test/committed:v1",
+                "sh",
+                "-c",
+                "test -f /modified.txt && test ! -e /mnt/bind/host-marker && test ! -e /mnt/tmpfs/runtime-marker",
+            ])
+            .output()
+            .expect("run committed image");
+        assert!(
+            committed_run.status.success(),
+            "committed image retained mount content: {}",
+            String::from_utf8_lossy(&committed_run.stderr)
+        );
+
         // Cleanup
         let _ = ferro_cli()
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .args(["rm", "-f", "commit-test"])
             .output();
         let _ = ferro_cli()
-            .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
+            .env("FERROCRATE_HOME", runtime_dir.path())
             .args(["rmi", "test/committed:v1"])
             .output();
     }

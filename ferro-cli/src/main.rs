@@ -12095,19 +12095,23 @@ fn commit_image(
             rootfs.display()
         ));
     }
-    if !record.mounts.is_empty() || !record.tmpfs_mounts.is_empty() {
-        return Err(
-            "commit: bind and tmpfs mounts must be removed before committing the rootfs"
-                .to_string(),
-        );
-    }
-
     // Build a deterministic-in-memory tar before authorization/publication so
     // an invalid or unreadable rootfs cannot consume a mutation permit.
     let mut tar_bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_bytes);
-        append_commit_rootfs(&mut builder, &rootfs)
+        let excluded_targets = record
+            .mounts
+            .iter()
+            .map(|mount| PathBuf::from(mount.target.trim_start_matches('/')))
+            .chain(
+                record
+                    .tmpfs_mounts
+                    .iter()
+                    .map(|mount| PathBuf::from(mount.target.trim_start_matches('/'))),
+            )
+            .collect::<Vec<_>>();
+        append_commit_rootfs(&mut builder, &rootfs, &excluded_targets)
             .map_err(|error| format!("commit: snapshot rootfs: {error}"))?;
         builder
             .finish()
@@ -12200,6 +12204,7 @@ fn commit_image(
 fn append_commit_rootfs<W: Write>(
     builder: &mut tar::Builder<W>,
     rootfs: &Path,
+    excluded_targets: &[PathBuf],
 ) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(rootfs)? {
         let entry = entry?;
@@ -12210,11 +12215,20 @@ fn append_commit_rootfs<W: Write>(
             continue;
         }
         let path = entry.path();
+        let relative = path
+            .strip_prefix(rootfs)
+            .expect("rootfs traversal path must remain beneath rootfs");
+        if excluded_targets
+            .iter()
+            .any(|target| relative == target || relative.starts_with(target))
+        {
+            continue;
+        }
         let archive_name = Path::new(".").join(&name);
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_dir() {
             builder.append_dir(&archive_name, &path)?;
-            append_commit_rootfs_dir(builder, &path, &archive_name)?;
+            append_commit_rootfs_dir(builder, rootfs, &path, &archive_name, excluded_targets)?;
         } else if metadata.file_type().is_symlink() {
             append_commit_symlink(builder, &path, &archive_name)?;
         } else {
@@ -12306,18 +12320,29 @@ fn append_export_archive_path<W: Write>(
 #[cfg(target_os = "linux")]
 fn append_commit_rootfs_dir<W: Write>(
     builder: &mut tar::Builder<W>,
+    rootfs: &Path,
     directory: &Path,
     archive_directory: &Path,
+    excluded_targets: &[PathBuf],
 ) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
         let path = entry.path();
+        let relative = path
+            .strip_prefix(rootfs)
+            .expect("rootfs traversal path must remain beneath rootfs");
+        if excluded_targets
+            .iter()
+            .any(|target| relative == target || relative.starts_with(target))
+        {
+            continue;
+        }
         let archive_name = archive_directory.join(&name);
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_dir() {
             builder.append_dir(&archive_name, &path)?;
-            append_commit_rootfs_dir(builder, &path, &archive_name)?;
+            append_commit_rootfs_dir(builder, rootfs, &path, &archive_name, excluded_targets)?;
         } else if metadata.file_type().is_symlink() {
             append_commit_symlink(builder, &path, &archive_name)?;
         } else {
@@ -28063,11 +28088,47 @@ mod tests {
     use ferro_core::image_manifest::parse_image_manifest;
     use sha2::Digest;
     use std::collections::{BTreeMap, HashMap};
-    use std::io::Read;
+    use std::io::{Cursor, Read};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn commit_snapshot_excludes_bind_and_tmpfs_mount_targets() {
+        let rootfs = tempfile::tempdir().expect("rootfs fixture");
+        std::fs::write(rootfs.path().join("rootfs-marker"), b"retain")
+            .expect("rootfs marker");
+        std::fs::create_dir_all(rootfs.path().join("mnt/bind"))
+            .expect("bind target");
+        std::fs::write(rootfs.path().join("mnt/bind/host-marker"), b"exclude")
+            .expect("bind marker");
+        std::fs::create_dir_all(rootfs.path().join("mnt/tmpfs"))
+            .expect("tmpfs target");
+        std::fs::write(rootfs.path().join("mnt/tmpfs/runtime-marker"), b"exclude")
+            .expect("tmpfs marker");
+
+        let mut bytes = Vec::new();
+        let mut builder = tar::Builder::new(&mut bytes);
+        super::append_commit_rootfs(
+            &mut builder,
+            rootfs.path(),
+            &[PathBuf::from("mnt/bind"), PathBuf::from("mnt/tmpfs")],
+        )
+        .expect("snapshot rootfs");
+        builder.finish().expect("finish snapshot");
+        drop(builder);
+
+        let mut archive = tar::Archive::new(Cursor::new(bytes));
+        let paths = archive
+            .entries()
+            .expect("snapshot entries")
+            .map(|entry| entry.expect("snapshot entry").path().expect("entry path").into_owned())
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|path| path.ends_with("rootfs-marker")));
+        assert!(paths.iter().all(|path| !path.ends_with("mnt/bind") && !path.starts_with("mnt/bind/")));
+        assert!(paths.iter().all(|path| !path.ends_with("mnt/tmpfs") && !path.starts_with("mnt/tmpfs/")));
+    }
 
     #[test]
     fn doctor_keeps_the_container_database_separate_from_runtime_directories() {

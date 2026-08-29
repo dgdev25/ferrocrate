@@ -2,7 +2,7 @@
 //!
 //! Tests full workflows from pull to cleanup.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::time::Duration;
 
@@ -20,6 +20,11 @@ fn reserve_dynamic_host_port() -> std::io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))
+}
+
+fn http_probe(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_ok()
 }
 
 fn response_provenance_token() -> String {
@@ -380,6 +385,73 @@ CMD ["cat", "/hello.txt"]
         let _ = ferro_cli()
             .env("FERROCRATE_RUNTIME_DIR", runtime_dir.path())
             .args(["rm", "restart-test"])
+            .output();
+    }
+
+    #[test]
+    #[ignore = "Requires rootless container runtime and registry access"]
+    fn stop_reaps_published_listener_before_start() {
+        if !should_run() {
+            eprintln!("Skipping: container runtime not available");
+            return;
+        }
+
+        let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let pull = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["pull", "alpine:3.19"])
+            .output()
+            .expect("pull alpine");
+        assert!(pull.status.success(), "{}", String::from_utf8_lossy(&pull.stderr));
+        let (reservation, port) = reserve_dynamic_host_port().expect("reserve host port");
+        drop(reservation);
+
+        let run = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args([
+                "run", "-d", "--name", "stop-reaps-listener", "-p",
+                &format!("{port}:8080"), "alpine:3.19", "sh", "-c",
+                "while :; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok' | nc -l -p 8080; done",
+            ])
+            .output()
+            .expect("run listener");
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !http_probe(port) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(http_probe(port), "published listener did not serve");
+
+        let stop = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["stop", "stop-reaps-listener"])
+            .output()
+            .expect("stop listener");
+        assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+        assert!(!http_probe(port), "listener survived stop on port {port}");
+
+        let start = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["start", "stop-reaps-listener"])
+            .output()
+            .expect("restart listener");
+        assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !http_probe(port) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(http_probe(port), "restarted listener did not serve");
+
+        let inspect = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["inspect", "--format", "json", "stop-reaps-listener"])
+            .output()
+            .expect("inspect restarted listener");
+        assert!(inspect.status.success());
+        assert!(String::from_utf8_lossy(&inspect.stdout).contains("running"));
+        let _ = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["rm", "-f", "stop-reaps-listener"])
             .output();
     }
 

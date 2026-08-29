@@ -20625,34 +20625,7 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/system/df") => {
-                let containers = runtime.list().map_err(|err| err.to_string())?;
-                let images = store.list_references().map_err(|err| err.to_string())?;
-                let volumes = volume_store.list().map_err(|err| err.to_string())?;
-                let body = serde_json::json!({
-                    "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
-                    "Images": images.iter().map(|image| serde_json::json!({
-                        "Id": image.digest,
-                        "RepoTags": [image.reference],
-                        "Created": image.created_at_unix,
-                        "Size": docker_manifest_layer_size(&image.manifest_json),
-                        "SharedSize": 0,
-                        "Containers": containers.iter().filter(|container| container.image == image.reference).count(),
-                    })).collect::<Vec<_>>(),
-                    "Containers": containers.iter().map(|container| serde_json::json!({
-                        "Id": container.id,
-                        "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(),
-                        "Image": container.image,
-                        "ImageID": "",
-                        "SizeRw": 0,
-                        "SizeRootFs": 0,
-                    })).collect::<Vec<_>>(),
-                    "Volumes": volumes.iter().map(|volume| serde_json::json!({
-                        "Name": volume.name,
-                        "Mountpoint": volume.path,
-                        "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0},
-                    })).collect::<Vec<_>>(),
-                    "BuildCache": docker_build_cache_entries(&runtime_dir),
-                });
+                let body = docker_system_df_payload(&runtime_dir, &runtime, &store, &volume_store)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/containers/json") => {
@@ -23998,6 +23971,94 @@ fn docker_info_payload(runtime: &ContainerRuntime, store: &LocalImageStore, peer
     }))
 }
 
+#[cfg(target_os = "linux")]
+fn docker_system_df_payload(
+    runtime_dir: &Path,
+    runtime: &ContainerRuntime,
+    store: &LocalImageStore,
+    volume_store: &LocalVolumeStore,
+) -> Result<serde_json::Value, String> {
+    let containers = runtime.list().map_err(|error| error.to_string())?;
+    let images = store.list_references().map_err(|error| error.to_string())?;
+    let volumes = volume_store.list().map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "LayersSize": images.iter().map(|image| docker_manifest_layer_size(&image.manifest_json)).fold(0u64, u64::saturating_add),
+        "Images": images.iter().map(|image| serde_json::json!({
+            "Id": image.digest,
+            "RepoTags": [image.reference],
+            "Created": image.created_at_unix,
+            "Size": docker_manifest_layer_size(&image.manifest_json),
+            "SharedSize": 0,
+            "Containers": containers.iter().filter(|container| container.image == image.reference).count(),
+        })).collect::<Vec<_>>(),
+        "Containers": containers.iter().map(|container| serde_json::json!({
+            "Id": container.id,
+            "Names": container.name.as_ref().map(|name| vec![format!("/{name}")]).unwrap_or_default(),
+            "Image": container.image,
+            "ImageID": "",
+            "SizeRw": 0,
+            "SizeRootFs": 0,
+        })).collect::<Vec<_>>(),
+        "Volumes": volumes.iter().map(|volume| serde_json::json!({
+            "Name": volume.name,
+            "Mountpoint": volume.path,
+            "UsageData": {"Size": docker_directory_usage(Path::new(&volume.path)), "RefCount": 0},
+        })).collect::<Vec<_>>(),
+        "BuildCache": docker_build_cache_entries(runtime_dir),
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn format_docker_system_df(body: &serde_json::Value, verbose: bool) -> String {
+    let images = body["Images"].as_array().map_or(&[][..], Vec::as_slice);
+    let containers = body["Containers"].as_array().map_or(&[][..], Vec::as_slice);
+    let volumes = body["Volumes"].as_array().map_or(&[][..], Vec::as_slice);
+    let cache = body["BuildCache"].as_array().map_or(&[][..], Vec::as_slice);
+    let image_size = body["LayersSize"].as_u64().unwrap_or(0);
+    let volume_size = volumes.iter().map(|volume| volume["UsageData"]["Size"].as_u64().unwrap_or(0)).sum::<u64>();
+    let mut output = String::new();
+    if verbose {
+        output.push_str("Images space usage:\n\nREPOSITORY          TAG       IMAGE ID       CREATED         SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS\n");
+        for image in images {
+            let reference = image["RepoTags"].get(0).and_then(serde_json::Value::as_str).unwrap_or("<none>");
+            let (repository, tag) = reference.rsplit_once(':').unwrap_or((reference, "<none>"));
+            output.push_str(&format!("{repository:<19} {tag:<9} {:<14} <unknown>      {:<9} 0B            {:<11} {}\n", short_docker_id(&image["Id"]), docker_size(image["Size"].as_u64().unwrap_or(0)), docker_size(image["Size"].as_u64().unwrap_or(0)), image["Containers"].as_u64().unwrap_or(0)));
+        }
+        output.push_str("\nContainers space usage:\n\nCONTAINER ID   IMAGE     COMMAND   LOCAL VOLUMES   SIZE      CREATED   STATUS    NAMES\n");
+        for container in containers {
+            output.push_str(&format!("{:<14} {:<9} <unknown> 0               0B        <unknown> <unknown> {}\n", short_docker_id(&container["Id"]), container["Image"].as_str().unwrap_or(""), container["Names"].get(0).and_then(serde_json::Value::as_str).unwrap_or("")));
+        }
+        output.push_str("\nLocal Volumes space usage:\n\nVOLUME NAME   LINKS     SIZE\n");
+        for volume in volumes {
+            output.push_str(&format!("{:<13} 0         {}\n", volume["Name"].as_str().unwrap_or(""), docker_size(volume["UsageData"]["Size"].as_u64().unwrap_or(0))));
+        }
+        output.push_str("\nBuild cache usage: 0B\n\nCACHE ID   CACHE TYPE   SIZE      CREATED         LAST USED       USAGE     SHARED\n");
+        for entry in cache {
+            output.push_str(&format!("{:<10} regular      {:<9} <unknown>      <unknown>      1         false\n", short_docker_id(&entry["ID"]), docker_size(entry["Size"].as_u64().unwrap_or(0))));
+        }
+        return output;
+    }
+    output.push_str("TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE\n");
+    output.push_str(&format!("Images          {:<9} {:<9} {:<9} 0B (0%)\n", images.len(), images.iter().filter(|image| image["Containers"].as_u64().unwrap_or(0) > 0).count(), docker_size(image_size)));
+    output.push_str(&format!("Containers      {:<9} {:<9} 0B        0B (0%)\n", containers.len(), containers.iter().filter(|container| container["Status"] == "running").count()));
+    output.push_str(&format!("Local Volumes   {:<9} {:<9} {:<9} 0B (0%)\n", volumes.len(), 0, docker_size(volume_size)));
+    output.push_str(&format!("Build Cache     {:<9} {:<9} 0B        0B\n", cache.len(), 0));
+    output
+}
+
+#[cfg(target_os = "linux")]
+fn short_docker_id(value: &serde_json::Value) -> &str {
+    value.as_str().unwrap_or("").strip_prefix("sha256:").unwrap_or(value.as_str().unwrap_or(""))
+        .get(..12).unwrap_or(value.as_str().unwrap_or(""))
+}
+
+#[cfg(target_os = "linux")]
+fn docker_size(bytes: u64) -> String {
+    if bytes < 1024 { return format!("{bytes}B"); }
+    if bytes < 1024 * 1024 { return format!("{:.1}kB", bytes as f64 / 1024.0); }
+    format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
 fn validate_docker_image_filters(filters: &HashMap<String, Vec<String>>) -> Result<(), String> {
     for key in filters.keys() {
         if !matches!(key.as_str(), "reference" | "since" | "before") {
@@ -27196,7 +27257,11 @@ fn run_buildkit_session_transport(
     runtime.block_on(async move {
         let stream = tokio::net::UnixStream::from_std(stream)
             .map_err(|error| format!("buildkit session: socket handoff failed: {error}"))?;
-        let handshake = h2::client::handshake(stream);
+        let handshake = h2::client::Builder::new()
+            .initial_window_size(BUILDKIT_H2_RECEIVE_WINDOW)
+            .initial_connection_window_size(BUILDKIT_H2_RECEIVE_WINDOW)
+            .max_frame_size(16 * 1024)
+            .handshake(stream);
         let (requests, connection) = tokio::time::timeout(lifetime, handshake)
             .await
             .map_err(|_| "buildkit session: h2 handshake timed out".to_string())?
@@ -31126,6 +31191,18 @@ volumes:
         let cli = Cli::try_parse_from(["ferrocrate", "system-df", "--format", "json"])
             .expect("parse system df");
         assert!(matches!(cli.command, Commands::SystemDf { format } if format == "json"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_docker_system_df_and_info_subcommands() {
+        for args in [
+            vec!["ferrocrate", "system", "df"],
+            vec!["ferrocrate", "system", "df", "--verbose"],
+            vec!["ferrocrate", "system", "info"],
+        ] {
+            Cli::try_parse_from(args).expect("Docker-compatible system subcommand parses");
+        }
     }
 
     #[test]

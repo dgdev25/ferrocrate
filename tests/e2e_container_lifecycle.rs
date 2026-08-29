@@ -456,6 +456,80 @@ CMD ["cat", "/hello.txt"]
     }
 
     #[test]
+    #[ignore = "Requires rootless container runtime and registry access"]
+    fn ephemeral_published_host_port_is_assigned_at_start() {
+        // S172: Docker stores an empty HostPort as the sentinel and assigns a
+        // real host port when the container starts. `run -d -p :80` must
+        // start successfully and report the assigned port.
+        if !should_run() {
+            eprintln!("Skipping: container runtime not available");
+            return;
+        }
+
+        let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let pull = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["pull", "alpine:3.19"])
+            .output()
+            .expect("pull alpine");
+        assert!(pull.status.success(), "{}", String::from_utf8_lossy(&pull.stderr));
+
+        let run = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args([
+                "run",
+                "-d",
+                "--name",
+                "ephemeral-publish",
+                "-p",
+                ":80",
+                "alpine:3.19",
+                "sleep",
+                "300",
+            ])
+            .output()
+            .expect("run with an empty HostPort");
+        assert!(
+            run.status.success(),
+            "start with an empty HostPort should succeed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let inspect = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["inspect", "--format", "json", "ephemeral-publish"])
+            .output()
+            .expect("inspect ephemeral publish");
+        assert!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
+        let inspect_json = String::from_utf8_lossy(&inspect.stdout);
+        // The daemon-compatible inspect renders Docker's `"HostPort"` shape;
+        // the daemonless local record renders `"host_port"`. Either way the
+        // sentinel must be replaced by an assigned non-zero host port.
+        let assigned = ["\"HostPort\":\"", "\"host_port\": "]
+            .iter()
+            .any(|marker| {
+                inspect_json.match_indices(marker).any(|(offset, _)| {
+                    let rest = &inspect_json[offset + marker.len()..];
+                    rest.chars()
+                        .take_while(|character| character.is_ascii_digit())
+                        .collect::<String>()
+                        .parse::<u16>()
+                        .map(|port| port != 0)
+                        .unwrap_or(false)
+                })
+            });
+        assert!(
+            assigned,
+            "host port stayed at the ephemeral sentinel: {inspect_json}"
+        );
+
+        let _ = ferro_cli()
+            .env("FERROCRATE_HOME", runtime_dir.path())
+            .args(["rm", "-f", "ephemeral-publish"])
+            .output();
+    }
+
+    #[test]
     #[ignore = "Requires container runtime"]
     fn container_commit_excludes_bind_and_tmpfs_mounts() {
         if !should_run() {

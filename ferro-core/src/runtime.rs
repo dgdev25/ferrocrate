@@ -3032,6 +3032,10 @@ impl ContainerRuntime {
     ) -> Result<ContainerRecord, RuntimeError> {
         parse_image_reference(image)?;
         ensure_kernel_min_version()?;
+        // A stored sentinel host port is resolved to a concrete free port for
+        // this start before any network backend sees the mappings (S172).
+        let mut port_mappings = port_mappings.to_vec();
+        resolve_ephemeral_host_ports(&mut port_mappings)?;
         let rootless = !nix::unistd::Uid::effective().is_root();
         if rootless && selinux_enabled() {
             return Err(RuntimeError::InvalidCommand(
@@ -3299,7 +3303,7 @@ impl ContainerRuntime {
             }
         }
 
-        validate_port_mapping_conflicts(&self.store, port_mappings)?;
+        validate_port_mapping_conflicts(&self.store, &port_mappings)?;
 
         let existing_records = self.store.list()?;
         let kernel_ops = Arc::clone(&self.kernel_ops);
@@ -3307,7 +3311,7 @@ impl ContainerRuntime {
             proof,
             intent,
             &container_id,
-            port_mappings,
+            &port_mappings,
             network_mode,
             network_backend,
             &mut rollback,
@@ -3317,7 +3321,7 @@ impl ContainerRuntime {
         self.phase_hook
             .reached("run", LifecyclePhasePoint::NetworkKernelEffect)?;
         // Track network resources for rollback
-        rollback.track_network(&mut network_setup, port_mappings)?;
+        rollback.track_network(&mut network_setup, &port_mappings)?;
         rollback.mark_resource_applied(
             "network",
             network_setup
@@ -3598,7 +3602,7 @@ impl ContainerRuntime {
                         rollback.rollback();
                         return Err(error.into());
                     }
-                    if let Err(error) = configure_slirp_host_forwards(&api_socket, port_mappings) {
+                    if let Err(error) = configure_slirp_host_forwards(&api_socket, &port_mappings) {
                         let _ = kill_pid(child_id);
                         rollback.rollback();
                         return Err(error);
@@ -5427,6 +5431,11 @@ impl ContainerRuntime {
                 "bounded on-failure restart limit is exhausted".into(),
             ));
         }
+        // A stored sentinel host port (`create` with an empty `HostPort`) is
+        // resolved to a concrete free port for this start, and the assigned
+        // port is persisted with the record so inspect and listings show it
+        // (S172). The next start assigns a fresh port, as Docker does.
+        resolve_ephemeral_host_ports(&mut record.ports)?;
 
         let records = self.store.list()?;
         self.reconcile_record_network(&record, &records, &mut BTreeSet::new())?;
@@ -11190,6 +11199,53 @@ fn ensure_bridge_backend_root(
     Err(RuntimeError::Network(format!(
         "rootless bridge backend setup requires root; requested backend {requested_backend} cannot be established"
     )))
+}
+
+/// Docker stores an empty `HostPort` as the ephemeral sentinel (`host_port`
+/// 0, S172): the daemon picks a free host port when the container starts and
+/// the assigned port then shows up in inspect and listings. Resolve every
+/// sentinel mapping before the network backend validates the mappings and
+/// installs the forwarding.
+fn resolve_ephemeral_host_ports(
+    mappings: &mut [crate::container_store::PortMappingRecord],
+) -> Result<(), RuntimeError> {
+    for mapping in mappings.iter_mut() {
+        if mapping.host_port != 0 {
+            continue;
+        }
+        if mapping.container_port == 0 {
+            return Err(RuntimeError::Network(
+                "publishing a port requires a non-zero container port".to_string(),
+            ));
+        }
+        mapping.host_port = allocate_ephemeral_host_port(&mapping.protocol)?;
+    }
+    Ok(())
+}
+
+/// Ask the kernel for a free host port by binding an OS-assigned port and
+/// releasing it. The forward is installed immediately afterwards, so the
+/// window for another process to claim the port is the startup gap itself.
+fn allocate_ephemeral_host_port(protocol: &str) -> Result<u16, RuntimeError> {
+    let port = if protocol.eq_ignore_ascii_case("udp") {
+        std::net::UdpSocket::bind(("0.0.0.0", 0))
+            .and_then(|socket| socket.local_addr())
+            .map_err(|error| {
+                RuntimeError::Network(format!("ephemeral host port allocation failed: {error}"))
+            })?
+    } else {
+        std::net::TcpListener::bind(("0.0.0.0", 0))
+            .and_then(|listener| listener.local_addr())
+            .map_err(|error| {
+                RuntimeError::Network(format!("ephemeral host port allocation failed: {error}"))
+            })?
+    };
+    if port.port() == 0 {
+        return Err(RuntimeError::Network(
+            "ephemeral host port allocation returned port 0".to_string(),
+        ));
+    }
+    Ok(port.port())
 }
 
 fn validate_rootless_bridge_network(
@@ -20066,6 +20122,58 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             protocol: "tcp".to_string(),
         }];
         super::validate_port_mapping_conflicts(&store, &fixed).expect("no fixed-port conflict");
+    }
+
+    #[test]
+    fn ephemeral_sentinel_host_port_is_resolved_at_start() {
+        // Docker stores `HostPort: ""` as the sentinel and assigns a real
+        // host port when the container starts (S172). Fixed ports and the
+        // container port must stay untouched.
+        let mut mappings = vec![
+            PortMappingRecord {
+                host_port: 0,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            },
+            PortMappingRecord {
+                host_port: 0,
+                container_port: 53,
+                protocol: "udp".to_string(),
+            },
+            PortMappingRecord {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            },
+        ];
+        super::resolve_ephemeral_host_ports(&mut mappings).expect("sentinels resolve");
+        assert_ne!(mappings[0].host_port, 0, "tcp sentinel must be assigned");
+        assert_ne!(mappings[1].host_port, 0, "udp sentinel must be assigned");
+        assert_eq!(mappings[0].container_port, 80);
+        assert_eq!(mappings[1].protocol, "udp");
+        assert_eq!(mappings[2].host_port, 8080, "fixed host port is kept");
+
+        // A resolved port must be a port the host can actually bind, so the
+        // slirp forward that reuses it starts from a verifiably free port.
+        std::net::TcpListener::bind(("0.0.0.0", mappings[0].host_port))
+            .expect("assigned tcp port is free");
+        std::net::UdpSocket::bind(("0.0.0.0", mappings[1].host_port))
+            .expect("assigned udp port is free");
+    }
+
+    #[test]
+    fn ephemeral_sentinel_with_a_zero_container_port_is_rejected() {
+        let mut mappings = vec![PortMappingRecord {
+            host_port: 0,
+            container_port: 0,
+            protocol: "tcp".to_string(),
+        }];
+        let error = super::resolve_ephemeral_host_ports(&mut mappings)
+            .expect_err("zero container port cannot publish");
+        assert!(
+            error.to_string().contains("non-zero container port"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

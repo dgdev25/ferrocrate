@@ -3631,6 +3631,41 @@ fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
 }
 
 #[test]
+fn docker_compat_create_normalizes_nullable_nested_objects() {
+    let harness = DaemonHarness::spawn();
+    for (name, networking_config) in [
+        ("nullable-root", serde_json::Value::Null),
+        ("nullable-endpoints", serde_json::json!({"EndpointsConfig": null})),
+    ] {
+        let body = serde_json::json!({
+            "Image": "busybox",
+            "Labels": null,
+            "Volumes": null,
+            "ExposedPorts": null,
+            "Healthcheck": null,
+            "HostConfig": null,
+            "NetworkingConfig": networking_config,
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "name={name} create response={response}");
+
+        let (status, inspect) = harness.request("GET", &format!("/v1.45/containers/{name}/json"));
+        assert_eq!(status, 200, "name={name} inspect response={inspect}");
+        let inspect: serde_json::Value = serde_json::from_str(&inspect).expect("inspect JSON");
+        assert_eq!(inspect["Config"]["Labels"], serde_json::json!({}));
+        assert_eq!(inspect["Config"]["Healthcheck"], serde_json::Value::Null);
+        assert_eq!(inspect["HostConfig"]["Memory"], 0);
+        assert_eq!(inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"], "bridge");
+    }
+}
+
+#[test]
 fn docker_compat_buildkit_control_hijacks_on_bare_and_versioned_paths() {
     let harness = DaemonHarness::spawn();
     for path in ["/grpc", "/v1.52/grpc"] {

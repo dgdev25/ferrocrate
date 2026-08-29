@@ -17694,15 +17694,30 @@ struct DockerCreateRequest {
     tty: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
-    #[serde(rename = "NetworkingConfig", default)]
-    networking_config: DockerNetworkingConfig,
+    #[serde(rename = "NetworkingConfig")]
+    networking_config: Option<DockerNetworkingConfig>,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default, serde::Deserialize)]
 struct DockerNetworkingConfig {
-    #[serde(rename = "EndpointsConfig", default)]
+    #[serde(
+        rename = "EndpointsConfig",
+        default,
+        deserialize_with = "deserialize_null_endpoint_configs"
+    )]
     endpoints: HashMap<String, DockerEndpointConfig>,
+}
+
+#[cfg(target_os = "linux")]
+fn deserialize_null_endpoint_configs<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, DockerEndpointConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<HashMap<String, DockerEndpointConfig>>::deserialize(deserializer)?
+        .unwrap_or_default())
 }
 
 #[cfg(target_os = "linux")]
@@ -24127,9 +24142,13 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
     };
     let network_aliases = request
         .networking_config
-        .endpoints
-        .get(&network_mode)
-        .or_else(|| request.networking_config.endpoints.values().next())
+        .as_ref()
+        .and_then(|networking| {
+            networking
+                .endpoints
+                .get(&network_mode)
+                .or_else(|| networking.endpoints.values().next())
+        })
         .map(|endpoint| endpoint.aliases.clone())
         .unwrap_or_default();
     let health = parse_docker_healthcheck(request.healthcheck)?;

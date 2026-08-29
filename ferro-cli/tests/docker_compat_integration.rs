@@ -1879,6 +1879,90 @@ fn docker_compat_start_and_stop_events_are_emitted_exactly_once_by_runtime() {
 }
 
 #[test]
+fn docker_compat_event_follower_subscribed_before_start_sees_the_whole_lifecycle() {
+    // `compose up` opens its event follower while it starts the services it
+    // monitors, and its monitor removes a service container from its watched
+    // set only on `die`. The follower must therefore be seeded from the
+    // journal tail when its request connects, not after other in-flight
+    // requests release the store guard — a follower that subscribes before
+    // the container's lifecycle must see that lifecycle end to end.
+    // Regression for S179: the follower queued behind
+    // `/containers/{id}/start`, seeded past the `die`, and `compose up`
+    // waited forever.
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/event-follower:latest");
+
+    let filters = "%7B%22label%22%3A%7B%22com.docker.compose.project%3Dfollower-race%22%3Atrue%7D%2C%22type%22%3A%7B%22container%22%3Atrue%7D%7D";
+
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=follower-race-one",
+        "application/json",
+        br#"{"Image":"compat/event-follower:latest","Cmd":["/bin/busybox","sleep","2"],"Labels":{"com.docker.compose.project":"follower-race"},"HostConfig":{"NetworkMode":"none"}}"#,
+    );
+    assert_eq!(status, 201, "create response={response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+
+    // Subscribe first, then start: every lifecycle event of this container
+    // happens after the follower asked to be connected, so the follower has
+    // to see them however fast the start transaction is.
+    let mut follower = UnixStream::connect(&harness.socket_path).expect("connect follower");
+    follower
+        .write_all(
+            format!(
+                "GET /v1.45/events?follow=1&filters={filters} HTTP/1.1\r\nHost: docker\r\nAccept: application/jsonl\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write follower request");
+    follower
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("follower read timeout");
+
+    // The subscription must be answered while nothing else is pending on the
+    // store guard; a guard-holding start in front of it is what delayed the
+    // cursor seed in the defect above.
+    let subscribed_at = Instant::now();
+    let mut header_bytes = [0u8; 64];
+    follower
+        .read_exact(&mut header_bytes)
+        .expect("read follower response headers");
+    assert!(
+        header_bytes.starts_with(b"HTTP/1.1 200"),
+        "follower headers={}",
+        String::from_utf8_lossy(&header_bytes)
+    );
+    assert!(
+        subscribed_at.elapsed() < Duration::from_secs(2),
+        "the event follower was not answered promptly; it queued on the store guard"
+    );
+
+    let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
+    assert_eq!(status, 204, "start response={response}");
+
+    let die_deadline = Instant::now() + Duration::from_secs(15);
+    let mut stream = String::new();
+    let saw_die = loop {
+        if Instant::now() > die_deadline {
+            break false;
+        }
+        let mut chunk = [0u8; 1024];
+        match follower.read(&mut chunk) {
+            Ok(0) => break false,
+            Ok(n) => stream.push_str(&String::from_utf8_lossy(&chunk[..n])),
+            Err(_) => continue,
+        }
+        if stream.contains("\"Action\":\"die\"") && stream.contains(&id) {
+            break true;
+        }
+    };
+    assert!(saw_die, "follower never received the die event: {stream}");
+}
+
+#[test]
 fn docker_compat_restarts_stopped_container_by_name() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/daemon-reconcile:latest");

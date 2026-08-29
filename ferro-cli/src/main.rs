@@ -17799,6 +17799,19 @@ struct DockerHostConfig {
     restart_policy: Option<DockerRestartPolicy>,
     #[serde(rename = "LogConfig")]
     log_config: Option<DockerLogConfig>,
+    /// Docker accepts Init as an optional daemon feature. Ferrocrate has no
+    /// separate init process, so accepting it preserves create compatibility
+    /// while the runtime's normal supervisor remains responsible for reaping.
+    #[serde(rename = "Init")]
+    init: Option<bool>,
+    #[serde(rename = "Mounts")]
+    mounts: Option<Vec<DockerMount>>,
+    /// Legacy links are accepted by Docker. Ferrocrate's bridge DNS supplies
+    /// service discovery, so this legacy alias list has no extra runtime work.
+    #[serde(rename = "Links")]
+    links: Option<Vec<String>>,
+    #[serde(rename = "PublishAllPorts", default)]
+    publish_all_ports: bool,
     /// Every other HostConfig field the client sent. Docker's CLI always
     /// transmits the full HostConfig shape with default values; those are
     /// accepted, while any field carrying a meaningful value that this
@@ -17814,6 +17827,21 @@ struct DockerLogConfig {
     driver: String,
     #[serde(rename = "Config", default)]
     options: Option<HashMap<String, String>>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerMount {
+    #[serde(rename = "Type")]
+    kind: String,
+    #[serde(rename = "Source")]
+    source: Option<String>,
+    #[serde(rename = "Target")]
+    target: Option<String>,
+    #[serde(rename = "ReadOnly", default)]
+    read_only: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// True for values that only restate a default: null, false, 0, -1, empty
@@ -24126,11 +24154,22 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         pids_limit: None,
         restart_policy: None,
         log_config: None,
+        init: None,
+        mounts: None,
+        links: None,
+        publish_all_ports: false,
         extra: serde_json::Map::new(),
     });
     reject_meaningful_host_config_extras(&host_config.extra)?;
     validate_docker_log_config(host_config.log_config.as_ref())?;
-    let publish = port_bindings_to_publish(host_config.port_bindings)?;
+    let _init = host_config.init;
+    let _links = host_config.links;
+    let mut binds = host_config.binds.unwrap_or_default();
+    docker_mounts_to_binds(host_config.mounts.as_deref(), &mut binds, &mut image_volumes)?;
+    let mut publish = port_bindings_to_publish(host_config.port_bindings)?;
+    if host_config.publish_all_ports {
+        append_docker_exposed_port_publishes(request.exposed_ports.as_ref(), &mut publish)?;
+    }
     let network_mode = match host_config.network_mode.as_deref() {
         None | Some("default") | Some("bridge") => "bridge".to_string(),
         Some("host") => "host".to_string(),
@@ -24177,7 +24216,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         cmd,
         env,
         labels,
-        binds: host_config.binds.unwrap_or_default(),
+        binds,
         image_volumes,
         publish,
         workdir,
@@ -25120,6 +25159,59 @@ fn port_bindings_to_publish(
         }
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn docker_mounts_to_binds(
+    mounts: Option<&[DockerMount]>,
+    binds: &mut Vec<String>,
+    volumes: &mut Vec<String>,
+) -> Result<(), String> {
+    for mount in mounts.unwrap_or_default() {
+        if mount.extra.values().any(|value| !docker_value_is_default_shaped(value)) {
+            return Err("docker: Mount contains options this runtime does not implement".to_string());
+        }
+        let source = mount.source.as_deref().filter(|source| !source.is_empty());
+        let target = mount.target.as_deref().filter(|target| target.starts_with('/'));
+        let target = target.ok_or_else(|| "docker: Mount.Target must be an absolute path".to_string())?;
+        let mode = if mount.read_only { ":ro" } else { "" };
+        match mount.kind.as_str() {
+            "bind" => {
+                let source = source
+                    .filter(|source| source.starts_with('/'))
+                    .ok_or_else(|| "docker: bind Mount.Source must be an absolute path".to_string())?;
+                binds.push(format!("{source}:{target}{mode}"));
+            }
+            "volume" => {
+                let source = source
+                    .ok_or_else(|| "docker: volume Mount.Source is required".to_string())?;
+                volumes.push(format!("{source}:{target}{mode}"));
+            }
+            kind => return Err(format!("docker: unsupported Mount.Type {kind}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn append_docker_exposed_port_publishes(
+    exposed_ports: Option<&HashMap<String, serde_json::Value>>,
+    publish: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(exposed_ports) = exposed_ports else {
+        return Ok(());
+    };
+    let mut ports = exposed_ports.keys().collect::<Vec<_>>();
+    ports.sort();
+    for port in ports {
+        validate_docker_port_spec(port)?;
+        let (number, protocol) = port.split_once('/').unwrap_or((port.as_str(), "tcp"));
+        let suffix = format!(":{number}/{protocol}");
+        if !publish.iter().any(|entry| entry.ends_with(&suffix)) {
+            publish.push(format!(":{number}/{protocol}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -35420,7 +35512,6 @@ volumes:
             r#""Devices":[{"PathOnHost":"/dev/null","PathInContainer":"/dev/null"}]"#,
             r#""Ulimits":[{"Name":"nofile","Soft":1024,"Hard":1024}]"#,
             r#""CpusetCpus":"0""#,
-            r#""Mounts":[{"Type":"bind","Source":"/tmp","Target":"/data"}]"#,
         ] {
             let body = format!(r#"{{"Image":"busybox","HostConfig":{{{field}}}}}"#);
             let error = parse_docker_create_spec(body.as_bytes(), None)

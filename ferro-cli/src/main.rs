@@ -20122,17 +20122,6 @@ fn handle_docker_compat_connection(
             .map(|peer| peer.request_origin())
             .map_err(|error| format!("docker peer authentication failed: {error}"))
         })?;
-        // Keep store-backed compatibility operations in daemon process order.
-        // This is deliberately acquired after socket authentication and before
-        // creating the request-scoped runtime.  The lock is released before
-        // streaming response bodies, so long-lived `/events` or log followers
-        // never block unrelated API calls.
-        let mut container_store_operation = Some(
-            state
-                .container_store_operations
-                .lock()
-                .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
-        );
         let runtime = daemon_request_scope(&daemon_runtime, origin.clone())
             .map_err(|error| error.to_string())?;
         let surface_authorization = runtime
@@ -20155,6 +20144,24 @@ fn handle_docker_compat_connection(
             query.insert("names".to_string(), name);
             path = "/images/get".to_string();
         }
+        // Keep store-backed compatibility operations in daemon process order.
+        // This is deliberately acquired after socket authentication and before
+        // creating the request-scoped runtime.  The lock is released before
+        // streaming response bodies, so long-lived `/events` or log followers
+        // never block unrelated API calls.
+        //
+        // `/events` is excluded: it reads the event journal under its own lock,
+        // and Docker seeds a follower's cursor at connect time. A compose
+        // client issues the subscription concurrently with the container start
+        // it monitors, and that container can exit while this handler still
+        // queues on the guard — the follower then never sees the `die` event
+        // and `compose up` waits forever.
+        let mut container_store_operation = Some(
+            state
+                .container_store_operations
+                .lock()
+                .map_err(|_| "docker: container store operation lock poisoned".to_string())?,
+        );
         event_request = Some((
             request.method.clone(),
             path.clone(),
@@ -24219,7 +24226,10 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         append_docker_exposed_port_publishes(request.exposed_ports.as_ref(), &mut publish)?;
     }
     let network_mode = match host_config.network_mode.as_deref() {
-        None | Some("default") | Some("bridge") => "bridge".to_string(),
+        // Go's HostConfig has no omitempty on NetworkMode, so a Go client that
+        // leaves it unset still sends an empty string. Docker treats that as
+        // the default network, and `compose bridge convert` relies on it.
+        None | Some("") | Some("default") | Some("bridge") => "bridge".to_string(),
         Some("host") => "host".to_string(),
         Some("none") => "none".to_string(),
         Some(other) => {
@@ -32709,6 +32719,20 @@ volumes:
             None,
         )
         .expect("default-shaped NetworkingConfig");
+        assert_eq!(spec.network_mode, "bridge");
+    }
+
+    #[test]
+    fn container_create_treats_empty_network_mode_as_the_default_network() {
+        // Captured from `docker compose bridge convert` (compose v5.4.0 over
+        // the suite's helm fixture): Go's HostConfig has no omitempty on
+        // NetworkMode, so an unset mode arrives as "" next to a null
+        // EndpointsConfig. Docker reads "" as the default network.
+        let spec = super::parse_docker_create_spec(
+            br#"{"Hostname":"","User":"1000","Env":["LICENSE_AGREEMENT=true"],"Image":"docker/compose-bridge-helm:v0.0.3","Labels":{},"HostConfig":{"Binds":["/tmp/compose-convert-1:/in","/tmp/out:/out"],"ContainerIDFile":"","LogConfig":{"Type":"","Config":null},"NetworkMode":"","PortBindings":null,"RestartPolicy":{"Name":"","MaximumRetryCount":0},"AutoRemove":true},"NetworkingConfig":{"EndpointsConfig":null}}"#,
+            None,
+        )
+        .expect("Go-shaped bridge convert create payload");
         assert_eq!(spec.network_mode, "bridge");
     }
 

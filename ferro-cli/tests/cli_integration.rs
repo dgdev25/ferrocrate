@@ -39,6 +39,57 @@ fn containers_command_succeeds() {
     assert!(status.success());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn native_create_persists_for_ps_inspect_and_rm() {
+    let (mut create, temp) = bin();
+    let create = create
+        .args(["create", "--name", "created-native", "alpine:3.20", "true"])
+        .output()
+        .expect("native create");
+    assert!(
+        create.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .env("HOME", temp.path())
+            .env("XDG_RUNTIME_DIR", temp.path())
+            .env("FERROCRATE_HOME", temp.path())
+            .env("FERROCRATE_RUNTIME_DIR", temp.path())
+            .env("FERROCRATE_IMAGE_STORE", temp.path().join("images"))
+            .env("FERROCRATE_DESKTOP_FORWARD", "0")
+            .args(args)
+            .output()
+            .expect("run ferro-cli")
+    };
+
+    let ps = run(&["ps", "--all"]);
+    assert!(
+        ps.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&ps.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ps.stdout).contains("created-native"));
+
+    let inspect = run(&["inspect", "created-native", "--format", "json"]);
+    assert!(
+        inspect.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    assert!(serde_json::from_slice::<serde_json::Value>(&inspect.stdout).is_ok());
+
+    let rm = run(&["rm", "created-native"]);
+    assert!(
+        rm.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&rm.stderr)
+    );
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct DesktopNetworkListRecord {

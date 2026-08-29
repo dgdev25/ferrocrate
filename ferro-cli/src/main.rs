@@ -5475,7 +5475,6 @@ fn dispatch(command: Commands) -> Result<(), String> {
             }
             #[cfg(target_os = "linux")]
             Commands::Create { name, memory_max, cpus, image, cmd } => {
-                let state = DockerCompatState::new(&runtime_dir)?;
                 let (cpu_quota, cpu_period) = docker_cpu_quota_period(None, None, cpus.as_deref())?;
                 let payload = serde_json::json!({
                     "Image": image,
@@ -5486,7 +5485,9 @@ fn dispatch(command: Commands) -> Result<(), String> {
                         "CpuPeriod": cpu_period.unwrap_or(0),
                     },
                 });
-                let id = docker_create_pending(&state, payload.to_string().as_bytes(), name)?;
+                let spec = parse_docker_create_spec(payload.to_string().as_bytes(), name)?;
+                let id = ferro_core::runtime::generate_container_id();
+                persist_native_created_container(&runtime_dir, &id, &spec)?;
                 println!("{id}");
                 Ok(())
             }
@@ -6809,6 +6810,60 @@ fn persist_half_built_container(
             .reserve_name(name, &record.id)
             .map_err(|error| error.to_string())?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// Persist a native `create` as a real lifecycle record.  The Docker socket
+/// keeps unstarted containers in its daemon-owned pending map, but a native
+/// CLI process has no such map after it exits: later native commands read the
+/// runtime store directly.
+fn persist_native_created_container(
+    runtime_dir: &Path,
+    id: &str,
+    spec: &DockerCreateSpec,
+) -> Result<(), String> {
+    let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
+        runtime_dir.join("containers.db"),
+    )
+    .map_err(|error| error.to_string())?;
+    if let Some(name) = spec.name.as_deref() {
+        store
+            .reserve_name(name, id)
+            .map_err(|error| error.to_string())?;
+    }
+    let record: ferro_core::container_store::ContainerRecord = serde_json::from_value(
+        serde_json::json!({
+            "id": id,
+            "name": spec.name,
+            "pid": 0,
+            "image": spec.image,
+            "command": spec.cmd,
+            "tty": spec.tty,
+            "workdir": spec.workdir,
+            "user": spec.user,
+            "env": spec.env,
+            "created_at_unix": spec.created_at_unix,
+            "stdout_path": runtime_dir.join("containers").join(id).join("stdout.log"),
+            "stderr_path": runtime_dir.join("containers").join(id).join("stderr.log"),
+            "status": "created",
+            "resource_limits": {
+                "memory_max": spec.memory_max,
+                "cpu_quota": spec.cpu_quota,
+                "cpu_period": spec.cpu_period,
+                "pids_max": spec.pids_max,
+            },
+        }),
+    )
+    .map_err(|error| format!("create: created container record: {error}"))?;
+    if let Err(error) = store.put(&record) {
+        if spec.name.is_some() {
+            let _ = store.release_reserved_name(id);
+        }
+        return Err(error.to_string());
+    }
+    std::fs::create_dir_all(runtime_dir.join("containers").join(id).join("rootfs"))
+        .map_err(|error| format!("create: initialize container filesystem: {error}"))?;
     Ok(())
 }
 

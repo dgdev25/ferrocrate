@@ -590,6 +590,18 @@ pub enum Commands {
         format: String,
         #[arg(short = 'f', long)]
         follow: bool,
+        /// Number of lines to show from the end of the logs (default: all).
+        #[arg(short = 'n', long)]
+        tail: Option<String>,
+        /// Show logs since a Unix timestamp, RFC3339 timestamp, or duration.
+        #[arg(long)]
+        since: Option<String>,
+        /// Show logs before a Unix timestamp, RFC3339 timestamp, or duration.
+        #[arg(long)]
+        until: Option<String>,
+        /// Show timestamps.
+        #[arg(short = 't', long)]
+        timestamps: bool,
     },
     #[cfg(target_os = "linux")]
     /// Report container resource statistics.
@@ -3847,8 +3859,11 @@ impl Default for TransferArchiveLimits {
     fn default() -> Self {
         Self {
             max_files: 100_000,
-            max_entry_bytes: 256 * 1024 * 1024,
-            max_total_bytes: 480 * 1024 * 1024,
+            // Docker streams build contexts without a fixed byte ceiling.
+            // Retain the file-count guard, but never reject a regular file or
+            // total context merely because of its size.
+            max_entry_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
         }
     }
 }
@@ -3865,6 +3880,16 @@ fn append_regular_file_bounded(
     destination: &Path,
     budget: &mut TransferArchiveBudget,
 ) -> Result<(), String> {
+    let _metadata = admit_regular_transfer_file(source, budget)?;
+    archive
+        .append_path_with_name(source, destination)
+        .map_err(|error| format!("archive {}: {error}", source.display()))
+}
+
+fn admit_regular_transfer_file(
+    source: &Path,
+    budget: &mut TransferArchiveBudget,
+) -> Result<std::fs::Metadata, String> {
     let metadata = std::fs::symlink_metadata(source)
         .map_err(|error| format!("archive {}: {error}", source.display()))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -3887,9 +3912,7 @@ fn append_regular_file_bounded(
     if budget.bytes > budget.limits.max_total_bytes {
         return Err("archive total size exceeds transfer limit".to_string());
     }
-    archive
-        .append_path_with_name(source, destination)
-        .map_err(|error| format!("archive {}: {error}", source.display()))
+    Ok(metadata)
 }
 
 fn append_bytes_bounded(
@@ -4266,9 +4289,6 @@ fn prepare_remote_compose_payload(
     let archive = archive
         .into_inner()
         .map_err(|error| format!("compose: finish project archive: {error}"))?;
-    if archive.len() > 512 * 1024 * 1024 {
-        return Err("compose: transfer archive exceeds request body limit".to_string());
-    }
     encode_metadata_archive(&RemoteComposeRequest { file_name, command }, &archive)
         .map_err(|error| format!("compose: encode request: {error}"))
 }
@@ -4401,9 +4421,6 @@ fn prepare_remote_build(
     let archive = archive
         .into_inner()
         .map_err(|error| format!("build: finish transfer archive: {error}"))?;
-    if archive.len() > 512 * 1024 * 1024 {
-        return Err("build: transfer archive exceeds request body limit".to_string());
-    }
     Ok(PreparedRemoteBuild {
         request: RemoteBuildRequest {
             // Native daemon builds always transfer a Dockerfile.  Preserve the
@@ -5540,7 +5557,20 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 container,
                 format,
                 follow,
-            } => handle_logs(&runtime, &container, &format, follow),
+                tail,
+                since,
+                until,
+                timestamps,
+            } => handle_logs(
+                &runtime,
+                &container,
+                &format,
+                follow,
+                tail.as_deref(),
+                since.as_deref(),
+                until.as_deref(),
+                timestamps,
+            ),
             #[cfg(target_os = "linux")]
             Commands::Inspect { container, format } => {
                 handle_inspect(&runtime, &container, &format)
@@ -8537,9 +8567,6 @@ fn dispatch_remote_socket(
                 let archive = archive
                     .into_inner()
                     .map_err(|error| format!("remote build: finalize context failed: {error}"))?;
-                if archive.len() > 512 * 1024 * 1024 {
-                    return Err("remote build: context exceeds request body limit".to_string());
-                }
                 let filename = dockerfile_path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -9043,7 +9070,37 @@ fn dispatch_remote_socket(
             container,
             format,
             follow,
+            tail,
+            since,
+            until,
+            timestamps,
         } => {
+            if *follow && (*timestamps || since.is_some() || until.is_some()) {
+                return Some(Err(
+                    "remote logs: --follow cannot be combined with --timestamps, --since, or --until"
+                        .to_string(),
+                ));
+            }
+            let mut query = String::from("stdout=1&stderr=1");
+            if let Some(tail) = tail.as_deref().filter(|value| value.parse::<usize>().is_ok()) {
+                query.push_str("&tail=");
+                query.push_str(&percent_encode_path_component(tail));
+            }
+            for (name, value) in [("since", since), ("until", until)] {
+                if let Some(value) = value {
+                    let bound = match cli_log_time_bound(value, name) {
+                        Ok(bound) => bound,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    query.push('&');
+                    query.push_str(name);
+                    query.push('=');
+                    query.push_str(&bound.to_string());
+                }
+            }
+            if *timestamps {
+                query.push_str("&timestamps=1");
+            }
             if *follow {
                 if format == "json" {
                     Err("remote logs: --follow cannot be combined with --format json".to_string())
@@ -9052,8 +9109,8 @@ fn dispatch_remote_socket(
                     // stream frames and sends TTY follow streams raw.
                     let mut demuxer = DockerLogFrameDemuxer::new();
                     let path = format!(
-                            "/containers/{}/logs?stdout=1&stderr=1&follow=1",
-                            percent_encode_path_component(container)
+                            "/containers/{}/logs?{query}&follow=1",
+                            percent_encode_path_component(container),
                         );
                     let mut on_chunk = |chunk: &[u8]| {
                             let (stdout, stderr) = demuxer.feed(chunk);
@@ -9078,8 +9135,8 @@ fn dispatch_remote_socket(
                 request(
                     "GET",
                     format!(
-                        "/containers/{}/logs?stdout=1&stderr=1",
-                        percent_encode_path_component(container)
+                        "/containers/{}/logs?{query}",
+                        percent_encode_path_component(container),
                     ),
                 )
                 .and_then(|body| {
@@ -13381,6 +13438,10 @@ fn handle_logs(
     container: &str,
     format: &str,
     follow: bool,
+    tail: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    timestamps: bool,
 ) -> Result<(), String> {
     if container.trim().is_empty() {
         return Err("logs: container is required".to_string());
@@ -13388,10 +13449,21 @@ fn handle_logs(
     if follow && format == "json" {
         return Err("logs: --follow cannot be combined with --format json".to_string());
     }
+    if follow && (timestamps || since.is_some() || until.is_some()) {
+        return Err(
+            "logs: --follow cannot be combined with --timestamps, --since, or --until"
+                .to_string(),
+        );
+    }
     let resolved = resolve_container_id(runtime, container)?;
     let mut emitted = 0usize;
     loop {
-        let logs = runtime.logs(&resolved).map_err(|err| err.to_string())?;
+        let logs = if timestamps || since.is_some() || until.is_some() {
+            cli_timestamped_logs(runtime, &resolved, since, until, timestamps)?
+        } else {
+            runtime.logs(&resolved).map_err(|err| err.to_string())?
+        };
+        let logs = cli_tail_logs(&logs, tail);
         if logs.len() < emitted {
             emitted = 0;
         }
@@ -13414,6 +13486,100 @@ fn handle_logs(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn cli_tail_logs(logs: &str, tail: Option<&str>) -> String {
+    let Some(tail) = tail else {
+        return logs.to_string();
+    };
+    // Docker CLI treats malformed and negative values as `all`, rather than
+    // rejecting the command before it reaches the daemon.
+    let Ok(count) = tail.parse::<usize>() else {
+        return logs.to_string();
+    };
+    if count == 0 {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = logs.lines().collect();
+    if lines.len() > count {
+        lines.drain(..lines.len() - count);
+    }
+    let mut result = lines.join("\n");
+    if logs.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn cli_log_time_bound(value: &str, name: &str) -> Result<u64, String> {
+    if let Ok(bound) = parse_docker_log_time_bound(value, name) {
+        return Ok(bound);
+    }
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(value) {
+        return u64::try_from(timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX))
+            .map_err(|_| format!("logs: invalid {name} timestamp: {value}"));
+    }
+    let (number, unit) = value
+        .trim()
+        .split_at(value.trim().find(|ch: char| !ch.is_ascii_digit() && ch != '.').unwrap_or(value.trim().len()));
+    let seconds = number
+        .parse::<f64>()
+        .map_err(|_| format!("logs: invalid {name} timestamp: {value}"))?;
+    let multiplier = match unit {
+        "ns" => 1e-9,
+        "us" | "µs" => 1e-6,
+        "ms" => 1e-3,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return Err(format!("logs: invalid {name} timestamp: {value}")),
+    };
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("logs: invalid {name} timestamp: {value}"));
+    }
+    let duration = (seconds * multiplier * 1_000_000_000.0) as u64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("logs: read clock: {error}"))?
+        .as_nanos()
+        .min(u64::MAX as u128) as u64;
+    Ok(now.saturating_sub(duration))
+}
+
+#[cfg(target_os = "linux")]
+fn cli_timestamped_logs(
+    runtime: &ContainerRuntime,
+    container: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    timestamps: bool,
+) -> Result<String, String> {
+    let since = since.map(|value| cli_log_time_bound(value, "since")).transpose()?;
+    let until = until.map(|value| cli_log_time_bound(value, "until")).transpose()?;
+    let (stdout, stderr) = runtime
+        .logs_timestamped_split(container)
+        .map_err(|error| error.to_string())?;
+    let mut output = String::new();
+    for lines in [stdout, stderr] {
+        let lines = lines.ok_or_else(|| {
+            "logs: timestamps/since/until require a complete per-line timestamp journal"
+                .to_string()
+        })?;
+        for line in lines {
+            let nanos = u64::try_from(line.nanos).unwrap_or(u64::MAX);
+            if since.is_some_and(|bound| nanos < bound) || until.is_some_and(|bound| nanos > bound) {
+                continue;
+            }
+            if timestamps {
+                output.push_str(&rfc3339_nanos(line.nanos));
+                output.push(' ');
+            }
+            output.push_str(&String::from_utf8_lossy(&line.bytes));
+        }
+    }
+    Ok(output)
 }
 
 #[cfg(target_os = "linux")]
@@ -25368,7 +25534,9 @@ struct HttpRequest {
 #[cfg(target_os = "linux")]
 fn http_body_limit(method: &str, path: &str) -> usize {
     const ORDINARY: usize = 4 * 1024 * 1024;
-    const ARCHIVE: usize = 512 * 1024 * 1024;
+    // Docker accepts a streamed build context without an arbitrary byte cap.
+    // The request parser still bounds headers and validates tar paths/types.
+    const ARCHIVE: usize = usize::MAX;
     const IMAGE: usize = 1024 * 1024 * 1024;
     let route = path.split('?').next().unwrap_or(path);
     let route = normalize_docker_api_path(route);
@@ -28763,18 +28931,18 @@ mod tests {
         let ordinary = super::http_body_limit("POST", "/containers/create");
         assert_eq!(ordinary, 4 * 1024 * 1024);
         for route in [
-            "/ferrocrate/rvf/import",
             "/ferrocrate/build",
             "/ferrocrate/compose",
             "/ferrocrate/volume/restore",
             "/build",
-            "/images/load",
             "/v1.44/build",
-            "/v1.44/images/load",
         ] {
             let limit = super::http_body_limit("POST", route);
             assert!(limit > ordinary, "{route} retained the 4 MiB cap");
-            assert!(limit <= 1024 * 1024 * 1024, "{route} is not bounded");
+            assert_eq!(limit, usize::MAX, "{route} retained a byte cap");
+        }
+        for route in ["/ferrocrate/rvf/import", "/images/load", "/v1.44/images/load"] {
+            assert_eq!(super::http_body_limit("POST", route), 1024 * 1024 * 1024);
         }
     }
 
@@ -28875,6 +29043,24 @@ mod tests {
             .expect_err("bound must reject transfer");
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn project_transfer_admits_a_sparse_context_larger_than_the_legacy_cap() {
+        let project = tempfile::tempdir().expect("project");
+        let fixture = project.path().join("large-context.bin");
+        std::fs::File::create(&fixture)
+            .expect("create sparse fixture")
+            .set_len(3 * 1024 * 1024 * 1024)
+            .expect("grow sparse fixture");
+        let mut budget = super::TransferArchiveBudget {
+            limits: super::TransferArchiveLimits::default(),
+            files: 0,
+            bytes: 0,
+        };
+        super::admit_regular_transfer_file(&fixture, &mut budget)
+            .expect("Docker-compatible transfer must not impose a byte cap");
+        assert_eq!(budget.files, 1);
     }
 
     #[test]
@@ -38102,15 +38288,37 @@ volumes:
     }
 
     #[test]
-    fn parses_logs_follow_flag() {
-        let cli = Cli::try_parse_from(["ferrocrate", "logs", "c1", "--follow"])
+    fn parses_logs_docker_compatible_selectors() {
+        let cli = Cli::try_parse_from([
+            "ferrocrate",
+            "logs",
+            "c1",
+            "--follow",
+            "--tail",
+            "5",
+            "--since",
+            "42m",
+            "--until",
+            "2026-08-29T17:22:53Z",
+            "--timestamps",
+        ])
             .expect("parse logs follow");
         match cli.command {
             Commands::Logs {
-                container, follow, ..
+                container,
+                follow,
+                tail,
+                since,
+                until,
+                timestamps,
+                ..
             } => {
                 assert_eq!(container, "c1");
                 assert!(follow);
+                assert_eq!(tail.as_deref(), Some("5"));
+                assert_eq!(since.as_deref(), Some("42m"));
+                assert_eq!(until.as_deref(), Some("2026-08-29T17:22:53Z"));
+                assert!(timestamps);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -38715,7 +38923,8 @@ volumes:
     fn logs_handler_requires_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        let err = handle_logs(&runtime, "", "text", false).expect_err("container required");
+        let err = handle_logs(&runtime, "", "text", false, None, None, None, false)
+            .expect_err("container required");
         assert!(err.contains("logs: container is required"));
     }
 

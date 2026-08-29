@@ -917,6 +917,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args(
     dockerfile_path: &Path,
     tag: Option<&str>,

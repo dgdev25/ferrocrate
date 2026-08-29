@@ -5305,6 +5305,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 cache_to.as_deref(),
                 &build_context,
                 &secret,
+                &HashMap::new(),
                 context.as_deref(),
             ),
             #[cfg(target_os = "linux")]
@@ -11020,6 +11021,7 @@ fn handle_build(
     cache_to: Option<&str>,
     build_context: &[String],
     secrets: &[String],
+    build_args: &HashMap<String, String>,
     context: Option<&str>,
 ) -> Result<(), String> {
     let output = execute_build(
@@ -11037,6 +11039,7 @@ fn handle_build(
         cache_to,
         build_context,
         secrets,
+        build_args,
         None,
         context,
     )?;
@@ -11060,6 +11063,7 @@ fn execute_build(
     cache_to: Option<&str>,
     build_context: &[String],
     secrets: &[String],
+    build_args: &HashMap<String, String>,
     artifact_dir: Option<&Path>,
     context: Option<&str>,
 ) -> Result<String, String> {
@@ -11140,13 +11144,14 @@ fn execute_build(
                 &dockerfile_path,
                 None,
             )?;
-            let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts(
+            let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
                 &dockerfile_path,
                 Some(tag),
                 &runtime_dir,
                 compression,
                 store,
                 &named_contexts,
+                build_args,
             )
             .map_err(|err| err.to_string())?;
             let permit = authorization
@@ -20248,6 +20253,7 @@ fn handle_docker_compat_connection(
                     cache_to.as_deref(),
                     &build_context,
                     &secrets,
+                    &HashMap::new(),
                     Some(workspace.path()),
                     None,
                 )?;
@@ -22120,6 +22126,12 @@ fn handle_docker_compat_connection(
                     return Err(format!("docker build: Dockerfile not found: {dockerfile}"));
                 }
                 let tag = query.get("t").map(String::as_str);
+                let build_args = query
+                    .get("buildargs")
+                    .map(|encoded| serde_json::from_str::<HashMap<String, String>>(encoded))
+                    .transpose()
+                    .map_err(|error| format!("docker build: invalid buildargs: {error}"))?
+                    .unwrap_or_default();
                 handle_build(
                     &store,
                     &origin,
@@ -22139,6 +22151,7 @@ fn handle_docker_compat_connection(
                     None,
                     &[],
                     &[],
+                    &build_args,
                     None,
                 )?;
                 http_response(
@@ -26210,6 +26223,7 @@ async fn execute_buildkit_frontend(
         .and_then(|platforms| platforms.split(',').next())
         .filter(|platform| !platform.is_empty())
         .map(str::to_owned);
+    let build_args = buildkit_frontend_build_args(&build.request.frontend_attrs, &request.frontend_opt);
     // Registry pulls and the classic build executor are synchronous.  Running
     // them on this h2 request runtime makes reqwest's blocking client try to
     // tear down its private Tokio runtime from an async context, which aborts
@@ -26241,6 +26255,7 @@ async fn execute_buildkit_frontend(
             None,
             &[],
             &[],
+            &build_args,
             None,
             None,
         )?;
@@ -26277,6 +26292,25 @@ async fn execute_buildkit_frontend(
         metadata: HashMap::new(),
         warnings: lint_warnings,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_frontend_build_args(
+    outer: &HashMap<String, String>,
+    frontend: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut build_args = outer
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("build-arg:")
+                .map(|name| (name.to_string(), value.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    build_args.extend(frontend.iter().filter_map(|(key, value)| {
+        key.strip_prefix("build-arg:")
+            .map(|name| (name.to_string(), value.to_string()))
+    }));
+    build_args
 }
 
 #[cfg(target_os = "linux")]
@@ -34847,6 +34881,7 @@ volumes:
             None,
             &[],
             &[],
+            &HashMap::new(),
             None,
         )
         .expect_err("dockerfile should be read");
@@ -34987,6 +35022,7 @@ volumes:
             None,
             &[],
             &[],
+            &HashMap::new(),
             None,
         )
         .expect_err("invalid tag");
@@ -37051,6 +37087,23 @@ volumes:
             "gateway.v0"
         );
         assert!(build.returned.lock().expect("return").is_some());
+    }
+
+    #[test]
+    fn buildkit_frontend_collects_multiple_build_args_from_outer_and_gateway_requests() {
+        let args = super::buildkit_frontend_build_args(
+            &HashMap::from([
+                ("build-arg:FIRST".to_string(), "one".to_string()),
+                ("unrelated".to_string(), "ignored".to_string()),
+            ]),
+            &HashMap::from([
+                ("build-arg:SECOND".to_string(), "two".to_string()),
+                ("build-arg:FIRST".to_string(), "gateway-one".to_string()),
+            ]),
+        );
+        assert_eq!(args.get("FIRST"), Some(&"gateway-one".to_string()));
+        assert_eq!(args.get("SECOND"), Some(&"two".to_string()));
+        assert_eq!(args.len(), 2);
     }
 
     #[test]

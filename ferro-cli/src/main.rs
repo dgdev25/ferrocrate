@@ -13460,6 +13460,7 @@ fn remove_orphan_state_directories(runtime_dir: &Path) -> Result<usize, String> 
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn handle_logs(
     runtime: &ContainerRuntime,
     container: &str,

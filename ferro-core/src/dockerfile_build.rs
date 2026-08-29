@@ -3025,7 +3025,7 @@ fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> 
 fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, String>) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
-    let mut global_args: HashMap<String, String> = HashMap::new();
+    let mut global_args = automatic_platform_args();
 
     for raw_line in dockerfile_instructions(contents)? {
         let line = raw_line.trim();
@@ -3043,6 +3043,7 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
             if let Some(stage) = current.take() {
                 stages.push(stage);
             }
+            validate_from_expression(&value, &global_args)?;
             let resolved_from = interpolate_value(&value, &[], &global_args);
             let (base, name) = parse_from(&resolved_from)?;
             current = Some(StageSpec {
@@ -3187,6 +3188,41 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
     }
 
     Ok(stages)
+}
+
+fn automatic_platform_args() -> HashMap<String, String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
+    let platform = format!("linux/{arch}");
+    HashMap::from([
+        ("BUILDPLATFORM".to_string(), platform.clone()),
+        ("BUILDOS".to_string(), "linux".to_string()),
+        ("BUILDARCH".to_string(), arch.to_string()),
+        ("TARGETPLATFORM".to_string(), platform),
+        ("TARGETOS".to_string(), "linux".to_string()),
+        ("TARGETARCH".to_string(), arch.to_string()),
+    ])
+}
+
+fn validate_from_expression(value: &str, args: &HashMap<String, String>) -> Result<(), DockerfileBuildError> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' { index += 1; continue; }
+        index += 1;
+        let start = if bytes.get(index) == Some(&b'{') { index += 1; index } else { index };
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') { index += 1; }
+        let name = &value[start..index];
+        if bytes.get(start - 1) == Some(&b'{') && bytes.get(index) == Some(&b'}') { index += 1; }
+        if !name.is_empty() && !args.contains_key(name) {
+            return Err(DockerfileBuildError::Invalid(format!("FROM --platform expression references undeclared build argument: {name}")));
+        }
+    }
+    Ok(())
 }
 
 /// Consume BuildKit heredoc bodies before instruction dispatch. Bodies are
@@ -7226,6 +7262,14 @@ mod tests {
             dockerfile_external_base_images(&dockerfile).unwrap(),
             vec!["alpine:3.20", "registry.example/app:1"]
         );
+    }
+
+    #[test]
+    fn from_platform_automatic_args_expand_and_unknown_args_fail_early() {
+        let valid = parse_stages("FROM --platform=$BUILDPLATFORM scratch\n").unwrap();
+        assert_eq!(valid[0].base, "scratch");
+        let error = parse_stages("FROM --platform=$BUILPLATFORM scratch\n").unwrap_err();
+        assert!(error.to_string().contains("undeclared build argument: BUILPLATFORM"));
     }
 
     #[test]

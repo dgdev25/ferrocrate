@@ -10959,7 +10959,15 @@ fn extract_docker_build_context_with_limits(
     limits: TransferArchiveLimits,
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut archive = tar::Archive::new(Cursor::new(archive));
+    // Compose sends the legacy `/build` context as a gzip-compressed tar.
+    // Docker also accepts an uncompressed tar, so select the decoder from the
+    // stream signature rather than relying on a client-specific header.
+    let reader: Box<dyn Read> = if archive.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(Cursor::new(archive)))
+    } else {
+        Box::new(Cursor::new(archive))
+    };
+    let mut archive = tar::Archive::new(reader);
     let mut files = 0usize;
     let mut total_bytes = 0u64;
     for entry in archive
@@ -26192,7 +26200,7 @@ async fn handle_buildkit_control_request(
                 .collect();
             let logs = result
                 .steps
-                .first()
+                .last()
                 .map(|step| {
                     use buildkit_proto::moby::buildkit::v1::VertexLog;
                     VertexLog {
@@ -26551,7 +26559,13 @@ async fn execute_buildkit_frontend(
             data: dockerfile_contents.as_bytes().to_vec(),
         });
     if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
-        let warnings = buildkit_lint_warnings(&dockerfile_contents);
+        let warnings = buildkit_lint_warnings_with_check(
+            &dockerfile_contents,
+            request
+                .frontend_opt
+                .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
+                .map(String::as_str),
+        );
         return Ok(BuildkitBuildResult {
             image_name: "local/build:lint".to_string(),
             image_digest: "sha256:lint".to_string(),
@@ -26561,20 +26575,15 @@ async fn execute_buildkit_frontend(
             warnings,
         });
     }
-    // Dockerfile checks are advisory. They must be delivered even when this
-    // compatibility executor cannot materialize a deliberately-invalid lint
-    // fixture (for example an undefined COPY variable).
-    let lint_warnings = buildkit_lint_warnings(&dockerfile_contents);
-    if !lint_warnings.is_empty() {
-        return Ok(BuildkitBuildResult {
-            image_name: "local/build:lint".to_string(),
-            image_digest: "sha256:lint".to_string(),
-            output: String::new(),
-            steps: Vec::new(),
-            metadata: HashMap::new(),
-            warnings: lint_warnings,
-        });
-    }
+    // Dockerfile checks are advisory: report them with the build result rather
+    // than replacing the requested solve with a synthetic lint-only result.
+    let lint_warnings = buildkit_lint_warnings_with_check(
+        &dockerfile_contents,
+        request
+            .frontend_opt
+            .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
+            .map(String::as_str),
+    );
     let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
@@ -26684,6 +26693,9 @@ async fn execute_buildkit_frontend(
         .map(|base| format!("pull: downloading {base}\npull: complete {base}\n"))
         .collect::<String>();
     output.push_str(&build_output);
+    let (export_step, export_output) = buildkit_export_progress(&image_name);
+    steps.push(export_step);
+    output.push_str(&export_output);
     let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
@@ -26695,6 +26707,14 @@ async fn execute_buildkit_frontend(
         metadata: HashMap::new(),
         warnings: lint_warnings,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_export_progress(image_name: &str) -> (String, String) {
+    (
+        "exporting to image".to_string(),
+        format!("naming to {image_name} done\n"),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -26717,7 +26737,35 @@ fn buildkit_frontend_build_args(
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
+    buildkit_lint_warnings_with_check(dockerfile, None)
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warnings_with_check(
+    dockerfile: &str,
+    check_option: Option<&str>,
+) -> Vec<BuildkitLintWarning> {
+    let check_options = check_option.map(str::to_owned).unwrap_or_else(|| {
+        dockerfile
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("# check=")
+                .or_else(|| line.strip_prefix("#check="))
+        })
+        .flat_map(|options| options.split(';'))
+        .collect::<Vec<_>>()
+        .join(";")
+    });
+    let skipped_rules = check_options
+        .split(';')
+        .filter_map(|option| option.strip_prefix("skip="))
+        .flat_map(|rules| rules.split(','))
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+        .collect::<std::collections::HashSet<_>>();
     let mut instructions = Vec::new();
     let mut heredoc_terminator = None;
     for (index, line) in dockerfile.lines().enumerate() {
@@ -26773,6 +26821,20 @@ fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
                 }
             }
         }
+        if (keyword.eq_ignore_ascii_case("CMD") || keyword.eq_ignore_ascii_case("ENTRYPOINT"))
+            && text
+                .split_once(char::is_whitespace)
+                .is_some_and(|(_, arguments)| !arguments.trim_start().starts_with('['))
+        {
+            warnings.push(buildkit_lint_warning(
+                "JSONArgsRecommended",
+                "JSON arguments recommended for ENTRYPOINT/CMD to prevent unintended behavior related to OS signals",
+                format!(
+                    "JSON arguments recommended for {keyword} to prevent unintended behavior related to OS signals"
+                ),
+                *line,
+            ));
+        }
         for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
             let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
             if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
@@ -26786,6 +26848,11 @@ fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
         }
     }
     warnings
+        .into_iter()
+        .filter(|warning| {
+            !skipped_rules.contains("all") && !skipped_rules.contains(warning.rule_name.as_str())
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -35428,6 +35495,74 @@ volumes:
         assert!(
             err.contains("Dockerfile"),
             "expected default dockerfile path in error, got: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_lint_checks_json_args_and_honors_skip_directives() {
+        let dockerfile = "FROM scratch\nCMD echo hello\n";
+        let warnings = super::buildkit_lint_warnings(dockerfile);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_name, "JSONArgsRecommended");
+        assert_eq!(
+            warnings[0].detail,
+            "JSON arguments recommended for CMD to prevent unintended behavior related to OS signals"
+        );
+
+        let skipped = super::buildkit_lint_warnings(
+            "# check=skip=JSONArgsRecommended\nFROM scratch\nCMD echo hello\n",
+        );
+        assert!(skipped.is_empty());
+
+        let selected_by_option = super::buildkit_lint_warnings_with_check(
+            "# check=skip=all\nFROM scratch\nCMD echo hello\n",
+            Some("skip=ConsistentInstructionCasing"),
+        );
+        assert_eq!(selected_by_option.len(), 1);
+        assert_eq!(selected_by_option[0].rule_name, "JSONArgsRecommended");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_export_progress_reports_the_published_image_name() {
+        let (step, output) = super::buildkit_export_progress("example/simple:latest");
+        assert_eq!(step, "exporting to image");
+        assert_eq!(output, "naming to example/simple:latest done\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_build_context_extraction_accepts_a_gzip_compressed_tar() {
+        use std::io::Write;
+
+        let mut tar = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("Dockerfile").expect("path");
+            header.set_size(b"FROM scratch\n".len() as u64);
+            header.set_cksum();
+            builder
+                .append(&header, &b"FROM scratch\n"[..])
+                .expect("append Dockerfile");
+            builder.finish().expect("finish tar");
+        }
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = flate2::write::GzEncoder::new(
+                &mut compressed,
+                flate2::Compression::default(),
+            );
+            encoder.write_all(&tar).expect("compress tar");
+            encoder.finish().expect("finish compression");
+        }
+
+        let destination = tempfile::tempdir().expect("context destination");
+        extract_docker_build_context(&compressed, destination.path()).expect("extract gzip tar");
+        assert_eq!(
+            std::fs::read_to_string(destination.path().join("Dockerfile")).expect("Dockerfile"),
+            "FROM scratch\n"
         );
     }
 

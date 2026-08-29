@@ -38,10 +38,31 @@ done
 # 3. Workspace tests. Only the explicitly audited concurrent-load flakes are
 #    non-blocking. A new single-test failure is still a regression until it is
 #    isolated and understood; never let the failure count alone waive it.
-out=$(timeout 2400 cargo test --workspace 2>&1)
+run_workspace_tests() {
+  timeout 2400 cargo test --workspace 2>&1
+}
+out=$(run_workspace_tests)
 p=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{p+=$4} END {print p+0}')
 f=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{f+=$6} END {print f+0}')
-if [ "$f" -eq 0 ]; then
+# A test binary aborted under concurrent host load reports as a partial run
+# (hundreds of tests missing plus a handful of "failures" that pass alone).
+# Seen three times on 2026-08-29 (504 tests missing each time); solo reruns
+# were clean each time. Retry once; only a run that counted a full suite may
+# decide pass/fail.
+if [ $((p + f)) -lt 2000 ]; then
+  note "workspace tests" "partial run ($((p+f)) of ~2305 counted, likely aborted under load) — retrying once"
+  out=$(run_workspace_tests)
+  p=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{p+=$4} END {print p+0}')
+  f=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{f+=$6} END {print f+0}')
+  if [ $((p + f)) -lt 2000 ]; then
+    note "workspace tests" "ABORTED twice ($((p+f)) counted) — treat as infra failure, not a regression verdict"
+    fail=1
+    aborted=1
+  fi
+fi
+if [ "${aborted:-0}" -eq 1 ]; then
+  : # verdict block below must not relabel an infra abort as test failures
+elif [ "$f" -eq 0 ]; then
   note "workspace tests" "$p passed, 0 failed"
 elif [ "$f" -eq 1 ]; then
   name=$(echo "$out" | grep -E "^test .+ \.\.\. FAILED$" | head -1 | awk '{print $2}')

@@ -8,21 +8,12 @@
 
 pub mod assertions;
 pub mod fixtures;
-pub mod harness;
-pub mod isolation;
 pub mod metrics;
-pub mod reporting;
-pub mod runner;
 
 // Re-export commonly used items
 pub use assertions::*;
 pub use fixtures::{Fixture, FixtureManager};
-pub use harness::{TestHarness, TestResult, TestStatus};
-pub use isolation::{ContainerGuard, NetworkGuard, TempDirGuard};
 pub use metrics::{Metric, MetricsCollector};
-pub use reporting::{Report, ReportGenerator, TestReport};
-pub use runner::{TestRunner, TestSuite};
-// Note: TestCategory is defined here in mod.rs, not re-exported from runner
 
 /// Test priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

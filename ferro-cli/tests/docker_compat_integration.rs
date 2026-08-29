@@ -3631,6 +3631,113 @@ fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
 }
 
 #[test]
+fn docker_compat_create_normalizes_nullable_nested_objects() {
+    let harness = DaemonHarness::spawn();
+    for (name, networking_config) in [
+        ("nullable-root", serde_json::Value::Null),
+        ("nullable-endpoints", serde_json::json!({"EndpointsConfig": null})),
+    ] {
+        let body = serde_json::json!({
+            "Image": "busybox",
+            "Labels": null,
+            "Volumes": null,
+            "ExposedPorts": null,
+            "Healthcheck": null,
+            "HostConfig": null,
+            "NetworkingConfig": networking_config,
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "name={name} create response={response}");
+
+        let (status, inspect) = harness.request("GET", &format!("/v1.45/containers/{name}/json"));
+        assert_eq!(status, 200, "name={name} inspect response={inspect}");
+        let inspect: serde_json::Value = serde_json::from_str(&inspect).expect("inspect JSON");
+        assert_eq!(inspect["Config"]["Labels"], serde_json::json!({}));
+        assert_eq!(inspect["Config"]["Healthcheck"], serde_json::Value::Null);
+        assert_eq!(inspect["HostConfig"]["Memory"], 0);
+        assert_eq!(inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"], "bridge");
+    }
+}
+
+#[test]
+fn docker_compat_create_accepts_common_host_config_fields() {
+    let harness = DaemonHarness::spawn();
+    let mount_source = harness.runtime_dir().join("mount-source");
+    fs::create_dir(&mount_source).expect("create mount source");
+    let mount_source = mount_source.to_string_lossy();
+
+    let link_source = serde_json::json!({"Image": "busybox"}).to_string();
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/containers/create?name=link-source",
+        "application/json",
+        link_source.as_bytes(),
+    );
+    assert_eq!(status, 201, "link source create response={response}");
+
+    for (name, body) in [
+        (
+            "host-config-init",
+            serde_json::json!({"Image": "busybox", "HostConfig": {"Init": true}}),
+        ),
+        (
+            "host-config-mounts",
+            serde_json::json!({
+                "Image": "busybox",
+                "HostConfig": {"Mounts": [{
+                    "Type": "bind", "Source": mount_source, "Target": "/data", "ReadOnly": true
+                }]}
+            }),
+        ),
+        (
+            "host-config-links",
+            serde_json::json!({"Image": "busybox", "HostConfig": {"Links": ["link-source:legacy"]}}),
+        ),
+        (
+            "host-config-publish-all",
+            serde_json::json!({
+                "Image": "busybox",
+                "ExposedPorts": {"8080/tcp": {}},
+                "HostConfig": {"PublishAllPorts": true}
+            }),
+        ),
+    ] {
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            body.to_string().as_bytes(),
+        );
+        assert_eq!(status, 201, "name={name} create response={response}");
+    }
+
+    let (status, inspect) = harness.request("GET", "/v1.45/containers/host-config-mounts/json");
+    assert_eq!(status, 200, "mount inspect response={inspect}");
+    let inspect: serde_json::Value = serde_json::from_str(&inspect).expect("mount inspect JSON");
+    assert_eq!(inspect["Mounts"][0]["Source"], mount_source.as_ref());
+    assert_eq!(inspect["Mounts"][0]["Destination"], "/data");
+    assert_eq!(inspect["Mounts"][0]["RW"], false);
+
+    let (status, containers) = harness.request("GET", "/v1.45/containers/json?all=true");
+    assert_eq!(status, 200, "container list response={containers}");
+    let containers: serde_json::Value = serde_json::from_str(&containers).expect("container list JSON");
+    let published = containers
+        .as_array()
+        .expect("container list array")
+        .iter()
+        .find(|container| container["Names"][0] == "/host-config-publish-all")
+        .expect("published container in list");
+    assert_eq!(published["Ports"][0]["PrivatePort"], 8080);
+    assert!(published["Ports"][0].get("PublicPort").is_none());
+}
+
+#[test]
 fn docker_compat_buildkit_control_hijacks_on_bare_and_versioned_paths() {
     let harness = DaemonHarness::spawn();
     for path in ["/grpc", "/v1.52/grpc"] {

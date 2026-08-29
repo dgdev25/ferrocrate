@@ -27684,7 +27684,7 @@ async fn receive_buildkit_local(
                     let Some(stat) = packet.stat else {
                         listing_done = true;
                         for (id, stat) in stats.iter().enumerate() {
-                            if stat.mode & MODE_DIR != 0 { continue; }
+                            if stat.mode & (MODE_DIR | MODE_SYMLINK) != 0 { continue; }
                             let request = FsutilPacket { packet_type: FsutilPacketType::Req as i32, stat: None, id: id as u32, data: Vec::new() };
                             outgoing.send_data(grpc_message(&request), false)
                                 .map_err(|error| format!("buildkit filesync: request file failed: {error}"))?;
@@ -27695,8 +27695,8 @@ async fn receive_buildkit_local(
                     if relative.is_absolute() || relative.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_))) {
                         return Err(format!("buildkit filesync: context path escapes root: {}", stat.path));
                     }
-                    if stat.mode & MODE_SYMLINK != 0 || !stat.linkname.is_empty() {
-                        return Err(format!("buildkit filesync: symlinks are not supported: {}", stat.path));
+                    if stat.mode & MODE_SYMLINK == 0 && !stat.linkname.is_empty() {
+                        return Err(format!("buildkit filesync: hard links are not supported: {}", stat.path));
                     }
                     if stat.size < 0 || stat.size as u64 > limits.max_entry_bytes {
                         return Err(format!("buildkit filesync: entry size exceeds transfer limit: {}", stat.path));
@@ -27711,6 +27711,10 @@ async fn receive_buildkit_local(
                     let target = destination.join(relative);
                     if stat.mode & MODE_DIR != 0 {
                         std::fs::create_dir_all(&target).map_err(|error| format!("buildkit filesync: create directory: {error}"))?;
+                    } else if stat.mode & MODE_SYMLINK != 0 {
+                        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
+                        std::os::unix::fs::symlink(&stat.linkname, &target)
+                            .map_err(|error| format!("buildkit filesync: create symlink: {error}"))?;
                     } else {
                         if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
                         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)
@@ -38008,7 +38012,7 @@ volumes:
     }
 
     #[test]
-    fn buildkit_filesync_receives_a_fake_client_packet_sequence() {
+    fn buildkit_filesync_preserves_relative_symlink_records() {
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -38051,31 +38055,50 @@ volumes:
                     .body(())
                     .expect("response");
                 let mut outgoing = respond.send_response(response, false).expect("send response");
-                let file = super::FsutilPacket {
-                    packet_type: super::FsutilPacketType::Stat as i32,
-                    stat: Some(super::FsutilStat { path: "hello.txt".to_string(), mode: 0o644, uid: 0, gid: 0, size: 5, mod_time: 0, linkname: String::new() }),
-                    id: 0,
-                    data: Vec::new(),
-                };
+                let stats = [
+                    ("node_modules", 1 << 31, 0, ""),
+                    ("node_modules/.bin", 1 << 31, 0, ""),
+                    ("node_modules/pkg", 1 << 31, 0, ""),
+                    ("node_modules/.bin/tool", (1 << 27) | 0o777, 0, "../pkg/bin.js"),
+                    ("node_modules/pkg/bin.js", 0o755, 5, ""),
+                ];
                 let end = super::FsutilPacket {
                     packet_type: super::FsutilPacketType::Stat as i32,
                     stat: None,
                     id: 0,
                     data: Vec::new(),
                 };
-                outgoing.send_data(super::grpc_message(&file), false).expect("file stat");
+                for (path, mode, size, linkname) in stats {
+                    let stat = super::FsutilPacket {
+                        packet_type: super::FsutilPacketType::Stat as i32,
+                        stat: Some(super::FsutilStat {
+                            path: path.to_string(),
+                            mode,
+                            uid: 0,
+                            gid: 0,
+                            size,
+                            mod_time: 0,
+                            linkname: linkname.to_string(),
+                        }),
+                        id: 0,
+                        data: Vec::new(),
+                    };
+                    outgoing.send_data(super::grpc_message(&stat), false).expect("file stat");
+                }
                 outgoing.send_data(super::grpc_message(&end), false).expect("end stat");
                 let mut buffer = Vec::new();
                 loop {
                     let data = incoming.data().await.expect("request data").expect("valid data");
                     buffer.extend_from_slice(&data);
                     let packets = super::drain_grpc_packets(&mut buffer).expect("request packets");
-                    if packets.iter().any(|packet| packet.packet_type == super::FsutilPacketType::Req as i32) {
+                    if packets.iter().any(|packet| {
+                        packet.packet_type == super::FsutilPacketType::Req as i32 && packet.id == 4
+                    }) {
                         break;
                     }
                 }
                 for data in [b"hello".as_slice(), b"".as_slice()] {
-                    let packet = super::FsutilPacket { packet_type: super::FsutilPacketType::Data as i32, stat: None, id: 0, data: data.to_vec() };
+                    let packet = super::FsutilPacket { packet_type: super::FsutilPacketType::Data as i32, stat: None, id: 4, data: data.to_vec() };
                     outgoing.send_data(super::grpc_message(&packet), false).expect("file data");
                 }
                 let _ = incoming.data().await;
@@ -38113,7 +38136,14 @@ volumes:
         receive_result.expect("receive local");
         server_result.expect("server thread");
         worker_result.expect("worker thread");
-        assert_eq!(std::fs::read(destination.join("hello.txt")).expect("file"), b"hello");
+        assert_eq!(
+            std::fs::read(destination.join("node_modules/pkg/bin.js")).expect("file"),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read_link(destination.join("node_modules/.bin/tool")).expect("symlink"),
+            std::path::Path::new("../pkg/bin.js")
+        );
     }
 
     #[test]

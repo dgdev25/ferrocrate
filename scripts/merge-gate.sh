@@ -76,7 +76,8 @@ elif [ "$f" -eq 1 ]; then
       ;;
   esac
 else
-  note "workspace tests" "$p passed, $f FAILED"; fail=1
+  names=$(echo "$out" | grep -E "^test .+ \.\.\. FAILED$" | awk '{print $2}' | head -4 | tr '\n' ' ')
+  note "workspace tests" "$p passed, $f FAILED (${names:-names unavailable})"; fail=1
 fi
 
 # 4. Conformance, both modes.

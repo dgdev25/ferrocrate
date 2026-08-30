@@ -7010,6 +7010,7 @@ fn handle_run(
     let selected_network_name = binding.association;
     let resolved_bridge_cidr = binding.bridge_cidr;
     let resolved_bridge_name = binding.bridge_name;
+    let resolved_publish_uses_bridge_network = binding.publish_uses_bridge_network;
     let _bridge_cidr_guard =
         ScopedEnv::set("FERROCRATE_BRIDGE_CIDR", resolved_bridge_cidr.as_deref());
     let _bridge_name_guard =
@@ -7021,7 +7022,11 @@ fn handle_run(
     let effective_backend = network_backend
         .parse::<NetworkBackend>()
         .map_err(|err| err.to_string())?;
-    if !publish.is_empty() && effective_network != "bridge" && !publish_uses_bridge_network {
+    if !publish.is_empty()
+        && effective_network != "bridge"
+        && !resolved_publish_uses_bridge_network
+        && !publish_uses_bridge_network
+    {
         return Err("run: publish requires --network bridge".to_string());
     }
     if !ferro_core::rvf_image::is_rvf_image(Path::new(image)) {
@@ -14492,6 +14497,7 @@ struct RunNetworkBinding {
     association: Option<String>,
     bridge_cidr: Option<String>,
     bridge_name: Option<String>,
+    publish_uses_bridge_network: bool,
 }
 
 #[cfg(test)]
@@ -14528,6 +14534,7 @@ fn bind_run_network_inner(
     }
     let mut resolved_bridge_cidr = bridge_cidr.map(|value| value.to_string());
     let mut resolved_bridge_name = bridge_name.map(|value| value.to_string());
+    let mut publish_uses_bridge_network = false;
     let association = if let Some(managed) = mode.strip_prefix("managed:") {
         ferro_core::managed_overlay::ManagedOverlayRef::parse(&mode)
             .map_err(|error| format!("run: invalid managed overlay: {error}"))?;
@@ -14546,6 +14553,7 @@ fn bind_run_network_inner(
         None
     } else if is_builtin_network_mode(&mode) {
         validate_network_mode(&mode)?;
+        publish_uses_bridge_network = mode == "bridge";
         Some(mode.clone())
     } else {
         let named = resolve_named_network(runtime_dir, network)?;
@@ -14565,6 +14573,7 @@ fn bind_run_network_inner(
         if resolved_bridge_name.is_none() {
             resolved_bridge_name = Some(named.bridge_name.clone());
         }
+        publish_uses_bridge_network = named.driver == "bridge";
         Some(named.name)
     };
     Ok(RunNetworkBinding {
@@ -14572,6 +14581,7 @@ fn bind_run_network_inner(
         association,
         bridge_cidr: resolved_bridge_cidr,
         bridge_name: resolved_bridge_name,
+        publish_uses_bridge_network,
     })
 }
 
@@ -33205,6 +33215,7 @@ volumes:
             .expect("valid internal rootless binding");
         assert_eq!(binding.mode, "container:pid:4242");
         assert!(binding.association.is_none());
+        assert!(!binding.publish_uses_bridge_network);
         let error = match super::bind_run_network(runtime_dir.path(), "container:4242", None, None)
         {
             Ok(_) => panic!("binding without pid marker must fail"),
@@ -34140,6 +34151,7 @@ volumes:
         let binding = bind_run_network(temp.path(), "app-net", None, None).expect("bind");
         assert_eq!(binding.mode, "bridge");
         assert_eq!(binding.association.as_deref(), Some("app-net"));
+        assert!(binding.publish_uses_bridge_network);
         assert_eq!(
             binding.bridge_name.as_deref(),
             Some(record.bridge_name.as_str())
@@ -34182,6 +34194,112 @@ volumes:
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compat_named_bridge_follower_reaches_run_validation_with_published_port() {
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let network =
+            super::create_network_record("project_default", None, None, None, None)
+                .expect("network record");
+        super::save_networks(temp.path(), &[network]).expect("save network");
+        let runtime = ContainerRuntime::new(temp.path())
+            .expect("runtime")
+            .with_request_origin(
+                ferro_core::authorization::RequestOrigin::cli_current().expect("origin"),
+            );
+        let container_store =
+            ferro_core::sqlite_container_store::SqliteContainerStore::open(
+                temp.path().join("containers.db"),
+            )
+            .expect("container store");
+        let leader = serde_json::from_value::<ferro_core::container_store::ContainerRecord>(
+            serde_json::json!({
+                "id": "leader",
+                "pid": 4242,
+                "image": "example.invalid/app:latest",
+                "command": ["sleep", "infinity"],
+                "created_at_unix": 1,
+                "stdout_path": "",
+                "stderr_path": "",
+                "status": "running",
+                "network_endpoints": [{
+                    "network_name": "project_default",
+                    "endpoint_id": "leader-endpoint",
+                    "interface_name": "eth0",
+                    "generation": 1
+                }]
+            }),
+        )
+        .expect("leader record");
+        container_store.put(&leader).expect("save leader");
+
+        let binding = super::bind_run_network_for_runtime(
+            temp.path(),
+            &runtime,
+            "project_default",
+            None,
+            None,
+        )
+        .expect("bind named network");
+        assert_eq!(binding.mode, "container:pid:4242");
+        let image_store = LocalImageStore::open(temp.path().join("images")).expect("image store");
+        let volume_store = LocalVolumeStore::open(temp.path().join("volumes"))
+            .expect("volume store");
+        let error = handle_run(
+            temp.path(),
+            &runtime,
+            &image_store,
+            &volume_store,
+            "",
+            &[],
+            "project_default",
+            "iptables",
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            &["18095:8092/tcp".to_string()],
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            "no",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("empty image remains invalid");
+        assert!(
+            error.contains("invalid image reference"),
+            "named bridge provenance should pass the publish guard: {error}"
+        );
+    }
+
     #[test]
     fn bind_run_network_builtins_keep_mode_as_association() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -34189,10 +34307,12 @@ volumes:
             let binding = bind_run_network(temp.path(), mode, None, None).expect(mode);
             assert_eq!(binding.mode, mode);
             assert_eq!(binding.association.as_deref(), Some(mode));
+            assert_eq!(binding.publish_uses_bridge_network, mode == "bridge");
         }
         let encrypted = bind_run_network(temp.path(), "encrypted", None, None).expect("encrypted");
         assert_eq!(encrypted.mode, "wireguard");
         assert_eq!(encrypted.association.as_deref(), Some("wireguard"));
+        assert!(!encrypted.publish_uses_bridge_network);
     }
 
     #[test]

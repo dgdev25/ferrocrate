@@ -4701,6 +4701,38 @@ fn parse_run(raw: &str, shell: &[String]) -> Result<RunSpec, DockerfileBuildErro
     parse_run_with_workdir(raw, shell, "/")
 }
 
+fn docker_levenshtein(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + usize::from(left_byte != right_byte));
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+fn docker_option_error(message: String, value: &str, options: &[&str]) -> String {
+    let suggestion = options
+        .iter()
+        .filter_map(|option| {
+            let distance = docker_levenshtein(value, option);
+            (distance < 3).then_some((distance, *option))
+        })
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, option)| option);
+    match suggestion {
+        Some(suggestion) if suggestion != value => {
+            format!("{message} (did you mean {suggestion}?)")
+        }
+        _ => message,
+    }
+}
+
 fn parse_run_with_workdir(
     raw: &str,
     shell: &[String],
@@ -4732,18 +4764,24 @@ fn parse_run_with_workdir(
     let mut bind_mounts = Vec::new();
     let mut network = None;
     let mut security = DockerfileSecurityMode::Sandbox;
+    let mut security_set = false;
     loop {
         if let Some(value) = tokens
             .first()
             .and_then(|token| token.strip_prefix("--network="))
         {
+            if network.is_some() {
+                return Err(DockerfileBuildError::Invalid(
+                    "duplicate flag specified: --network".to_string(),
+                ));
+            }
             network = Some(match value {
                 "default" => DockerfileNetworkMode::Sandbox,
                 "none" => DockerfileNetworkMode::None,
                 "host" => DockerfileNetworkMode::Host,
                 other => {
                     return Err(DockerfileBuildError::Invalid(format!(
-                        "unsupported network mode {other:?}"
+                        "invalid network mode {other:?}"
                     )))
                 }
             });
@@ -4754,12 +4792,18 @@ fn parse_run_with_workdir(
             .first()
             .and_then(|token| token.strip_prefix("--security="))
         {
+            if security_set {
+                return Err(DockerfileBuildError::Invalid(
+                    "duplicate flag specified: --security".to_string(),
+                ));
+            }
+            security_set = true;
             security = match value {
                 "sandbox" => DockerfileSecurityMode::Sandbox,
                 "insecure" => DockerfileSecurityMode::Insecure,
                 other => {
                     return Err(DockerfileBuildError::Invalid(format!(
-                        "unsupported security mode {other:?}"
+                        "security {other:?} is not valid"
                     )))
                 }
             };
@@ -4796,8 +4840,8 @@ fn parse_run_with_workdir(
                 "env" => secret_env = Some(value),
                 "ro" | "readonly" => read_only = true,
                 "rw" => read_only = false,
-                "tmpfs-size" | "size" if !value.is_empty() => {
-                    tmpfs_size = Some(parse_buildkit_byte_size("tmpfs-size", value)?)
+                "size" if !value.is_empty() => {
+                    tmpfs_size = Some(parse_buildkit_byte_size("size", value)?)
                 }
                 "sharing" => {
                     if value.is_empty() {
@@ -4813,14 +4857,16 @@ fn parse_run_with_workdir(
                 "required" => {
                     required = Some(if value.is_empty() { "true" } else { value });
                 }
-                "typ" => {
-                    return Err(DockerfileBuildError::Invalid(
-                        "unexpected key 'typ'; did you mean type?".to_string(),
-                    ));
-                }
                 _ => {
-                    return Err(DockerfileBuildError::Unsupported(format!(
-                        "RUN --mount option is not supported: {key}"
+                    let message = format!("unexpected key '{key}' in '{option}'");
+                    return Err(DockerfileBuildError::Invalid(docker_option_error(
+                        message,
+                        key,
+                        &[
+                            "type", "from", "source", "target", "readonly", "id",
+                            "sharing", "required", "size", "mode", "uid", "gid", "src",
+                            "dst", "destination", "ro", "rw", "readwrite", "env",
+                        ],
                     )));
                 }
             }
@@ -4833,8 +4879,10 @@ fn parse_run_with_workdir(
                     Some(value) if value.eq_ignore_ascii_case("private") => CacheSharing::Private,
                     Some(value) if value.eq_ignore_ascii_case("locked") => CacheSharing::Locked,
                     Some(value) => {
-                        return Err(DockerfileBuildError::Unsupported(format!(
-                            "RUN cache mount sharing={value} is not supported; use shared, private, or locked"
+                        return Err(DockerfileBuildError::Invalid(docker_option_error(
+                            format!("unsupported sharing value {value:?}"),
+                            value,
+                            &["shared", "private", "locked"],
                         )));
                     }
                 };
@@ -5018,13 +5066,10 @@ fn parse_run_with_workdir(
                 });
             }
             other => {
-                let suggestion = if other == "tmp" {
-                    "; did you mean tmpfs?"
-                } else {
-                    ""
-                };
-                return Err(DockerfileBuildError::Unsupported(format!(
-                    "unsupported mount type \"{other}\"{suggestion}"
+                return Err(DockerfileBuildError::Invalid(docker_option_error(
+                    format!("unsupported mount type {other:?}"),
+                    other,
+                    &["bind", "cache", "tmpfs", "secret", "ssh"],
                 )));
             }
         }
@@ -5034,13 +5079,27 @@ fn parse_run_with_workdir(
     // before any RUN sandbox is started.  Preserve unrelated leading options
     // for their dedicated parsers (network/security/device); this branch is
     // deliberately narrow so it cannot reinterpret shell arguments.
-    if tokens
-        .first()
-        .is_some_and(|token| token == &"--mont" || token.starts_with("--mont="))
-    {
-        return Err(DockerfileBuildError::Invalid(
-            "unknown flag: --mont; did you mean mount?".to_string(),
-        ));
+    if let Some(token) = tokens.first().filter(|token| token.starts_with("--")) {
+        if *token == "--" {
+            tokens.remove(0);
+        } else {
+            let flag = token[2..].split_once('=').map(|(name, _)| name).unwrap_or(&token[2..]);
+            if matches!(flag, "mount" | "network" | "security") {
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "missing a value on flag: --{flag}"
+                )));
+            }
+            if flag == "device" {
+                return Err(DockerfileBuildError::Unsupported(
+                    "RUN --device is not supported".to_string(),
+                ));
+            }
+            return Err(DockerfileBuildError::Invalid(docker_option_error(
+                format!("unknown flag: --{flag}"),
+                flag,
+                &["mount", "network", "security", "device"],
+            )));
+        }
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
@@ -11251,7 +11310,7 @@ mod tests {
     #[test]
     fn tmpfs_mounts_are_accepted_for_shell_runs() {
         let run = parse_run(
-            "--mount=type=tmpfs,target=/tmp,tmpfs-size=65536 echo value",
+            "--mount=type=tmpfs,target=/tmp,size=65536 echo value",
             &["/bin/sh".into(), "-c".into()],
         )
         .expect("tmpfs mount parses");
@@ -11266,14 +11325,15 @@ mod tests {
         .expect("BuildKit byte-size syntax parses");
         assert_eq!(human_size.tmpfs_mounts[0].size, Some(128 * 1024 * 1024));
         let read_only = parse_run(
-            "--mount=type=tmpfs,target=/run,tmpfs-size=4096,ro echo value",
+            "--mount=type=tmpfs,target=/run,size=4096,ro echo value",
             &["/bin/sh".into(), "-c".into()],
         )
         .expect("read-only tmpfs mount parses");
         assert!(read_only.tmpfs_mounts[0].read_only);
         for invalid in [
             "--mount=type=tmpfs,target=relative echo value",
-            "--mount=type=tmpfs,target=/tmp,tmpfs-size=0 echo value",
+            "--mount=type=tmpfs,target=/tmp,size=0 echo value",
+            "--mount=type=tmpfs,target=/tmp,tmpfs-size=4096 echo value",
             "--mount=type=tmpfs,target=/tmp --mount=type=tmpfs,target=/tmp echo value",
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
@@ -11295,7 +11355,7 @@ mod tests {
             &["/bin/sh".into(), "-c".into()],
         )
         .expect_err("unknown network mode fails before execution");
-        assert!(invalid.to_string().contains("unsupported network mode"));
+        assert!(invalid.to_string().contains("invalid network mode"));
     }
 
     #[test]
@@ -11328,7 +11388,9 @@ mod tests {
             &["/bin/sh".into(), "-c".into()],
         )
         .expect_err("unknown security mode fails before execution");
-        assert!(invalid.to_string().contains("unsupported security mode"));
+        assert!(invalid
+            .to_string()
+            .contains("security \"privileged\" is not valid"));
     }
 
     #[test]
@@ -11412,6 +11474,43 @@ mod tests {
         .expect_err("misspelled type");
         assert!(kind.to_string().contains("unsupported mount type \"tmp\""));
         assert!(kind.to_string().contains("did you mean tmpfs?"));
+
+        for (run, expected, suggestion) in [
+            (
+                "--mout=type=tmpfs,target=/tmp true",
+                "unknown flag: --mout",
+                Some("did you mean mount?"),
+            ),
+            (
+                "--banana=value true",
+                "unknown flag: --banana",
+                None,
+            ),
+            (
+                "--mount=type=tmpfs,targe=/tmp true",
+                "unexpected key 'targe' in 'targe=/tmp'",
+                Some("did you mean target?"),
+            ),
+            (
+                "--mount=type=secre,target=/run/secret true",
+                "unsupported mount type \"secre\"",
+                Some("did you mean secret?"),
+            ),
+            (
+                "--mount=type=cache,target=/tmp,sharing=lockd true",
+                "unsupported sharing value \"lockd\"",
+                Some("did you mean locked?"),
+            ),
+        ] {
+            let error = parse_run(run, &["/bin/sh".into(), "-c".into()])
+                .expect_err("invalid RUN option must fail during parsing");
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message:?}");
+            match suggestion {
+                Some(suggestion) => assert!(message.contains(suggestion), "{message:?}"),
+                None => assert!(!message.contains("did you mean"), "{message:?}"),
+            }
+        }
     }
 
     #[test]

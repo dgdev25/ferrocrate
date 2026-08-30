@@ -29661,7 +29661,17 @@ async fn receive_buildkit_local(
     std::fs::create_dir_all(destination)
         .map_err(|error| format!("buildkit filesync: create staging directory: {error}"))?;
     while let Some(chunk) = incoming.data().await {
-        let chunk = chunk.map_err(|error| format!("buildkit filesync: receive failed: {error}"))?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(_) if sent_fin && listing_done && open_files.is_empty() => {
+                // All declared bytes are durable and our protocol FIN was
+                // sent. Some fsutil peers close the response and connection
+                // together, so h2 can surface the close before its final FIN
+                // frame even though the transfer itself is complete.
+                return Ok(());
+            }
+            Err(error) => return Err(format!("buildkit filesync: receive failed: {error}")),
+        };
         incoming
             .flow_control()
             .release_capacity(chunk.len())
@@ -29740,12 +29750,16 @@ async fn receive_buildkit_local(
                     // already completed transfer into a solve failure.
                     let _ = outgoing.send_data(Bytes::new(), true);
                     while let Some(chunk) = incoming.data().await {
-                        let chunk = chunk.map_err(|error| {
-                            format!("buildkit filesync: finish receive failed: {error}")
-                        })?;
-                        incoming.flow_control().release_capacity(chunk.len()).map_err(|error| {
-                            format!("buildkit filesync: finish flow control failed: {error}")
-                        })?;
+                        let Ok(chunk) = chunk else {
+                            // The reciprocal protocol FIN is the integrity
+                            // boundary. A peer may close the h2 stream at the
+                            // same instant instead of waiting for our optional
+                            // half-close, which h2 reports as a broken pipe.
+                            return Ok(());
+                        };
+                        if incoming.flow_control().release_capacity(chunk.len()).is_err() {
+                            return Ok(());
+                        }
                     }
                     return Ok(());
                 }

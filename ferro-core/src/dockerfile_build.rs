@@ -3049,6 +3049,7 @@ fn canonicalize_named_contexts(
             || !name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:@".contains(&byte))
+            || (name.contains('/') && !name.contains(':') && !name.contains('@'))
         {
             return Err(DockerfileBuildError::Invalid(format!(
                 "invalid named build context: {name}"
@@ -3347,7 +3348,9 @@ fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, Doc
             continue;
         }
         let trailing = line.chars().rev().take_while(|&c| c == escape).count();
+        let continuing = pending.is_some();
         let mut current = pending.take().unwrap_or_default();
+        let line = if continuing { line.trim_start() } else { line.as_str() };
         if trailing % 2 == 1 {
             current.push_str(&line[..line.len() - escape.len_utf8()]);
             pending = Some(current);

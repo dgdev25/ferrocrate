@@ -3049,7 +3049,6 @@ fn canonicalize_named_contexts(
             || !name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:@".contains(&byte))
-            || (name.contains('/') && !name.contains(':') && !name.contains('@'))
         {
             return Err(DockerfileBuildError::Invalid(format!(
                 "invalid named build context: {name}"
@@ -8915,7 +8914,7 @@ mod tests {
         .unwrap();
         assert_ne!(plan.plan_digest(), changed.plan_digest());
 
-        contexts.insert("bad/name".to_string(), assets.clone());
+        contexts.insert("bad name".to_string(), assets.clone());
         assert!(prepare_dockerfile_build_with_contexts(
             &dockerfile,
             Some("local/app:test"),

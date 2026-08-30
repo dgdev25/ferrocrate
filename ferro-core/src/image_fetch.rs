@@ -338,11 +338,7 @@ fn pull_layers_concurrently(
             let expected_size = layer.size;
             let blob_path = blob_root.join(digest.replace(':', "_"));
             scope.spawn(move || -> Result<(usize, PathBuf), ImageFetchError> {
-                if !blob_path.exists() {
-                    pull_blob_with_peer_fallback(client, reference, &digest, auth, &blob_path)?;
-                }
-                verify_digest(&blob_path, &digest)?;
-                verify_size(&blob_path, expected_size)?;
+                fetch_verified_layer(client, reference, auth, &digest, expected_size, &blob_path)?;
                 let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
                 Ok((index, blob_path))
             })
@@ -630,6 +626,52 @@ fn pull_blob_with_peer_fallback(
     Ok(())
 }
 
+/// Fetch a layer only after its descriptor size and digest both validate.
+///
+/// Registry clients can report a successful response after receiving a short
+/// body (for example, when an intermediary supplies a shorter content length).
+/// Never let that blob reach layer decompression: retry the whole layer download
+/// from an atomic temporary file instead.
+fn fetch_verified_layer(
+    client: &RegistryClient,
+    image: &str,
+    auth: Option<&RegistryAuth>,
+    digest: &str,
+    expected_size: i64,
+    dest: &Path,
+) -> Result<(), ImageFetchError> {
+    const MAX_LAYER_FETCH_ATTEMPTS: usize = 3;
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_LAYER_FETCH_ATTEMPTS {
+        if attempt > 1 || !dest.exists() {
+            if let Err(error) = pull_blob_with_peer_fallback(client, image, digest, auth, dest) {
+                eprintln!(
+                    "layer {digest}: fetch attempt {attempt}/{MAX_LAYER_FETCH_ATTEMPTS} failed: {error}; retrying"
+                );
+                last_error = Some(error);
+                continue;
+            }
+        }
+
+        match verify_size(dest, expected_size).and_then(|()| verify_digest(dest, digest)) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let actual_size = fs::metadata(dest).map(|metadata| metadata.len()).ok();
+                let actual_size = actual_size
+                    .map(|size| size.to_string())
+                    .unwrap_or_else(|| "unavailable".to_string());
+                eprintln!(
+                    "layer {digest}: fetch attempt {attempt}/{MAX_LAYER_FETCH_ATTEMPTS} validation failed: expected {expected_size} bytes, got {actual_size} bytes: {error}; retrying"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.expect("layer fetch attempts always record an error"))
+}
+
 fn select_platform_manifest(manifests: &[crate::image_manifest::Descriptor]) -> Option<String> {
     if manifests.is_empty() {
         return None;
@@ -688,10 +730,14 @@ pub fn resolve_layer_paths_with_store(
     for layer in &manifest.layers {
         let digest = layer.digest.replace(':', "_");
         let blob_path = blob_root.join(&digest);
-        if !blob_path.exists() {
-            client.pull_blob_to_file(&canonical, &layer.digest, auth.as_ref(), &blob_path)?;
-        }
-        verify_digest(&blob_path, &layer.digest)?;
+        fetch_verified_layer(
+            &client,
+            &canonical,
+            auth.as_ref(),
+            &layer.digest,
+            layer.size,
+            &blob_path,
+        )?;
         let _ = ensure_cas_blob(runtime_dir, &blob_path)?;
         layer_paths.push(blob_path);
     }
@@ -850,6 +896,8 @@ mod tests {
     use httptest::{Expectation, Server};
     use sha2::{Digest, Sha256};
     use std::fs;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
     use std::sync::Arc;
 
     #[test]
@@ -1059,6 +1107,66 @@ mod tests {
             .join("shake256")
             .join(hash);
         assert!(cas_path.exists());
+    }
+
+    #[test]
+    fn retries_a_truncated_gzip_layer_before_rootfs_decompression() {
+        let plain_layer = {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_path("usr/bin/ready").unwrap();
+            header.set_size(2);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, b"ok".as_slice()).unwrap();
+            builder.into_inner().unwrap()
+        };
+        let gzip_layer = crate::layer_compression::compress_bytes_gzip(&plain_layer).unwrap();
+        let config = b"{\"config\":{}}";
+        let config_digest = format!("sha256:{:x}", Sha256::digest(config));
+        let layer_digest = format!("sha256:{:x}", Sha256::digest(&gzip_layer));
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer_digest}","size":{}}}]}}"#,
+            config.len(),
+            gzip_layer.len(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_layer = gzip_layer.clone();
+        let server = std::thread::spawn(move || {
+            for response in [
+                manifest.into_bytes(),
+                config.to_vec(),
+                server_layer[..server_layer.len() - 8].to_vec(),
+                server_layer,
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let image = format!("{address}/library/truncated:latest");
+
+        let result = pull_image(
+            temp.path(),
+            &image,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+        )
+        .expect("a short layer must be retried before it reaches gzip decompression");
+        server.join().unwrap();
+
+        let rootfs = temp.path().join("rootfs");
+        crate::rootfs::construct_rootfs(&rootfs, &result.layer_paths)
+            .expect("retried gzip layer must decompress");
+        assert_eq!(fs::read(rootfs.join("usr/bin/ready")).unwrap(), b"ok");
     }
 
     #[test]

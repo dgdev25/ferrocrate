@@ -2762,19 +2762,31 @@ fn handle_doctor(
                 ok: rootless.is_ok() && user_namespace_ok,
                 message: match rootless {
                     Ok(config) => format!(
-                        "rootless context {} for {} (uid map {}:{} size {}; gid map {}:{} size {}); {}{}",
+                        "rootless context {} for {} (uid map {}; gid map {}); {}{}",
                         if user_namespace_ok {
                             "available"
                         } else {
                             "configured but user-namespace creation is unavailable"
                         },
                         config.username,
-                        config.uid_mapping.container_id,
-                        config.uid_mapping.host_id,
-                        config.uid_mapping.size,
-                        config.gid_mapping.container_id,
-                        config.gid_mapping.host_id,
-                        config.gid_mapping.size,
+                        config
+                            .uid_mapping
+                            .iter()
+                            .map(|mapping| format!(
+                                "{}:{} size {}",
+                                mapping.container_id, mapping.host_id, mapping.size
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        config
+                            .gid_mapping
+                            .iter()
+                            .map(|mapping| format!(
+                                "{}:{} size {}",
+                                mapping.container_id, mapping.host_id, mapping.size
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         socket_message,
                         user_namespace
                             .as_ref()

@@ -14,8 +14,9 @@
 
 use std::fs;
 use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 fn rootless_test_image() -> String {
     std::env::var("FERROCRATE_ROOTLESS_TEST_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string())
@@ -187,6 +188,38 @@ fn rootless_compose_instance_statuses(compose_output: &str) -> Vec<(String, Stri
             Some((name.to_string(), status.to_string()))
         })
         .collect()
+}
+
+struct RootlessDockerDaemon {
+    child: Child,
+    socket: PathBuf,
+}
+
+impl Drop for RootlessDockerDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn rootless_docker_daemon(binary: &str, runtime: &Path) -> RootlessDockerDaemon {
+    let socket = runtime.join("docker.sock");
+    let child = Command::new(binary)
+        .env("FERROCRATE_HOME", runtime)
+        .env("FERROCRATE_RUNTIME_DIR", runtime)
+        .env("FERROCRATE_ROOTLESS_NETNS", "1")
+        .env("FERROCRATE_NETWORK_BACKEND", "iptables")
+        .args(["daemon", "--docker-compat", "--socket"])
+        .arg(&socket)
+        .spawn()
+        .expect("start rootless Docker-compatible daemon");
+    for _ in 0..200 {
+        if socket.exists() && UnixStream::connect(&socket).is_ok() {
+            return RootlessDockerDaemon { child, socket };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("rootless Docker-compatible daemon did not create its socket");
 }
 
 /// Exercises the S183 terminal path with a real rootless workload.  This is
@@ -388,6 +421,103 @@ fn rootless_compose_executes_a_bind_mount_and_cleans_up() {
     assert_eq!(
         fs::read_to_string(runtime.join("volumes/named/marker")).expect("named volume output"),
         "named-volume\n"
+    );
+}
+
+/// S181: a real multi-user image must retain its mapped IDs through the
+/// rootless bridge launcher.  Keep this registry-dependent check behind the
+/// existing rootless Compose E2E gate.
+#[test]
+fn rootless_compose_nginx_services_wait_running() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        eprintln!("SKIP: set FERROCRATE_RUN_ROOTLESS_E2E=1 for S181 nginx Compose coverage");
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    if !Command::new("docker")
+        .args(["compose", "version"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        eprintln!("SKIP: Docker Compose client is unavailable for S181 coverage");
+        return;
+    }
+
+    let project = rootless_compose_project_dir(
+        root.path(),
+        "services:\n  simple:\n    image: nginx:alpine\n  another:\n    image: nginx:alpine\n",
+    );
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let daemon = rootless_docker_daemon(binary, &runtime);
+    let docker = |args: &[&str]| {
+        Command::new("docker")
+            .current_dir(&project)
+            .env("DOCKER_HOST", format!("unix://{}", daemon.socket.display()))
+            .args(args)
+            .output()
+            .expect("run Docker Compose client")
+    };
+    let pull = docker(&["pull", "nginx:alpine"]);
+    assert!(
+        pull.status.success(),
+        "S181 nginx pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+
+    let up = docker(&[
+        "compose",
+        "--project-name",
+        "s181-nginx",
+        "--file",
+        "compose.yml",
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "20",
+    ]);
+    assert!(
+        up.status.success(),
+        "S181 compose up --detach --wait failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&up.stdout),
+        String::from_utf8_lossy(&up.stderr)
+    );
+
+    for service in ["simple", "another"] {
+        let name = format!("s181-nginx-{service}-1");
+        let inspect = docker(&["inspect", "--format", "{{json .State}}", &name]);
+        assert!(
+            inspect.status.success(),
+            "S181 inspect {service} failed: {}",
+            String::from_utf8_lossy(&inspect.stderr)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&inspect.stdout).expect("S181 inspect JSON");
+        assert_eq!(payload["Status"], "running", "S181 {service}: {payload}");
+        assert!(
+            payload["ExitCode"].as_i64() == Some(0),
+            "S181 {service} exited: {payload}"
+        );
+    }
+
+    let down = docker(&[
+        "compose",
+        "--project-name",
+        "s181-nginx",
+        "--file",
+        "compose.yml",
+        "down",
+    ]);
+    assert!(
+        down.status.success(),
+        "S181 compose down failed: {}",
+        String::from_utf8_lossy(&down.stderr)
     );
 }
 

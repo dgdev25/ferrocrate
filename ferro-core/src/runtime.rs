@@ -5,7 +5,7 @@ use crate::authorization::runtime::{
 };
 use crate::authorization::{
     gate::{AuthorizationGate, AuthorizedRequest},
-    Action,
+    Action, RequestOrigin, ResourceKind,
 };
 #[cfg(target_os = "linux")]
 use crate::capabilities::{drop_all_capabilities, set_capabilities};
@@ -1871,6 +1871,33 @@ impl ContainerRuntime {
         self.authorization.request_origin()
     }
 
+    fn prepare_rootless_mapping(
+        &self,
+        container_id: &str,
+        generation: u64,
+    ) -> Result<(crate::rootless::RootlessConfig, crate::authorization::surface::SurfacePermit), RuntimeError>
+    {
+        let origin = self
+            .request_origin()
+            .unwrap_or(RequestOrigin::cli_current().map_err(|error| {
+                RuntimeError::Authorization(format!("resolve rootless mapping origin: {error}"))
+            })?);
+        let config = crate::rootless::RootlessConfig::from_system().map_err(|error| {
+            RuntimeError::InvalidState(format!("resolve rootless user namespace mappings: {error}"))
+        })?;
+        let permit = self
+            .surface_authorization()?
+            .authorize_named(
+                &origin,
+                Action::RootlessMapping,
+                ResourceKind::RootlessMapping,
+                container_id,
+                generation,
+            )
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+        Ok((config, permit))
+    }
+
     pub fn request_scoped(&self, origin: crate::authorization::RequestOrigin) -> Self {
         Self {
             store: self.store.clone(),
@@ -3349,6 +3376,11 @@ impl ContainerRuntime {
         // and can fail on hosts that deny nested user namespaces.
         let unshare_netns = rootless && network_mode == "bridge" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
+        let rootless_mapping = if use_slirp {
+            Some(self.prepare_rootless_mapping(&container_id, 1)?)
+        } else {
+            None
+        };
 
         // Load seccomp profile for container isolation.
         // Guest authority uses the restricted guest profile; others use the default.
@@ -3585,6 +3617,29 @@ impl ContainerRuntime {
         }
         release_prepared_child(child_id)?;
         if use_slirp {
+            // The outer ownership launcher stopped before `unshare` created
+            // its namespaces.  After the first release, the inner launcher
+            // stops in the newly-created user/network namespace, while its
+            // uid_map is still writable.  Install the subordinate-ID map at
+            // that point before either slirp or bubblewrap can release the
+            // image workload.
+            wait_until_launch_stopped(child_id)?;
+            let (config, permit) = rootless_mapping
+                .expect("rootless slirp launch prepared its namespace mapping");
+            if let Err(error) = crate::rootless::apply_user_namespace_mappings_authorized(
+                Path::new("/proc"),
+                child_id,
+                &config,
+                &container_id,
+                1,
+                permit,
+            ) {
+                let _ = kill_pid(child_id);
+                rollback.rollback();
+                return Err(RuntimeError::InvalidState(format!(
+                    "install rootless user namespace mappings: {error}"
+                )));
+            }
             let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
@@ -5457,6 +5512,11 @@ impl ContainerRuntime {
 
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
+        let rootless_mapping = if restart_rootless_slirp {
+            Some(self.prepare_rootless_mapping(&record.id, record.mutation_generation.max(1))?)
+        } else {
+            None
+        };
 
         // Load seccomp profile for restarted container.
         // Uses the authority stored in the container record, if present.
@@ -5604,6 +5664,23 @@ impl ContainerRuntime {
         )?;
         release_prepared_child(child_id)?;
         if restart_rootless_slirp {
+            wait_until_launch_stopped(child_id)?;
+            let (config, permit) = rootless_mapping
+                .expect("rootless slirp restart prepared its namespace mapping");
+            crate::rootless::apply_user_namespace_mappings_authorized(
+                Path::new("/proc"),
+                child_id,
+                &config,
+                &record.id,
+                record.mutation_generation.max(1),
+                permit,
+            )
+            .map_err(|error| {
+                let _ = kill_pid(child_id);
+                RuntimeError::InvalidState(format!(
+                    "install rootless user namespace mappings: {error}"
+                ))
+            })?;
             let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             let (helper_pid, helper_start_time) =
                 match start_slirp4netns(child_id, Some(&api_socket)) {
@@ -7695,13 +7772,11 @@ fn build_command(
             })?;
         let mut unshare_cmd = Command::new(unshare_path);
         // Creating a network namespace alone is not permitted for an
-        // unprivileged caller. Pair it with a user namespace. Avoid invoking
-        // setuid mapping helpers after no_new_privs is installed; callers
-        // needing subordinate-ID mappings use the authenticated mapping path.
-        // Map the caller to root in the outer user namespace so bubblewrap
-        // can reuse its privileges instead of creating a denied nested user
-        // namespace on hardened hosts.
-        unshare_cmd.args(["--user", "--map-root-user", "--net", "--"]);
+        // unprivileged caller. Pair it with a still-unmapped user namespace;
+        // the parent installs the authenticated caller-plus-subordinate map
+        // while this inner launcher is stopped. `--map-root-user` would make
+        // uid_map immutable before that mapping can be installed.
+        unshare_cmd.args(["--user", "--net", "--"]);
         // Keep the process stopped after `unshare` has created its network
         // namespace. The parent attaches slirp4netns at this point, then
         // releases the workload with a second SIGCONT. This avoids both the
@@ -19907,14 +19982,11 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.len() >= 9);
-        assert!(args[args.len() - 10].ends_with("/unshare"));
-        assert_eq!(
-            &args[args.len() - 9..args.len() - 5],
-            ["--user", "--map-root-user", "--net", "--"]
-        );
-        assert!(args[args.len() - 5].ends_with("/sh"));
-        assert_eq!(args[args.len() - 4], "-c");
-        assert_eq!(args[args.len() - 3], "kill -STOP $$; exec \"$@\"");
+        assert!(args.iter().any(|arg| arg.ends_with("/unshare")));
+        assert!(args.windows(3).any(|window| window == ["--user", "--net", "--"]));
+        assert!(!args.iter().any(|arg| arg == "--map-root-user"));
+        assert!(args.iter().any(|arg| arg.ends_with("/sh")));
+        assert!(args.iter().any(|arg| arg == "kill -STOP $$; exec \"$@\""));
         assert_eq!(args[args.len() - 1], "/bin/true");
         assert!(args.iter().any(|arg| arg == "ferrocrate-rootless"));
     }
@@ -19941,21 +20013,16 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.len() >= 13);
-        assert!(args[args.len() - 13].ends_with("/unshare"));
-        assert_eq!(
-            &args[args.len() - 12..args.len() - 8],
-            ["--user", "--map-root-user", "--net", "--"]
-        );
-        assert!(args[args.len() - 8].ends_with("/sh"));
-        assert_eq!(args[args.len() - 7], "-c");
-        assert_eq!(args[args.len() - 6], "kill -STOP $$; exec \"$@\"");
-        assert_eq!(args[args.len() - 5], "ferrocrate-rootless");
-        assert!(args[args.len() - 4].ends_with("/setpriv"));
-        assert_eq!(
-            &args[args.len() - 3..args.len() - 1],
-            ["--no-new-privs", "--"]
-        );
+        assert!(args.len() >= 12);
+        assert!(args.iter().any(|arg| arg.ends_with("/unshare")));
+        assert!(args.windows(3).any(|window| window == ["--user", "--net", "--"]));
+        assert!(!args.iter().any(|arg| arg == "--map-root-user"));
+        assert!(args.iter().any(|arg| arg.ends_with("/sh")));
+        assert!(args.windows(3).any(|window| {
+            window == ["-c", "kill -STOP $$; exec \"$@\"", "ferrocrate-rootless"]
+        }));
+        assert!(args.iter().any(|arg| arg.ends_with("/setpriv")));
+        assert!(args.windows(2).any(|window| window == ["--no-new-privs", "--"]));
         assert_eq!(args[args.len() - 1], "/bin/true");
     }
 

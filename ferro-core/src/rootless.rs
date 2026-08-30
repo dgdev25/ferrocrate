@@ -38,8 +38,8 @@ impl RootlessMapping {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootlessConfig {
     pub username: String,
-    pub uid_mapping: RootlessMapping,
-    pub gid_mapping: RootlessMapping,
+    pub uid_mapping: Vec<RootlessMapping>,
+    pub gid_mapping: Vec<RootlessMapping>,
 }
 
 /// Probe whether this process can create the mapped user namespace used by
@@ -415,29 +415,8 @@ impl RootlessConfig {
         let uid_range = first_subid_range(Path::new("/etc/subuid"), &username, uid.as_raw())?;
         let gid_range = first_subid_range(Path::new("/etc/subgid"), &username, gid.as_raw())?;
 
-        let uid_mapping = uid_range
-            .map(|range| RootlessMapping {
-                container_id: 0,
-                host_id: range.start,
-                size: range.count,
-            })
-            .unwrap_or(RootlessMapping {
-                container_id: 0,
-                host_id: uid.as_raw(),
-                size: 1,
-            });
-
-        let gid_mapping = gid_range
-            .map(|range| RootlessMapping {
-                container_id: 0,
-                host_id: range.start,
-                size: range.count,
-            })
-            .unwrap_or(RootlessMapping {
-                container_id: 0,
-                host_id: gid.as_raw(),
-                size: 1,
-            });
+        let uid_mapping = mappings_for_caller(uid.as_raw(), uid_range);
+        let gid_mapping = mappings_for_caller(gid.as_raw(), gid_range);
 
         Ok(Self {
             username,
@@ -445,6 +424,26 @@ impl RootlessConfig {
             gid_mapping,
         })
     }
+}
+
+/// Map the caller to container root, then place the subordinate range after
+/// it.  The initial identity mapping lets the unprivileged parent install the
+/// map, while the second entry makes image users such as nginx's uid 101
+/// representable inside the workload namespace.
+fn mappings_for_caller(caller_id: u32, range: Option<IdRange>) -> Vec<RootlessMapping> {
+    let mut mappings = vec![RootlessMapping {
+        container_id: 0,
+        host_id: caller_id,
+        size: 1,
+    }];
+    if let Some(range) = range.filter(|range| range.count > 1) {
+        mappings.push(RootlessMapping {
+            container_id: 1,
+            host_id: range.start,
+            size: range.count - 1,
+        });
+    }
+    mappings
 }
 
 /// Enable rootless namespaces for a container process.
@@ -531,10 +530,14 @@ fn write_setgroups(path: &Path) -> Result<(), RootlessError> {
 fn write_id_mapping(
     path: &Path,
     pid: u32,
-    mapping: &RootlessMapping,
+    mappings: &[RootlessMapping],
     helper: &'static str,
 ) -> Result<(), RootlessError> {
-    match fs::write(path, mapping.as_uid_map_entry()) {
+    let entries = mappings
+        .iter()
+        .map(RootlessMapping::as_uid_map_entry)
+        .collect::<String>();
+    match fs::write(path, entries) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             let helper_path = trusted_executable_path(helper).ok_or_else(|| {
@@ -546,13 +549,16 @@ fn write_id_mapping(
                     ),
                 }
             })?;
-            let status = Command::new(helper_path)
-                .args([
-                    pid.to_string(),
+            let mut command = Command::new(helper_path);
+            command.arg(pid.to_string());
+            for mapping in mappings {
+                command.args([
                     mapping.container_id.to_string(),
                     mapping.host_id.to_string(),
                     mapping.size.to_string(),
-                ])
+                ]);
+            }
+            let status = command
                 .status()
                 .map_err(|source| RootlessError::LaunchMappingHelper { helper, source })?;
             if status.success() {
@@ -901,16 +907,30 @@ mod tests {
 
         let cfg = RootlessConfig {
             username: "tester".to_string(),
-            uid_mapping: RootlessMapping {
-                container_id: 0,
-                host_id: 100_000,
-                size: DEFAULT_SUBID_SIZE,
-            },
-            gid_mapping: RootlessMapping {
-                container_id: 0,
-                host_id: 100_000,
-                size: DEFAULT_SUBID_SIZE,
-            },
+            uid_mapping: vec![
+                RootlessMapping {
+                    container_id: 0,
+                    host_id: 1_000,
+                    size: 1,
+                },
+                RootlessMapping {
+                    container_id: 1,
+                    host_id: 100_000,
+                    size: DEFAULT_SUBID_SIZE - 1,
+                },
+            ],
+            gid_mapping: vec![
+                RootlessMapping {
+                    container_id: 0,
+                    host_id: 1_000,
+                    size: 1,
+                },
+                RootlessMapping {
+                    container_id: 1,
+                    host_id: 100_000,
+                    size: DEFAULT_SUBID_SIZE - 1,
+                },
+            ],
         };
 
         apply_user_namespace_mappings(proc_root, 4242, &cfg).expect("mapping applied");
@@ -921,11 +941,37 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(pid_dir.join("uid_map")).expect("uid_map"),
-            "0 100000 65536\n"
+            "0 1000 1\n1 100000 65535\n"
         );
         assert_eq!(
             fs::read_to_string(pid_dir.join("gid_map")).expect("gid_map"),
-            "0 100000 65536\n"
+            "0 1000 1\n1 100000 65535\n"
+        );
+    }
+
+    #[test]
+    fn subordinate_mapping_preserves_caller_root_and_maps_image_users() {
+        let mappings = super::mappings_for_caller(
+            1_000,
+            Some(super::IdRange {
+                start: 100_000,
+                count: DEFAULT_SUBID_SIZE,
+            }),
+        );
+        assert_eq!(
+            mappings,
+            vec![
+                RootlessMapping {
+                    container_id: 0,
+                    host_id: 1_000,
+                    size: 1,
+                },
+                RootlessMapping {
+                    container_id: 1,
+                    host_id: 100_000,
+                    size: DEFAULT_SUBID_SIZE - 1,
+                },
+            ]
         );
     }
 }

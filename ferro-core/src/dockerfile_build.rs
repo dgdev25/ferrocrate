@@ -94,6 +94,7 @@ pub struct ImageBuildPlan {
     base_digests: Vec<(String, Option<String>)>,
     named_contexts: HashMap<String, PathBuf>,
     build_args: HashMap<String, String>,
+    execution_options: DockerfileExecutionOptions,
     stage_dependencies: Vec<Vec<usize>>,
     stage_batches: Vec<Vec<usize>>,
     stage_identities: Vec<String>,
@@ -182,7 +183,39 @@ pub fn prepare_dockerfile_build_with_contexts_and_build_args(
     dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
     store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
-    prepare_dockerfile_build_with_contexts_and_build_args_inner(dockerfile_path, tag, runtime_dir, compression, store, named_contexts, build_args)
+    prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        named_contexts,
+        build_args,
+        &DockerfileExecutionOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    named_contexts: &HashMap<String, PathBuf>,
+    build_args: &HashMap<String, String>,
+    execution_options: &DockerfileExecutionOptions,
+) -> Result<ImageBuildPlan, DockerfileBuildError> {
+    prepare_dockerfile_build_with_contexts_and_build_args_inner(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        named_contexts,
+        build_args,
+        execution_options,
+    )
 }
 
 /// Return registry-backed `FROM` references in first-use order.
@@ -230,12 +263,23 @@ pub fn prepare_dockerfile_build_with_contexts(
     store: &LocalImageStore,
     named_contexts: &HashMap<String, PathBuf>,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
-    prepare_dockerfile_build_with_contexts_and_build_args_inner(dockerfile_path, tag, runtime_dir, compression, store, named_contexts, &HashMap::new())
+    prepare_dockerfile_build_with_contexts_and_build_args_inner(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        named_contexts,
+        &HashMap::new(),
+        &DockerfileExecutionOptions::default(),
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
     dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
     store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
+    execution_options: &DockerfileExecutionOptions,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
@@ -277,6 +321,7 @@ fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
     }
     hash.update(dockerfile_digest);
     for (key, value) in BTreeMap::from_iter(build_args.iter()) { hash.update(key.as_bytes()); hash.update(value.as_bytes()); }
+    append_execution_options_identity(&mut hash, execution_options);
     hash.update([match compression {
         CompressionFormat::None => 0,
         CompressionFormat::Gzip => 1,
@@ -323,11 +368,21 @@ fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
         base_digests,
         named_contexts: canonicalize_named_contexts(named_contexts)?,
         build_args: build_args.clone(),
+        execution_options: execution_options.clone(),
         stage_dependencies,
         stage_batches,
         stage_identities,
         plan_digest: hash.finalize().into(),
     })
+}
+
+fn append_execution_options_identity(
+    hash: &mut Sha256,
+    options: &DockerfileExecutionOptions,
+) {
+    let encoded = format!("{options:?}");
+    hash.update((encoded.len() as u64).to_be_bytes());
+    hash.update(encoded.as_bytes());
 }
 
 pub struct BuildResult {
@@ -725,6 +780,7 @@ fn build_one_stage(
     inherited_root: Option<&Path>,
     inherited_workdir: Option<&str>,
     control: &BuildControl,
+    execution_options: &DockerfileExecutionOptions,
 ) -> Result<BuiltStage, DockerfileBuildError> {
     // Stage roots are mutable during COPY and RUN. A fixed `stage-{idx}`
     // directory lets concurrent builds overlay each other's context; allocate
@@ -842,6 +898,7 @@ fn build_one_stage(
             secrets,
             context_dir,
             control,
+            execution_options,
         )?;
         // Preserve Dockerfile ordering for artifacts copied after a RUN. In
         // particular, `npm ci` removes sqlite3's build directory, so its
@@ -883,6 +940,7 @@ fn build_one_stage(
             secrets,
             context_dir,
             control,
+            execution_options,
         )?;
         // Parallel build attempts share the runtime directory. Allocate the
         // streamed layer's scratch file too, rather than using a fixed name.
@@ -955,6 +1013,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
         secrets,
         authorization_plan_digest,
         &HashMap::new(),
+        &DockerfileExecutionOptions::default(),
     )
 }
 
@@ -970,6 +1029,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     secrets: &HashMap<String, PathBuf>,
     authorization_plan_digest: Option<&str>,
     build_args: &HashMap<String, String>,
+    execution_options: &DockerfileExecutionOptions,
 ) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
@@ -1076,7 +1136,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     let mut journaled_attempt = false;
     let outcome = control.check("build start").and_then(|()| {
         let mut cache = load_build_cache(runtime_dir)?;
-        if !has_sensitive_mounts(&stages) {
+        if execution_options.no_cache.is_none() && !has_sensitive_mounts(&stages) {
             if let Some(entry) = cache.get(&cache_key).cloned() {
                 if !entry.cache_key.is_empty() && entry.cache_key != cache_key {
                     return Err(DockerfileBuildError::Invalid(
@@ -1139,6 +1199,7 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             &base_digests,
             &control,
             &mut journal,
+            execution_options,
         )
     });
     match outcome {
@@ -1263,6 +1324,7 @@ fn execute_stages_and_publish(
     base_digests: &[String],
     control: &BuildControl,
     journal: &mut BuildJournal,
+    execution_options: &DockerfileExecutionOptions,
 ) -> Result<BuildResult, DockerfileBuildError> {
     let mut stage_roots = vec![None; stages.len()];
     let mut stage_names: HashMap<String, PathBuf> = HashMap::new();
@@ -1331,6 +1393,7 @@ fn execute_stages_and_publish(
             );
             let checkpoint = worker_checkpoints
                 .get(&idx)
+                .filter(|_| !stage_ignores_cache(&stages[idx], execution_options))
                 .filter(|checkpoint| checkpoint.build_key == stage_identities[idx])
                 .cloned();
             let outcome = match checkpoint {
@@ -1363,6 +1426,7 @@ fn execute_stages_and_publish(
                             inherited_root.as_deref(),
                             stage_workdirs[idx].as_deref(),
                             control,
+                            execution_options,
                         ),
                         Err(error) => Err(error),
                     }
@@ -1383,6 +1447,7 @@ fn execute_stages_and_publish(
                     inherited_root.as_deref(),
                     stage_workdirs[idx].as_deref(),
                     control,
+                    execution_options,
                 ),
             };
             match &outcome {
@@ -1605,6 +1670,17 @@ fn execute_stages_and_publish(
     })
 }
 
+fn stage_ignores_cache(stage: &StageSpec, options: &DockerfileExecutionOptions) -> bool {
+    let Some(names) = options.no_cache.as_ref() else {
+        return false;
+    };
+    names.is_empty()
+        || stage
+            .name
+            .as_deref()
+            .is_some_and(|name| names.iter().any(|item| item.eq_ignore_ascii_case(name)))
+}
+
 pub fn execute_dockerfile_build_authorized(
     plan: ImageBuildPlan,
     store: &LocalImageStore,
@@ -1635,7 +1711,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
             "image build plan does not match authorization proof".to_string(),
         ));
     }
-    let observed = prepare_dockerfile_build_with_contexts_and_build_args(
+    let observed = prepare_dockerfile_build_with_contexts_and_build_args_and_options(
         &plan.dockerfile_path,
         Some(&plan.canonical_tag),
         &plan.runtime_dir,
@@ -1643,6 +1719,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
         store,
         &plan.named_contexts,
         &plan.build_args,
+        &plan.execution_options,
     )?;
     if observed.plan_digest != plan.plan_digest
         || observed.context_digest != plan.context_digest
@@ -1669,6 +1746,7 @@ pub fn execute_dockerfile_build_authorized_with_secrets(
         secrets,
         Some(&authorization_plan_digest),
         &plan.build_args,
+        &plan.execution_options,
     ) {
         Ok(result) => {
             permit
@@ -3768,11 +3846,23 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
         for mount in &run.secret_mounts {
             append_stage_identity_str(buffer, "secret.target", &mount.target);
             append_stage_identity_str(buffer, "secret.id", &mount.id);
+            append_stage_identity_str(
+                buffer,
+                "secret.env",
+                mount.env.as_deref().unwrap_or("\0absent"),
+            );
             append_stage_identity_bool(buffer, "secret.required", mount.required);
+            append_stage_identity_u64(buffer, "secret.uid", u64::from(mount.uid));
+            append_stage_identity_u64(buffer, "secret.gid", u64::from(mount.gid));
+            append_stage_identity_u64(buffer, "secret.mode", u64::from(mount.mode));
         }
         for mount in &run.ssh_mounts {
             append_stage_identity_str(buffer, "ssh.target", &mount.target);
             append_stage_identity_str(buffer, "ssh.id", &mount.id);
+            append_stage_identity_bool(buffer, "ssh.required", mount.required);
+            append_stage_identity_u64(buffer, "ssh.uid", u64::from(mount.uid));
+            append_stage_identity_u64(buffer, "ssh.gid", u64::from(mount.gid));
+            append_stage_identity_u64(buffer, "ssh.mode", u64::from(mount.mode));
         }
         for mount in &run.tmpfs_mounts {
             append_stage_identity_str(buffer, "tmpfs.target", &mount.target);
@@ -3784,6 +3874,16 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
             append_stage_identity_str(buffer, "bind.target", &mount.target);
             append_stage_identity_bool(buffer, "bind.ro", mount.read_only);
         }
+        append_stage_identity_str(
+            buffer,
+            "run.network",
+            match run.network {
+                None => "default",
+                Some(DockerfileNetworkMode::Sandbox) => "sandbox",
+                Some(DockerfileNetworkMode::None) => "none",
+                Some(DockerfileNetworkMode::Host) => "host",
+            },
+        );
     }
     for port in &stage.exposed_ports {
         append_stage_identity_str(buffer, "expose", port);
@@ -4260,6 +4360,48 @@ fn apply_cache_mount_metadata(
     Ok(())
 }
 
+fn apply_secret_mount_metadata(
+    target: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<(), DockerfileBuildError> {
+    #[cfg(unix)]
+    {
+        use nix::unistd::{chown, Gid, Uid};
+        fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
+        if !Uid::effective().is_root() {
+            if uid == 0 && gid == 0 {
+                // Bubblewrap maps the invoking host user to container 0:0.
+                // Keeping the host ownership therefore produces BuildKit's
+                // default ownership inside the RUN user namespace.
+                return Ok(());
+            }
+            return Err(DockerfileBuildError::Unsupported(
+                "rootless secret uid/gid require subordinate user-ID mappings".to_string(),
+            ));
+        }
+        chown(
+            target,
+            Some(Uid::from_raw(uid)),
+            Some(Gid::from_raw(gid)),
+        )
+        .map_err(|error| {
+            DockerfileBuildError::Invalid(format!(
+                "secret mount cannot set owner {uid}:{gid}: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, uid, gid, mode);
+        Err(DockerfileBuildError::Unsupported(
+            "secret mount metadata requires a Unix host".to_string(),
+        ))
+    }
+}
+
 fn parse_arg(value: &str) -> Result<(String, String), DockerfileBuildError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -4366,6 +4508,7 @@ struct RunSpec {
     ssh_mounts: Vec<SshMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
     bind_mounts: Vec<BindMount>,
+    network: Option<DockerfileNetworkMode>,
 }
 
 #[derive(Debug, Clone)]
@@ -4389,13 +4532,21 @@ enum CacheSharing {
 struct SecretMount {
     target: String,
     id: String,
+    env: Option<String>,
     required: bool,
+    uid: u32,
+    gid: u32,
+    mode: u32,
 }
 
 #[derive(Debug, Clone)]
 struct SshMount {
     target: String,
     id: String,
+    required: bool,
+    uid: u32,
+    gid: u32,
+    mode: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -4531,6 +4682,7 @@ fn parse_run_with_workdir(
                 ssh_mounts: Vec::new(),
                 tmpfs_mounts: Vec::new(),
                 bind_mounts: Vec::new(),
+                network: None,
             });
         }
     }
@@ -4540,11 +4692,33 @@ fn parse_run_with_workdir(
     let mut ssh_mounts = Vec::new();
     let mut tmpfs_mounts = Vec::new();
     let mut bind_mounts = Vec::new();
-    while tokens
-        .first()
-        .is_some_and(|token| token.starts_with("--mount="))
-    {
-        let mount = tokens.remove(0).trim_start_matches("--mount=");
+    let mut network = None;
+    loop {
+        if let Some(value) = tokens
+            .first()
+            .and_then(|token| token.strip_prefix("--network="))
+        {
+            network = Some(match value {
+                "default" => DockerfileNetworkMode::Sandbox,
+                "none" => DockerfileNetworkMode::None,
+                "host" => DockerfileNetworkMode::Host,
+                other => {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "unsupported network mode {other:?}"
+                    )))
+                }
+            });
+            tokens.remove(0);
+            continue;
+        }
+        let Some(mount) = tokens
+            .first()
+            .and_then(|token| token.strip_prefix("--mount="))
+            .map(str::to_string)
+        else {
+            break;
+        };
+        tokens.remove(0);
         let mut kind = None;
         let mut target = None;
         let mut id = None;
@@ -4556,6 +4730,7 @@ fn parse_run_with_workdir(
         let mut uid = None;
         let mut gid = None;
         let mut mode = None;
+        let mut secret_env = None;
         for option in mount.split(',') {
             let (key, value) = option.split_once('=').unwrap_or((option, ""));
             match key {
@@ -4563,10 +4738,11 @@ fn parse_run_with_workdir(
                 "target" | "dst" | "destination" => target = Some(value),
                 "id" => id = Some(value),
                 "source" | "src" => source = Some(value),
+                "env" => secret_env = Some(value),
                 "ro" | "readonly" => read_only = true,
                 "rw" => read_only = false,
                 "tmpfs-size" | "size" if !value.is_empty() => {
-                    tmpfs_size = Some(parse_limit_value("tmpfs-size", value)?)
+                    tmpfs_size = Some(parse_buildkit_byte_size("tmpfs-size", value)?)
                 }
                 "sharing" => {
                     if value.is_empty() {
@@ -4582,6 +4758,11 @@ fn parse_run_with_workdir(
                 "required" => {
                     required = Some(if value.is_empty() { "true" } else { value });
                 }
+                "typ" => {
+                    return Err(DockerfileBuildError::Invalid(
+                        "unexpected key 'typ'; did you mean type?".to_string(),
+                    ));
+                }
                 _ => {
                     return Err(DockerfileBuildError::Unsupported(format!(
                         "RUN --mount option is not supported: {key}"
@@ -4589,8 +4770,8 @@ fn parse_run_with_workdir(
                 }
             }
         }
-        match kind {
-            Some("cache") => {
+        match kind.unwrap_or("bind") {
+            "cache" => {
                 let sharing = match sharing {
                     None => CacheSharing::Shared,
                     Some(value) if value.eq_ignore_ascii_case("shared") => CacheSharing::Shared,
@@ -4602,9 +4783,9 @@ fn parse_run_with_workdir(
                         )));
                     }
                 };
-                if required.is_some() {
+                if required.is_some() || secret_env.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
-                        "RUN cache mount does not accept required".to_string(),
+                        "RUN cache mount does not accept required/env".to_string(),
                     ));
                 }
                 if source.is_some() {
@@ -4642,7 +4823,7 @@ fn parse_run_with_workdir(
                     mode,
                 });
             }
-            Some("secret") => {
+            "secret" => {
                 if sharing.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
                         "RUN secret mount does not accept sharing".to_string(),
@@ -4654,17 +4835,18 @@ fn parse_run_with_workdir(
                     ));
                 }
                 let required = match required {
-                    None | Some("true") => true,
-                    Some("false") => false,
+                    None | Some("false") => false,
+                    Some("true") => true,
                     Some(value) => {
                         return Err(DockerfileBuildError::Invalid(format!(
                             "RUN secret mount required must be true or false, got {value}"
                         )));
                     }
                 };
-                let id = id.ok_or_else(|| {
-                    DockerfileBuildError::Invalid("secret mount requires id".to_string())
-                })?;
+                let id = id.or_else(|| target.and_then(|target| Path::new(target).file_name()?.to_str()))
+                    .ok_or_else(|| DockerfileBuildError::Invalid(
+                        "invalid secret mount: one of id or target is required".to_string(),
+                    ))?;
                 let id = validate_secret_id(id)?;
                 let target = target
                     .map(str::to_string)
@@ -4672,13 +4854,24 @@ fn parse_run_with_workdir(
                 secret_mounts.push(SecretMount {
                     target: validate_cache_target(&target)?,
                     id,
+                    env: secret_env
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
                     required,
+                    uid: uid.map(|value| parse_cache_owner_id("uid", value)).transpose()?.unwrap_or(0),
+                    gid: gid.map(|value| parse_cache_owner_id("gid", value)).transpose()?.unwrap_or(0),
+                    mode: mode.map(parse_copy_mode).transpose()?.unwrap_or(0o400),
                 });
             }
-            Some("ssh") => {
-                if sharing.is_some() || required.is_some() {
+            "ssh" => {
+                if secret_env.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
-                        "RUN ssh mount sharing/required options are not supported".to_string(),
+                        "RUN ssh mount does not accept env".to_string(),
+                    ));
+                }
+                if sharing.is_some() {
+                    return Err(DockerfileBuildError::Unsupported(
+                        "RUN ssh mount sharing is not supported".to_string(),
                     ));
                 }
                 if source.is_some() {
@@ -4699,10 +4892,24 @@ fn parse_run_with_workdir(
                         "duplicate SSH mount target: {target}"
                     )));
                 }
-                ssh_mounts.push(SshMount { target, id });
+                let required = match required {
+                    None | Some("false") => false,
+                    Some("true") => true,
+                    Some(value) => return Err(DockerfileBuildError::Invalid(format!(
+                        "RUN ssh mount required must be true or false, got {value}"
+                    ))),
+                };
+                ssh_mounts.push(SshMount {
+                    target,
+                    id,
+                    required,
+                    uid: uid.map(|value| parse_cache_owner_id("uid", value)).transpose()?.unwrap_or(0),
+                    gid: gid.map(|value| parse_cache_owner_id("gid", value)).transpose()?.unwrap_or(0),
+                    mode: mode.map(parse_copy_mode).transpose()?.unwrap_or(0o600),
+                });
             }
-            Some("tmpfs") => {
-                if sharing.is_some() || required.is_some() {
+            "tmpfs" => {
+                if sharing.is_some() || required.is_some() || secret_env.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
                         "RUN tmpfs mount sharing/required options are not supported".to_string(),
                     ));
@@ -4725,8 +4932,8 @@ fn parse_run_with_workdir(
                     read_only,
                 });
             }
-            Some("bind") => {
-                if sharing.is_some() || required.is_some() {
+            "bind" => {
+                if sharing.is_some() || required.is_some() || secret_env.is_some() {
                     return Err(DockerfileBuildError::Unsupported(
                         "RUN bind mount sharing/required options are not supported".to_string(),
                     ));
@@ -4755,17 +4962,30 @@ fn parse_run_with_workdir(
                     read_only,
                 });
             }
-            Some(other) => {
+            other => {
+                let suggestion = if other == "tmp" {
+                    "; did you mean tmpfs?"
+                } else {
+                    ""
+                };
                 return Err(DockerfileBuildError::Unsupported(format!(
-                    "RUN --mount=type={other} is not supported"
+                    "unsupported mount type \"{other}\"{suggestion}"
                 )));
             }
-            None => {
-                return Err(DockerfileBuildError::Invalid(
-                    "RUN mount requires type".to_string(),
-                ));
-            }
         }
+    }
+    // Dockerfile frontend flags belong to the instruction, not the shell
+    // command.  In particular, BuildKit diagnoses the common `--mont` typo
+    // before any RUN sandbox is started.  Preserve unrelated leading options
+    // for their dedicated parsers (network/security/device); this branch is
+    // deliberately narrow so it cannot reinterpret shell arguments.
+    if tokens
+        .first()
+        .is_some_and(|token| token == &"--mont" || token.starts_with("--mont="))
+    {
+        return Err(DockerfileBuildError::Invalid(
+            "unknown flag: --mont; did you mean mount?".to_string(),
+        ));
     }
     let command = tokens.join(" ");
     if command.starts_with('[') {
@@ -4791,6 +5011,7 @@ fn parse_run_with_workdir(
                 ssh_mounts,
                 tmpfs_mounts,
                 bind_mounts,
+                network,
             });
         }
         // Not a JSON array: shell form, so mount flags stay valid.
@@ -4810,6 +5031,7 @@ fn parse_run_with_workdir(
         ssh_mounts,
         tmpfs_mounts,
         bind_mounts,
+        network,
     })
 }
 
@@ -5165,12 +5387,13 @@ fn run_stage_commands(
     secrets: &HashMap<String, PathBuf>,
     context_dir: &Path,
     control: &BuildControl,
+    execution_options: &DockerfileExecutionOptions,
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
     let limits = &control.limits;
     let running_as_root = nix::unistd::Uid::effective().is_root();
     fs::create_dir_all(cache_root)?;
-    for run in runs {
+    for (run_index, run) in runs.iter().enumerate() {
         if run.args.is_empty() {
             return Err(DockerfileBuildError::Invalid(
                 "RUN instruction produced empty command".to_string(),
@@ -5185,8 +5408,22 @@ fn run_stage_commands(
                 )
             })?)
         };
+        let network_mode = run.network.unwrap_or(execution_options.network_mode);
+        if network_mode == DockerfileNetworkMode::Host
+            && !execution_options.allow_network_host
+        {
+            return Err(DockerfileBuildError::Invalid(
+                "network.host is not allowed; grant the network.host entitlement".to_string(),
+            ));
+        }
         if rootless_bwrap.is_some() {
             provision_rootless_build_network_files(rootfs)?;
+        }
+        let cgroup_namespace = child_requires_cgroup_namespace(execution_options);
+        let cgroup_mount_target = cgroup_namespace.then(|| rootfs.join("sys/fs/cgroup"));
+        let cgroup_mount_existed = cgroup_mount_target.as_ref().is_some_and(|target| target.exists());
+        if let Some(target) = &cgroup_mount_target {
+            fs::create_dir_all(target)?;
         }
         let mut cmd = if let Some(bwrap) = &rootless_bwrap {
             let mut command = Command::new(bwrap);
@@ -5225,6 +5462,16 @@ fn run_stage_commands(
                         })
                         .unwrap_or_else(|| "/".to_string()),
                 );
+            if network_mode == DockerfileNetworkMode::None {
+                command.arg("--unshare-net");
+            }
+            if cgroup_namespace {
+                command.arg("--unshare-cgroup-try");
+                command
+                    .arg("--ro-bind")
+                    .arg("/sys/fs/cgroup")
+                    .arg("/sys/fs/cgroup");
+            }
             command
         } else {
             let mut command = Command::new(&run.args[0]);
@@ -5256,6 +5503,10 @@ fn run_stage_commands(
         let seccomp = seccomp_profile.clone();
         let limits = control.limits.clone();
         let child_limits = limits.clone();
+        let run_cgroup = prepare_build_run_cgroup(execution_options, run_index)?;
+        let child_cgroup = run_cgroup.as_ref().map(|cgroup| cgroup.path.clone());
+        let child_cgroup_mount = cgroup_mount_target.clone();
+        let child_ulimits = execution_options.ulimits.clone();
         let ssh_socket = std::env::var_os("FERROCRATE_BUILD_SSH_AUTH_SOCK")
             .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
             .map(PathBuf::from);
@@ -5266,12 +5517,21 @@ fn run_stage_commands(
             // The current executor exposes one authorized host agent socket;
             // retain the parsed identity for Dockerfile/API compatibility.
             let _ = mount_spec.id.as_str();
-            let source = ssh_socket.clone().ok_or_else(|| {
-                DockerfileBuildError::Invalid(
-                    "SSH mount requires FERROCRATE_BUILD_SSH_AUTH_SOCK or SSH_AUTH_SOCK"
+            let Some(source) = ssh_socket.clone() else {
+                if mount_spec.required {
+                    return Err(DockerfileBuildError::Invalid(
+                        "required SSH mount has no FERROCRATE_BUILD_SSH_AUTH_SOCK or SSH_AUTH_SOCK"
+                            .to_string(),
+                    ));
+                }
+                continue;
+            };
+            if mount_spec.uid != 0 || mount_spec.gid != 0 || mount_spec.mode != 0o600 {
+                return Err(DockerfileBuildError::Unsupported(
+                    "SSH mount uid/gid/mode require an agent socket proxy and are not yet supported"
                         .to_string(),
-                )
-            })?;
+                ));
+            }
             let metadata = fs::symlink_metadata(&source).map_err(|err| {
                 DockerfileBuildError::Invalid(format!(
                     "SSH agent socket {} cannot be inspected: {err}",
@@ -5367,6 +5627,23 @@ fn run_stage_commands(
             tmpfs_specs.push((target.clone(), mount_spec.size, mount_spec.read_only));
             tmpfs_targets.push((target, existed));
         }
+        if let Some(size) = execution_options.shm_size {
+            let target = validate_mount_target(&rootfs, "/dev/shm", "shared memory")?;
+            if !tmpfs_seen.contains(&target) {
+                let existed = target.exists();
+                if existed && !target.is_dir() {
+                    return Err(DockerfileBuildError::Invalid(
+                        "/dev/shm is not a directory".to_string(),
+                    ));
+                }
+                if !existed {
+                    fs::create_dir_all(&target)?;
+                }
+                tmpfs_seen.insert(target.clone());
+                tmpfs_specs.push((target.clone(), Some(size), false));
+                tmpfs_targets.push((target, existed));
+            }
+        }
         let tmpfs_for_child = tmpfs_specs.clone();
         let mut bind_specs = Vec::new();
         let mut bind_seen = HashSet::new();
@@ -5438,12 +5715,35 @@ fn run_stage_commands(
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
             cmd.pre_exec(move || {
+                if let Some(cgroup) = child_cgroup.as_ref() {
+                    fs::write(cgroup.join("cgroup.procs"), std::process::id().to_string())
+                        .map_err(|err| io::Error::new(err.kind(), format!(
+                            "build pre_exec join cgroup {}: {err}", cgroup.display()
+                        )))?;
+                }
                 if running_as_root {
-                    setup_build_namespace_root().map_err(|err| {
+                    setup_build_namespace_root(
+                        network_mode != DockerfileNetworkMode::Host,
+                        child_cgroup.is_some(),
+                    )
+                    .map_err(|err| {
                         io::Error::new(
                             err.kind(),
                             format!("build pre_exec unshare root namespaces: {err}"),
                         )
+                    })?;
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(target) = child_cgroup_mount.as_ref().filter(|_| running_as_root) {
+                    mount(
+                        Some("cgroup2"),
+                        target,
+                        Some("cgroup2"),
+                        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                        None::<&str>,
+                    )
+                    .map_err(|err| {
+                        io::Error::other(format!("build pre_exec mount cgroup2: {err}"))
                     })?;
                 }
                 #[cfg(unix)]
@@ -5544,6 +5844,9 @@ fn run_stage_commands(
                 apply_build_limits(&child_limits).map_err(|err| {
                     io::Error::new(err.kind(), format!("build pre_exec apply limits: {err}"))
                 })?;
+                apply_dockerfile_ulimits(&child_ulimits).map_err(|err| {
+                    io::Error::new(err.kind(), format!("build pre_exec apply ulimits: {err}"))
+                })?;
                 Ok(())
             });
         }
@@ -5566,6 +5869,16 @@ fn run_stage_commands(
                     "secret {} must be a regular file no larger than 1 MiB",
                     mount.id
                 )));
+            }
+            if let Some(name) = &mount.env {
+                let value = fs::read(source)?;
+                let value = String::from_utf8(value).map_err(|_| {
+                    DockerfileBuildError::Invalid(format!(
+                        "secret {} is not valid UTF-8 for environment variable {name}",
+                        mount.id
+                    ))
+                })?;
+                cmd.env(name, value);
             }
         }
         let mut mounted = Vec::new();
@@ -5605,6 +5918,9 @@ fn run_stage_commands(
         }
         let mut secret_mounted = Vec::new();
         for (index, mount) in run.secret_mounts.iter().enumerate() {
+            if mount.env.is_some() {
+                continue;
+            }
             let Some(source) = secrets.get(&mount.id) else {
                 continue;
             };
@@ -5624,8 +5940,7 @@ fn run_stage_commands(
                 fs::create_dir_all(parent)?;
             }
             fs::copy(source, &target)?;
-            #[cfg(unix)]
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o400))?;
+            apply_secret_mount_metadata(&target, mount.uid, mount.gid, mount.mode)?;
             secret_mounted.push((target, backup, existed));
         }
         let mut child = match cmd.spawn() {
@@ -5667,6 +5982,14 @@ fn run_stage_commands(
                         fs::rename(backup, target)?;
                     }
                 }
+                if let Some(cgroup) = run_cgroup {
+                    let _ = cgroup.cleanup();
+                }
+                cleanup_cgroup_mount_stub(
+                    cgroup_mount_target.as_deref(),
+                    cgroup_mount_existed,
+                    &rootfs,
+                );
                 return Err(DockerfileBuildError::Invalid(format!(
                     "RUN sandbox spawn failed: {err}"
                 )));
@@ -5809,6 +6132,14 @@ fn run_stage_commands(
                 fs::rename(backup, target)?;
             }
         }
+        if let Some(cgroup) = run_cgroup {
+            cgroup.cleanup()?;
+        }
+        cleanup_cgroup_mount_stub(
+            cgroup_mount_target.as_deref(),
+            cgroup_mount_existed,
+            &rootfs,
+        );
         if let Some(err) = cleanup_error {
             return Err(err);
         }
@@ -6006,6 +6337,37 @@ fn parse_limit_value(name: &str, value: &str) -> Result<u64, DockerfileBuildErro
     Ok(parsed)
 }
 
+fn parse_buildkit_byte_size(name: &str, value: &str) -> Result<u64, DockerfileBuildError> {
+    let split = value
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    let base = number.parse::<u64>().map_err(|_| {
+        DockerfileBuildError::Invalid(format!("{name} must be a valid byte size"))
+    })?;
+    if base == 0 {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        "t" | "tb" | "tib" => 1024_u64.pow(4),
+        _ => {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "{name} must be a valid byte size"
+            )))
+        }
+    };
+    base.checked_mul(multiplier).ok_or_else(|| {
+        DockerfileBuildError::Invalid(format!("{name} byte size overflows u64"))
+    })
+}
+
 fn apply_build_limits(limits: &BuildLimits) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -6122,11 +6484,204 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
         .map_err(|err| DockerfileBuildError::Invalid(format!("build seccomp profile: {err}")))
 }
 
-fn setup_build_namespace_root() -> io::Result<()> {
+fn setup_build_namespace_root(
+    isolate_network: bool,
+    isolate_cgroup: bool,
+) -> io::Result<()> {
     use nix::sched::{unshare, CloneFlags};
-    unshare(CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNET)
+    let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
+    if isolate_network {
+        flags |= CloneFlags::CLONE_NEWNET;
+    }
+    if isolate_cgroup {
+        flags |= CloneFlags::CLONE_NEWCGROUP;
+    }
+    unshare(flags)
         .map_err(|err| io::Error::other(err.to_string()))?;
     make_mount_namespace_private()
+}
+
+fn child_requires_cgroup_namespace(options: &DockerfileExecutionOptions) -> bool {
+    options.cgroup_parent.is_some()
+        || options.memory.is_some()
+        || options.memory_swap.is_some()
+        || options.cpu_shares.is_some()
+        || options.cpu_quota.is_some()
+        || options.cpu_period.is_some()
+        || options.cpuset_cpus.is_some()
+        || options.cpuset_mems.is_some()
+        || options.pids_limit.is_some()
+}
+
+fn cleanup_cgroup_mount_stub(target: Option<&Path>, existed: bool, rootfs: &Path) {
+    if existed {
+        return;
+    }
+    let Some(target) = target else {
+        return;
+    };
+    let _ = fs::remove_dir(target);
+    for relative in ["sys/fs", "sys"] {
+        let path = rootfs.join(relative);
+        let _ = fs::remove_dir(path);
+    }
+}
+
+#[derive(Debug)]
+struct BuildRunCgroup {
+    path: PathBuf,
+}
+
+impl BuildRunCgroup {
+    fn cleanup(self) -> Result<(), DockerfileBuildError> {
+        let kill = self.path.join("cgroup.kill");
+        if kill.exists() {
+            let _ = fs::write(&kill, "1\n");
+        }
+        fs::remove_dir(&self.path).map_err(|err| {
+            DockerfileBuildError::Invalid(format!(
+                "remove RUN cgroup {}: {err}",
+                self.path.display()
+            ))
+        })
+    }
+}
+
+fn prepare_build_run_cgroup(
+    options: &DockerfileExecutionOptions,
+    run_index: usize,
+) -> Result<Option<BuildRunCgroup>, DockerfileBuildError> {
+    let requested = child_requires_cgroup_namespace(options);
+    if !requested {
+        return Ok(None);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = run_index;
+        return Err(DockerfileBuildError::Unsupported(
+            "RUN resource options require a Linux cgroup v2 host".to_string(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use crate::cgroups::{CgroupV2Manager, CpuMax, ResourceLimits};
+
+        let root = std::env::var_os("FERROCRATE_CGROUP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
+        let parent = options.cgroup_parent.as_deref().unwrap_or("ferrocrate-build");
+        if parent.is_empty()
+            || parent.starts_with('/')
+            || parent.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+            || parent.contains('\\')
+            || parent.contains('\0')
+        {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "invalid cgroup-parent {parent:?}"
+            )));
+        }
+        let name = format!(
+            "{parent}/run-{}-{run_index}",
+            std::process::id()
+        );
+        let manager = CgroupV2Manager::new(&root);
+        let path = manager.create_group(&name).map_err(|err| {
+            DockerfileBuildError::Invalid(format!("create RUN cgroup {name}: {err}"))
+        })?;
+        let limits = ResourceLimits {
+            memory_max: options.memory,
+            cpu_max: options.cpu_quota.map(|quota| CpuMax {
+                quota,
+                period: options.cpu_period.unwrap_or(100_000),
+            }),
+            pids_max: options.pids_limit,
+        };
+        if let Err(err) = manager.apply_limits(&path, &limits) {
+            let _ = fs::remove_dir(&path);
+            return Err(DockerfileBuildError::Invalid(format!(
+                "apply RUN cgroup limits: {err}"
+            )));
+        }
+        let write = |name: &str, value: String| -> Result<(), DockerfileBuildError> {
+            fs::write(path.join(name), value).map_err(|err| {
+                DockerfileBuildError::Invalid(format!(
+                    "write RUN cgroup option {}: {err}",
+                    path.join(name).display()
+                ))
+            })
+        };
+        if let Some(shares) = options.cpu_shares {
+            let shares = shares.clamp(2, 262_144);
+            let weight = 1 + ((shares - 2) * 9_999) / 262_142;
+            write("cpu.weight", weight.to_string())?;
+        }
+        if options.cpu_quota.is_none() {
+            if let Some(period) = options.cpu_period {
+                write("cpu.max", format!("max {period}"))?;
+            }
+        }
+        if let Some(cpus) = &options.cpuset_cpus {
+            write("cpuset.cpus", cpus.clone())?;
+        }
+        if let Some(mems) = &options.cpuset_mems {
+            write("cpuset.mems", mems.clone())?;
+        }
+        if let Some(total) = options.memory_swap {
+            let value = if total < 0 {
+                "max".to_string()
+            } else if let Some(memory) = options.memory {
+                (total as u64).saturating_sub(memory).to_string()
+            } else {
+                total.to_string()
+            };
+            write("memory.swap.max", value)?;
+        }
+        Ok(Some(BuildRunCgroup { path }))
+    }
+}
+
+fn apply_dockerfile_ulimits(ulimits: &[DockerfileUlimit]) -> io::Result<()> {
+    for limit in ulimits {
+        let resource = match limit.name.as_str() {
+            "core" => nix::libc::RLIMIT_CORE,
+            "cpu" => nix::libc::RLIMIT_CPU,
+            "data" => nix::libc::RLIMIT_DATA,
+            "fsize" => nix::libc::RLIMIT_FSIZE,
+            "memlock" => nix::libc::RLIMIT_MEMLOCK,
+            "nofile" => nix::libc::RLIMIT_NOFILE,
+            "nproc" => nix::libc::RLIMIT_NPROC,
+            "rss" => nix::libc::RLIMIT_RSS,
+            "stack" => nix::libc::RLIMIT_STACK,
+            #[cfg(target_os = "linux")]
+            "locks" => nix::libc::RLIMIT_LOCKS,
+            #[cfg(target_os = "linux")]
+            "msgqueue" => nix::libc::RLIMIT_MSGQUEUE,
+            #[cfg(target_os = "linux")]
+            "nice" => nix::libc::RLIMIT_NICE,
+            #[cfg(target_os = "linux")]
+            "rtprio" => nix::libc::RLIMIT_RTPRIO,
+            #[cfg(target_os = "linux")]
+            "rttime" => nix::libc::RLIMIT_RTTIME,
+            #[cfg(target_os = "linux")]
+            "sigpending" => nix::libc::RLIMIT_SIGPENDING,
+            name => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported ulimit name {name:?}"),
+                ))
+            }
+        };
+        let raw = nix::libc::rlimit {
+            rlim_cur: limit.soft,
+            rlim_max: limit.hard,
+        };
+        // SAFETY: `raw` is fully initialized and `resource` is one of libc's
+        // platform constants. This runs in the child immediately before exec.
+        if unsafe { nix::libc::setrlimit(resource, &raw) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Mark the freshly unshared mount namespace private. On hosts whose root
@@ -9775,7 +10330,25 @@ mod tests {
         .expect("secret mount parses");
         assert_eq!(run.secret_mounts[0].id, "token");
         assert_eq!(run.secret_mounts[0].target, "/run/secrets/token");
-        assert!(run.secret_mounts[0].required);
+        assert!(!run.secret_mounts[0].required);
+        assert_eq!(run.secret_mounts[0].mode, 0o400);
+        assert_eq!(run.secret_mounts[0].uid, 0);
+        assert_eq!(run.secret_mounts[0].gid, 0);
+        let env_secret = parse_run(
+            "--mount=type=secret,id=token,env=TOKEN echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("secret environment mount parses");
+        assert_eq!(env_secret.secret_mounts[0].env.as_deref(), Some("TOKEN"));
+        let metadata = parse_run(
+            "--mount=type=secret,target=/run/token,uid=1001,gid=1002,mode=0440,required cat /run/token",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("secret metadata parses");
+        assert_eq!(metadata.secret_mounts[0].id, "token");
+        assert_eq!(metadata.secret_mounts[0].uid, 1001);
+        assert_eq!(metadata.secret_mounts[0].gid, 1002);
+        assert_eq!(metadata.secret_mounts[0].mode, 0o440);
         let optional = parse_run(
             "--mount=type=secret,id=optional,required=false echo value",
             &["/bin/sh".into(), "-c".into()],
@@ -10279,7 +10852,7 @@ mod tests {
             "FROM scratch\n\
              COPY busybox /busybox\n\
              SHELL [\"/busybox\", \"sh\", \"-c\"]\n\
-             RUN --mount=type=secret,id=token true\n",
+             RUN --mount=type=secret,id=token,required=true true\n",
         )
         .expect("write dockerfile");
         fs::copy(busybox, ctx.join("busybox")).expect("copy busybox");
@@ -10576,6 +11149,17 @@ mod tests {
     }
 
     #[test]
+    fn run_rejects_misspelled_mount_flag_before_shell_execution() {
+        let error = parse_run(
+            "--mont=type=tmpfs,target=/tmp true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("BuildKit rejects an unknown RUN option during parsing");
+        assert!(error.to_string().contains("unknown flag: --mont"));
+        assert!(error.to_string().contains("did you mean mount?"));
+    }
+
+    #[test]
     fn tmpfs_mounts_are_accepted_for_shell_runs() {
         let run = parse_run(
             "--mount=type=tmpfs,target=/tmp,tmpfs-size=65536 echo value",
@@ -10586,6 +11170,12 @@ mod tests {
         assert_eq!(run.tmpfs_mounts[0].target, "/tmp");
         assert_eq!(run.tmpfs_mounts[0].size, Some(65_536));
         assert!(!run.tmpfs_mounts[0].read_only);
+        let human_size = parse_run(
+            "--mount=type=tmpfs,target=/dev/shm,size=128m echo value",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("BuildKit byte-size syntax parses");
+        assert_eq!(human_size.tmpfs_mounts[0].size, Some(128 * 1024 * 1024));
         let read_only = parse_run(
             "--mount=type=tmpfs,target=/run,tmpfs-size=4096,ro echo value",
             &["/bin/sh".into(), "-c".into()],
@@ -10599,6 +11189,62 @@ mod tests {
         ] {
             assert!(parse_run(invalid, &["/bin/sh".into(), "-c".into()]).is_err());
         }
+    }
+
+    #[test]
+    fn run_network_mode_is_parsed_as_instruction_metadata() {
+        let none = parse_run(
+            "--network=none echo isolated",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("per-RUN network parses");
+        assert_eq!(none.network, Some(super::DockerfileNetworkMode::None));
+        assert_eq!(none.args.last().map(String::as_str), Some("echo isolated"));
+
+        let invalid = parse_run(
+            "--network=invalid true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("unknown network mode fails before execution");
+        assert!(invalid.to_string().contains("unsupported network mode"));
+    }
+
+    #[test]
+    fn no_cache_filters_apply_to_all_or_named_stages() {
+        let stages = parse_stages("FROM scratch AS build\nFROM scratch AS package\n")
+            .expect("stages parse");
+        let all = super::DockerfileExecutionOptions {
+            no_cache: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(super::stage_ignores_cache(&stages[0], &all));
+        assert!(super::stage_ignores_cache(&stages[1], &all));
+
+        let named = super::DockerfileExecutionOptions {
+            no_cache: Some(vec!["build".to_string()]),
+            ..Default::default()
+        };
+        assert!(super::stage_ignores_cache(&stages[0], &named));
+        assert!(!super::stage_ignores_cache(&stages[1], &named));
+    }
+
+    #[test]
+    fn run_mount_diagnostics_suggest_buildkit_keys_and_types() {
+        let key = parse_run(
+            "--mount=typ=tmpfs true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("misspelled key");
+        assert!(key.to_string().contains("unexpected key 'typ'"));
+        assert!(key.to_string().contains("did you mean type?"));
+
+        let kind = parse_run(
+            "--mount=type=tmp true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("misspelled type");
+        assert!(kind.to_string().contains("unsupported mount type \"tmp\""));
+        assert!(kind.to_string().contains("did you mean tmpfs?"));
     }
 
     #[test]

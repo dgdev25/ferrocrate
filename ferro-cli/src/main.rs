@@ -11202,6 +11202,7 @@ fn handle_build(
         secrets,
         build_args,
         None,
+        None,
         context,
     )?;
     print!("{output}");
@@ -11225,6 +11226,7 @@ fn execute_build(
     build_context: &[String],
     secrets: &[String],
     build_args: &HashMap<String, String>,
+    execution_options: Option<&ferro_core::dockerfile_build::DockerfileExecutionOptions>,
     artifact_dir: Option<&Path>,
     context: Option<&str>,
 ) -> Result<String, String> {
@@ -11306,7 +11308,8 @@ fn execute_build(
                 None,
                 build_args,
             )?;
-            let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
+            let execution_options = execution_options.cloned().unwrap_or_default();
+            let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
                 &dockerfile_path,
                 Some(tag),
                 &runtime_dir,
@@ -11314,6 +11317,7 @@ fn execute_build(
                 store,
                 &named_contexts,
                 build_args,
+                &execution_options,
             )
             .map_err(|err| err.to_string())?;
             let permit = authorization
@@ -15537,7 +15541,7 @@ fn run_scanner(scanner: &str, rootfs: &Path) -> Result<String, String> {
 
 #[cfg(target_os = "linux")]
 enum ComposePrerequisite {
-    ImageBuild(ferro_core::dockerfile_build::ImageBuildPlan),
+    ImageBuild(Box<ferro_core::dockerfile_build::ImageBuildPlan>),
     ImagePull(ferro_core::image_fetch::ImageFetchPlan),
     VolumeCreate(ferro_core::volume_store::VolumeCreatePlan),
 }
@@ -15791,7 +15795,7 @@ fn prepare_compose_service(
             build.args.as_ref().unwrap_or(&HashMap::new()),
         )
         .map_err(|error| error.to_string())?;
-        prerequisites.push(ComposePrerequisite::ImageBuild(plan));
+        prerequisites.push(ComposePrerequisite::ImageBuild(Box::new(plan)));
     } else if resolve_reference(store, &image)
         .map_err(|error| error.to_string())?
         .is_none()
@@ -17275,7 +17279,7 @@ fn execute_compose_prerequisite(
             let permit = authorization
                 .authorize_image_build_plan(&origin, &plan)
                 .map_err(|error| error.to_string())?;
-            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(plan, store, permit)
+            ferro_core::dockerfile_build::execute_dockerfile_build_authorized(*plan, store, permit)
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }
@@ -20603,6 +20607,7 @@ fn handle_docker_compat_connection(
                     &build_context,
                     &secrets,
                     &request.build_args,
+                    None,
                     Some(workspace.path()),
                     None,
                 )?;
@@ -26436,14 +26441,21 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
             "soruce.http.uidgid",
             "source.buildop.llbfilename",
             "exec.meta.base",
+            "exec.meta.cgroup.parent",
             "exec.meta.network",
             "exec.meta.proxyenv",
+            "exec.meta.ulimit",
+            "exec.meta.linux.resources",
             "exec.mount.bind",
             "exec.mount.cache",
             "exec.mount.cache.sharing",
             "exec.mount.selector",
             "exec.mount.tmpfs",
+            "exec.mount.tmpfs.size",
             "exec.mount.secret",
+            "exec.mount.ssh",
+            "exec.cgroup",
+            "exec.secretenv",
             "file.base",
             "constraints",
             "platform",
@@ -26633,6 +26645,11 @@ async fn execute_buildkit_frontend(
             session_auth.insert(registry, auth);
         }
     }
+    let execution_options = buildkit_frontend_execution_options(
+        &build.request.frontend_attrs,
+        &request.frontend_opt,
+        &build.request.entitlements,
+    )?;
     let exporter = build
         .request
         .exporters
@@ -26678,6 +26695,7 @@ async fn execute_buildkit_frontend(
             &[],
             &[],
             &build_args,
+            Some(&execution_options),
             None,
             None,
         )?;
@@ -26792,10 +26810,7 @@ fn buildkit_frontend_execution_options(
                     let (name, limits) = entry.split_once('=').ok_or_else(|| {
                         format!("buildkit solve: invalid ulimit {entry}")
                     })?;
-                    let (soft, hard) = limits
-                        .split_once(':')
-                        .map(|(soft, hard)| (soft, hard))
-                        .unwrap_or((limits, limits));
+                    let (soft, hard) = limits.split_once(':').unwrap_or((limits, limits));
                     let soft = soft.parse::<u64>().map_err(|_| {
                         format!("buildkit solve: invalid ulimit soft value: {entry}")
                     })?;

@@ -18729,6 +18729,7 @@ struct BuildkitBuildResult {
     steps: Vec<String>,
     metadata: HashMap<String, Vec<u8>>,
     warnings: Vec<BuildkitLintWarning>,
+    solve_error: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -26267,11 +26268,19 @@ async fn handle_buildkit_control_request(
             .await;
             match result {
                 Ok(result) => {
+                    let solve_error = result.solve_error.clone();
                     *build
                         .result
                         .lock()
                         .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
                         Some(result);
+                    if let Some(error) = solve_error {
+                        *build
+                            .error
+                            .lock()
+                            .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                            Some(error);
+                    }
                 }
                 Err(error) => {
                     *build
@@ -26727,6 +26736,12 @@ async fn execute_buildkit_frontend(
     }
     std::fs::copy(&source_dockerfile, &dockerfile)
         .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
+    // BuildKit keeps the Dockerfile available as a context source even though
+    // the builder itself excludes its parser input from COPY.  Use a private
+    // parser copy so `COPY Dockerfile .` retains Docker-compatible behavior.
+    let parser_dockerfile = context.join(".ferrocrate-buildkit.Dockerfile");
+    std::fs::copy(&source_dockerfile, &parser_dockerfile)
+        .map_err(|error| format!("buildkit solve: stage parser Dockerfile failed: {error}"))?;
     let dockerfile_contents = std::fs::read_to_string(&dockerfile)
         .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
     *build
@@ -26737,6 +26752,13 @@ async fn execute_buildkit_frontend(
             filename: filename.to_string(),
             data: dockerfile_contents.as_bytes().to_vec(),
         });
+    let lint_config = buildkit_lint_config(
+        &dockerfile_contents,
+        request
+            .frontend_opt
+            .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
+            .map(String::as_str),
+    );
     if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
         let warnings = buildkit_lint_warnings_with_check(
             &dockerfile_contents,
@@ -26750,8 +26772,14 @@ async fn execute_buildkit_frontend(
             image_digest: "sha256:lint".to_string(),
             output: String::new(),
             steps: Vec::new(),
-            metadata: buildkit_lint_result_metadata(&warnings, &dockerfile_contents, filename)?,
+            metadata: buildkit_lint_result_metadata(
+                &warnings,
+                &dockerfile_contents,
+                filename,
+                lint_config.error,
+            )?,
             warnings,
+            solve_error: None,
         });
     }
     // Dockerfile checks are advisory: report them with the build result rather
@@ -26769,7 +26797,7 @@ async fn execute_buildkit_frontend(
     )?;
     let external_bases =
         ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
-            &dockerfile,
+            &parser_dockerfile,
             &build_args,
         )
         .map_err(|error| error.to_string())?;
@@ -26828,7 +26856,7 @@ async fn execute_buildkit_frontend(
             blocking_execution.store.as_ref(),
             &blocking_execution.origin,
             &blocking_execution.authorization,
-            &dockerfile,
+            &parser_dockerfile,
             Some(&session_auth),
             &build_args,
         )?;
@@ -26836,7 +26864,7 @@ async fn execute_buildkit_frontend(
             blocking_execution.store.as_ref(),
             &blocking_execution.origin,
             &blocking_execution.authorization,
-            Some(dockerfile.to_str().ok_or_else(|| {
+            Some(parser_dockerfile.to_str().ok_or_else(|| {
                 "buildkit solve: staged Dockerfile path is not UTF-8".to_string()
             })?),
             None,
@@ -26882,6 +26910,8 @@ async fn execute_buildkit_frontend(
     let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
+    let solve_error = (lint_config.error && !lint_warnings.is_empty())
+        .then(|| buildkit_lint_violation_error(&lint_warnings));
     Ok(BuildkitBuildResult {
         image_name,
         image_digest: image.digest,
@@ -26889,6 +26919,7 @@ async fn execute_buildkit_frontend(
         steps,
         metadata: HashMap::new(),
         warnings: lint_warnings,
+        solve_error,
     })
 }
 
@@ -27067,25 +27098,8 @@ fn buildkit_lint_warnings_with_check(
     dockerfile: &str,
     check_option: Option<&str>,
 ) -> Vec<BuildkitLintWarning> {
-    let check_options = check_option.map(str::to_owned).unwrap_or_else(|| {
-        dockerfile
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            line.strip_prefix("# check=")
-                .or_else(|| line.strip_prefix("#check="))
-        })
-        .flat_map(|options| options.split(';'))
-        .collect::<Vec<_>>()
-        .join(";")
-    });
-    let skipped_rules = check_options
-        .split(';')
-        .filter_map(|option| option.strip_prefix("skip="))
-        .flat_map(|rules| rules.split(','))
-        .map(str::trim)
-        .filter(|rule| !rule.is_empty())
-        .collect::<std::collections::HashSet<_>>();
+    let config = buildkit_lint_config(dockerfile, check_option);
+    let skipped_rules = &config.skipped_rules;
     let mut instructions = Vec::new();
     let mut heredoc_terminator = None;
     for (index, line) in dockerfile.lines().enumerate() {
@@ -27176,6 +27190,54 @@ fn buildkit_lint_warnings_with_check(
 }
 
 #[cfg(target_os = "linux")]
+struct BuildkitLintConfig {
+    skipped_rules: std::collections::HashSet<String>,
+    error: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_config(dockerfile: &str, check_option: Option<&str>) -> BuildkitLintConfig {
+    let check_options = check_option.map(str::to_owned).unwrap_or_else(|| {
+        dockerfile
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("# check=")
+                    .or_else(|| line.strip_prefix("#check="))
+            })
+            .flat_map(|options| options.split(';'))
+            .collect::<Vec<_>>()
+            .join(";")
+    });
+    let skipped_rules = check_options
+        .split(';')
+        .filter_map(|option| option.strip_prefix("skip="))
+        .flat_map(|rules| rules.split(','))
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    let error = check_options
+        .split(';')
+        .any(|option| option.trim().eq_ignore_ascii_case("error=true"));
+    BuildkitLintConfig {
+        skipped_rules,
+        error,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_violation_error(warnings: &[BuildkitLintWarning]) -> String {
+    let mut rules = warnings
+        .iter()
+        .map(|warning| warning.rule_name.as_str())
+        .collect::<Vec<_>>();
+    rules.sort_unstable();
+    rules.dedup();
+    format!("lint violation found for rules: {}", rules.join(", "))
+}
+
+#[cfg(target_os = "linux")]
 fn buildkit_lint_warning(
     rule_name: &str,
     description: &str,
@@ -27208,12 +27270,20 @@ fn buildkit_lint_result_metadata(
     warnings: &[BuildkitLintWarning],
     dockerfile: &str,
     filename: &str,
+    return_as_error: bool,
 ) -> Result<HashMap<String, Vec<u8>>, String> {
     use base64::Engine as _;
     let ranges = |line: usize| serde_json::json!([{
         "start": {"line": line, "character": 0},
         "end": {"line": line, "character": 0}
     }]);
+    let build_error = (return_as_error && !warnings.is_empty()).then(|| {
+        let line = warnings[0].line;
+        serde_json::json!({
+            "message": buildkit_lint_violation_error(warnings),
+            "location": {"sourceIndex": 0, "ranges": ranges(line)},
+        })
+    });
     let payload = serde_json::json!({
         "warnings": warnings.iter().map(|warning| serde_json::json!({
             "ruleName": warning.rule_name,
@@ -27228,6 +27298,7 @@ fn buildkit_lint_result_metadata(
             "definition": {},
             "language": "Dockerfile",
         }],
+        "buildError": build_error,
     });
     let result = serde_json::to_vec_pretty(&payload)
         .map_err(|error| format!("buildkit lint result encoding failed: {error}"))?;
@@ -35979,6 +36050,58 @@ volumes:
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn buildkit_lint_check_options_preserve_error_and_frontend_precedence() {
+        let dockerfile = "# check=skip=ConsistentInstructionCasing;error=true\n\
+FROM scratch as base\ncopy Dockerfile .\n";
+        let config = super::buildkit_lint_config(dockerfile, None);
+        assert!(config.error);
+        assert!(config.skipped_rules.contains("ConsistentInstructionCasing"));
+
+        let overridden = super::buildkit_lint_config(dockerfile, Some("skip=all"));
+        assert!(!overridden.error);
+        assert!(overridden.skipped_rules.contains("all"));
+
+        let warnings = super::buildkit_lint_warnings_with_check(
+            dockerfile,
+            Some("skip=ConsistentInstructionCasing;error=true"),
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_name, "FromAsCasing");
+        assert_eq!(warnings[0].line, 2);
+        let metadata = super::buildkit_lint_result_metadata(
+            &warnings,
+            dockerfile,
+            "Dockerfile",
+            true,
+        )
+        .expect("lint metadata");
+        let result: serde_json::Value = serde_json::from_slice(&metadata["result.json"])
+            .expect("lint result json");
+        assert_eq!(
+            result["buildError"]["message"],
+            "lint violation found for rules: FromAsCasing"
+        );
+        assert_eq!(
+            result["warnings"][0]["location"]["ranges"][0]["start"]["line"],
+            2
+        );
+
+        let source = std::sync::Mutex::new(Some(super::BuildkitDockerfileSource {
+            filename: "Dockerfile".to_string(),
+            data: dockerfile.as_bytes().to_vec(),
+        }));
+        let progress =
+            super::buildkit_progress_warnings(&warnings, &source).expect("progress warnings");
+        assert_eq!(progress.len(), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&progress[0].short),
+            "FromAsCasing: 'as' and 'FROM' keywords' casing do not match (line 2)"
+        );
+        assert_eq!(progress[0].url, warnings[0].url);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn buildkit_export_progress_reports_the_published_image_name() {
         let (step, output) = super::buildkit_export_progress("example/simple:latest");
         assert_eq!(step, "exporting to image");
@@ -38347,6 +38470,7 @@ volumes:
             steps: Vec::new(),
             metadata: HashMap::new(),
             warnings: Vec::new(),
+            solve_error: None,
         });
 
         state

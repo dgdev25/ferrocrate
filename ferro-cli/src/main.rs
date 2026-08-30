@@ -27011,8 +27011,17 @@ fn buildkit_frontend_execution_options(
     if let Some(value) = cpuset_mems.as_deref() {
         validate_buildkit_cpuset("cpusetmems", value)?;
     }
+    let shm_size = get("shm-size")
+        .filter(|value| !value.is_empty())
+        .map(|raw| {
+            raw.parse::<i64>()
+                .map_err(|_| format!("buildkit solve: invalid shm-size value: {raw}"))
+        })
+        .transpose()?
+        .filter(|value| *value > 0)
+        .map(|value| value as u64);
     Ok(DockerfileExecutionOptions {
-        shm_size: unsigned("shm-size")?,
+        shm_size,
         ulimits,
         cgroup_parent: get("cgroup-parent")
             .filter(|value| !value.is_empty())
@@ -38284,6 +38293,30 @@ volumes:
         assert_eq!(options.no_cache, Some(vec!["build".into(), "package".into()]));
         assert_eq!(options.network_mode, DockerfileNetworkMode::None);
         assert!(options.allow_network_host);
+    }
+
+    #[test]
+    fn buildkit_frontend_shm_size_matches_dockerfile_frontend_semantics() {
+        for value in ["0", "-1"] {
+            let options = super::buildkit_frontend_execution_options(
+                &HashMap::new(),
+                &HashMap::from([("shm-size".to_string(), value.to_string())]),
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("Dockerfile frontend accepts shm-size={value}: {error}"));
+            assert_eq!(
+                options.shm_size, None,
+                "non-positive shm-size leaves BuildKit's default /dev/shm mount unchanged",
+            );
+        }
+
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::new(),
+            &HashMap::from([("shm-size".to_string(), "134217728".to_string())]),
+            &[],
+        )
+        .expect("positive byte count parses");
+        assert_eq!(options.shm_size, Some(134_217_728));
     }
 
     #[test]

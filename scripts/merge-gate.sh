@@ -39,7 +39,10 @@ done
 #    non-blocking. A new single-test failure is still a regression until it is
 #    isolated and understood; never let the failure count alone waive it.
 run_workspace_tests() {
-  timeout 2400 cargo test --workspace 2>&1
+  # --no-fail-fast: a fail-fast run stops at the first failing binary, which
+  # loses the rest of the suite and has repeatedly produced misleading
+  # partial counts under load (2026-08-29/30). Every binary must report.
+  timeout 2400 cargo test --workspace --no-fail-fast 2>&1
 }
 out=$(run_workspace_tests)
 p=$(echo "$out" | grep -E "^test result: (ok|FAILED)" | awk '{p+=$4} END {print p+0}')

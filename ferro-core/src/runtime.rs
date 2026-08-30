@@ -7593,7 +7593,14 @@ fn build_bwrap_command(
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    bwrap.arg("--cap-drop").arg("ALL");
+    // Keep the rootless workload on the minimal capability set, but preserve
+    // CAP_CHOWN for image entrypoints (notably nginx) that prepare
+    // directories owned by their configured non-root user.
+    bwrap
+        .arg("--cap-drop")
+        .arg("ALL")
+        .arg("--cap-add")
+        .arg("CAP_CHOWN");
     if disable_userns {
         // Followers enter the leader's user namespace through an inherited
         // descriptor and use a BusyBox nsenter handoff for the network. The
@@ -19881,6 +19888,32 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .windows(2)
             .any(|window| window == ["--remount-ro", "/"]));
         assert_eq!(args.last().map(String::as_str), Some("/bin/true"));
+    }
+
+    #[test]
+    fn rootless_bwrap_keeps_chown_for_image_initialization() {
+        if !super::command_available("bwrap") {
+            return;
+        }
+        let command = super::build_bwrap_command(
+            Path::new("/"),
+            &["/bin/true".into()],
+            &[],
+            &[],
+            None,
+            false,
+            false,
+        )
+        .expect("bubblewrap command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--cap-add", "CAP_CHOWN"]),
+            "rootless image initialization must retain CAP_CHOWN: {args:?}"
+        );
     }
 
     #[test]

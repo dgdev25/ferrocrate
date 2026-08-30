@@ -100,6 +100,40 @@ pub struct ImageBuildPlan {
     plan_digest: [u8; 32],
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DockerfileExecutionOptions {
+    pub shm_size: Option<u64>,
+    pub ulimits: Vec<DockerfileUlimit>,
+    pub cgroup_parent: Option<String>,
+    pub memory: Option<u64>,
+    pub memory_swap: Option<i64>,
+    pub cpu_shares: Option<u64>,
+    pub cpu_quota: Option<u64>,
+    pub cpu_period: Option<u64>,
+    pub cpuset_cpus: Option<String>,
+    pub cpuset_mems: Option<String>,
+    pub pids_limit: Option<u64>,
+    /// `Some([])` disables cache for every stage; names select specific stages.
+    pub no_cache: Option<Vec<String>>,
+    pub network_mode: DockerfileNetworkMode,
+    pub allow_network_host: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockerfileUlimit {
+    pub name: String,
+    pub soft: u64,
+    pub hard: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockerfileNetworkMode {
+    #[default]
+    Sandbox,
+    None,
+    Host,
+}
+
 impl ImageBuildPlan {
     pub fn canonical_tag(&self) -> &str {
         &self.canonical_tag
@@ -158,12 +192,19 @@ pub fn prepare_dockerfile_build_with_contexts_and_build_args(
 pub fn dockerfile_external_base_images(
     dockerfile_path: &Path,
 ) -> Result<Vec<String>, DockerfileBuildError> {
+    dockerfile_external_base_images_with_build_args(dockerfile_path, &HashMap::new())
+}
+
+pub fn dockerfile_external_base_images_with_build_args(
+    dockerfile_path: &Path,
+    build_args: &HashMap<String, String>,
+) -> Result<Vec<String>, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
         ));
     }
-    let stages = parse_stages(&fs::read_to_string(dockerfile_path)?)?;
+    let stages = parse_stages_with_build_args(&fs::read_to_string(dockerfile_path)?, build_args)?;
     let mut aliases = HashSet::new();
     let mut seen = HashSet::new();
     let mut bases = Vec::new();
@@ -3026,6 +3067,11 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
     let mut global_args = automatic_platform_args();
+    for (name, value) in build_args {
+        if global_args.contains_key(name) {
+            global_args.insert(name.clone(), value.clone());
+        }
+    }
 
     for raw_line in dockerfile_instructions(contents)? {
         let line = raw_line.trim();
@@ -3191,21 +3237,175 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
 }
 
 fn automatic_platform_args() -> HashMap<String, String> {
+    automatic_platform_args_for_target(None).expect("native platform is valid")
+}
+
+/// BuildKit's automatic platform arguments for one frontend target.
+///
+/// The build platform is the worker that executes RUN, while the target comes
+/// from the solve's `platform` frontend option. Build arguments are applied by
+/// the caller after this map so explicit overrides retain BuildKit precedence.
+pub fn automatic_platform_args_for_target(
+    target: Option<&str>,
+) -> Result<HashMap<String, String>, DockerfileBuildError> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         "x86" => "386",
         other => other,
     };
-    let platform = format!("linux/{arch}");
-    HashMap::from([
-        ("BUILDPLATFORM".to_string(), platform.clone()),
+    let build_platform = format!("linux/{arch}");
+    let target = match target {
+        Some(target) => parse_buildkit_platform(target)?,
+        None => BuildkitPlatform {
+            formatted: build_platform.clone(),
+            os: "linux".to_string(),
+            os_version: String::new(),
+            architecture: arch.to_string(),
+            variant: String::new(),
+        },
+    };
+    Ok(HashMap::from([
+        ("BUILDPLATFORM".to_string(), build_platform),
         ("BUILDOS".to_string(), "linux".to_string()),
+        // OCI platform variants and OS versions are empty on the native Linux
+        // host, but BuildKit still defines the automatic ARGs.  Keeping the
+        // empty values is important: `${TARGETVARIANT}` and
+        // `${TARGETOSVERSION}` are valid expressions and must not be treated
+        // as undeclared variables by the frontend phase.
+        ("BUILDOSVERSION".to_string(), String::new()),
         ("BUILDARCH".to_string(), arch.to_string()),
-        ("TARGETPLATFORM".to_string(), platform),
-        ("TARGETOS".to_string(), "linux".to_string()),
-        ("TARGETARCH".to_string(), arch.to_string()),
-    ])
+        ("BUILDVARIANT".to_string(), String::new()),
+        ("TARGETPLATFORM".to_string(), target.formatted),
+        ("TARGETOS".to_string(), target.os),
+        ("TARGETOSVERSION".to_string(), target.os_version),
+        ("TARGETARCH".to_string(), target.architecture),
+        ("TARGETVARIANT".to_string(), target.variant),
+    ]))
+}
+
+struct BuildkitPlatform {
+    formatted: String,
+    os: String,
+    os_version: String,
+    architecture: String,
+    variant: String,
+}
+
+fn parse_buildkit_platform(value: &str) -> Result<BuildkitPlatform, DockerfileBuildError> {
+    let parts = value.split('/').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty()) {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "invalid target platform {value}: expected OS/architecture[/variant]"
+        )));
+    }
+    let (raw_os, raw_options) = match parts[0].split_once('(') {
+        Some((os, options)) if options.ends_with(')') => {
+            (os, Some(&options[..options.len() - 1]))
+        }
+        Some(_) => {
+            return Err(DockerfileBuildError::Invalid(format!(
+                "invalid target platform OS component: {}",
+                parts[0]
+            )))
+        }
+        None => (parts[0], None),
+    };
+    if raw_os.is_empty()
+        || !raw_os
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "invalid target platform OS component: {}",
+            parts[0]
+        )));
+    }
+    let os = match raw_os.to_ascii_lowercase().as_str() {
+        "macos" => "darwin".to_string(),
+        other => other.to_string(),
+    };
+    let architecture = match parts[1].to_ascii_lowercase().as_str() {
+        "x86_64" | "x86-64" => "amd64".to_string(),
+        "aarch64" => "arm64".to_string(),
+        "i386" => "386".to_string(),
+        "armhf" => "arm".to_string(),
+        other => other.to_string(),
+    };
+    if !architecture
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "invalid target platform architecture: {}",
+            parts[1]
+        )));
+    }
+    let variant = parts.get(2).copied().unwrap_or("").to_ascii_lowercase();
+    if !variant
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "invalid target platform variant: {variant}"
+        )));
+    }
+    let raw_options = raw_options.unwrap_or("");
+    let raw_os_version = raw_options.split('+').next().unwrap_or("");
+    let os_version = percent_decode_platform_option(raw_os_version)?;
+    let formatted_os = if raw_options.is_empty() {
+        os.clone()
+    } else {
+        format!("{os}({raw_options})")
+    };
+    let formatted = if variant.is_empty() {
+        format!("{formatted_os}/{architecture}")
+    } else {
+        format!("{formatted_os}/{architecture}/{variant}")
+    };
+    Ok(BuildkitPlatform {
+        formatted,
+        os,
+        os_version,
+        architecture,
+        variant,
+    })
+}
+
+fn percent_decode_platform_option(value: &str) -> Result<String, DockerfileBuildError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= bytes.len() {
+            return Err(DockerfileBuildError::Invalid(
+                "invalid percent escape in target OS version".to_string(),
+            ));
+        }
+        let hex = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let high = hex(bytes[index + 1]);
+        let low = hex(bytes[index + 2]);
+        let (Some(high), Some(low)) = (high, low) else {
+            return Err(DockerfileBuildError::Invalid(
+                "invalid percent escape in target OS version".to_string(),
+            ));
+        };
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).map_err(|_| {
+        DockerfileBuildError::Invalid("target OS version is not UTF-8".to_string())
+    })
 }
 
 fn validate_from_expression(value: &str, args: &HashMap<String, String>) -> Result<(), DockerfileBuildError> {
@@ -7228,7 +7428,7 @@ mod tests {
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
         parse_limit_value, parse_maintainer, parse_onbuild, parse_run,
-        parse_stages, parse_stop_signal, prepare_dockerfile_build,
+        parse_stages, parse_stages_with_build_args, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts,
         prepare_dockerfile_build_with_contexts_and_build_args, prune_build_cache, registry_cache_descriptor,
         registry_cache_reference, reject_cache_path_symlinks, resolve_base_image,
@@ -7269,6 +7469,63 @@ mod tests {
         assert_eq!(valid[0].base, "scratch");
         let error = parse_stages("FROM --platform=$BUILPLATFORM scratch\n").unwrap_err();
         assert!(error.to_string().contains("undeclared build argument: BUILPLATFORM"));
+    }
+
+    #[test]
+    fn automatic_platform_args_include_variants_and_os_versions() {
+        let args = super::automatic_platform_args();
+        for name in [
+            "BUILDPLATFORM",
+            "BUILDOS",
+            "BUILDOSVERSION",
+            "BUILDARCH",
+            "BUILDVARIANT",
+            "TARGETPLATFORM",
+            "TARGETOS",
+            "TARGETOSVERSION",
+            "TARGETARCH",
+            "TARGETVARIANT",
+        ] {
+            assert!(args.contains_key(name), "missing BuildKit automatic arg {name}");
+        }
+        assert_eq!(args["BUILDVARIANT"], "");
+        assert_eq!(args["TARGETVARIANT"], "");
+        assert_eq!(args["BUILDOSVERSION"], "");
+        assert_eq!(args["TARGETOSVERSION"], "");
+    }
+
+    #[test]
+    fn requested_platform_binds_target_args_with_os_version_and_variant() {
+        let args = super::automatic_platform_args_for_target(
+            Some("windows(10.0.20348.1006)/arm64/v8"),
+        )
+        .expect("BuildKit platform syntax parses");
+
+        assert_eq!(args["TARGETPLATFORM"], "windows(10.0.20348.1006)/arm64/v8");
+        assert_eq!(args["TARGETOS"], "windows");
+        assert_eq!(args["TARGETOSVERSION"], "10.0.20348.1006");
+        assert_eq!(args["TARGETARCH"], "arm64");
+        assert_eq!(args["TARGETVARIANT"], "v8");
+        assert_eq!(args["BUILDOS"], "linux");
+        assert_eq!(args["BUILDOSVERSION"], "");
+    }
+
+    #[test]
+    fn requested_platform_args_drive_from_and_stage_arg_expansion() {
+        let mut args = super::automatic_platform_args_for_target(Some("darwin/ppc64le"))
+            .expect("target platform");
+        args.insert("TARGETOS".to_string(), "freebsd".to_string());
+        let stages = parse_stages_with_build_args(
+            "FROM scratch AS base-freebsd\nFROM base-${TARGETOS}\nARG TARGETPLATFORM\nARG TARGETOS\nRUN echo $TARGETPLATFORM $TARGETOS\n",
+            &args,
+        )
+        .expect("automatic args are BuildKit expressions");
+
+        assert_eq!(stages[1].base, "base-freebsd");
+        assert_eq!(
+            stages[1].run[0].args.last().map(String::as_str),
+            Some("echo darwin/ppc64le freebsd")
+        );
     }
 
     #[test]

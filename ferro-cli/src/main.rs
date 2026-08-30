@@ -11304,6 +11304,7 @@ fn execute_build(
                 authorization,
                 &dockerfile_path,
                 None,
+                build_args,
             )?;
             let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
                 &dockerfile_path,
@@ -11442,10 +11443,14 @@ fn prefetch_dockerfile_bases(
     authorization: &SurfaceAuthorization,
     dockerfile: &Path,
     session_auth: Option<&HashMap<String, RegistryAuth>>,
+    build_args: &HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
     let mut pulled = Vec::new();
-    for base in ferro_core::dockerfile_build::dockerfile_external_base_images(dockerfile)
-        .map_err(|error| error.to_string())?
+    for base in ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
+        dockerfile,
+        build_args,
+    )
+    .map_err(|error| error.to_string())?
     {
         let selector = normalize_selector(&base).map_err(|error| error.to_string())?;
         if resolve_reference(store, &base)
@@ -15768,7 +15773,14 @@ fn prepare_compose_service(
         let context = build.context.as_deref().unwrap_or(".");
         let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
         let dockerfile_path = project_dir.join(context).join(dockerfile);
-        prefetch_dockerfile_bases(store, origin, authorization, &dockerfile_path, None)?;
+        prefetch_dockerfile_bases(
+            store,
+            origin,
+            authorization,
+            &dockerfile_path,
+            None,
+            build.args.as_ref().unwrap_or(&HashMap::new()),
+        )?;
         let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
             &dockerfile_path,
             Some(&image),
@@ -26584,7 +26596,15 @@ async fn execute_buildkit_frontend(
             .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
             .map(String::as_str),
     );
-    let external_bases = ferro_core::dockerfile_build::dockerfile_external_base_images(&dockerfile)
+    let build_args = buildkit_frontend_build_args(
+        &build.request.frontend_attrs,
+        &request.frontend_opt,
+    )?;
+    let external_bases =
+        ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
+            &dockerfile,
+            &build_args,
+        )
         .map_err(|error| error.to_string())?;
     let mut session_auth = HashMap::new();
     for base in &external_bases {
@@ -26625,17 +26645,6 @@ async fn execute_buildkit_frontend(
         .filter(|name| !name.is_empty())
         .unwrap_or("local/build:latest")
         .to_string();
-    // The classic executor materializes one platform at a time.  BuildKit
-    // clients commonly request a comma-separated platform list even for
-    // check-only solves; use its first requested platform here rather than
-    // handing the whole list to the single-platform parser.
-    let platform = request
-        .frontend_opt
-        .get("platform")
-        .and_then(|platforms| platforms.split(',').next())
-        .filter(|platform| !platform.is_empty())
-        .map(str::to_owned);
-    let build_args = buildkit_frontend_build_args(&build.request.frontend_attrs, &request.frontend_opt);
     // Registry pulls and the classic build executor are synchronous.  Running
     // them on this h2 request runtime makes reqwest's blocking client try to
     // tear down its private Tokio runtime from an async context, which aborts
@@ -26649,6 +26658,7 @@ async fn execute_buildkit_frontend(
             &blocking_execution.authorization,
             &dockerfile,
             Some(&session_auth),
+            &build_args,
         )?;
         let build_output = execute_build(
             blocking_execution.store.as_ref(),
@@ -26662,7 +26672,7 @@ async fn execute_buildkit_frontend(
             "gzip",
             "oci",
             None,
-            platform.as_deref(),
+            None,
             None,
             None,
             &[],
@@ -26721,19 +26731,156 @@ fn buildkit_export_progress(image_name: &str) -> (String, String) {
 fn buildkit_frontend_build_args(
     outer: &HashMap<String, String>,
     frontend: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut build_args = outer
+) -> Result<HashMap<String, String>, String> {
+    let target = frontend
+        .get("platform")
+        .or_else(|| outer.get("platform"))
+        .and_then(|platforms| platforms.split(',').next())
+        .filter(|platform| !platform.is_empty());
+    let mut build_args = ferro_core::dockerfile_build::automatic_platform_args_for_target(target)
+        .map_err(|error| format!("buildkit solve: {error}"))?;
+    build_args.extend(outer
         .iter()
         .filter_map(|(key, value)| {
             key.strip_prefix("build-arg:")
                 .map(|name| (name.to_string(), value.to_string()))
-        })
-        .collect::<HashMap<_, _>>();
+        }));
     build_args.extend(frontend.iter().filter_map(|(key, value)| {
         key.strip_prefix("build-arg:")
             .map(|name| (name.to_string(), value.to_string()))
     }));
-    build_args
+    Ok(build_args)
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_frontend_execution_options(
+    outer: &HashMap<String, String>,
+    frontend: &HashMap<String, String>,
+    entitlements: &[String],
+) -> Result<ferro_core::dockerfile_build::DockerfileExecutionOptions, String> {
+    use ferro_core::dockerfile_build::{
+        DockerfileExecutionOptions, DockerfileNetworkMode, DockerfileUlimit,
+    };
+
+    let get = |name: &str| frontend.get(name).or_else(|| outer.get(name));
+    let unsigned = |name: &str| -> Result<Option<u64>, String> {
+        let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        let value = raw
+            .parse::<u64>()
+            .map_err(|_| format!("buildkit solve: invalid {name} value: {raw}"))?;
+        if value == 0 {
+            return Err(format!("buildkit solve: invalid {name} value: must be > 0"));
+        }
+        Ok(Some(value))
+    };
+    let signed = |name: &str| -> Result<Option<i64>, String> {
+        let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        raw.parse::<i64>()
+            .map(Some)
+            .map_err(|_| format!("buildkit solve: invalid {name} value: {raw}"))
+    };
+    let ulimits = get("ulimit")
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|entry| {
+                    let (name, limits) = entry.split_once('=').ok_or_else(|| {
+                        format!("buildkit solve: invalid ulimit {entry}")
+                    })?;
+                    let (soft, hard) = limits
+                        .split_once(':')
+                        .map(|(soft, hard)| (soft, hard))
+                        .unwrap_or((limits, limits));
+                    let soft = soft.parse::<u64>().map_err(|_| {
+                        format!("buildkit solve: invalid ulimit soft value: {entry}")
+                    })?;
+                    let hard = hard.parse::<u64>().map_err(|_| {
+                        format!("buildkit solve: invalid ulimit hard value: {entry}")
+                    })?;
+                    if name.is_empty() || soft > hard {
+                        return Err(format!("buildkit solve: invalid ulimit {entry}"));
+                    }
+                    Ok(DockerfileUlimit {
+                        name: name.to_string(),
+                        soft,
+                        hard,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let network_mode = match get("force-network-mode").map(String::as_str).unwrap_or("") {
+        "" | "sandbox" => DockerfileNetworkMode::Sandbox,
+        "none" => DockerfileNetworkMode::None,
+        "host" => DockerfileNetworkMode::Host,
+        other => return Err(format!("buildkit solve: invalid netmode {other}")),
+    };
+    let no_cache = get("no-cache").map(|value| {
+        value
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let memory = unsigned("memory")?;
+    let memory_swap = signed("memswap")?;
+    if memory_swap.is_some_and(|value| value < -1 || value == 0) {
+        return Err("buildkit solve: memswap must be -1 or > 0".to_string());
+    }
+    let cpuset_cpus = get("cpusetcpus").filter(|value| !value.is_empty()).cloned();
+    let cpuset_mems = get("cpusetmems").filter(|value| !value.is_empty()).cloned();
+    if let Some(value) = cpuset_cpus.as_deref() {
+        validate_buildkit_cpuset("cpusetcpus", value)?;
+    }
+    if let Some(value) = cpuset_mems.as_deref() {
+        validate_buildkit_cpuset("cpusetmems", value)?;
+    }
+    Ok(DockerfileExecutionOptions {
+        shm_size: unsigned("shm-size")?,
+        ulimits,
+        cgroup_parent: get("cgroup-parent")
+            .filter(|value| !value.is_empty())
+            .cloned(),
+        memory,
+        memory_swap,
+        cpu_shares: unsigned("cpushares")?,
+        cpu_quota: unsigned("cpuquota")?,
+        cpu_period: unsigned("cpuperiod")?,
+        cpuset_cpus,
+        cpuset_mems,
+        pids_limit: unsigned("pids-limit")?,
+        no_cache,
+        network_mode,
+        allow_network_host: entitlements.iter().any(|value| value == "network.host"),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_buildkit_cpuset(name: &str, value: &str) -> Result<(), String> {
+    for item in value.split(',') {
+        let (start, end) = item
+            .split_once('-')
+            .map(|(start, end)| (start, Some(end)))
+            .unwrap_or((item, None));
+        let start = start
+            .parse::<u32>()
+            .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
+        if let Some(end) = end {
+            let end = end
+                .parse::<u32>()
+                .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
+            if end < start {
+                return Err(format!("buildkit solve: invalid {name} value: {value}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -37799,11 +37946,62 @@ volumes:
             &HashMap::from([
                 ("build-arg:SECOND".to_string(), "two".to_string()),
                 ("build-arg:FIRST".to_string(), "gateway-one".to_string()),
+                ("platform".to_string(), "windows(10.0.20348.1006)/arm64/v8".to_string()),
             ]),
-        );
+        )
+        .expect("frontend options parse");
         assert_eq!(args.get("FIRST"), Some(&"gateway-one".to_string()));
         assert_eq!(args.get("SECOND"), Some(&"two".to_string()));
-        assert_eq!(args.len(), 2);
+        assert_eq!(args.get("TARGETOS"), Some(&"windows".to_string()));
+        assert_eq!(
+            args.get("TARGETOSVERSION"),
+            Some(&"10.0.20348.1006".to_string())
+        );
+        assert_eq!(args.get("TARGETARCH"), Some(&"arm64".to_string()));
+        assert_eq!(args.get("TARGETVARIANT"), Some(&"v8".to_string()));
+        assert_eq!(args.len(), 12);
+    }
+
+    #[test]
+    fn buildkit_frontend_parses_run_resource_and_cache_options() {
+        use ferro_core::dockerfile_build::DockerfileNetworkMode;
+
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::from([
+                ("memory".to_string(), "67108864".to_string()),
+                ("cpuquota".to_string(), "50000".to_string()),
+                ("cpuperiod".to_string(), "100000".to_string()),
+                ("cpushares".to_string(), "1024".to_string()),
+                ("cpusetcpus".to_string(), "0-2,4".to_string()),
+                ("cpusetmems".to_string(), "0".to_string()),
+                ("memswap".to_string(), "134217728".to_string()),
+                ("pids-limit".to_string(), "32".to_string()),
+                ("no-cache".to_string(), "build,package".to_string()),
+            ]),
+            &HashMap::from([
+                ("shm-size".to_string(), "134217728".to_string()),
+                ("ulimit".to_string(), "nofile=1062:1062".to_string()),
+                ("cgroup-parent".to_string(), "build-parent".to_string()),
+                ("force-network-mode".to_string(), "none".to_string()),
+            ]),
+            &["network.host".to_string()],
+        )
+        .expect("frontend resources parse");
+
+        assert_eq!(options.shm_size, Some(134_217_728));
+        assert_eq!(options.memory, Some(67_108_864));
+        assert_eq!(options.cpu_quota, Some(50_000));
+        assert_eq!(options.cpu_period, Some(100_000));
+        assert_eq!(options.cpu_shares, Some(1024));
+        assert_eq!(options.cpuset_cpus.as_deref(), Some("0-2,4"));
+        assert_eq!(options.cpuset_mems.as_deref(), Some("0"));
+        assert_eq!(options.memory_swap, Some(134_217_728));
+        assert_eq!(options.pids_limit, Some(32));
+        assert_eq!(options.ulimits[0].name, "nofile");
+        assert_eq!(options.ulimits[0].soft, 1062);
+        assert_eq!(options.no_cache, Some(vec!["build".into(), "package".into()]));
+        assert_eq!(options.network_mode, DockerfileNetworkMode::None);
+        assert!(options.allow_network_host);
     }
 
     #[test]

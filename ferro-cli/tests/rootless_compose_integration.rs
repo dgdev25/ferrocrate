@@ -204,7 +204,7 @@ impl Drop for RootlessDockerDaemon {
 
 fn rootless_docker_daemon(binary: &str, runtime: &Path) -> RootlessDockerDaemon {
     let socket = runtime.join("docker.sock");
-    let child = Command::new(binary)
+    let mut child = Command::new(binary)
         .env("FERROCRATE_HOME", runtime)
         .env("FERROCRATE_RUNTIME_DIR", runtime)
         .env("FERROCRATE_ROOTLESS_NETNS", "1")
@@ -219,6 +219,8 @@ fn rootless_docker_daemon(binary: &str, runtime: &Path) -> RootlessDockerDaemon 
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    let _ = child.kill();
+    let _ = child.wait();
     panic!("rootless Docker-compatible daemon did not create its socket");
 }
 

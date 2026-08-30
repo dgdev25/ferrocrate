@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 forwarder="$ROOT_DIR/bench/suites/buildkit-dockerfile/dockerd-forwarder.py"
 
 python3 - "$forwarder" <<'PYEOF'
+import importlib.util
+import json
 import os
 import pathlib
 import signal
@@ -14,11 +16,54 @@ import tempfile
 import time
 
 forwarder = sys.argv[1]
+spec = importlib.util.spec_from_file_location("dockerd_forwarder", forwarder)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
 with tempfile.TemporaryDirectory() as work:
+    work = pathlib.Path(work)
+    routes = {
+        "none": str(work / "none.sock"),
+        "network-host": str(work / "network.sock"),
+        "security-insecure": str(work / "security.sock"),
+        "all": str(work / "all.sock"),
+    }
+    for name, expected in (
+        ("none", routes["none"]),
+        ("network", routes["network-host"]),
+        ("security", routes["security-insecure"]),
+        ("all", routes["all"]),
+    ):
+        config = work / f"{name}.json"
+        entitlements = {}
+        if name in ("network", "all"):
+            entitlements["network-host"] = True
+        if name in ("security", "all"):
+            entitlements["security-insecure"] = True
+        config.write_text(json.dumps({"builder": {"Entitlements": entitlements}}))
+        assert module.gate_path(["--config-file", str(config)], routes) == expected
+
+    missing = work / "missing.json"
+    try:
+        module.gate_path(["--config-file", str(missing)], routes)
+    except ValueError as error:
+        assert "daemon config" in str(error)
+    else:
+        raise AssertionError("missing worker daemon config must fail closed")
+
     sock = pathlib.Path(work, "dockerd.sock")
-    env = dict(os.environ, BK_GATE=str(pathlib.Path(work, "gate.sock")))
+    config = pathlib.Path(work, "worker.json")
+    config.write_text('{"builder":{"Entitlements":{}}}')
+    env = dict(os.environ, BK_GATE_NONE=str(pathlib.Path(work, "gate.sock")))
     proc = subprocess.Popen(
-        [sys.executable, forwarder, "--host", f"unix://{sock}"],
+        [
+            sys.executable,
+            forwarder,
+            "--host",
+            f"unix://{sock}",
+            "--config-file",
+            str(config),
+        ],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

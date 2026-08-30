@@ -5,6 +5,10 @@
 profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(unconfined) {
   userns,
 
+  # Keep bubblewrap in this profile.  Ubuntu's bwrap-userns-restrict profile
+  # otherwise stacks unpriv_bwrap and denies CAP_CHOWN to image entrypoints.
+  /usr/bin/bwrap ix,
+
   # Existing Linux capability access remains unchanged by the unconfined attachment.
   #include if exists <local/usr.local.bin.ferrocrate>
 }

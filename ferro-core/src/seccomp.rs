@@ -183,7 +183,7 @@ fn parse_action_with_errno(action: &str, errno: Option<i64>) -> Result<ScmpActio
 /// Returns an error if:
 /// - The profile contains unknown syscalls or actions
 /// - The libseccomp library fails to apply the filter
-pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompError> {
+fn build_seccomp_filter(profile: &SeccompProfile) -> Result<ScmpFilterContext, SeccompError> {
     let default_action =
         parse_action_with_errno(&profile.default_action, profile.default_errno_ret)?;
 
@@ -283,10 +283,26 @@ pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompErro
         }
     }
 
-    // Apply the filter
-    filter
+    Ok(filter)
+}
+
+pub fn apply_seccomp_profile(profile: &SeccompProfile) -> Result<(), SeccompError> {
+    build_seccomp_filter(profile)?
         .load()
         .map_err(|e| SeccompError::Build(format!("load: {e}")))?;
+
+    Ok(())
+}
+
+/// Export a profile as classic BPF for a launcher that applies seccomp only
+/// after it has finished setting up namespaces and mounts.
+pub fn export_seccomp_profile_bpf<T: std::os::fd::AsRawFd>(
+    profile: &SeccompProfile,
+    output: &mut T,
+) -> Result<(), SeccompError> {
+    build_seccomp_filter(profile)?
+        .export_bpf(output)
+        .map_err(|e| SeccompError::Build(format!("export bpf: {e}")))?;
 
     Ok(())
 }

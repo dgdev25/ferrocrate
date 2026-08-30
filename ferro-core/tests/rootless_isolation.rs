@@ -12,8 +12,8 @@ use std::process::Command;
 #[test]
 fn resolves_rootless_config_from_system() {
     let config = RootlessConfig::from_system().expect("rootless config should resolve");
-    assert!(config.uid_mapping.size > 0);
-    assert!(config.gid_mapping.size > 0);
+    assert!(config.uid_mapping.iter().all(|mapping| mapping.size > 0));
+    assert!(config.gid_mapping.iter().all(|mapping| mapping.size > 0));
 }
 
 /// Uses the host's real `unshare(2)` launcher and `/proc/<pid>` mapping files,

@@ -11,6 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 test -f "$profile"
 grep -Fqx 'profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(unconfined) {' "$profile"
 grep -Eq '^[[:space:]]+userns,$' "$profile"
+grep -Eq '^[[:space:]]+/usr/bin/bwrap ix,$' "$profile"
 grep -Fq '# Existing Linux capability access remains unchanged by the unconfined attachment.' "$profile"
 
 if command -v apparmor_parser >/dev/null 2>&1; then

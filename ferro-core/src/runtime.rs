@@ -7593,14 +7593,12 @@ fn build_bwrap_command(
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    // Keep the rootless workload on the minimal capability set, but preserve
-    // CAP_CHOWN for image entrypoints (notably nginx) that prepare
-    // directories owned by their configured non-root user.
-    bwrap
-        .arg("--cap-drop")
-        .arg("ALL")
-        .arg("--cap-add")
-        .arg("CAP_CHOWN");
+    // Do not drop the user-namespace capability set here.  Bubblewrap's
+    // --cap-add only applies to a privileged caller, so adding CAP_CHOWN
+    // after --cap-drop ALL does not restore it for this rootless workload.
+    // Image entrypoints such as nginx need CAP_CHOWN while initializing their
+    // owned cache directories.  These capabilities are confined to the
+    // container user namespace and grant no host privilege.
     if disable_userns {
         // Followers enter the leader's user namespace through an inherited
         // descriptor and use a BusyBox nsenter handoff for the network. The
@@ -19891,7 +19889,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
     }
 
     #[test]
-    fn rootless_bwrap_keeps_chown_for_image_initialization() {
+    fn rootless_bwrap_keeps_user_namespace_capabilities_for_image_initialization() {
         if !super::command_available("bwrap") {
             return;
         }
@@ -19910,8 +19908,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(
-            args.windows(2)
-                .any(|window| window == ["--cap-add", "CAP_CHOWN"]),
+            !args
+                .windows(2)
+                .any(|window| window == ["--cap-drop", "ALL"]),
             "rootless image initialization must retain CAP_CHOWN: {args:?}"
         );
     }

@@ -484,11 +484,29 @@ fn rootless_compose_nginx_services_wait_running() {
         "--wait-timeout",
         "20",
     ]);
+    let failure_diagnostics = || {
+        ["simple", "another"]
+            .into_iter()
+            .map(|service| {
+                let name = format!("s181-nginx-{service}-1");
+                let inspect = docker(&["inspect", "--format", "{{json .State}}", &name]);
+                let logs = docker(&["logs", &name]);
+                format!(
+                    "{service}: inspect={} logs_stdout={} logs_stderr={}",
+                    String::from_utf8_lossy(&inspect.stdout),
+                    String::from_utf8_lossy(&logs.stdout),
+                    String::from_utf8_lossy(&logs.stderr),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     assert!(
         up.status.success(),
-        "S181 compose up --detach --wait failed: stdout={} stderr={}",
+        "S181 compose up --detach --wait failed: stdout={} stderr={} diagnostics={}",
         String::from_utf8_lossy(&up.stdout),
-        String::from_utf8_lossy(&up.stderr)
+        String::from_utf8_lossy(&up.stderr),
+        failure_diagnostics(),
     );
 
     for service in ["simple", "another"] {

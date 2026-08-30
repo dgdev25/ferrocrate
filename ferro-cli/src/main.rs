@@ -26744,6 +26744,15 @@ async fn execute_buildkit_frontend(
         .map_err(|error| format!("buildkit solve: stage parser Dockerfile failed: {error}"))?;
     let dockerfile_contents = std::fs::read_to_string(&dockerfile)
         .map_err(|error| format!("buildkit solve: read staged Dockerfile failed: {error}"))?;
+    let dockerignore = [
+        dockerfile_local.join(format!("{filename}.dockerignore")),
+        context.join(".dockerignore"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .map(std::fs::read_to_string)
+    .transpose()
+    .map_err(|error| format!("buildkit solve: read .dockerignore failed: {error}"))?;
     *build
         .dockerfile_source
         .lock()
@@ -26760,12 +26769,13 @@ async fn execute_buildkit_frontend(
             .map(String::as_str),
     );
     if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
-        let warnings = buildkit_lint_warnings_with_check(
+        let warnings = buildkit_lint_warnings_with_context(
             &dockerfile_contents,
             request
                 .frontend_opt
                 .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
                 .map(String::as_str),
+            dockerignore.as_deref(),
         );
         return Ok(BuildkitBuildResult {
             image_name: "local/build:lint".to_string(),
@@ -26784,13 +26794,30 @@ async fn execute_buildkit_frontend(
     }
     // Dockerfile checks are advisory: report them with the build result rather
     // than replacing the requested solve with a synthetic lint-only result.
-    let lint_warnings = buildkit_lint_warnings_with_check(
+    let lint_warnings = buildkit_lint_warnings_with_context(
         &dockerfile_contents,
         request
             .frontend_opt
             .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
             .map(String::as_str),
+        dockerignore.as_deref(),
     );
+    if let Some(source) = dockerignore
+        .as_deref()
+        .and_then(|ignore| buildkit_first_ignored_copy_source(&dockerfile_contents, ignore))
+    {
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint-error".to_string(),
+            image_digest: "sha256:lint-error".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: lint_warnings,
+            solve_error: Some(format!(
+                "failed to compute cache key: failed to calculate checksum of ref ferrocrate \"/{source}\": not found"
+            )),
+        });
+    }
     let build_args = buildkit_frontend_build_args(
         &build.request.frontend_attrs,
         &request.frontend_opt,
@@ -27094,9 +27121,19 @@ fn buildkit_lint_warnings(dockerfile: &str) -> Vec<BuildkitLintWarning> {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(test)]
 fn buildkit_lint_warnings_with_check(
     dockerfile: &str,
     check_option: Option<&str>,
+) -> Vec<BuildkitLintWarning> {
+    buildkit_lint_warnings_with_context(dockerfile, check_option, None)
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_lint_warnings_with_context(
+    dockerfile: &str,
+    check_option: Option<&str>,
+    dockerignore: Option<&str>,
 ) -> Vec<BuildkitLintWarning> {
     let config = buildkit_lint_config(dockerfile, check_option);
     let skipped_rules = &config.skipped_rules;
@@ -27169,6 +27206,41 @@ fn buildkit_lint_warnings_with_check(
                 *line,
             ));
         }
+        if (keyword.eq_ignore_ascii_case("COPY") || keyword.eq_ignore_ascii_case("ADD"))
+            && dockerignore.is_some()
+        {
+            let arguments = text
+                .split_once(char::is_whitespace)
+                .map(|(_, arguments)| arguments)
+                .unwrap_or("");
+            let words = arguments.split_whitespace().collect::<Vec<_>>();
+            let copied_from_stage = words.iter().any(|word| {
+                *word == "--from" || word.starts_with("--from=")
+            });
+            if !copied_from_stage && words.len() >= 2 {
+                let command = if keyword.eq_ignore_ascii_case("COPY") {
+                    "Copy"
+                } else {
+                    "Add"
+                };
+                for source in &words[..words.len() - 1] {
+                    if source.starts_with("--")
+                        || source.contains("://")
+                        || !buildkit_dockerignore_excludes(source, dockerignore.unwrap_or(""))
+                    {
+                        continue;
+                    }
+                    warnings.push(buildkit_lint_warning(
+                        "CopyIgnoredFile",
+                        "Attempting to Copy file that is excluded by .dockerignore",
+                        format!(
+                            "Attempting to {command} file \"{source}\" that is excluded by .dockerignore"
+                        ),
+                        *line,
+                    ));
+                }
+            }
+        }
         for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
             let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
             if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
@@ -27187,6 +27259,75 @@ fn buildkit_lint_warnings_with_check(
             !skipped_rules.contains("all") && !skipped_rules.contains(warning.rule_name.as_str())
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_dockerignore_excludes(source: &str, dockerignore: &str) -> bool {
+    let normalized = if source == "." {
+        "."
+    } else {
+        source.trim_start_matches("./")
+    };
+    if normalized == "." && dockerignore.lines().any(|line| line.trim().starts_with('!')) {
+        return false;
+    }
+    let mut excluded = false;
+    for line in dockerignore.lines() {
+        let rule = line.trim();
+        if rule.is_empty() || rule.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = rule
+            .strip_prefix('!')
+            .map(|pattern| (true, pattern))
+            .unwrap_or((false, rule));
+        let pattern = pattern.trim_start_matches("./").trim_start_matches('/');
+        let matches = match (normalized, pattern) {
+            (".", "*" | "**") => true,
+            (".", _) => false,
+            (_, "*" | "**") => true,
+            (_, _) if pattern.contains('*') => {
+                let parts = pattern.split('*').collect::<Vec<_>>();
+                normalized.starts_with(parts[0])
+                    && normalized.ends_with(parts.last().copied().unwrap_or(""))
+            }
+            _ => normalized == pattern,
+        };
+        if matches {
+            excluded = !negated;
+        }
+    }
+    excluded
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_first_ignored_copy_source(dockerfile: &str, dockerignore: &str) -> Option<String> {
+    dockerfile.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (keyword, arguments) = trimmed.split_once(char::is_whitespace)?;
+        if !keyword.eq_ignore_ascii_case("COPY") && !keyword.eq_ignore_ascii_case("ADD") {
+            return None;
+        }
+        let words = arguments.split_whitespace().collect::<Vec<_>>();
+        if words.len() < 2
+            || words
+                .iter()
+                .any(|word| *word == "--from" || word.starts_with("--from="))
+        {
+            return None;
+        }
+        words[..words.len() - 1].iter().find_map(|source| {
+            if *source == "."
+                || source.starts_with("--")
+                || source.contains("://")
+                || !buildkit_dockerignore_excludes(source, dockerignore)
+            {
+                None
+            } else {
+                Some(source.trim_start_matches("./").to_string())
+            }
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -27652,7 +27793,7 @@ fn send_buildkit_frontend_error(
         .map_err(|lock| format!("buildkit Dockerfile source lock poisoned: {lock}"))?
         .clone();
     let mut trailers = http::HeaderMap::new();
-    trailers.insert("grpc-status", http::HeaderValue::from_static("13"));
+    trailers.insert("grpc-status", http::HeaderValue::from_static("2"));
     trailers.insert(
         "grpc-message",
         http::HeaderValue::from_str(&buildkit_grpc_message(error))
@@ -27703,7 +27844,7 @@ fn buildkit_source_error_details(
     }))
     .map_err(|cause| format!("buildkit source detail JSON failed: {cause}"))?;
     let status = Status {
-        code: 13,
+        code: 2,
         message: error.to_string(),
         details: vec![prost_types::Any {
             type_url: "github.com/moby/buildkit/errdefs.Source+json".to_string(),
@@ -36098,6 +36239,53 @@ FROM scratch as base\ncopy Dockerfile .\n";
             "FromAsCasing: 'as' and 'FROM' keywords' casing do not match (line 2)"
         );
         assert_eq!(progress[0].url, warnings[0].url);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_lint_reports_only_copy_sources_excluded_by_dockerignore() {
+        let dockerfile = "\nFROM scratch\nCOPY Dockerfile .\nADD Dockerfile /windy\n";
+        let warnings = super::buildkit_lint_warnings_with_context(
+            dockerfile,
+            None,
+            Some("Dockerfile\n"),
+        );
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].rule_name, "CopyIgnoredFile");
+        assert_eq!(warnings[0].line, 3);
+        assert_eq!(
+            warnings[0].detail,
+            "Attempting to Copy file \"Dockerfile\" that is excluded by .dockerignore"
+        );
+        assert_eq!(warnings[1].line, 4);
+        assert_eq!(
+            warnings[1].detail,
+            "Attempting to Add file \"Dockerfile\" that is excluded by .dockerignore"
+        );
+        assert_eq!(
+            super::buildkit_first_ignored_copy_source(dockerfile, "Dockerfile\n")
+                .as_deref(),
+            Some("Dockerfile")
+        );
+
+        let skipped = super::buildkit_lint_warnings_with_context(
+            "# check=skip=CopyIgnoredFile\nCOPY Dockerfile .\n",
+            None,
+            Some("Dockerfile\n"),
+        );
+        assert!(skipped.is_empty());
+        let included_root = super::buildkit_lint_warnings_with_context(
+            "FROM scratch\nCOPY . .\n",
+            None,
+            Some("**\n!Dockerfile\n"),
+        );
+        assert!(included_root.is_empty());
+        let dotfiles_only = super::buildkit_lint_warnings_with_context(
+            "FROM scratch\nCOPY . .\n",
+            None,
+            Some(".*\n"),
+        );
+        assert!(dotfiles_only.is_empty());
     }
 
     #[cfg(target_os = "linux")]

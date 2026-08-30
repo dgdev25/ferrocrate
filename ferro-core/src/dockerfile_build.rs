@@ -7227,7 +7227,7 @@ mod tests {
         export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
-        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_run_with_workdir,
+        parse_limit_value, parse_maintainer, parse_onbuild, parse_run,
         parse_stages, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts,
         prepare_dockerfile_build_with_contexts_and_build_args, prune_build_cache, registry_cache_descriptor,
@@ -7401,21 +7401,25 @@ mod tests {
     }
 
     #[test]
-    fn run_mount_targets_resolve_relative_to_workdir_without_parent_traversal() {
-        let run = parse_run_with_workdir(
-            "--mount=type=bind,source=package.json,target=package.json --mount=type=cache,target=.cache echo value",
-            &["/bin/sh".into(), "-c".into()],
-            "/usr/src/app",
+    fn run_mount_targets_resolve_relative_to_stage_workdir_and_reject_parent_escapes() {
+        let stages = parse_stages(
+            "FROM scratch\nWORKDIR /usr/src/app\nRUN --mount=type=bind,source=package.json,target=package.json --mount=type=cache,target=.cache echo value\n",
         )
-        .expect("relative bind and cache mount targets parse");
+        .expect("relative bind and cache targets resolve through Dockerfile stage parsing");
+        let run = &stages[0].run[0];
         assert_eq!(run.bind_mounts[0].target, "/usr/src/app/package.json");
         assert_eq!(run.cache_mounts[0].target, "/usr/src/app/.cache");
-        assert!(parse_run_with_workdir(
-            "--mount=type=bind,source=package.json,target=../package.json echo value",
-            &["/bin/sh".into(), "-c".into()],
-            "/usr/src/app",
-        )
-        .is_err());
+
+        for mount in [
+            "type=bind,source=package.json,target=../package.json",
+            "type=cache,target=../cache",
+        ] {
+            let error = parse_stages(&format!(
+                "FROM scratch\nWORKDIR /usr/src/app\nRUN --mount={mount} echo value\n"
+            ))
+            .expect_err("RUN mount target must not escape its workdir");
+            assert!(error.to_string().contains("parent traversal"));
+        }
     }
 
     #[test]

@@ -18728,8 +18728,19 @@ struct BuildkitBuildResult {
     output: String,
     steps: Vec<String>,
     metadata: HashMap<String, Vec<u8>>,
+    platforms: Vec<BuildkitExporterPlatform>,
     warnings: Vec<BuildkitLintWarning>,
     solve_error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BuildkitExporterPlatform {
+    id: String,
+    os: String,
+    os_version: String,
+    architecture: String,
+    variant: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -26428,14 +26439,7 @@ async fn handle_buildkit_control_request(
                         "buildkit gateway: client LLB solve has no prepared Dockerfile result"
                             .to_string()
                     })?;
-                GatewayResult {
-                    result: Some(result::Result::Ref(Ref {
-                        id: format!("ferrocrate-{build_id}"),
-                        ..Default::default()
-                    })),
-                    metadata: prepared.metadata,
-                    ..Default::default()
-                }
+                buildkit_gateway_build_result(build_id, prepared)?
             } else {
                 return send_buildkit_frontend_error(
                     &mut response_stream,
@@ -26471,14 +26475,7 @@ async fn handle_buildkit_control_request(
                 .lock()
                 .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
                 Some(built.clone());
-            GatewayResult {
-                result: Some(result::Result::Ref(Ref {
-                    id: format!("ferrocrate-{build_id}"),
-                    ..Default::default()
-                })),
-                metadata: built.metadata,
-                ..Default::default()
-            }
+            buildkit_gateway_build_result(build_id, built)?
         };
         response_stream
             .send_data(
@@ -26632,6 +26629,91 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
         .collect(),
         workers: buildkit_list_workers_response().record,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_gateway_build_result(
+    build_id: &str,
+    mut built: BuildkitBuildResult,
+) -> Result<buildkit_proto::moby::buildkit::v1::frontend::Result, String> {
+    use buildkit_proto::moby::buildkit::v1::frontend::{result, Ref, RefMap, Result};
+
+    let is_multi = built.platforms.len() > 1;
+    let mut seen = HashSet::new();
+    let platforms = built
+        .platforms
+        .iter()
+        .filter(|platform| seen.insert(platform.id.clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if is_multi && platforms.len() != 1 {
+        return Err(
+            "buildkit solve: classic bridge cannot represent distinct platform results"
+                .to_string(),
+        );
+    }
+    if !platforms.is_empty() {
+        let mapping = serde_json::json!({
+            "platforms": platforms.iter().map(|platform| {
+                let mut value = serde_json::json!({
+                    "id": platform.id,
+                    "platform": {
+                        "architecture": platform.architecture,
+                        "os": platform.os,
+                    }
+                });
+                if !platform.os_version.is_empty() {
+                    value["platform"]["os.version"] =
+                        serde_json::Value::String(platform.os_version.clone());
+                }
+                if !platform.variant.is_empty() {
+                    value["platform"]["variant"] =
+                        serde_json::Value::String(platform.variant.clone());
+                }
+                value
+            }).collect::<Vec<_>>()
+        });
+        built.metadata.insert(
+            "refs.platforms".to_string(),
+            serde_json::to_vec(&mapping)
+                .map_err(|error| format!("buildkit platform metadata failed: {error}"))?,
+        );
+    }
+    let single_ref = Ref {
+        id: format!("ferrocrate-{build_id}"),
+        ..Default::default()
+    };
+    let result = if is_multi {
+        if let Some(config) = built.metadata.remove("containerimage.config") {
+            for platform in &platforms {
+                built.metadata.insert(
+                    format!("containerimage.config/{}", platform.id),
+                    config.clone(),
+                );
+            }
+        }
+        let refs = platforms
+            .iter()
+            .map(|platform| {
+                let suffix = format!("{:x}", Sha256::digest(platform.id.as_bytes()));
+                (
+                    platform.id.clone(),
+                    Ref {
+                        id: format!("ferrocrate-{build_id}-{}", &suffix[..16]),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        result::Result::Refs(RefMap { refs })
+    } else {
+        result::Result::Ref(single_ref)
+    };
+    Ok(Result {
+        result: Some(result),
+        metadata: built.metadata,
+        ..Default::default()
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -26794,6 +26876,7 @@ async fn execute_buildkit_frontend(
                 filename,
                 build_error,
             )?,
+            platforms: Vec::new(),
             warnings,
             solve_error: None,
         });
@@ -26815,6 +26898,7 @@ async fn execute_buildkit_frontend(
             output: String::new(),
             steps: Vec::new(),
             metadata: HashMap::new(),
+            platforms: Vec::new(),
             warnings: lint_warnings,
             solve_error: Some(error),
         });
@@ -26829,6 +26913,7 @@ async fn execute_buildkit_frontend(
             output: String::new(),
             steps: Vec::new(),
             metadata: HashMap::new(),
+            platforms: Vec::new(),
             warnings: lint_warnings,
             solve_error: Some(format!(
                 "failed to compute cache key: failed to calculate checksum of ref ferrocrate \"/{source}\": not found"
@@ -26836,6 +26921,10 @@ async fn execute_buildkit_frontend(
         });
     }
     let build_args = buildkit_frontend_build_args(
+        &build.request.frontend_attrs,
+        &request.frontend_opt,
+    )?;
+    let export_platforms = buildkit_frontend_export_platforms(
         &build.request.frontend_attrs,
         &request.frontend_opt,
     )?;
@@ -26954,6 +27043,20 @@ async fn execute_buildkit_frontend(
     let image = resolve_reference(execution.store.as_ref(), &image_name)
         .map_err(|error| format!("buildkit solve: inspect result failed: {error}"))?
         .ok_or_else(|| "buildkit solve: classic builder did not publish an image".to_string())?;
+    let manifest: serde_json::Value = serde_json::from_str(&image.manifest_json)
+        .map_err(|error| format!("buildkit solve: result manifest is invalid: {error}"))?;
+    let config_digest = manifest["config"]["digest"]
+        .as_str()
+        .filter(|digest| !digest.is_empty())
+        .ok_or_else(|| "buildkit solve: result manifest has no config digest".to_string())?;
+    let config = std::fs::read(
+        execution
+            .runtime_dir
+            .join("images")
+            .join("configs")
+            .join(config_digest.replace(':', "_")),
+    )
+    .map_err(|error| format!("buildkit solve: read result config failed: {error}"))?;
     let solve_error = (lint_config.error && !lint_warnings.is_empty())
         .then(|| buildkit_lint_violation_error(&lint_warnings));
     Ok(BuildkitBuildResult {
@@ -26961,7 +27064,8 @@ async fn execute_buildkit_frontend(
         image_digest: image.digest,
         output,
         steps,
-        metadata: HashMap::new(),
+        metadata: HashMap::from([("containerimage.config".to_string(), config)]),
+        platforms: export_platforms,
         warnings: lint_warnings,
         solve_error,
     })
@@ -27096,6 +27200,53 @@ fn parse_buildkit_ulimits(
                 name: name.to_string(),
                 soft,
                 hard,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_frontend_export_platforms(
+    outer: &HashMap<String, String>,
+    frontend: &HashMap<String, String>,
+) -> Result<Vec<BuildkitExporterPlatform>, String> {
+    let requested = frontend
+        .get("platform")
+        .or_else(|| outer.get("platform"))
+        .map(String::as_str)
+        .unwrap_or("");
+    let native = ferro_core::dockerfile_build::automatic_platform_args_for_target(None)
+        .map_err(|error| format!("buildkit solve: {error}"))?;
+    let values = if requested.is_empty() {
+        vec![native["TARGETPLATFORM"].as_str()]
+    } else {
+        requested
+            .split(',')
+            .filter(|platform| !platform.is_empty())
+            .collect::<Vec<_>>()
+    };
+    if values.is_empty() {
+        return Err("buildkit solve: platform list is empty".to_string());
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let target = ferro_core::dockerfile_build::automatic_platform_args_for_target(Some(
+                value,
+            ))
+            .map_err(|error| format!("buildkit solve: {error}"))?;
+            if target["TARGETPLATFORM"] != native["TARGETPLATFORM"] {
+                return Err(format!(
+                    "buildkit solve: platform {} is not supported by this bridge; available platform is {}",
+                    target["TARGETPLATFORM"], native["TARGETPLATFORM"]
+                ));
+            }
+            Ok(BuildkitExporterPlatform {
+                id: target["TARGETPLATFORM"].clone(),
+                os: target["TARGETOS"].clone(),
+                os_version: target["TARGETOSVERSION"].clone(),
+                architecture: target["TARGETARCH"].clone(),
+                variant: target["TARGETVARIANT"].clone(),
             })
         })
         .collect()
@@ -39177,6 +39328,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             output: String::new(),
             steps: Vec::new(),
             metadata: HashMap::new(),
+            platforms: Vec::new(),
             warnings: Vec::new(),
             solve_error: None,
         });
@@ -39190,6 +39342,114 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 },
             )
             .expect("client LLB after prepared inputs is accepted");
+    }
+
+    #[test]
+    fn buildkit_gateway_represents_duplicate_supported_platform_metadata() {
+        use super::buildkit_proto::moby::buildkit::v1::frontend::result;
+
+        let platform = super::BuildkitExporterPlatform {
+            id: "linux/amd64".to_string(),
+            os: "linux".to_string(),
+            os_version: String::new(),
+            architecture: "amd64".to_string(),
+            variant: String::new(),
+        };
+        let gateway = super::buildkit_gateway_build_result(
+            "duplicate-platform",
+            super::BuildkitBuildResult {
+                image_name: "local/duplicate:latest".to_string(),
+                image_digest: "sha256:duplicate".to_string(),
+                output: String::new(),
+                steps: Vec::new(),
+                metadata: HashMap::from([(
+                    "containerimage.config".to_string(),
+                    br#"{"architecture":"amd64","os":"linux"}"#.to_vec(),
+                )]),
+                platforms: vec![platform.clone(), platform],
+                warnings: Vec::new(),
+                solve_error: None,
+            },
+        )
+        .expect("gateway result");
+
+        let result::Result::Refs(refs) = gateway.result.expect("reference map") else {
+            panic!("duplicate multi-platform solve must use a reference map");
+        };
+        assert_eq!(refs.refs.len(), 1);
+        assert!(refs.refs.contains_key("linux/amd64"));
+        let platforms: serde_json::Value = serde_json::from_slice(
+            gateway.metadata.get("refs.platforms").expect("platform mapping"),
+        )
+        .expect("platform mapping JSON");
+        assert_eq!(platforms["platforms"].as_array().map(Vec::len), Some(1));
+        assert_eq!(platforms["platforms"][0]["id"], "linux/amd64");
+        assert_eq!(platforms["platforms"][0]["platform"]["os"], "linux");
+        assert_eq!(
+            gateway
+                .metadata
+                .get("containerimage.config/linux/amd64")
+                .map(Vec::as_slice),
+            Some(br#"{"architecture":"amd64","os":"linux"}"#.as_slice())
+        );
+    }
+
+    #[test]
+    fn buildkit_gateway_rejects_distinct_platforms_from_one_classic_result() {
+        let platform = |id: &str, architecture: &str| super::BuildkitExporterPlatform {
+            id: id.to_string(),
+            os: "linux".to_string(),
+            os_version: String::new(),
+            architecture: architecture.to_string(),
+            variant: String::new(),
+        };
+        let error = super::buildkit_gateway_build_result(
+            "distinct-platforms",
+            super::BuildkitBuildResult {
+                image_name: "local/distinct:latest".to_string(),
+                image_digest: "sha256:distinct".to_string(),
+                output: String::new(),
+                steps: Vec::new(),
+                metadata: HashMap::new(),
+                platforms: vec![
+                    platform("linux/amd64", "amd64"),
+                    platform("linux/arm64", "arm64"),
+                ],
+                warnings: Vec::new(),
+                solve_error: None,
+            },
+        )
+        .expect_err("one classic result cannot stand in for distinct platforms");
+
+        assert!(error.contains("cannot represent distinct platform results"), "{error}");
+    }
+
+    #[test]
+    fn buildkit_frontend_platform_metadata_is_limited_to_the_bridge_worker() {
+        let native = ferro_core::dockerfile_build::automatic_platform_args_for_target(None)
+            .expect("native platform");
+        let native = native["TARGETPLATFORM"].clone();
+        let duplicate = super::buildkit_frontend_export_platforms(
+            &HashMap::new(),
+            &HashMap::from([("platform".to_string(), format!("{native},{native}"))]),
+        )
+        .expect("duplicate native platforms");
+        assert_eq!(duplicate.len(), 2);
+        assert_eq!(duplicate[0].id, native);
+        assert_eq!(duplicate[1].id, native);
+
+        let foreign_arch = if std::env::consts::ARCH == "aarch64" {
+            "amd64"
+        } else {
+            "arm64"
+        };
+        let error = super::buildkit_frontend_export_platforms(
+            &HashMap::new(),
+            &HashMap::from([("platform".to_string(), format!("linux/{foreign_arch}"))]),
+        )
+        .expect_err("foreign worker platform must not be represented as executable");
+        assert!(error.contains("not supported by this bridge"), "{error}");
+        assert!(error.contains(&native), "{error}");
     }
 
     #[test]

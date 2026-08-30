@@ -22,5 +22,5 @@ Test command: `bash scripts/merge-gate.sh`
 
 - [x] S1: Confirm upstream platform contracts — Recorded BuildKit's OS-version expression and multi-platform exporter/provenance behavior plus the local blast radius at upstream `2a684cd90798b5cade3cfef31b4981cf33920526`.
 - [x] S2: Evaluate TARGETOSVERSION at the frontend boundary — Red/green regressions cover stage expansion, target image configuration, cache identity, and matching base OS-version inheritance.
-- [ ] S3: Represent supported multi-platform exporter metadata — Add failing gateway/export regressions, preserve platform mappings and provenance-facing fields, and commit independently.
+- [x] S3: Represent supported multi-platform exporter metadata — Gateway/export regressions preserve `refs.platforms`, platform-scoped image configs, and duplicate native-platform reference maps while rejecting distinct targets the classic bridge cannot execute.
 - [ ] S4: Close the S161 census and acceptance gates — Run the focused upstream census, all required conformance modes, and `scripts/merge-gate.sh`; close the ticket only if the remainder passes.

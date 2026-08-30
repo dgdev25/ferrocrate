@@ -1050,6 +1050,7 @@ dependencies = [
  "base64",
  "bzip2",
  "caps",
+ "chrono",
  "dashmap",
  "ed25519-dalek",
  "ferro-mind",

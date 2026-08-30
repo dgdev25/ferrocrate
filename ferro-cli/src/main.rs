@@ -18752,6 +18752,7 @@ struct BuildkitBuildResult {
     platforms: Vec<BuildkitExporterPlatform>,
     warnings: Vec<BuildkitLintWarning>,
     solve_error: Option<String>,
+    exporter_response: HashMap<String, String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -18807,6 +18808,14 @@ enum BuildkitSessionCommand {
         host: String,
         reply: tokio::sync::oneshot::Sender<Result<Option<RegistryAuth>, String>>,
     },
+    SendFile {
+        data: Vec<u8>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    StoreContent {
+        blobs: Vec<(String, Vec<u8>)>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -18851,6 +18860,81 @@ async fn receive_buildkit_session_local(
     tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
         .await
         .map_err(|_| "buildkit session: filesync timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
+}
+
+#[cfg(target_os = "linux")]
+async fn send_buildkit_session_file(
+    state: &DockerCompatState,
+    uuid: &str,
+    data: Vec<u8>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session {
+            break session;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
+    if !session.methods.contains("/moby.filesync.v1.FileSend/DiffCopy") {
+        return Err("buildkit session: FileSend.DiffCopy was not exposed".to_string());
+    }
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    session
+        .commands
+        .send(BuildkitSessionCommand::SendFile { data, reply: reply_tx })
+        .await
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
+        .map_err(|_| "buildkit session: file export timed out".to_string())?
+        .map_err(|_| "buildkit session: session disconnected".to_string())?
+}
+
+#[cfg(target_os = "linux")]
+async fn store_buildkit_session_content(
+    state: &DockerCompatState,
+    uuid: &str,
+    blobs: Vec<(String, Vec<u8>)>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let session = loop {
+        let session = state
+            .buildkit_sessions
+            .lock()
+            .map_err(|error| format!("buildkit session registry poisoned: {error}"))?
+            .get(uuid)
+            .cloned();
+        if let Some(session) = session { break session; }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("buildkit session: unknown or expired session {uuid}"));
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+    };
+    if !session.methods.contains("/containerd.services.content.v1.Content/Write") {
+        return Err("buildkit session: content store Write was not exposed".to_string());
+    }
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    session.commands
+        .send(BuildkitSessionCommand::StoreContent { blobs, reply: reply_tx })
+        .await
+        .map_err(|_| "buildkit session: session disconnected".to_string())?;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reply_rx)
+        .await
+        .map_err(|_| "buildkit session: content export timed out".to_string())?
         .map_err(|_| "buildkit session: session disconnected".to_string())?
 }
 
@@ -26144,6 +26228,19 @@ async fn handle_buildkit_control_request(
             .map_err(|error| format!("buildkit control: response data failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
+    if method == BuildkitControlMethod::DiskUsage {
+        use buildkit_proto::moby::buildkit::v1::{DiskUsageRequest, DiskUsageResponse};
+        let _ = receive_buildkit_unary::<DiskUsageRequest>(request.into_body()).await?;
+        response_stream
+            .send_data(grpc_message(&DiskUsageResponse::default()), false)
+            .map_err(|error| format!("buildkit disk usage: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
+    if method == BuildkitControlMethod::Prune {
+        use buildkit_proto::moby::buildkit::v1::PruneRequest;
+        let _ = receive_buildkit_unary::<PruneRequest>(request.into_body()).await?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
     if method == BuildkitControlMethod::Session {
         let registration = parse_buildkit_control_session_registration(request.headers())?;
         return run_buildkit_control_session(
@@ -26482,11 +26579,33 @@ async fn handle_buildkit_control_request(
                     .result
                     .lock()
                     .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
-                    .clone()
-                    .ok_or_else(|| {
-                        "buildkit gateway: client LLB solve has no prepared Dockerfile result"
-                            .to_string()
-                    })?;
+                    .clone();
+                let prepared = if let Some(prepared) = prepared {
+                    prepared
+                } else {
+                    // A remote main context has no local Inputs call, so the
+                    // client frontend can submit its LLB directly. Prepare
+                    // the classic result from the outer frontend attributes
+                    // at that point instead of requiring a fictitious local.
+                    let frontend = SolveRequest {
+                        frontend: "dockerfile.v0".to_string(),
+                        frontend_opt: build.request.frontend_attrs.clone(),
+                        ..Default::default()
+                    };
+                    let prepared = execute_buildkit_frontend(
+                        state.as_ref(),
+                        execution.clone(),
+                        build.as_ref(),
+                        &frontend,
+                    )
+                    .await?;
+                    *build
+                        .result
+                        .lock()
+                        .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
+                        Some(prepared.clone());
+                    prepared
+                };
                 let result = buildkit_gateway_build_result(build_id, prepared)?;
                 register_buildkit_prepared_reference(build_id, build.as_ref(), &result)?;
                 result
@@ -26706,6 +26825,7 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
             "source.git",
             "source.git.keepgitdir",
             "source.git.fullurl",
+            "source.git.mtime",
             "source.http",
             "source.http.checksum",
             "source.http.perm",
@@ -26858,11 +26978,11 @@ fn buildkit_outer_solve_response(
         .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
         .clone();
     if let Some(result) = result {
+        let mut exporter_response = result.exporter_response;
+        exporter_response.insert("containerimage.digest".to_string(), result.image_digest);
+        exporter_response.insert("image.name".to_string(), result.image_name);
         return Ok(SolveResponse {
-            exporter_response: HashMap::from([
-                ("containerimage.digest".to_string(), result.image_digest),
-                ("image.name".to_string(), result.image_name),
-            ]),
+            exporter_response,
         });
     }
     if build.request.internal
@@ -26902,23 +27022,43 @@ async fn execute_buildkit_frontend(
         .map_err(|error| format!("buildkit solve: create staging directory failed: {error}"))?;
     let context = staging.path().join("context");
     let dockerfile_local = staging.path().join("dockerfile");
-    receive_buildkit_session_local(
-        state,
-        &build.request.session,
-        "context",
-        &context,
-        Duration::from_secs(120),
-    )
-    .await?;
-    receive_buildkit_session_local(
-        state,
-        &build.request.session,
-        "dockerfile",
-        &dockerfile_local,
-        Duration::from_secs(120),
-    )
-    .await?;
-    let source_dockerfile = dockerfile_local.join(filename_path);
+    let primary_context = request
+        .frontend_opt
+        .get("context")
+        .or_else(|| build.request.frontend_attrs.get("context"))
+        .filter(|value| !value.is_empty())
+        .cloned();
+    let primary_context_epoch = if let Some(source) = primary_context {
+        let context_destination = context.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            materialize_buildkit_remote_context(&source, &context_destination)
+        })
+        .await
+        .map_err(|error| format!("buildkit solve: remote context worker failed: {error}"))??)
+    } else {
+        receive_buildkit_session_local(
+            state,
+            &build.request.session,
+            "context",
+            &context,
+            Duration::from_secs(120),
+        )
+        .await?;
+        receive_buildkit_session_local(
+            state,
+            &build.request.session,
+            "dockerfile",
+            &dockerfile_local,
+            Duration::from_secs(120),
+        )
+        .await?;
+        None
+    };
+    let source_dockerfile = if primary_context_epoch.is_some() {
+        context.join(filename_path)
+    } else {
+        dockerfile_local.join(filename_path)
+    };
     if !source_dockerfile.is_file() {
         return Err(format!("buildkit solve: Dockerfile not found: {filename}"));
     }
@@ -26927,8 +27067,10 @@ async fn execute_buildkit_frontend(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("buildkit solve: create Dockerfile parent failed: {error}"))?;
     }
-    std::fs::copy(&source_dockerfile, &dockerfile)
-        .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
+    if source_dockerfile != dockerfile {
+        std::fs::copy(&source_dockerfile, &dockerfile)
+            .map_err(|error| format!("buildkit solve: stage Dockerfile failed: {error}"))?;
+    }
     // BuildKit keeps the Dockerfile available as a context source even though
     // the builder itself excludes its parser input from COPY.  Use a private
     // parser copy so `COPY Dockerfile .` retains Docker-compatible behavior.
@@ -26990,6 +27132,7 @@ async fn execute_buildkit_frontend(
             platforms: Vec::new(),
             warnings,
             solve_error: None,
+            exporter_response: HashMap::new(),
         });
     }
     // Dockerfile checks are advisory: report them with the build result rather
@@ -27012,6 +27155,7 @@ async fn execute_buildkit_frontend(
             platforms: Vec::new(),
             warnings: lint_warnings,
             solve_error: Some(error),
+            exporter_response: HashMap::new(),
         });
     }
     if let Some(source) = dockerignore
@@ -27029,11 +27173,19 @@ async fn execute_buildkit_frontend(
             solve_error: Some(format!(
                 "failed to compute cache key: failed to calculate checksum of ref ferrocrate \"/{source}\": not found"
             )),
+            exporter_response: HashMap::new(),
         });
     }
-    let build_args = buildkit_frontend_build_args(
+    let mut build_args = buildkit_frontend_build_args(
         &build.request.frontend_attrs,
         &request.frontend_opt,
+    )?;
+    let source_date_epoch = resolve_buildkit_source_date_epoch(
+        &dockerfile_contents,
+        &mut build_args,
+        &build.request.frontend_attrs,
+        &request.frontend_opt,
+        primary_context_epoch,
     )?;
     let export_platforms = buildkit_frontend_export_platforms(
         &build.request.frontend_attrs,
@@ -27090,11 +27242,12 @@ async fn execute_buildkit_frontend(
             session_auth.insert(registry, auth);
         }
     }
-    let execution_options = buildkit_frontend_execution_options(
+    let mut execution_options = buildkit_frontend_execution_options(
         &build.request.frontend_attrs,
         &request.frontend_opt,
         &build.request.entitlements,
     )?;
+    execution_options.source_date_epoch = source_date_epoch;
     let exporter = build
         .request
         .exporters
@@ -27202,6 +27355,37 @@ async fn execute_buildkit_frontend(
     .map_err(|error| format!("buildkit solve: read result config failed: {error}"))?;
     let solve_error = (lint_config.error && !lint_warnings.is_empty())
         .then(|| buildkit_lint_violation_error(&lint_warnings));
+    let mut exporter_response = HashMap::new();
+    if let Some(exporter) = build.request.exporters.iter().find(|exporter| exporter.r#type == "oci") {
+        let bundle = buildkit_oci_bundle(
+            execution.runtime_dir.as_ref(),
+            execution.store.as_ref(),
+            &image_name,
+            exporter.attrs.get("rewrite-timestamp").map(String::as_str) == Some("true"),
+            source_date_epoch,
+        )?;
+        exporter_response.insert(
+            "containerimage.descriptor".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(&bundle.descriptor),
+        );
+        if exporter.attrs.get("tar").map(String::as_str) == Some("false") {
+            store_buildkit_session_content(
+                state,
+                &build.request.session,
+                bundle.blobs,
+                Duration::from_secs(120),
+            )
+            .await?;
+        } else {
+            send_buildkit_session_file(
+                state,
+                &build.request.session,
+                bundle.archive,
+                Duration::from_secs(120),
+            )
+            .await?;
+        }
+    }
     Ok(BuildkitBuildResult {
         image_name,
         image_digest: image.digest,
@@ -27211,6 +27395,7 @@ async fn execute_buildkit_frontend(
         platforms: export_platforms,
         warnings: lint_warnings,
         solve_error,
+        exporter_response,
     })
 }
 
@@ -27251,6 +27436,266 @@ fn buildkit_export_progress(image_name: &str) -> (String, String) {
         "exporting to image".to_string(),
         format!("naming to {image_name} done\n"),
     )
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitOciBundle {
+    archive: Vec<u8>,
+    descriptor: Vec<u8>,
+    blobs: Vec<(String, Vec<u8>)>,
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_oci_bundle(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    image_name: &str,
+    rewrite_timestamp: bool,
+    source_date_epoch: Option<u64>,
+) -> Result<BuildkitOciBundle, String> {
+    let image = resolve_reference(store, image_name)
+        .map_err(|error| format!("buildkit solve: inspect OCI result failed: {error}"))?
+        .ok_or_else(|| "buildkit solve: OCI result image was not published".to_string())?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&image.manifest_json)
+        .map_err(|error| format!("buildkit solve: OCI manifest is invalid: {error}"))?;
+    if rewrite_timestamp {
+        if let Some(epoch) = source_date_epoch {
+            for layer in manifest["layers"].as_array_mut().into_iter().flatten() {
+                layer["annotations"]["buildkit/rewritten-timestamp"] =
+                    serde_json::Value::String(epoch.to_string());
+            }
+        }
+    }
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|error| format!("buildkit solve: encode OCI manifest failed: {error}"))?;
+    let manifest_digest = format!("sha256:{:x}", Sha256::digest(&manifest_bytes));
+    let descriptor = serde_json::to_vec(&serde_json::json!({
+        "mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+        "digest": manifest_digest,
+        "size": manifest_bytes.len(),
+    }))
+    .map_err(|error| format!("buildkit solve: encode OCI descriptor failed: {error}"))?;
+    let index = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "manifests": [serde_json::from_slice::<serde_json::Value>(&descriptor)
+            .map_err(|error| format!("buildkit solve: decode OCI descriptor failed: {error}"))?],
+    }))
+    .map_err(|error| format!("buildkit solve: encode OCI index failed: {error}"))?;
+    let config_digest = manifest["config"]["digest"]
+        .as_str()
+        .ok_or_else(|| "buildkit solve: OCI manifest has no config digest".to_string())?;
+    let config_path = resolve_config_path_with_store(runtime_dir, image_name, store)
+        .map_err(|error| format!("buildkit solve: resolve OCI config failed: {error}"))?
+        .ok_or_else(|| "buildkit solve: OCI config is unavailable".to_string())?;
+    let config = std::fs::read(config_path)
+        .map_err(|error| format!("buildkit solve: read OCI config failed: {error}"))?;
+    let layer_paths = resolve_layer_paths_with_store(runtime_dir, image_name, store)
+        .map_err(|error| format!("buildkit solve: resolve OCI layers failed: {error}"))?;
+    let layer_digests = manifest["layers"]
+        .as_array()
+        .ok_or_else(|| "buildkit solve: OCI manifest has invalid layers".to_string())?
+        .iter()
+        .map(|layer| layer["digest"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    if layer_paths.len() != layer_digests.len() {
+        return Err("buildkit solve: OCI layer metadata does not match stored layers".to_string());
+    }
+
+    let mut blobs = vec![
+        (manifest_digest.clone(), manifest_bytes.clone()),
+        (config_digest.to_string(), config.clone()),
+    ];
+    for (digest, path) in layer_digests.iter().zip(&layer_paths) {
+        let data = std::fs::read(path)
+            .map_err(|error| format!("buildkit solve: read OCI layer failed: {error}"))?;
+        blobs.push((digest.clone(), data));
+    }
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        builder.mode(tar::HeaderMode::Deterministic);
+        append_buildkit_oci_bytes(&mut builder, "oci-layout", br#"{"imageLayoutVersion":"1.0.0"}"#)?;
+        append_buildkit_oci_bytes(&mut builder, "index.json", &index)?;
+        for (digest, data) in &blobs {
+            append_buildkit_oci_blob(&mut builder, digest, data)?;
+        }
+        builder
+            .finish()
+            .map_err(|error| format!("buildkit solve: finish OCI archive failed: {error}"))?;
+    }
+    Ok(BuildkitOciBundle { archive, descriptor, blobs })
+}
+
+#[cfg(target_os = "linux")]
+fn append_buildkit_oci_blob<W: Write>(
+    builder: &mut tar::Builder<W>,
+    digest: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    let (algorithm, encoded) = digest
+        .split_once(':')
+        .ok_or_else(|| format!("buildkit solve: invalid OCI digest: {digest}"))?;
+    append_buildkit_oci_bytes(builder, &format!("blobs/{algorithm}/{encoded}"), data)
+}
+
+#[cfg(target_os = "linux")]
+fn append_buildkit_oci_bytes<W: Write>(
+    builder: &mut tar::Builder<W>,
+    path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(data.len() as u64);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, path, data)
+        .map_err(|error| format!("buildkit solve: write OCI archive failed: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_buildkit_remote_context(source: &str, destination: &Path) -> Result<u64, String> {
+    if source.ends_with("/.git") || source.starts_with("git://") {
+        let status = std::process::Command::new("git")
+            .args(["clone", "--quiet", source])
+            .arg(destination)
+            .status()
+            .map_err(|error| format!("buildkit solve: start git clone failed: {error}"))?;
+        if !status.success() {
+            return Err(format!("buildkit solve: git clone failed with {status}"));
+        }
+        let output = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%ct"])
+            .current_dir(destination)
+            .output()
+            .map_err(|error| format!("buildkit solve: read git commit time failed: {error}"))?;
+        if !output.status.success() {
+            return Err("buildkit solve: git context has no readable commit time".to_string());
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "buildkit solve: git context has an invalid commit time".to_string());
+    }
+    let (archive, epoch) = download_buildkit_http_archive(source)?;
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("buildkit solve: create remote context failed: {error}"))?;
+    extract_docker_build_context(&archive, destination)
+        .map_err(|error| error.replacen("docker build:", "buildkit solve:", 1))?;
+    Ok(epoch)
+}
+
+#[cfg(target_os = "linux")]
+fn download_buildkit_http_archive(source: &str) -> Result<(Vec<u8>, u64), String> {
+    let response = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("buildkit solve: create HTTP client failed: {error}"))?
+        .get(source)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| format!("buildkit solve: fetch remote context failed: {error}"))?;
+    let last_modified = response
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .and_then(buildkit_http_date_epoch);
+    let archive = response
+        .bytes()
+        .map_err(|error| format!("buildkit solve: read remote context failed: {error}"))?
+        .to_vec();
+    if archive.len() as u64 > TransferArchiveLimits::default().max_total_bytes {
+        return Err("buildkit solve: remote context exceeds transfer limit".to_string());
+    }
+    let archive_epoch = buildkit_archive_max_mtime(&archive)?;
+    Ok((archive, last_modified.unwrap_or(archive_epoch)))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_http_date_epoch(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|value| value.timestamp())
+        .or_else(|| {
+            value
+                .strip_suffix(" GMT")
+                .or_else(|| value.strip_suffix(" UTC"))
+                .and_then(|value| {
+                    chrono::NaiveDateTime::parse_from_str(value, "%A, %d-%b-%y %H:%M:%S")
+                        .ok()
+                })
+                .map(|value| value.and_utc().timestamp())
+        })
+        .and_then(|value| u64::try_from(value).ok())
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_archive_max_mtime(archive: &[u8]) -> Result<u64, String> {
+    let reader: Box<dyn Read> = if archive.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::GzDecoder::new(Cursor::new(archive)))
+    } else {
+        Box::new(Cursor::new(archive))
+    };
+    let mut maximum = None;
+    for entry in tar::Archive::new(reader)
+        .entries()
+        .map_err(|error| format!("buildkit solve: invalid remote archive: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("buildkit solve: invalid remote archive entry: {error}"))?;
+        let mtime = entry
+            .header()
+            .mtime()
+            .map_err(|error| format!("buildkit solve: invalid remote archive mtime: {error}"))?;
+        maximum = Some(maximum.map_or(mtime, |current: u64| current.max(mtime)));
+    }
+    maximum.ok_or_else(|| "buildkit solve: remote archive is empty".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_buildkit_source_date_epoch(
+    dockerfile: &str,
+    build_args: &mut HashMap<String, String>,
+    outer: &HashMap<String, String>,
+    frontend: &HashMap<String, String>,
+    primary_context_epoch: Option<u64>,
+) -> Result<Option<u64>, String> {
+    let default = dockerfile
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.to_ascii_uppercase().starts_with("FROM "))
+        .filter_map(|line| line.strip_prefix("ARG ").or_else(|| line.strip_prefix("arg ")))
+        .filter_map(|arg| arg.split_once('='))
+        .find_map(|(name, value)| (name.trim() == "SOURCE_DATE_EPOCH").then(|| value.trim().to_string()));
+    let Some(selector) = build_args
+        .get("SOURCE_DATE_EPOCH")
+        .cloned()
+        .or(default)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let epoch = if let Ok(epoch) = selector.parse::<u64>() {
+        epoch
+    } else if selector == "context" {
+        let Some(epoch) = primary_context_epoch else {
+            return Ok(None);
+        };
+        epoch
+    } else {
+        let key = format!("context:{selector}");
+        let source = frontend.get(&key).or_else(|| outer.get(&key));
+        let Some(source) = source else {
+            return Err(format!("invalid SOURCE_DATE_EPOCH: {selector}"));
+        };
+        download_buildkit_http_archive(source)?.1
+    };
+    build_args.insert("SOURCE_DATE_EPOCH".to_string(), epoch.to_string());
+    Ok(Some(epoch))
 }
 
 #[cfg(target_os = "linux")]
@@ -27534,6 +27979,7 @@ fn buildkit_frontend_execution_options(
         allow_security_insecure: entitlements
             .iter()
             .any(|value| value == "security.insecure"),
+        source_date_epoch: None,
     })
 }
 
@@ -28375,6 +28821,8 @@ async fn wait_for_buildkit_completion(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuildkitControlMethod {
     ListWorkers,
+    DiskUsage,
+    Prune,
     Session,
     Solve,
     Status,
@@ -28392,6 +28840,8 @@ enum BuildkitControlMethod {
 fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
     match path {
         "/moby.buildkit.v1.Control/ListWorkers" => BuildkitControlMethod::ListWorkers,
+        "/moby.buildkit.v1.Control/DiskUsage" => BuildkitControlMethod::DiskUsage,
+        "/moby.buildkit.v1.Control/Prune" => BuildkitControlMethod::Prune,
         "/moby.buildkit.v1.Control/Session" => BuildkitControlMethod::Session,
         "/moby.buildkit.v1.Control/Solve" => BuildkitControlMethod::Solve,
         "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
@@ -28704,6 +29154,25 @@ struct BuildkitCredentialsResponse {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, PartialEq, Message)]
+struct BuildkitWriteContentRequest {
+    #[prost(int32, tag = "1")]
+    action: i32,
+    #[prost(string, tag = "2")]
+    reference: String,
+    #[prost(int64, tag = "3")]
+    total: i64,
+    #[prost(string, tag = "4")]
+    expected: String,
+    #[prost(int64, tag = "5")]
+    offset: i64,
+    #[prost(bytes = "vec", tag = "6")]
+    data: Vec<u8>,
+    #[prost(map = "string, string", tag = "7")]
+    labels: HashMap<String, String>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Message)]
 struct FsutilStat {
     #[prost(string, tag = "1")]
     path: String,
@@ -28963,6 +29432,14 @@ where
                                 let result = request_buildkit_credentials(&mut requests, &host).await;
                                 let _ = reply.send(result);
                             }
+                            BuildkitSessionCommand::SendFile { data, reply } => {
+                                let result = send_buildkit_file(&mut requests, &data).await;
+                                let _ = reply.send(result);
+                            }
+                            BuildkitSessionCommand::StoreContent { blobs, reply } => {
+                                let result = store_buildkit_content(&mut requests, &blobs).await;
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 }
@@ -29027,6 +29504,121 @@ async fn request_buildkit_credentials(
             password: credentials.secret,
         }))
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn send_buildkit_file(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    data: &[u8],
+) -> Result<(), String> {
+    use buildkit_proto::moby::buildkit::v1::BytesMessage;
+
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/moby.filesync.v1.FileSend/DiffCopy")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("buildkit-attachable-exporter-id", "0")
+        .body(())
+        .map_err(|error| format!("buildkit file export: request failed: {error}"))?;
+    let mut ready_requests = requests
+        .clone()
+        .ready()
+        .await
+        .map_err(|error| format!("buildkit file export: h2 client unavailable: {error}"))?;
+    let (response, mut outgoing) = ready_requests
+        .send_request(request, false)
+        .map_err(|error| format!("buildkit file export: start RPC failed: {error}"))?;
+    let chunks = data.chunks(1024 * 1024).collect::<Vec<_>>();
+    for (index, chunk) in chunks.iter().enumerate() {
+        outgoing
+            .send_data(
+                grpc_message(&BytesMessage { data: chunk.to_vec() }),
+                index + 1 == chunks.len(),
+            )
+            .map_err(|error| format!("buildkit file export: send failed: {error}"))?;
+    }
+    if chunks.is_empty() {
+        outgoing
+            .send_data(grpc_message(&BytesMessage { data: Vec::new() }), true)
+            .map_err(|error| format!("buildkit file export: send failed: {error}"))?;
+    }
+    let response = response
+        .await
+        .map_err(|error| format!("buildkit file export: response failed: {error}"))?;
+    if response.status() != http::StatusCode::OK {
+        return Err(format!("buildkit file export returned HTTP {}", response.status()));
+    }
+    let mut incoming = response.into_body();
+    while let Some(chunk) = incoming.data().await {
+        let chunk = chunk.map_err(|error| format!("buildkit file export: response body failed: {error}"))?;
+        incoming.flow_control().release_capacity(chunk.len())
+            .map_err(|error| format!("buildkit file export: flow control failed: {error}"))?;
+    }
+    let trailers = incoming
+        .trailers()
+        .await
+        .map_err(|error| format!("buildkit file export: trailers failed: {error}"))?;
+    let status = trailers
+        .as_ref()
+        .and_then(|values| values.get("grpc-status"))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("0");
+    if status != "0" {
+        return Err(format!("buildkit file export failed with gRPC status {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn store_buildkit_content(
+    requests: &mut h2::client::SendRequest<Bytes>,
+    blobs: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    for (digest, data) in blobs {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/containerd.services.content.v1.Content/Write")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("buildkit-attachable-store-id", "export")
+            .body(())
+            .map_err(|error| format!("buildkit content export: request failed: {error}"))?;
+        let mut ready_requests = requests.clone().ready().await
+            .map_err(|error| format!("buildkit content export: h2 client unavailable: {error}"))?;
+        let (response, mut outgoing) = ready_requests.send_request(request, false)
+            .map_err(|error| format!("buildkit content export: start RPC failed: {error}"))?;
+        outgoing.send_data(grpc_message(&BuildkitWriteContentRequest {
+            action: 2,
+            reference: format!("ferrocrate-{}", digest.replace(':', "-")),
+            total: data.len() as i64,
+            expected: digest.clone(),
+            offset: 0,
+            data: data.clone(),
+            labels: HashMap::new(),
+        }), true).map_err(|error| format!("buildkit content export: send failed: {error}"))?;
+        let response = response.await
+            .map_err(|error| format!("buildkit content export: response failed: {error}"))?;
+        if response.status() != http::StatusCode::OK {
+            return Err(format!("buildkit content export returned HTTP {}", response.status()));
+        }
+        let mut incoming = response.into_body();
+        while let Some(chunk) = incoming.data().await {
+            let chunk = chunk.map_err(|error| format!("buildkit content export: response body failed: {error}"))?;
+            incoming.flow_control().release_capacity(chunk.len())
+                .map_err(|error| format!("buildkit content export: flow control failed: {error}"))?;
+        }
+        let trailers = incoming.trailers().await
+            .map_err(|error| format!("buildkit content export: trailers failed: {error}"))?;
+        let status = trailers.as_ref()
+            .and_then(|values| values.get("grpc-status"))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("0");
+        if status != "0" && status != "6" {
+            return Err(format!("buildkit content export failed with gRPC status {status}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -39345,6 +39937,64 @@ FROM --platform=linux/${MYARCH} busybox\n";
             super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Return"),
             super::BuildkitControlMethod::GatewayReturn
         );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.Control/Prune"),
+            super::BuildkitControlMethod::Prune
+        );
+        assert_eq!(
+            super::buildkit_control_method("/moby.buildkit.v1.Control/DiskUsage"),
+            super::BuildkitControlMethod::DiskUsage
+        );
+    }
+
+    #[test]
+    fn buildkit_source_date_epoch_supports_rfc850_and_archive_maximum() {
+        assert_eq!(
+            super::buildkit_http_date_epoch("Tuesday, 14-Nov-23 22:16:41 UTC"),
+            Some(1_700_000_201)
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            for (name, mtime) in [("older", 1_700_000_101), ("newer", 1_700_000_302)] {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(1);
+                header.set_mtime(mtime);
+                header.set_cksum();
+                archive.append_data(&mut header, name, b"x".as_slice()).expect("entry");
+            }
+            archive.finish().expect("archive");
+        }
+        assert_eq!(super::buildkit_archive_max_mtime(&bytes), Ok(1_700_000_302));
+    }
+
+    #[test]
+    fn buildkit_source_date_epoch_resolves_context_and_dockerfile_default() {
+        let mut args = HashMap::from([("SOURCE_DATE_EPOCH".to_string(), "context".to_string())]);
+        assert_eq!(
+            super::resolve_buildkit_source_date_epoch(
+                "FROM scratch\n",
+                &mut args,
+                &HashMap::new(),
+                &HashMap::new(),
+                Some(1_700_000_101),
+            ),
+            Ok(Some(1_700_000_101))
+        );
+        assert_eq!(args["SOURCE_DATE_EPOCH"], "1700000101");
+
+        let mut args = HashMap::new();
+        assert_eq!(
+            super::resolve_buildkit_source_date_epoch(
+                "ARG SOURCE_DATE_EPOCH=1700000602\nFROM scratch\n",
+                &mut args,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+            ),
+            Ok(Some(1_700_000_602))
+        );
     }
 
     #[test]
@@ -39637,6 +40287,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             platforms: Vec::new(),
             warnings: Vec::new(),
             solve_error: None,
+            exporter_response: HashMap::new(),
         });
 
         state
@@ -39675,6 +40326,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 platforms: vec![platform.clone(), platform],
                 warnings: Vec::new(),
                 solve_error: None,
+                exporter_response: HashMap::new(),
             },
         )
         .expect("gateway result");
@@ -39740,6 +40392,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 ],
                 warnings: Vec::new(),
                 solve_error: None,
+                exporter_response: HashMap::new(),
             },
         )
         .expect_err("one classic result cannot stand in for distinct platforms");
@@ -40172,6 +40825,12 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 }
                 super::BuildkitSessionCommand::Credentials { .. } => {
                     panic!("unexpected credentials request")
+                }
+                super::BuildkitSessionCommand::SendFile { .. } => {
+                    panic!("unexpected file export request")
+                }
+                super::BuildkitSessionCommand::StoreContent { .. } => {
+                    panic!("unexpected content export request")
                 }
             }
         });

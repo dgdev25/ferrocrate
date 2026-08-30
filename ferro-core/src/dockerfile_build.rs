@@ -118,6 +118,8 @@ pub struct DockerfileExecutionOptions {
     pub cpuset_cpus: Option<String>,
     pub cpuset_mems: Option<String>,
     pub pids_limit: Option<u64>,
+    /// Resolved BuildKit SOURCE_DATE_EPOCH used for config and layer clamping.
+    pub source_date_epoch: Option<u64>,
     /// `Some([])` disables cache for every stage; names select specific stages.
     pub no_cache: Option<Vec<String>>,
     pub network_mode: DockerfileNetworkMode,
@@ -1011,8 +1013,12 @@ fn build_one_stage(
         }
     }
 
-    let (layer_bytes, mut layer_media_type) =
-        build_layer_from_dir(&context_root, Some(dockerfile_path), compression)?;
+    let (layer_bytes, mut layer_media_type) = build_layer_from_dir(
+        &context_root,
+        Some(dockerfile_path),
+        compression,
+        execution_options.source_date_epoch,
+    )?;
     let mut layer_digest = sha256_digest_bytes(&layer_bytes);
     let mut layer_size = layer_bytes.len() as i64;
     write_blob(runtime_dir, &layer_digest, &layer_bytes)?;
@@ -1105,6 +1111,7 @@ fn build_one_stage(
             &stage_baseline,
             compression,
             &layer_temp,
+            execution_options.source_date_epoch,
         )?;
         let (digest, size) = write_blob_from_file(runtime_dir, &layer_temp)?;
         let _ = fs::remove_dir_all(layer_dir);
@@ -1734,6 +1741,7 @@ fn execute_stages_and_publish(
     )?;
     let config_json = build_config_json(
         &output_platform,
+        execution_options.source_date_epoch,
         final_stage.healthcheck.clone(),
         &final_env,
         &final_labels,
@@ -1934,9 +1942,16 @@ fn build_layer_from_dir(
     source_dir: &Path,
     dockerfile_path: Option<&Path>,
     compression: CompressionFormat,
+    source_date_epoch: Option<u64>,
 ) -> Result<(Vec<u8>, String), DockerfileBuildError> {
     let mut tar_builder = Builder::new(Vec::new());
-    add_directory(&mut tar_builder, source_dir, source_dir, dockerfile_path)?;
+    add_directory(
+        &mut tar_builder,
+        source_dir,
+        source_dir,
+        dockerfile_path,
+        source_date_epoch,
+    )?;
     let tar_bytes = tar_builder
         .into_inner()
         .map_err(|err| io::Error::other(err.to_string()))?;
@@ -2033,6 +2048,7 @@ fn build_layer_from_snapshot_to_file(
     before: &BTreeMap<PathBuf, StagePathState>,
     compression: CompressionFormat,
     output: &Path,
+    source_date_epoch: Option<u64>,
 ) -> Result<String, DockerfileBuildError> {
     let after = snapshot_stage_root(root)?;
     let file = File::create(output)?;
@@ -2069,7 +2085,7 @@ fn build_layer_from_snapshot_to_file(
         if before.get(path).is_some_and(|old| old.kind != state.kind) {
             append_whiteout(&mut builder, path)?;
         }
-        append_stage_path(&mut builder, root, path, state)?;
+        append_stage_path(&mut builder, root, path, state, source_date_epoch)?;
     }
     builder
         .into_inner()
@@ -2108,11 +2124,11 @@ fn append_stage_path<W: Write>(
     root: &Path,
     relative: &Path,
     state: &StagePathState,
+    source_date_epoch: Option<u64>,
 ) -> Result<(), DockerfileBuildError> {
     let path = root.join(relative);
     match state.kind {
-        StagePathKind::File => builder
-            .append_path_with_name(path, relative)
+        StagePathKind::File => append_tar_file(builder, &path, relative, source_date_epoch)
             .map_err(DockerfileBuildError::Io),
         StagePathKind::Directory => {
             let mut header = tar::Header::new_gnu();
@@ -2173,6 +2189,7 @@ fn add_directory(
     base: &Path,
     path: &Path,
     dockerfile_path: Option<&Path>,
+    source_date_epoch: Option<u64>,
 ) -> Result<(), DockerfileBuildError> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path)? {
@@ -2199,23 +2216,51 @@ fn add_directory(
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             append_tar_dir_entry(builder, &relative).map_err(DockerfileBuildError::Io)?;
-            add_directory(builder, base, &entry_path, dockerfile_path)?;
+            add_directory(
+                builder,
+                base,
+                &entry_path,
+                dockerfile_path,
+                source_date_epoch,
+            )?;
         } else if file_type.is_symlink() {
             let target = fs::read_link(&entry_path)?;
             append_tar_symlink_entry(builder, &relative, &target)
                 .map_err(DockerfileBuildError::Io)?;
         } else if file_type.is_file() {
-            builder
-                .append_path_with_name(&entry_path, &relative)
+            append_tar_file(builder, &entry_path, &relative, source_date_epoch)
                 .map_err(DockerfileBuildError::Io)?;
         }
     }
     Ok(())
 }
 
+fn append_tar_file<W: Write>(
+    builder: &mut Builder<W>,
+    source: &Path,
+    archive_path: &Path,
+    source_date_epoch: Option<u64>,
+) -> io::Result<()> {
+    let metadata = fs::metadata(source)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata(&metadata);
+    if let Some(epoch) = source_date_epoch {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_secs())
+            .unwrap_or_default();
+        header.set_mtime(modified.min(epoch));
+    }
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, File::open(source)?)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_config_json(
     platform: &BuildkitPlatform,
+    source_date_epoch: Option<u64>,
     healthcheck: Option<HealthcheckSpec>,
     env: &[String],
     labels: &HashMap<String, String>,
@@ -2229,6 +2274,10 @@ fn build_config_json(
     exposed_ports: &[String],
     volumes: &[String],
 ) -> String {
+    let created = source_date_epoch
+        .and_then(|epoch| chrono::DateTime::from_timestamp(epoch as i64, 0))
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
     let health = healthcheck.map(|spec| {
         json!({
             "Test": spec.test,
@@ -2260,7 +2309,7 @@ fn build_config_json(
     };
 
     json!({
-        "created": "1970-01-01T00:00:00Z",
+        "created": created,
         "author": author,
         "architecture": platform.architecture,
         "os": platform.os,
@@ -8347,6 +8396,7 @@ mod tests {
             &before,
             crate::layer_compression::CompressionFormat::Gzip,
             &layer,
+            None,
         )
         .unwrap();
         let decoder = flate2::read::GzDecoder::new(std::fs::File::open(layer).unwrap());
@@ -8376,6 +8426,7 @@ mod tests {
             &before,
             crate::layer_compression::CompressionFormat::Gzip,
             &layer,
+            None,
         )
         .unwrap();
 
@@ -8929,6 +8980,73 @@ mod tests {
             .expect("layers");
         assert_eq!(layers.len(), 1);
         assert!(layers[0].exists());
+    }
+
+    #[test]
+    fn source_date_epoch_clamps_layer_entries_and_image_created_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch\nCOPY payload /payload\n").expect("dockerfile");
+        let payload = temp.path().join("payload");
+        let file = fs::File::create(&payload).expect("payload");
+        file.set_len(1).expect("payload size");
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(1_700_001_000),
+                ),
+        )
+        .expect("payload mtime");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        let options = super::DockerfileExecutionOptions {
+            source_date_epoch: Some(1_700_000_000),
+            ..Default::default()
+        };
+        let plan = super::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+            &dockerfile,
+            Some("local/source-date-epoch:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &HashMap::new(),
+            &HashMap::new(),
+            &options,
+        )
+        .expect("plan");
+        let permit = crate::authorization::surface::SurfaceAuthorization::compatibility()
+            .authorize_image_build_plan(
+                &crate::authorization::RequestOrigin::cli_current().expect("origin"),
+                &plan,
+            )
+            .expect("permit");
+        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
+            .expect("build");
+        let config: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                runtime
+                    .join("images/configs")
+                    .join(result.config_digest.replace(':', "_")),
+            )
+            .expect("config"),
+        )
+        .expect("config JSON");
+        assert_eq!(config["created"], "2023-11-14T22:13:20Z");
+        let layers = resolve_layer_paths_with_store(&runtime, &result.reference, &store)
+            .expect("layers");
+        let decoder = flate2::read::GzDecoder::new(fs::File::open(&layers[0]).expect("layer"));
+        let mut archive = tar::Archive::new(decoder);
+        let mtime = archive
+            .entries()
+            .expect("entries")
+            .find_map(|entry| {
+                let entry = entry.expect("entry");
+                (entry.path().expect("path").as_ref() == std::path::Path::new("payload"))
+                    .then(|| entry.header().mtime().expect("mtime"))
+            })
+            .expect("payload entry");
+        assert_eq!(mtime, 1_700_000_000);
     }
 
     #[test]

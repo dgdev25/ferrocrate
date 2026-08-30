@@ -64,6 +64,29 @@ run_case() {
   # in the isolated target dir until the trap removes it.
 }
 
+run_core_case() {
+  local name="$1"
+  local timeout_seconds="$2"
+  local qualified_name="dockerfile_build::tests::$name"
+  echo "running $name (bound ${timeout_seconds}s)"
+  if timeout --foreground --kill-after=10s "${timeout_seconds}s" \
+    env CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" CARGO_INCREMENTAL=0 \
+    CARGO_TARGET_DIR="$target_root/target" \
+    cargo test -p ferro-core --lib --offline "$qualified_name" \
+    -- --ignored --exact --test-threads=1 --nocapture \
+    >"$output_dir/$name.log" 2>&1; then
+    printf '%s\tpass\n' "$name" >>"$manifest"
+  else
+    local rc=$?
+    if (( rc == 124 || rc == 137 )); then
+      printf '%s\ttimeout\n' "$name" >>"$manifest"
+    else
+      printf '%s\tfail\n' "$name" >>"$manifest"
+    fi
+    echo "qualification: $name failed (rc=$rc); see $output_dir/$name.log" >&2
+  fi
+}
+
 root_mode="${FERROCRATE_QUAL_ROOT:-0}"
 if [[ "$root_mode" == "1" ]]; then
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -79,6 +102,7 @@ if [[ "$root_mode" == "1" ]]; then
   run_case qual_root_enospc_tmpfs_fail_closed_and_recovery 420
   run_case qual_root_cgroup_oom_group_teardown 420
   run_case qual_root_cpu_throttle_measured 420
+  run_core_case qual_root_buildkit_insecure_devices_and_loop_whitelist 420
 else
   run_case qual_hundred_container_lifecycle_with_rss_sampling 900
   run_case qual_resource_exhaustion_memory_oom_isolated 420

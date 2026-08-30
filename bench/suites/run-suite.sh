@@ -45,9 +45,13 @@ echo $$ > "$LOCKFILE.pid"
 # this script. Later paths register what they need cleaned by setting these
 # variables; they must never call `trap ... EXIT` themselves.
 CLEANUP_DAEMON=""; CLEANUP_PATHS=""; CLEANUP_DOCKER_CONTEXT=""
+CLEANUP_EXTRA_DAEMONS=(); CLEANUP_EXTRA_PATHS=()
 suite_cleanup() {
   [ -n "$CLEANUP_DAEMON" ] && kill "$CLEANUP_DAEMON" 2>/dev/null
+  local daemon path
+  for daemon in "${CLEANUP_EXTRA_DAEMONS[@]}"; do kill "$daemon" 2>/dev/null || true; done
   [ -n "$CLEANUP_DOCKER_CONTEXT" ] && docker context rm -f "$CLEANUP_DOCKER_CONTEXT" >/dev/null 2>&1
+  for path in "${CLEANUP_EXTRA_PATHS[@]}"; do rm -f "$path"; done
   # shellcheck disable=SC2086
   [ -n "$CLEANUP_PATHS" ] && rm -f $CLEANUP_PATHS
   rm -f "$LOCKFILE.pid"
@@ -317,6 +321,40 @@ FROZEN
         *)      TARGET="unix://$SOCK";;
       esac
       GATE="$WORK/gate.sock"
+      if [ "$ENGINE" = ferrocrate ]; then
+        start_entitlement_daemon() {
+          local variant="$1" socket="$2"; shift 2
+          local variant_home="$FERROCRATE_HOME/home-$variant"
+          mkdir -p "$variant_home"
+          HOME="$variant_home" FERROCRATE_HOME="$variant_home" \
+            FERROCRATE_RUNTIME_DIR="$variant_home" \
+            "$WORK/ferro-suite-engine" daemon --docker-compat \
+            --socket "$socket" "$@" > "$WORK/daemon-$variant.log" 2>&1 &
+          local daemon=$!
+          for _ in $(seq 1 100); do [ -S "$socket" ] && break; sleep 0.1; done
+          [ -S "$socket" ] || {
+            echo "Ferrocrate $variant entitlement daemon did not create $socket; see $WORK/daemon-$variant.log" >&2
+            kill "$daemon" 2>/dev/null || true
+            exit 2
+          }
+          CLEANUP_EXTRA_DAEMONS+=("$daemon")
+          CLEANUP_EXTRA_PATHS+=("$socket")
+        }
+        NETWORK_HOST_SOCK="$WORK/network-host.sock"
+        SECURITY_INSECURE_SOCK="$WORK/security-insecure.sock"
+        ALL_ENTITLEMENTS_SOCK="$WORK/all-entitlements.sock"
+        start_entitlement_daemon network-host "$NETWORK_HOST_SOCK" \
+          --allow-insecure-entitlement network.host
+        start_entitlement_daemon security-insecure "$SECURITY_INSECURE_SOCK" \
+          --allow-insecure-entitlement security.insecure
+        start_entitlement_daemon all-entitlements "$ALL_ENTITLEMENTS_SOCK" \
+          --allow-insecure-entitlement network.host \
+          --allow-insecure-entitlement security.insecure
+        export BK_GATE_NONE="$SOCK"
+        export BK_GATE_NETWORK_HOST="$NETWORK_HOST_SOCK"
+        export BK_GATE_SECURITY_INSECURE="$SECURITY_INSECURE_SOCK"
+        export BK_GATE_ALL="$ALL_ENTITLEMENTS_SOCK"
+      else
       python3 - "$GATE" "$TARGET" > "$WORK/gate.log" 2>&1 <<'PYEOF' &
 import os, socket, sys, threading
 gate, target = sys.argv[1], sys.argv[2][len("unix://"):]
@@ -374,10 +412,14 @@ PYEOF
       GATEPID=$!
       for _ in $(seq 1 50); do [ -S "$GATE" ] && break; sleep 0.1; done
       [ -S "$GATE" ] || { echo "gate did not come up; see $WORK/gate.log" >&2; kill $GATEPID; exit 2; }
+        export BK_GATE_NONE="$GATE"
+        export BK_GATE_NETWORK_HOST="$GATE"
+        export BK_GATE_SECURITY_INSECURE="$GATE"
+        export BK_GATE_ALL="$GATE"
+      fi
       mkdir -p "$WORK/bin"
       cp "$BENCH/suites/buildkit-dockerfile/dockerd-forwarder.py" "$WORK/bin/dockerd"
       chmod +x "$WORK/bin/dockerd"
-      export BK_GATE="$GATE"
       # Persistent mirror storage: the harness copies every test image from
       # docker.io into a throwaway registry once per run. Docker Hub allows
       # this shared IP 100 manifest requests per rolling hour, so a fresh

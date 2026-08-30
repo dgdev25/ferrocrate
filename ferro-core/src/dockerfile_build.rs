@@ -167,6 +167,93 @@ fn dockerfile_default_capabilities() -> Vec<caps::Capability> {
     ]
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BuildDeviceNode {
+    path: PathBuf,
+    kind: nix::sys::stat::SFlag,
+    major: u64,
+    minor: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn next_free_loop_device() -> io::Result<u32> {
+    let control = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/loop-control")?;
+    const LOOP_CTL_GET_FREE: nix::libc::c_ulong = 0x4C82;
+    let result = unsafe { nix::libc::ioctl(control.as_raw_fd(), LOOP_CTL_GET_FREE) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    u32::try_from(result).map_err(|_| io::Error::other("free loop device id exceeds u32"))
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_insecure_device_nodes(free_loop_id: Option<u32>) -> Vec<BuildDeviceNode> {
+    use nix::sys::stat::SFlag;
+    let character = |path: &str, major, minor| BuildDeviceNode {
+        path: path.into(),
+        kind: SFlag::S_IFCHR,
+        major,
+        minor,
+    };
+    let mut devices = vec![
+        character("null", 1, 3),
+        character("zero", 1, 5),
+        character("full", 1, 7),
+        character("random", 1, 8),
+        character("urandom", 1, 9),
+        character("tty", 5, 0),
+        character("kmsg", 1, 11),
+        character("cuse", 10, 203),
+        character("fuse", 10, 229),
+        character("kvm", 10, 232),
+        character("net/tun", 10, 200),
+        character("loop-control", 10, 237),
+    ];
+    let last_loop = free_loop_id.unwrap_or(0).saturating_add(7);
+    devices.extend((0..=last_loop).map(|minor| BuildDeviceNode {
+        path: format!("loop{minor}").into(),
+        kind: SFlag::S_IFBLK,
+        major: 7,
+        minor: u64::from(minor),
+    }));
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn mount_rootful_insecure_devices(rootfs_dev: &Path) -> io::Result<()> {
+    mount(
+        None::<&str>,
+        rootfs_dev,
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
+        Some("mode=755,size=1m"),
+    )
+    .map_err(|error| io::Error::other(format!("mount insecure build /dev: {error}")))?;
+    for directory in ["net", "pts", "shm"] {
+        fs::create_dir_all(rootfs_dev.join(directory))?;
+    }
+    let free_loop_id = next_free_loop_device().ok();
+    for device in buildkit_insecure_device_nodes(free_loop_id) {
+        nix::sys::stat::mknod(
+            &rootfs_dev.join(&device.path),
+            device.kind,
+            nix::sys::stat::Mode::from_bits_truncate(0o666),
+            nix::sys::stat::makedev(device.major, device.minor),
+        )
+        .map_err(|error| {
+            io::Error::other(format!(
+                "create insecure build device /dev/{}: {error}",
+                device.path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 impl ImageBuildPlan {
     pub fn canonical_tag(&self) -> &str {
         &self.canonical_tag
@@ -5605,6 +5692,13 @@ fn run_stage_commands(
                 "entitlement security.insecure is not allowed".to_string(),
             ));
         }
+        let rootful_insecure_dev = if running_as_root && security_insecure {
+            let target = validate_mount_target(rootfs, "/dev", "insecure build device")?;
+            fs::create_dir_all(&target)?;
+            Some(target)
+        } else {
+            None
+        };
         if rootless_bwrap.is_some() {
             provision_rootless_build_network_files(rootfs)?;
         }
@@ -5940,6 +6034,14 @@ fn run_stage_commands(
                             err.kind(),
                             format!("build pre_exec unshare root namespaces: {err}"),
                         )
+                    })?;
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(target) = rootful_insecure_dev.as_ref() {
+                    mount_rootful_insecure_devices(target).map_err(|err| {
+                        io::Error::new(err.kind(), format!(
+                            "build pre_exec prepare insecure devices: {err}"
+                        ))
                     })?;
                 }
                 #[cfg(target_os = "linux")]
@@ -11553,6 +11655,93 @@ mod tests {
         assert!(invalid
             .to_string()
             .contains("security \"privileged\" is not valid"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn insecure_device_census_matches_buildkit_fixed_and_loop_whitelist() {
+        use nix::sys::stat::SFlag;
+        let devices = super::buildkit_insecure_device_nodes(Some(12));
+        for (path, major, minor) in [
+            ("kmsg", 1, 11),
+            ("cuse", 10, 203),
+            ("fuse", 10, 229),
+            ("kvm", 10, 232),
+            ("net/tun", 10, 200),
+            ("loop-control", 10, 237),
+        ] {
+            assert!(
+                devices.iter().any(|device| {
+                    device.path == std::path::Path::new(path)
+                        && device.kind == SFlag::S_IFCHR
+                        && device.major == major
+                        && device.minor == minor
+                }),
+                "missing BuildKit automatic device /dev/{path}"
+            );
+        }
+        let loops = devices
+            .iter()
+            .filter(|device| device.kind == SFlag::S_IFBLK && device.major == 7)
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 20, "loop whitelist must cover 0..=free+7");
+        assert_eq!(loops.first().unwrap().path, std::path::Path::new("loop0"));
+        assert_eq!(loops.last().unwrap().path, std::path::Path::new("loop19"));
+        let fallback = super::buildkit_insecure_device_nodes(None);
+        assert!(fallback
+            .iter()
+            .any(|device| device.path == std::path::Path::new("loop7")));
+        assert!(!fallback
+            .iter()
+            .any(|device| device.path == std::path::Path::new("loop8")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "root-gated qualification scenario: FERROCRATE_QUAL_ROOT=1 as root"]
+    fn qual_root_buildkit_insecure_devices_and_loop_whitelist() {
+        assert!(
+            nix::unistd::Uid::effective().is_root(),
+            "root required; run via scripts/qualification-fault-matrix.sh with FERROCRATE_QUAL_ROOT=1"
+        );
+        let busybox = static_busybox().expect("qualification host needs static busybox");
+        let free_loop = super::next_free_loop_device().unwrap_or(0);
+        let last_loop = free_loop.saturating_add(7);
+        let outside_loop = last_loop.saturating_add(1);
+        let temp = tempfile::tempdir().expect("qualification tempdir");
+        let context = temp.path().join("context");
+        std::fs::create_dir_all(&context).expect("context dir");
+        std::fs::copy(busybox, context.join("busybox")).expect("copy static busybox");
+        let insecure_probe = format!(
+            "test -c /dev/kmsg && test -c /dev/cuse && test -c /dev/fuse && \
+             test -c /dev/kvm && test -c /dev/net/tun && test -c /dev/loop-control && \
+             test -b /dev/loop0 && test -b /dev/loop{last_loop} && \
+             test ! -e /dev/loop{outside_loop} && \
+             dd if=/dev/zero of=/disk.img bs=1M count=1 >/dev/null 2>&1 && \
+             losetup /dev/loop{free_loop} /disk.img && \
+             losetup -d /dev/loop{free_loop} && rm /disk.img"
+        );
+        let insecure_json =
+            serde_json::to_string(&vec!["/busybox", "sh", "-ec", insecure_probe.as_str()])
+                .expect("probe JSON");
+        let dockerfile = context.join("Dockerfile");
+        std::fs::write(&dockerfile, format!(
+            "FROM scratch\nCOPY busybox /busybox\n\
+             RUN [\"/busybox\",\"sh\",\"-ec\",\"test ! -e /dev/fuse && test ! -e /dev/loop-control\"]\n\
+             RUN --security=insecure {insecure_json}\n"
+        )).expect("write Dockerfile");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("image store");
+        let options = super::DockerfileExecutionOptions {
+            allow_security_insecure: true,
+            ..super::DockerfileExecutionOptions::default()
+        };
+        super::build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args(
+            &dockerfile, Some("local/s159-insecure-devices:latest"), &runtime,
+            CompressionFormat::Gzip, &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &HashMap::new(), &HashMap::new(), None, &HashMap::new(), &options,
+        ).unwrap_or_else(|error| panic!("rootful insecure device build failed: {error}"));
     }
 
     #[test]

@@ -124,8 +124,8 @@ pub struct DockerfileExecutionOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockerfileUlimit {
     pub name: String,
-    pub soft: u64,
-    pub hard: u64,
+    pub soft: i64,
+    pub hard: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -6761,8 +6761,8 @@ fn apply_dockerfile_ulimits(ulimits: &[DockerfileUlimit]) -> io::Result<()> {
             }
         };
         let raw = nix::libc::rlimit {
-            rlim_cur: limit.soft,
-            rlim_max: limit.hard,
+            rlim_cur: limit.soft as nix::libc::rlim_t,
+            rlim_max: limit.hard as nix::libc::rlim_t,
         };
         // SAFETY: `raw` is fully initialized and `resource` is one of libc's
         // platform constants. This runs in the child immediately before exec.

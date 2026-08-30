@@ -27167,6 +27167,7 @@ fn buildkit_lint_warnings_with_context(
     let lowercase = instructions.iter().filter(|(_, keyword, _)| keyword == &keyword.to_ascii_lowercase()).count();
     let majority = if uppercase >= lowercase { "uppercase" } else { "lowercase" };
     let mut warnings = Vec::new();
+    let mut defined_variables = std::collections::HashSet::from(["PATH".to_string()]);
     for (line, keyword, text) in &instructions {
         let wrong_case = (majority == "uppercase" && keyword != &keyword.to_ascii_uppercase())
             || (majority == "lowercase" && keyword != &keyword.to_ascii_lowercase());
@@ -27241,15 +27242,39 @@ fn buildkit_lint_warnings_with_context(
                 }
             }
         }
-        for variable in text.split_whitespace().filter_map(|word| word.strip_prefix('$')) {
-            let variable = variable.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
-            if !variable.is_empty() && !text.starts_with("ARG ") && !text.starts_with("arg ") {
+        if !keyword.eq_ignore_ascii_case("FROM") && !keyword.eq_ignore_ascii_case("ARG") {
+            for variable in buildkit_dockerfile_variables(text) {
+                if defined_variables.contains(&variable) {
+                    continue;
+                }
+                let suggestion = buildkit_nearest_variable(&variable, &defined_variables)
+                    .map(|candidate| format!(" (did you mean ${candidate}?)"))
+                    .unwrap_or_default();
                 warnings.push(buildkit_lint_warning(
                     "UndefinedVar",
                     "Variables should be defined before their use",
-                    format!("Usage of undefined variable '${variable}'"),
+                    format!("Usage of undefined variable '${variable}'{suggestion}"),
                     *line,
                 ));
+            }
+        }
+        let arguments = text
+            .split_once(char::is_whitespace)
+            .map(|(_, arguments)| arguments.trim())
+            .unwrap_or("");
+        if keyword.eq_ignore_ascii_case("ARG") {
+            if let Some(name) = arguments
+                .split(['=', ' '])
+                .next()
+                .filter(|name| !name.is_empty())
+            {
+                defined_variables.insert(name.to_string());
+            }
+        } else if keyword.eq_ignore_ascii_case("ENV") {
+            for assignment in arguments.split_whitespace() {
+                if let Some((name, _)) = assignment.split_once('=') {
+                    defined_variables.insert(name.to_string());
+                }
             }
         }
     }
@@ -27259,6 +27284,68 @@ fn buildkit_lint_warnings_with_context(
             !skipped_rules.contains("all") && !skipped_rules.contains(warning.rule_name.as_str())
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_dockerfile_variables(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut variables = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let braced = bytes.get(index) == Some(&b'{');
+        if braced {
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+        {
+            index += 1;
+        }
+        if index > start {
+            let variable = &text[start..index];
+            if !variables.iter().any(|existing| existing == variable) {
+                variables.push(variable.to_string());
+            }
+        }
+    }
+    variables
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_nearest_variable<'a>(
+    variable: &str,
+    defined: &'a std::collections::HashSet<String>,
+) -> Option<&'a str> {
+    let mut candidates = defined
+        .iter()
+        .map(|candidate| (buildkit_edit_distance(variable, candidate), candidate.as_str()))
+        .filter(|(distance, _)| *distance <= 2)
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.first().map(|(_, candidate)| *candidate)
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_edit_distance(left: &str, right: &str) -> usize {
+    let right = right.as_bytes();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        let mut current = vec![left_index + 1];
+        for (right_index, right_byte) in right.iter().enumerate() {
+            current.push(std::cmp::min(
+                std::cmp::min(current[right_index] + 1, previous[right_index + 1] + 1),
+                previous[right_index] + usize::from(left_byte != *right_byte),
+            ));
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 #[cfg(target_os = "linux")]
@@ -36286,6 +36373,34 @@ FROM scratch as base\ncopy Dockerfile .\n";
             Some(".*\n"),
         );
         assert!(dotfiles_only.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_lint_tracks_declared_variables_and_suggests_near_matches() {
+        let dockerfile = "\nFROM alpine\n\
+ARG DIR_BINARIES=binaries/\n\
+ARG DIR_ASSETS=assets/\n\
+ARG DIR_CONFIG=config/\n\
+COPY $DIR_ASSET .\n";
+        let warnings = super::buildkit_lint_warnings(dockerfile);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_name, "UndefinedVar");
+        assert_eq!(warnings[0].line, 6);
+        assert_eq!(
+            warnings[0].detail,
+            "Usage of undefined variable '$DIR_ASSET' (did you mean $DIR_ASSETS?)"
+        );
+
+        assert!(super::buildkit_lint_warnings(
+            "FROM alpine\nARG foo=Dockerfile\nCOPY $foo .\nRUN echo $PATH\n"
+        )
+        .is_empty());
+        let before_declaration = super::buildkit_lint_warnings(
+            "FROM alpine\nCOPY $foo .\nARG foo=bar\nRUN echo $foo\n",
+        );
+        assert_eq!(before_declaration.len(), 1);
+        assert_eq!(before_declaration[0].line, 2);
     }
 
     #[cfg(target_os = "linux")]

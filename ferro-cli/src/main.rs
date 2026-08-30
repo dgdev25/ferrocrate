@@ -27186,6 +27186,10 @@ fn buildkit_frontend_execution_options(
         .filter(|value| *value > 0)
         .map(|value| value as u64);
     Ok(DockerfileExecutionOptions {
+        target_platform: get("platform")
+            .and_then(|platforms| platforms.split(',').next())
+            .filter(|platform| !platform.is_empty())
+            .map(str::to_string),
         shm_size,
         ulimits,
         cgroup_parent: get("cgroup-parent")
@@ -38975,6 +38979,10 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 ("no-cache".to_string(), "build,package".to_string()),
             ]),
             &HashMap::from([
+                (
+                    "platform".to_string(),
+                    "windows(10.0.20348.1006)/amd64".to_string(),
+                ),
                 ("shm-size".to_string(), "134217728".to_string()),
                 ("ulimit".to_string(), "nofile=1062:1062".to_string()),
                 ("cgroup-parent".to_string(), "build-parent".to_string()),
@@ -38985,6 +38993,10 @@ FROM --platform=linux/${MYARCH} busybox\n";
         .expect("frontend resources parse");
 
         assert_eq!(options.shm_size, Some(134_217_728));
+        assert_eq!(
+            options.target_platform.as_deref(),
+            Some("windows(10.0.20348.1006)/amd64")
+        );
         assert_eq!(options.memory, Some(67_108_864));
         assert_eq!(options.cpu_quota, Some(50_000));
         assert_eq!(options.cpu_period, Some(100_000));

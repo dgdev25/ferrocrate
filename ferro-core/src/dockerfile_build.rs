@@ -103,6 +103,10 @@ pub struct ImageBuildPlan {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DockerfileExecutionOptions {
+    /// BuildKit frontend target platform. This remains separate from automatic
+    /// build arguments because users may override `TARGET*` arguments without
+    /// changing the output image's platform.
+    pub target_platform: Option<String>,
     pub shm_size: Option<u64>,
     pub ulimits: Vec<DockerfileUlimit>,
     pub cgroup_parent: Option<String>,
@@ -464,6 +468,10 @@ struct BaseImageInfo {
 /// with no command at all, so `run` had nothing to start (S24).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BaseConfig {
+    architecture: Option<String>,
+    os: Option<String>,
+    os_version: Option<String>,
+    variant: Option<String>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     workdir: Option<String>,
@@ -1106,12 +1114,20 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
             )));
         }
     }
+    let cache_platform = output_platform_for_config(
+        execution_options.target_platform.as_deref(),
+        &base_infos
+            .last()
+            .ok_or_else(|| DockerfileBuildError::Invalid("missing final stage".to_string()))?
+            .config,
+    )?
+    .formatted;
     let cache_key = build_cache_key_with_build_args(
         &dockerfile,
         compression,
         &context_hash,
         &base_infos,
-        BUILD_CACHE_PLATFORM,
+        &cache_platform,
         build_args,
     );
     let base_digests = base_infos
@@ -1594,7 +1610,12 @@ fn execute_stages_and_publish(
     );
     let exposed_ports = merge_unique(&final_base.exposed_ports, &final_stage.exposed_ports);
     let volumes = merge_unique(&final_base.volumes, &final_stage.volumes);
+    let output_platform = output_platform_for_config(
+        execution_options.target_platform.as_deref(),
+        final_base,
+    )?;
     let config_json = build_config_json(
+        &output_platform,
         final_stage.healthcheck.clone(),
         &final_env,
         &final_labels,
@@ -2076,6 +2097,7 @@ fn add_directory(
 
 #[allow(clippy::too_many_arguments)]
 fn build_config_json(
+    platform: &BuildkitPlatform,
     healthcheck: Option<HealthcheckSpec>,
     env: &[String],
     labels: &HashMap<String, String>,
@@ -2122,8 +2144,18 @@ fn build_config_json(
     json!({
         "created": "1970-01-01T00:00:00Z",
         "author": author,
-        "architecture": "amd64",
-        "os": "linux",
+        "architecture": platform.architecture,
+        "os": platform.os,
+        "os.version": if platform.os_version.is_empty() {
+            None
+        } else {
+            Some(platform.os_version.as_str())
+        },
+        "variant": if platform.variant.is_empty() {
+            None
+        } else {
+            Some(platform.variant.as_str())
+        },
         "config": {
             "Env": env,
             "Cmd": cmd,
@@ -2742,9 +2774,9 @@ pub fn prune_build_cache(
     Ok(remove_count)
 }
 
-/// The cache key binds the target platform so a future multi-platform cache
-/// misses instead of serving a layer built for a different platform. Builds
-/// are single-platform today; the constant matches `build_config_json`.
+/// Native platform fixture used by cache-key unit tests. Production builds
+/// bind the normalized frontend target platform selected for their image.
+#[cfg(test)]
 const BUILD_CACHE_PLATFORM: &str = "linux/amd64";
 
 #[cfg(test)]
@@ -3390,12 +3422,47 @@ pub fn automatic_platform_args_for_target(
     ]))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct BuildkitPlatform {
     formatted: String,
     os: String,
     os_version: String,
     architecture: String,
     variant: String,
+}
+
+fn output_platform_for_config(
+    target: Option<&str>,
+    base: &BaseConfig,
+) -> Result<BuildkitPlatform, DockerfileBuildError> {
+    let mut platform = match target {
+        Some(target) => parse_buildkit_platform(target)?,
+        None => automatic_platform_args_for_target(None).map(|args| BuildkitPlatform {
+            formatted: args["TARGETPLATFORM"].clone(),
+            os: args["TARGETOS"].clone(),
+            os_version: args["TARGETOSVERSION"].clone(),
+            architecture: args["TARGETARCH"].clone(),
+            variant: args["TARGETVARIANT"].clone(),
+        })?,
+    };
+    let same_os_arch = base.os.as_deref() == Some(platform.os.as_str())
+        && base.architecture.as_deref() == Some(platform.architecture.as_str());
+    if target.is_none() {
+        if let (Some(os), Some(architecture)) = (&base.os, &base.architecture) {
+            platform.os = os.clone();
+            platform.architecture = architecture.clone();
+            platform.os_version = base.os_version.clone().unwrap_or_default();
+            platform.variant = base.variant.clone().unwrap_or_default();
+        }
+    } else if same_os_arch {
+        if platform.os_version.is_empty() {
+            platform.os_version = base.os_version.clone().unwrap_or_default();
+        }
+        if platform.variant.is_empty() {
+            platform.variant = base.variant.clone().unwrap_or_default();
+        }
+    }
+    Ok(platform)
 }
 
 fn parse_buildkit_platform(value: &str) -> Result<BuildkitPlatform, DockerfileBuildError> {
@@ -7025,6 +7092,26 @@ fn load_base_config(
     };
 
     Ok(BaseConfig {
+        architecture: document
+            .get("architecture")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        os: document
+            .get("os")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        os_version: document
+            .get("os.version")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        variant: document
+            .get("variant")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         entrypoint: strings("Entrypoint").filter(|values| !values.is_empty()),
         cmd: strings("Cmd").filter(|values| !values.is_empty()),
         workdir: text("WorkingDir"),
@@ -8214,6 +8301,24 @@ mod tests {
     }
 
     #[test]
+    fn target_without_os_version_preserves_matching_base_os_version() {
+        let base = super::BaseConfig {
+            architecture: Some("amd64".to_string()),
+            os: Some("windows".to_string()),
+            os_version: Some("10.0.20348.1006".to_string()),
+            variant: None,
+            ..Default::default()
+        };
+
+        let output = super::output_platform_for_config(Some("windows/amd64"), &base)
+            .expect("output platform");
+
+        assert_eq!(output.os, "windows");
+        assert_eq!(output.architecture, "amd64");
+        assert_eq!(output.os_version, "10.0.20348.1006");
+    }
+
+    #[test]
     fn requested_platform_args_drive_from_and_stage_arg_expansion() {
         let mut args = super::automatic_platform_args_for_target(Some("darwin/ppc64le"))
             .expect("target platform");
@@ -8627,6 +8732,63 @@ mod tests {
         assert_eq!(config["config"]["Env"], serde_json::json!(["FIRST=one", "SECOND=two"]));
         assert_eq!(config["config"]["Labels"]["org.ferrocrate.first"], "one");
         assert_eq!(config["config"]["Labels"]["org.ferrocrate.second"], "two");
+    }
+
+    #[test]
+    fn buildkit_target_os_version_expands_and_is_written_to_image_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nARG TARGETOSVERSION\nCOPY <<EOF /osversion\n${TARGETOSVERSION}\nEOF\n",
+        )
+        .expect("write Dockerfile");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("open store");
+        let build_args = super::automatic_platform_args_for_target(Some(
+            "windows(10.0.20348.1006)/amd64",
+        ))
+        .expect("target platform");
+
+        let options = super::DockerfileExecutionOptions {
+            target_platform: Some("windows(10.0.20348.1006)/amd64".to_string()),
+            ..Default::default()
+        };
+        let plan = super::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+            &dockerfile,
+            Some("local/os-version:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &HashMap::new(),
+            &build_args,
+            &options,
+        )
+        .expect("prepare build plan");
+        let permit = crate::authorization::surface::SurfaceAuthorization::compatibility()
+            .authorize_image_build_plan(
+                &crate::authorization::RequestOrigin::cli_current().expect("origin"),
+                &plan,
+            )
+            .expect("authorize build plan");
+        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
+            .expect("build image");
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 0).join("osversion"))
+                .expect("TARGETOSVERSION output"),
+            "10.0.20348.1006"
+        );
+        let config = fs::read_to_string(
+            runtime
+                .join("images")
+                .join("configs")
+                .join(result.config_digest.replace(':', "_")),
+        )
+        .expect("read image config");
+        let config: serde_json::Value = serde_json::from_str(&config).expect("parse image config");
+        assert_eq!(config["os"], "windows");
+        assert_eq!(config["architecture"], "amd64");
+        assert_eq!(config["os.version"], "10.0.20348.1006");
     }
 
     #[test]

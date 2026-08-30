@@ -474,11 +474,11 @@ fn mappings_for_caller(caller_id: u32, range: Option<IdRange>) -> Vec<RootlessMa
         host_id: caller_id,
         size: 1,
     }];
-    if let Some(range) = range.filter(|range| range.count > 1) {
+    if let Some(range) = range.filter(|range| range.count > 0) {
         mappings.push(RootlessMapping {
             container_id: 1,
             host_id: range.start,
-            size: range.count - 1,
+            size: range.count,
         });
     }
     mappings
@@ -995,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn subordinate_mapping_preserves_caller_root_and_maps_image_users() {
+    fn subordinate_mapping_matches_rootlesskit_full_range() {
         let mappings = super::mappings_for_caller(
             1_000,
             Some(super::IdRange {
@@ -1014,7 +1014,7 @@ mod tests {
                 RootlessMapping {
                     container_id: 1,
                     host_id: 100_000,
-                    size: DEFAULT_SUBID_SIZE - 1,
+                    size: DEFAULT_SUBID_SIZE,
                 },
             ]
         );

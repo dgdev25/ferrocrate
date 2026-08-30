@@ -49,6 +49,7 @@ pub enum SurfaceExecutionError {
     GenerationMismatch,
 }
 
+#[derive(Clone)]
 pub struct SurfaceAuthorization {
     gate: Arc<AuthorizationGate>,
     durability: SurfaceDurability,
@@ -57,6 +58,7 @@ pub struct SurfaceAuthorization {
     pseudonym_key: [u8; 32],
 }
 
+#[derive(Clone)]
 enum SurfaceDurability {
     Disabled,
     Required(Arc<WitnessJournal>),

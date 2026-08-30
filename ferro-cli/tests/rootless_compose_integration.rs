@@ -224,6 +224,40 @@ fn rootless_docker_daemon(binary: &str, runtime: &Path) -> RootlessDockerDaemon 
     panic!("rootless Docker-compatible daemon did not create its socket");
 }
 
+fn process_children(pid: u32) -> Vec<u32> {
+    fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .ok()
+        .into_iter()
+        .flat_map(|children| {
+            children
+                .split_whitespace()
+                .filter_map(|child| child.parse().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn descendant_with_cmdline(root: u32, marker: &str) -> Option<u32> {
+    for _ in 0..200 {
+        let mut pending = vec![root];
+        while let Some(pid) = pending.pop() {
+            pending.extend(process_children(pid));
+            if pid != root
+                && fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .ok()
+                    .is_some_and(|comm| comm.trim() != "bwrap")
+                && fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .is_some_and(|cmdline| String::from_utf8_lossy(&cmdline).contains(marker))
+            {
+                return Some(pid);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    None
+}
+
 /// Exercises the S183 terminal path with a real rootless workload.  This is
 /// deliberately opt-in because it requires the host's user/network namespace
 /// support and a trusted slirp4netns helper; a skipped capability is not a
@@ -538,6 +572,122 @@ fn rootless_compose_nginx_services_wait_running() {
         down.status.success(),
         "S181 compose down failed: {}",
         String::from_utf8_lossy(&down.stderr)
+    );
+}
+
+/// S181: every daemon-mediated rootless rootfs launch needs Docker-rootless's
+/// caller-plus-subordinate user namespace, even when networking does not
+/// independently require the slirp launcher.
+#[test]
+fn rootless_compose_workload_retains_subids_and_chown_capability() {
+    if std::env::var("FERROCRATE_RUN_ROOTLESS_E2E").as_deref() != Ok("1") {
+        eprintln!("SKIP: set FERROCRATE_RUN_ROOTLESS_E2E=1 for S181 mapping coverage");
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "run this fixture as a non-root user"
+    );
+
+    let root = tempfile::tempdir().expect("root tempdir");
+    let project = rootless_compose_project_dir(
+        root.path(),
+        "services:\n  probe:\n    image: nginx:alpine\n    network_mode: none\n    command: [\"/bin/sh\", \"-c\", \"echo S181_UIDMAP_PROBE; while :; do sleep 1; done\"]\n",
+    );
+    let runtime = runtime_dir(root.path());
+    let binary = env!("CARGO_BIN_EXE_ferro-cli");
+    let daemon = rootless_docker_daemon(binary, &runtime);
+    let docker = |args: &[&str]| {
+        Command::new("docker")
+            .current_dir(&project)
+            .env("DOCKER_HOST", format!("unix://{}", daemon.socket.display()))
+            .args(args)
+            .output()
+            .expect("run Docker Compose client")
+    };
+    let pull = docker(&["pull", "nginx:alpine"]);
+    assert!(
+        pull.status.success(),
+        "S181 mapping probe pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+
+    let up = docker(&[
+        "compose",
+        "--project-name",
+        "s181-mapping",
+        "--file",
+        "compose.yml",
+        "up",
+        "--detach",
+    ]);
+    assert!(
+        up.status.success(),
+        "S181 mapping probe failed to start: stdout={} stderr={}",
+        String::from_utf8_lossy(&up.stdout),
+        String::from_utf8_lossy(&up.stderr)
+    );
+
+    let inspect = docker(&[
+        "inspect",
+        "--format",
+        "{{json .State}}",
+        "s181-mapping-probe-1",
+    ]);
+    assert!(
+        inspect.status.success(),
+        "S181 mapping probe inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).expect("S181 mapping probe state JSON");
+    let launcher_pid = state["Pid"].as_u64().expect("S181 launcher pid") as u32;
+    let workload_pid = descendant_with_cmdline(launcher_pid, "S181_UIDMAP_PROBE")
+        .expect("S181 live workload descendant");
+    let uid_map = fs::read_to_string(format!("/proc/{workload_pid}/uid_map"))
+        .expect("read S181 workload uid_map");
+    let status = fs::read_to_string(format!("/proc/{workload_pid}/status"))
+        .expect("read S181 workload status");
+    let cap_eff = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:").map(str::trim))
+        .and_then(|value| u64::from_str_radix(value, 16).ok())
+        .expect("parse S181 workload CapEff");
+
+    let down = docker(&[
+        "compose",
+        "--project-name",
+        "s181-mapping",
+        "--file",
+        "compose.yml",
+        "down",
+    ]);
+    assert!(
+        down.status.success(),
+        "S181 mapping probe cleanup failed: {}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+
+    let expected = ferro_core::rootless::RootlessConfig::from_system()
+        .expect("resolve S181 expected rootless mapping")
+        .uid_mapping
+        .into_iter()
+        .map(|mapping| mapping.as_uid_map_entry())
+        .collect::<String>();
+    let normalize_map = |raw: &str| {
+        raw.lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        normalize_map(&uid_map),
+        normalize_map(&expected),
+        "S181 Compose workload must use the caller-plus-subordinate uid_map"
+    );
+    assert_ne!(
+        cap_eff & 1,
+        0,
+        "S181 Compose workload must retain CAP_CHOWN: CapEff={cap_eff:016x}"
     );
 }
 

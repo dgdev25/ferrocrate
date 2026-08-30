@@ -9,7 +9,7 @@ use ferro_core::runtime::{
 };
 use ferro_core::sqlite_container_store::SqliteContainerStore;
 use ferro_core::witness::{
-    decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessStage,
+    decode_record, JournalConfig, JournalMode, WitnessAction, WitnessJournal, WitnessStage,
 };
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -309,14 +309,23 @@ fn assert_abort_reopen_matrix(action: &str) {
         }
         drop(runtime);
         drop(journal);
-        let reopened = Arc::new(
-            WitnessJournal::open(JournalConfig::new(
+        let reopen_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let reopened = loop {
+            match WitnessJournal::open(JournalConfig::new(
                 &journal_path,
                 journal_id,
                 JournalMode::Required,
-            ))
-            .unwrap(),
-        );
+            )) {
+                Ok(reopened) => break Arc::new(reopened),
+                Err(_error) if std::time::Instant::now() < reopen_deadline => {
+                    // Rootless launch supervision retains the shared journal
+                    // while it reaps the stopped ownership launcher. Model a
+                    // process exit by waiting for that bounded cleanup.
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => panic!("reopen witness journal after simulated crash: {error}"),
+            }
+        };
         let runtime = ContainerRuntime::new_with_authorization(
             root.path(),
             Arc::new(AuthorizationGate::new(policies)),
@@ -927,14 +936,32 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let stages = journal
+        let decoded = journal
             .records()
             .unwrap()
             .iter()
-            .map(|bytes| decode_record(bytes).unwrap().stage())
+            .map(|bytes| decode_record(bytes).unwrap())
             .collect::<Vec<_>>();
+        let lifecycle_action = match action {
+            "run" => WitnessAction::ContainerRun,
+            "exec" => WitnessAction::ContainerExec,
+            "pause" => WitnessAction::ContainerPause,
+            "resume" => WitnessAction::ContainerResume,
+            "stop" => WitnessAction::ContainerStop,
+            "kill" => WitnessAction::ContainerKill,
+            "restart" => WitnessAction::ContainerRestart,
+            "remove" => WitnessAction::ContainerDelete,
+            _ => unreachable!(),
+        };
+        let stages_for = |expected_action| {
+            decoded
+                .iter()
+                .filter(|record| record.action() == expected_action)
+                .map(|record| record.stage())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            stages,
+            stages_for(lifecycle_action),
             [
                 WitnessStage::RequestReceived,
                 WitnessStage::Decision,
@@ -942,6 +969,22 @@ fn every_allowed_lifecycle_method_has_one_decision_and_terminal_receipt() {
             ],
             "{action}"
         );
+        let mapping_stages = stages_for(WitnessAction::RootlessMapping);
+        if !nix::unistd::Uid::effective().is_root() && matches!(action, "run" | "restart") {
+            assert_eq!(
+                mapping_stages,
+                [
+                    WitnessStage::RequestReceived,
+                    WitnessStage::Decision,
+                    WitnessStage::Outcome
+                ],
+                "{action} rootless mapping"
+            );
+            assert_eq!(decoded.len(), 6, "{action} journal entries");
+        } else {
+            assert!(mapping_stages.is_empty(), "{action} rootless mapping");
+            assert_eq!(decoded.len(), 3, "{action} journal entries");
+        }
         drop(runtime);
         drop(journal);
         std::env::remove_var("FERROCRATE_CGROUP_ROOT");

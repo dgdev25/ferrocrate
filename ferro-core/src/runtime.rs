@@ -1753,6 +1753,46 @@ struct NormalizedRunRequest {
     _bind_handles: Vec<std::fs::File>,
 }
 
+#[derive(Clone)]
+struct RootlessLaunchMapping {
+    config: crate::rootless::RootlessConfig,
+    authorization: crate::authorization::surface::SurfaceAuthorization,
+    origin: RequestOrigin,
+}
+
+impl RootlessLaunchMapping {
+    fn apply(
+        &self,
+        pid: u32,
+        container_id: &str,
+        generation: u64,
+    ) -> Result<(), RuntimeError> {
+        let permit = self
+            .authorization
+            .authorize_named(
+                &self.origin,
+                Action::RootlessMapping,
+                ResourceKind::RootlessMapping,
+                container_id,
+                generation,
+            )
+            .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+        crate::rootless::apply_user_namespace_mappings_authorized(
+            Path::new("/proc"),
+            pid,
+            &self.config,
+            container_id,
+            generation,
+            permit,
+        )
+        .map_err(|error| {
+            RuntimeError::InvalidState(format!(
+                "install rootless user namespace mappings: {error}"
+            ))
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_execution_digest(
     pinned_image: &str,
@@ -1872,10 +1912,7 @@ impl ContainerRuntime {
 
     fn prepare_rootless_mapping(
         &self,
-        container_id: &str,
-        generation: u64,
-    ) -> Result<(crate::rootless::RootlessConfig, crate::authorization::surface::SurfacePermit), RuntimeError>
-    {
+    ) -> Result<RootlessLaunchMapping, RuntimeError> {
         let origin = self
             .request_origin()
             .unwrap_or(RequestOrigin::cli_current().map_err(|error| {
@@ -1884,17 +1921,11 @@ impl ContainerRuntime {
         let config = crate::rootless::RootlessConfig::from_system().map_err(|error| {
             RuntimeError::InvalidState(format!("resolve rootless user namespace mappings: {error}"))
         })?;
-        let permit = self
-            .surface_authorization()?
-            .authorize_named(
-                &origin,
-                Action::RootlessMapping,
-                ResourceKind::RootlessMapping,
-                container_id,
-                generation,
-            )
-            .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
-        Ok((config, permit))
+        Ok(RootlessLaunchMapping {
+            config,
+            authorization: self.surface_authorization()?,
+            origin,
+        })
     }
 
     pub fn request_scoped(&self, origin: crate::authorization::RequestOrigin) -> Self {
@@ -3375,8 +3406,12 @@ impl ContainerRuntime {
         // and can fail on hosts that deny nested user namespaces.
         let unshare_netns = rootless && network_mode == "bridge" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
-        let rootless_mapping = if use_slirp {
-            Some(self.prepare_rootless_mapping(&container_id, 1)?)
+        let rootless_mapping = if rootless_launch_needs_mapping(
+            !rootless,
+            true,
+            netns_name.as_deref(),
+        ) {
+            Some(self.prepare_rootless_mapping()?)
         } else {
             None
         };
@@ -3440,6 +3475,7 @@ impl ContainerRuntime {
             resolved_user.as_deref(),
             netns_name.as_deref(),
             unshare_netns,
+            rootless_mapping.clone(),
             seccomp_profile.as_ref(),
             mounts.to_vec(),
             tmpfs_mounts.to_vec(),
@@ -3615,30 +3651,20 @@ impl ContainerRuntime {
             }
         }
         release_prepared_child(child_id)?;
-        if use_slirp {
+        if let Some(mapping) = rootless_mapping.as_ref() {
             // The outer ownership launcher stopped before `unshare` created
-            // its namespaces.  After the first release, the inner launcher
-            // stops in the newly-created user/network namespace, while its
-            // uid_map is still writable.  Install the subordinate-ID map at
-            // that point before either slirp or bubblewrap can release the
-            // image workload.
+            // its namespaces. After the first release, the inner launcher
+            // stops in the newly-created user namespace, while its uid_map is
+            // still writable. Install the subordinate-ID map before either
+            // slirp or bubblewrap can release the image workload.
             wait_until_launch_stopped(child_id)?;
-            let (config, permit) = rootless_mapping
-                .expect("rootless slirp launch prepared its namespace mapping");
-            if let Err(error) = crate::rootless::apply_user_namespace_mappings_authorized(
-                Path::new("/proc"),
-                child_id,
-                &config,
-                &container_id,
-                1,
-                permit,
-            ) {
+            if let Err(error) = mapping.apply(child_id, &container_id, 1) {
                 let _ = kill_pid(child_id);
                 rollback.rollback();
-                return Err(RuntimeError::InvalidState(format!(
-                    "install rootless user namespace mappings: {error}"
-                )));
+                return Err(error);
             }
+        }
+        if use_slirp {
             let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             match start_slirp4netns(child_id, Some(&api_socket)) {
                 Ok((helper_pid, helper_start_time)) => {
@@ -3671,12 +3697,14 @@ impl ContainerRuntime {
         }
         // The rootless wrapper deliberately stopped after namespace creation;
         // let it exec the workload only after slirp setup is complete.
-        if use_slirp {
+        if rootless_mapping.is_some() {
             // slirp must be attached before the workload starts, but resolver
             // publication must still precede the second release for the same
             // rootfs bind-order reason as the non-slirp path above.
-            if let Ok(containers) = self.store.list() {
-                update_container_hosts(&self.runtime_dir, &containers)?;
+            if use_slirp {
+                if let Ok(containers) = self.store.list() {
+                    update_container_hosts(&self.runtime_dir, &containers)?;
+                }
             }
             release_prepared_child(child_id)?;
         }
@@ -5511,8 +5539,12 @@ impl ContainerRuntime {
 
         let stdout_path = PathBuf::from(&record.stdout_path);
         let stderr_path = PathBuf::from(&record.stderr_path);
-        let rootless_mapping = if restart_rootless_slirp {
-            Some(self.prepare_rootless_mapping(&record.id, record.mutation_generation.max(1))?)
+        let rootless_mapping = if rootless_launch_needs_mapping(
+            nix::unistd::Uid::effective().is_root(),
+            true,
+            record.netns.as_deref(),
+        ) {
+            Some(self.prepare_rootless_mapping()?)
         } else {
             None
         };
@@ -5550,6 +5582,7 @@ impl ContainerRuntime {
             record.user.as_deref(),
             record.netns.as_deref(),
             restart_rootless_slirp,
+            rootless_mapping.clone(),
             seccomp_profile.as_ref(),
             record
                 .mounts
@@ -5662,24 +5695,19 @@ impl ContainerRuntime {
             LifecyclePhasePoint::LaunchIdentityDurable,
         )?;
         release_prepared_child(child_id)?;
-        if restart_rootless_slirp {
+        if let Some(mapping) = rootless_mapping.as_ref() {
             wait_until_launch_stopped(child_id)?;
-            let (config, permit) = rootless_mapping
-                .expect("rootless slirp restart prepared its namespace mapping");
-            crate::rootless::apply_user_namespace_mappings_authorized(
-                Path::new("/proc"),
-                child_id,
-                &config,
-                &record.id,
-                record.mutation_generation.max(1),
-                permit,
-            )
-            .map_err(|error| {
-                let _ = kill_pid(child_id);
-                RuntimeError::InvalidState(format!(
-                    "install rootless user namespace mappings: {error}"
-                ))
-            })?;
+            mapping
+                .apply(
+                    child_id,
+                    &record.id,
+                    record.mutation_generation.max(1),
+                )
+                .inspect_err(|_error| {
+                    let _ = kill_pid(child_id);
+                })?;
+        }
+        if restart_rootless_slirp {
             let api_socket = slirp_api_socket_path(&self.runtime_dir, &record.id)?;
             let (helper_pid, helper_start_time) =
                 match start_slirp4netns(child_id, Some(&api_socket)) {
@@ -5711,8 +5739,11 @@ impl ContainerRuntime {
             if let Ok(containers) = self.store.list() {
                 update_container_hosts(&self.runtime_dir, &containers)?;
             }
-            // `unshare` and the ownership launcher each stop once. Forwarding
-            // must be ready before the second release can exec the workload.
+        }
+        if rootless_mapping.is_some() {
+            // `unshare` and the ownership launcher each stop once. Rootless
+            // forwarding, when present, must be ready before the second
+            // release can exec the workload.
             release_prepared_child(child_id)?;
         }
         let _ = log_event(
@@ -7471,6 +7502,7 @@ fn spawn_process_with_logs(
     user: Option<&str>,
     netns_name: Option<&str>,
     unshare_netns: bool,
+    rootless_mapping: Option<RootlessLaunchMapping>,
     seccomp_profile: Option<&SeccompProfile>,
     mounts: Vec<BindMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
@@ -7543,6 +7575,7 @@ fn spawn_process_with_logs(
             workdir,
             user,
             netns_name,
+            rootless_mapping,
             seccomp_for_restart,
             mounts,
             tmpfs_mounts,
@@ -7668,6 +7701,14 @@ fn build_bwrap_command(
     Ok(bwrap)
 }
 
+fn rootless_launch_needs_mapping(
+    running_as_root: bool,
+    has_rootfs: bool,
+    netns_name: Option<&str>,
+) -> bool {
+    !running_as_root && has_rootfs && netns_name.is_none()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_command(
     cmd: &[String],
@@ -7686,11 +7727,16 @@ fn build_command(
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
     let rootless_shared_netns = netns_name.is_some_and(|value| value.starts_with("pid:"));
+    let mapped_rootless_launch = rootless_launch_needs_mapping(
+        running_as_root,
+        rootfs_dir.is_some(),
+        netns_name,
+    );
     let direct_container_setup = running_as_root && netns_name.is_some();
     const BWRAP_SECCOMP_FD: i32 = 9;
     let bwrap_seccomp = if !running_as_root
         && rootfs_dir.is_some()
-        && (rootless_shared_netns || unshare_netns)
+        && (rootless_shared_netns || unshare_netns || mapped_rootless_launch)
     {
         seccomp_profile
             .map(prepare_bwrap_seccomp_filter)
@@ -7819,21 +7865,25 @@ fn build_command(
             netns_cmd.arg(&cmd[0]).args(&cmd[1..]);
         }
         netns_cmd
-    } else if unshare_netns {
+    } else if unshare_netns || mapped_rootless_launch {
         let unshare_path =
             crate::rootless::trusted_executable_path("unshare").ok_or_else(|| {
                 RuntimeError::InvalidCommand(
-                    "rootless network namespaces require a trusted root-owned unshare executable"
+                    "rootless user namespaces require a trusted root-owned unshare executable"
                         .to_string(),
                 )
             })?;
         let mut unshare_cmd = Command::new(&unshare_path);
-        // Creating a network namespace alone is not permitted for an
-        // unprivileged caller. Pair it with a still-unmapped user namespace;
-        // the parent installs the authenticated caller-plus-subordinate map
-        // while this inner launcher is stopped. `--map-root-user` would make
-        // uid_map immutable before that mapping can be installed.
-        unshare_cmd.args(["--user", "--net", "--"]);
+        // Every rootless image enters a still-unmapped user namespace; the
+        // parent installs the authenticated caller-plus-subordinate map while
+        // this inner launcher is stopped. Bridge workloads add the network
+        // namespace before slirp attaches. `--map-root-user` would make the
+        // uid_map immutable before the complete mapping can be installed.
+        unshare_cmd.arg("--user");
+        if unshare_netns {
+            unshare_cmd.arg("--net");
+        }
+        unshare_cmd.arg("--");
         // Keep the process stopped after `unshare` has created its network
         // namespace. The parent attaches slirp4netns at this point, then
         // releases the workload with a second SIGCONT. This avoids both the
@@ -7841,7 +7891,7 @@ fn build_command(
         // before networking is attached.
         let shell = crate::rootless::trusted_executable_path("sh").ok_or_else(|| {
             RuntimeError::InvalidCommand(
-                "rootless network namespaces require a trusted root-owned shell executable"
+                "rootless user namespaces require a trusted root-owned shell executable"
                     .to_string(),
             )
         })?;
@@ -8021,7 +8071,7 @@ fn build_command(
                     )
                 })?;
             }
-            if no_new_privs && !unshare_netns {
+            if no_new_privs && !unshare_netns && !mapped_rootless_launch {
                 if let Err(err) = set_no_new_privileges() {
                     if err.raw_os_error() == Some(nix::libc::EINVAL)
                         || err.raw_os_error() == Some(nix::libc::EPERM)
@@ -9038,6 +9088,7 @@ fn supervise_child(
     workdir: Option<String>,
     user: Option<String>,
     netns_name: Option<String>,
+    rootless_mapping: Option<RootlessLaunchMapping>,
     seccomp_profile: Option<SeccompProfile>,
     mounts: Vec<BindMount>,
     tmpfs_mounts: Vec<TmpfsMount>,
@@ -9359,6 +9410,37 @@ fn supervise_child(
             }
             let _ = kill_pid(pid);
             break;
+        }
+        if let Some(mapping) = rootless_mapping.as_ref() {
+            let mapping_result = wait_until_launch_stopped(pid).and_then(|()| {
+                let generation = store
+                    .get(&container_id)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.mutation_generation.max(1))
+                    .unwrap_or(1);
+                mapping.apply(pid, &container_id, generation)
+            });
+            if let Err(error) = mapping_result {
+                warn!(
+                    container = %container_id,
+                    pid,
+                    error = %error,
+                    "restart supervisor stopping: rootless namespace mapping failed"
+                );
+                let _ = kill_pid(pid);
+                break;
+            }
+            if let Err(error) = release_prepared_child(pid) {
+                warn!(
+                    container = %container_id,
+                    pid,
+                    error = %error,
+                    "restart supervisor stopping: mapped workload release failed"
+                );
+                let _ = kill_pid(pid);
+                break;
+            }
         }
         child = new_child;
         _pidfd = new_pidfd;
@@ -22028,7 +22110,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let policy = root.join("policy.toml");
         std::fs::write(
             &policy,
-            "schema_version = 1\ngeneration = 1\nmode = \"disabled\"\n",
+            // The fixture supplies a required witness journal, so use the
+            // supported non-enforcing mode. Rootless launches now authorize
+            // their namespace mapping as part of every rootfs start.
+            "schema_version = 1\ngeneration = 1\nmode = \"shadow\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600)).unwrap();

@@ -375,45 +375,7 @@ PYEOF
       for _ in $(seq 1 50); do [ -S "$GATE" ] && break; sleep 0.1; done
       [ -S "$GATE" ] || { echo "gate did not come up; see $WORK/gate.log" >&2; kill $GATEPID; exit 2; }
       mkdir -p "$WORK/bin"
-      cat > "$WORK/bin/dockerd" <<'PYEOF'
-#!/usr/bin/env python3
-# dockerd replacement for buildkit's integration harness: listens where the
-# harness's --host flag says and pipes every connection to BK_GATE. The
-# harness pings the socket, talks the Docker API, and hijacks /grpc for
-# BuildKit; the engine behind the gate serves all three.
-import os, socket, sys, threading
-sock, gate, i = None, os.environ["BK_GATE"], 0
-args = sys.argv[1:]
-while i < len(args):
-    if args[i] == "--host" and i + 1 < len(args):
-        h = args[i + 1]
-        sock = h[len("unix://"):] if h.startswith("unix://") else h
-    i += 1
-if not sock: sys.exit(1)
-try: os.unlink(sock)
-except FileNotFoundError: pass
-srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(sock); srv.listen(128)
-def pump(a, b):
-    try:
-        while True:
-            d = a.recv(65536)
-            if not d: break
-            b.sendall(d)
-    except OSError: pass
-    finally:
-        for s in (a, b):
-            try: s.shutdown(socket.SHUT_RDWR)
-            except OSError: pass
-def handle(c):
-    try: u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); u.connect(gate)
-    except OSError: c.close(); return
-    threading.Thread(target=pump, args=(c, u), daemon=True).start()
-    pump(u, c)
-while True:
-    c, _ = srv.accept()
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
-PYEOF
+      cp "$BENCH/suites/buildkit-dockerfile/dockerd-forwarder.py" "$WORK/bin/dockerd"
       chmod +x "$WORK/bin/dockerd"
       export BK_GATE="$GATE"
       # Persistent mirror storage: the harness copies every test image from

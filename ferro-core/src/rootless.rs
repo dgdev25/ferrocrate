@@ -365,7 +365,7 @@ pub(crate) fn bubblewrap_path() -> Option<PathBuf> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-                metadata.uid() == 0
+                trusted_bubblewrap_owner(candidate, metadata.uid())
                     && metadata.permissions().mode() & 0o111 != 0
                     && metadata.permissions().mode() & 0o022 == 0
             }
@@ -374,6 +374,44 @@ pub(crate) fn bubblewrap_path() -> Option<PathBuf> {
                 true
             }
         })
+}
+
+#[cfg(unix)]
+fn uid_map_maps_host_root(raw: &str) -> bool {
+    raw.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(namespace_start) = fields.next().and_then(|value| value.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        let Some(host_start) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
+            return false;
+        };
+        let Some(length) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
+            return false;
+        };
+        let _ = namespace_start;
+        host_start == 0 && length != 0
+    })
+}
+
+#[cfg(unix)]
+fn trusted_bubblewrap_owner(candidate: &Path, owner: u32) -> bool {
+    if owner == 0 {
+        return true;
+    }
+    // In a single-ID user namespace, host-root-owned files are reported with
+    // overflowuid. The suite daemon cannot modify those files, so the fixed
+    // distro bwrap remains a trusted helper even though st_uid is translated.
+    let overflow_uid = fs::read_to_string("/proc/sys/kernel/overflowuid")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok());
+    let host_root_is_unmapped = fs::read_to_string("/proc/self/uid_map")
+        .map(|raw| !uid_map_maps_host_root(&raw))
+        .unwrap_or(false);
+    let distro_bwrap =
+        fs::canonicalize(candidate).is_ok_and(|path| path == Path::new("/usr/bin/bwrap"));
+    overflow_uid == Some(owner) && host_root_is_unmapped && distro_bwrap
 }
 
 #[derive(Debug, Error)]
@@ -821,6 +859,13 @@ mod tests {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
         }
+    }
+
+    #[test]
+    fn host_root_mapping_distinguishes_initial_and_single_id_namespaces() {
+        assert!(super::uid_map_maps_host_root("0 0 4294967295\n"));
+        assert!(!super::uid_map_maps_host_root("0 1000 1\n"));
+        assert!(!super::uid_map_maps_host_root("0 1000 1\n1 100000 65535\n"));
     }
 
     #[test]

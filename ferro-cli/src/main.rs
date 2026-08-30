@@ -11483,13 +11483,24 @@ fn prefetch_dockerfile_bases(
     session_auth: Option<&HashMap<String, RegistryAuth>>,
     build_args: &HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
-    let mut pulled = Vec::new();
-    for base in ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
+    let bases = ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
         dockerfile,
         build_args,
     )
-    .map_err(|error| error.to_string())?
-    {
+    .map_err(|error| error.to_string())?;
+    prefetch_image_references(store, origin, authorization, bases, session_auth)
+}
+
+#[cfg(target_os = "linux")]
+fn prefetch_image_references(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    references: Vec<String>,
+    session_auth: Option<&HashMap<String, RegistryAuth>>,
+) -> Result<Vec<String>, String> {
+    let mut pulled = Vec::new();
+    for base in references {
         let selector = normalize_selector(&base).map_err(|error| error.to_string())?;
         if resolve_reference(store, &base)
             .map_err(|error| error.to_string())?
@@ -20249,8 +20260,12 @@ fn validate_buildkit_daemon_entitlements(
 fn validate_buildkit_solve_entitlements(
     requested: &[String],
     allowed: &HashSet<String>,
+    dockerd_forced_host_network: bool,
 ) -> Result<(), String> {
     for entitlement in requested {
+        if entitlement == "network.host" && dockerd_forced_host_network {
+            continue;
+        }
         if !allowed.contains(entitlement) {
             return Err(format!("entitlement {entitlement} is not allowed"));
         }
@@ -26169,6 +26184,26 @@ async fn handle_buildkit_control_request(
             .map_err(|error| format!("buildkit gateway warn: response failed: {error}"))?;
         return send_buildkit_grpc_status(&mut response_stream, 0, None);
     }
+    if method == BuildkitControlMethod::GatewayResolveImageConfig {
+        use buildkit_proto::moby::buildkit::v1::frontend::{
+            ResolveImageConfigRequest, ResolveImageConfigResponse,
+        };
+
+        let request =
+            receive_buildkit_unary::<ResolveImageConfigRequest>(request.into_body()).await?;
+        let (digest, config) = buildkit_resolve_image_config(execution.as_ref(), &request.r#ref)?;
+        response_stream
+            .send_data(
+                grpc_message(&ResolveImageConfigResponse {
+                    digest,
+                    config,
+                    r#ref: request.r#ref,
+                }),
+                false,
+            )
+            .map_err(|error| format!("buildkit gateway resolve image: response failed: {error}"))?;
+        return send_buildkit_grpc_status(&mut response_stream, 0, None);
+    }
     if method == BuildkitControlMethod::GatewayReadFile {
         use buildkit_proto::moby::buildkit::v1::frontend::{ReadFileRequest, ReadFileResponse};
 
@@ -26195,13 +26230,19 @@ async fn handle_buildkit_control_request(
             let reference = references
                 .get(&read.r#ref)
                 .ok_or_else(|| format!("buildkit gateway: unknown reference {}", read.r#ref))?;
-            let file = reference.files.get(&read.file_path).ok_or_else(|| {
-                format!(
-                    "buildkit gateway: file {} is unavailable in reference {}",
-                    read.file_path, read.r#ref
-                )
-            })?;
-            buildkit_gateway_read_range(file, read.range.as_ref())?
+            let file = reference.files.get(&read.file_path).cloned();
+            drop(references);
+            let Some(file) = file else {
+                // The Dockerfile client probes Dockerfile.dockerignore before
+                // falling back to the context ignore file. Missing files are
+                // a normal gRPC NotFound response, not a reset control stream.
+                return send_buildkit_grpc_status(
+                    &mut response_stream,
+                    5,
+                    Some("file%20not%20found"),
+                );
+            };
+            buildkit_gateway_read_range(&file, read.range.as_ref())?
         };
         response_stream
             .send_data(grpc_message(&ReadFileResponse { data }), false)
@@ -26264,6 +26305,8 @@ async fn handle_buildkit_control_request(
         if let Err(error) = validate_buildkit_solve_entitlements(
             &build.request.entitlements,
             execution.daemon_entitlements.as_ref(),
+            build.request.frontend_attrs.get("force-network-mode").map(String::as_str)
+                == Some("host"),
         ) {
             *build
                 .error
@@ -26411,12 +26454,7 @@ async fn handle_buildkit_control_request(
             .await?;
         let prepared_client_llb = solve.frontend.is_empty()
             && solve.definition.is_some()
-            && state
-                .buildkit_build(build_id)?
-                .gateway_solve
-                .lock()
-                .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?
-                .is_none();
+            && state.buildkit_build(build_id)?.request.frontend.is_empty();
         let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
         let result = if let Some(definition) = solve.definition.as_ref() {
             if let Some((url, filename, checksum)) = buildkit_http_source(definition)? {
@@ -26449,7 +26487,9 @@ async fn handle_buildkit_control_request(
                         "buildkit gateway: client LLB solve has no prepared Dockerfile result"
                             .to_string()
                     })?;
-                buildkit_gateway_build_result(build_id, prepared)?
+                let result = buildkit_gateway_build_result(build_id, prepared)?;
+                register_buildkit_prepared_reference(build_id, build.as_ref(), &result)?;
+                result
             } else {
                 return send_buildkit_frontend_error(
                     &mut response_stream,
@@ -26559,6 +26599,66 @@ async fn handle_buildkit_control_request(
 }
 
 #[cfg(target_os = "linux")]
+fn register_buildkit_prepared_reference(
+    build_id: &str,
+    build: &BuildkitBuild,
+    result: &buildkit_proto::moby::buildkit::v1::frontend::Result,
+) -> Result<(), String> {
+    use buildkit_proto::moby::buildkit::v1::frontend::result;
+
+    let Some(result::Result::Ref(reference)) = result.result.as_ref() else {
+        return Ok(());
+    };
+    let source = build
+        .dockerfile_source
+        .lock()
+        .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
+        .clone()
+        .ok_or_else(|| {
+            format!("buildkit gateway: prepared result {build_id} has no Dockerfile source")
+        })?;
+    build
+        .gateway_references
+        .lock()
+        .map_err(|error| format!("buildkit gateway reference registry poisoned: {error}"))?
+        .insert(reference.id.clone(), buildkit_dockerfile_reference(source));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_dockerfile_reference(source: BuildkitDockerfileSource) -> BuildkitGatewayReference {
+    let mut files = HashMap::new();
+    files.insert(source.filename.clone(), source.data.clone());
+    files.insert(format!("/{}", source.filename.trim_start_matches('/')), source.data);
+    BuildkitGatewayReference { files }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_resolve_image_config(
+    execution: &BuildkitExecutionContext,
+    reference: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let image = resolve_reference(execution.store.as_ref(), reference)
+        .map_err(|error| format!("buildkit gateway: resolve image {reference}: {error}"))?
+        .ok_or_else(|| format!("buildkit gateway: image not found: {reference}"))?;
+    let manifest: serde_json::Value = serde_json::from_str(&image.manifest_json)
+        .map_err(|error| format!("buildkit gateway: image manifest is invalid: {error}"))?;
+    let config_digest = manifest["config"]["digest"]
+        .as_str()
+        .filter(|digest| !digest.is_empty())
+        .ok_or_else(|| "buildkit gateway: image manifest has no config digest".to_string())?;
+    let config = std::fs::read(
+        execution
+            .runtime_dir
+            .join("images")
+            .join("configs")
+            .join(config_digest.replace(':', "_")),
+    )
+    .map_err(|error| format!("buildkit gateway: read image config failed: {error}"))?;
+    Ok((image.digest, config))
+}
+
+#[cfg(target_os = "linux")]
 fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::PongResponse {
     use buildkit_proto::moby::buildkit::v1::apicaps::ApiCap;
     use buildkit_proto::moby::buildkit::v1::frontend::PongResponse;
@@ -26615,6 +26715,7 @@ fn buildkit_gateway_pong() -> buildkit_proto::moby::buildkit::v1::frontend::Pong
             "exec.meta.cgroup.parent",
             "exec.meta.network",
             "exec.meta.proxyenv",
+            "exec.meta.security",
             "exec.meta.ulimit",
             "exec.meta.linux.resources",
             "exec.mount.bind",
@@ -26938,12 +27039,30 @@ async fn execute_buildkit_frontend(
         &build.request.frontend_attrs,
         &request.frontend_opt,
     )?;
-    let external_bases =
+    let mut external_bases =
         ferro_core::dockerfile_build::dockerfile_external_base_images_with_build_args(
             &parser_dockerfile,
             &build_args,
         )
         .map_err(|error| error.to_string())?;
+    let named_frontend_contexts = build.request.frontend_attrs.keys()
+        .chain(request.frontend_opt.keys())
+        .filter_map(|key| key.strip_prefix("context:"))
+        .collect::<HashSet<_>>();
+    let external_copy_images =
+        ferro_core::dockerfile_build::dockerfile_external_copy_images_with_build_args(
+            &parser_dockerfile,
+            &build_args,
+        )
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|reference| !named_frontend_contexts.contains(reference.as_str()))
+        .collect::<Vec<_>>();
+    for reference in &external_copy_images {
+        if !external_bases.contains(reference) {
+            external_bases.push(reference.clone());
+        }
+    }
     let mut session_auth = HashMap::new();
     for base in &external_bases {
         let selector = normalize_selector(base)
@@ -26994,14 +27113,28 @@ async fn execute_buildkit_frontend(
     // BuildKit's control stream while resolving a cold external base.
     let blocking_execution = execution.clone();
     let blocking_image_name = image_name.clone();
+    let external_context_root = staging.path().join("external-image-contexts");
     let (pulled_bases, build_output) = tokio::task::spawn_blocking(move || {
-        let pulled_bases = prefetch_dockerfile_bases(
+        let mut pulled_bases = prefetch_dockerfile_bases(
             blocking_execution.store.as_ref(),
             &blocking_execution.origin,
             &blocking_execution.authorization,
             &parser_dockerfile,
             Some(&session_auth),
             &build_args,
+        )?;
+        pulled_bases.extend(prefetch_image_references(
+            blocking_execution.store.as_ref(),
+            &blocking_execution.origin,
+            &blocking_execution.authorization,
+            external_copy_images.clone(),
+            Some(&session_auth),
+        )?);
+        let build_contexts = materialize_buildkit_image_contexts(
+            blocking_execution.runtime_dir.as_ref(),
+            blocking_execution.store.as_ref(),
+            &external_copy_images,
+            &external_context_root,
         )?;
         let build_output = execute_build(
             blocking_execution.store.as_ref(),
@@ -27018,7 +27151,7 @@ async fn execute_buildkit_frontend(
             None,
             None,
             None,
-            &[],
+            &build_contexts,
             &[],
             &build_args,
             Some(&execution_options),
@@ -27079,6 +27212,37 @@ async fn execute_buildkit_frontend(
         warnings: lint_warnings,
         solve_error,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_buildkit_image_contexts(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    references: &[String],
+    destination: &Path,
+) -> Result<Vec<String>, String> {
+    let mut contexts = Vec::with_capacity(references.len());
+    for (index, reference) in references.iter().enumerate() {
+        let rootfs = destination.join(index.to_string());
+        let canonical = normalize_selector(reference)
+            .map_err(|error| format!("buildkit solve: invalid COPY source {reference}: {error}"))?;
+        let layers = ferro_core::image_fetch::resolve_layer_paths_with_store(
+            runtime_dir,
+            canonical.canonical(),
+            store,
+        )
+        .map_err(|error| format!("buildkit solve: resolve COPY source {reference}: {error}"))?;
+        let images = runtime_dir.join("images");
+        ferro_core::layer_cache::construct_rootfs_cached(
+            &rootfs,
+            &layers,
+            &images.join("file-cas").join("shake256"),
+            &images.join("layer-cache"),
+        )
+        .map_err(|error| format!("buildkit solve: materialize COPY source {reference}: {error}"))?;
+        contexts.push(format!("{reference}={}", rootfs.display()));
+    }
+    Ok(contexts)
 }
 
 #[cfg(target_os = "linux")]
@@ -28215,6 +28379,7 @@ enum BuildkitControlMethod {
     Solve,
     Status,
     GatewayPing,
+    GatewayResolveImageConfig,
     GatewayInputs,
     GatewayReadFile,
     GatewaySolve,
@@ -28231,6 +28396,9 @@ fn buildkit_control_method(path: &str) -> BuildkitControlMethod {
         "/moby.buildkit.v1.Control/Solve" => BuildkitControlMethod::Solve,
         "/moby.buildkit.v1.Control/Status" => BuildkitControlMethod::Status,
         "/moby.buildkit.v1.frontend.LLBBridge/Ping" => BuildkitControlMethod::GatewayPing,
+        "/moby.buildkit.v1.frontend.LLBBridge/ResolveImageConfig" => {
+            BuildkitControlMethod::GatewayResolveImageConfig
+        }
         "/moby.buildkit.v1.frontend.LLBBridge/Inputs" => BuildkitControlMethod::GatewayInputs,
         "/moby.buildkit.v1.frontend.LLBBridge/ReadFile" => BuildkitControlMethod::GatewayReadFile,
         "/moby.buildkit.v1.frontend.LLBBridge/Solve" => BuildkitControlMethod::GatewaySolve,
@@ -28972,9 +29140,13 @@ async fn receive_buildkit_local(
                     // the sender's reciprocal protocol FIN, then drain the
                     // response to its clean gRPC end rather than dropping an
                     // active h2 stream (which emits RST_STREAM/CANCEL).
-                    outgoing
-                        .send_data(Bytes::new(), true)
-                        .map_err(|error| format!("buildkit filesync: close request failed: {error}"))?;
+                    // The peer's reciprocal protocol FIN is the transfer
+                    // acknowledgement. Some fsutil senders close their h2
+                    // response at the same time, which can make this optional
+                    // gRPC half-close report `inactive stream`. Keep sending
+                    // it for peers that wait for CloseSend, but do not turn an
+                    // already completed transfer into a solve failure.
+                    let _ = outgoing.send_data(Bytes::new(), true);
                     while let Some(chunk) = incoming.data().await {
                         let chunk = chunk.map_err(|error| {
                             format!("buildkit filesync: finish receive failed: {error}")
@@ -39152,6 +39324,12 @@ FROM --platform=linux/${MYARCH} busybox\n";
     #[test]
     fn buildkit_control_dispatches_gateway_callback_methods() {
         assert_eq!(
+            super::buildkit_control_method(
+                "/moby.buildkit.v1.frontend.LLBBridge/ResolveImageConfig"
+            ),
+            super::BuildkitControlMethod::GatewayResolveImageConfig
+        );
+        assert_eq!(
             super::buildkit_control_method("/moby.buildkit.v1.frontend.LLBBridge/Ping"),
             super::BuildkitControlMethod::GatewayPing
         );
@@ -39416,16 +39594,24 @@ FROM --platform=linux/${MYARCH} busybox\n";
         assert!(super::validate_buildkit_solve_entitlements(
             &["security.insecure".to_string(), "network.host".to_string()],
             &allowed,
+            false,
         )
         .is_ok());
         for entitlement in ["security.insecure", "network.host"] {
             let denied = super::validate_buildkit_solve_entitlements(
                 &[entitlement.to_string()],
                 &std::collections::HashSet::new(),
+                false,
             )
             .expect_err("daemon permission is required in addition to the client request");
             assert_eq!(denied, format!("entitlement {entitlement} is not allowed"));
         }
+        super::validate_buildkit_solve_entitlements(
+            &["network.host".to_string()],
+            &std::collections::HashSet::new(),
+            true,
+        )
+        .expect("dockerd global host networking bypasses the daemon entitlement gate");
     }
 
     #[test]
@@ -39511,6 +39697,23 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 .get("containerimage.config/linux/amd64")
                 .map(Vec::as_slice),
             Some(br#"{"architecture":"amd64","os":"linux"}"#.as_slice())
+        );
+    }
+
+    #[test]
+    fn buildkit_prepared_reference_serves_relative_and_absolute_dockerfile_paths() {
+        let reference = super::buildkit_dockerfile_reference(super::BuildkitDockerfileSource {
+            filename: "nested/Dockerfile".to_string(),
+            data: b"FROM scratch\n".to_vec(),
+        });
+
+        assert_eq!(
+            reference.files.get("nested/Dockerfile").map(Vec::as_slice),
+            Some(b"FROM scratch\n".as_slice())
+        );
+        assert_eq!(
+            reference.files.get("/nested/Dockerfile").map(Vec::as_slice),
+            Some(b"FROM scratch\n".as_slice())
         );
     }
 
@@ -40199,6 +40402,122 @@ FROM --platform=linux/${MYARCH} busybox\n";
             std::fs::read_link(destination.join("node_modules/.bin/tool")).expect("symlink"),
             std::path::Path::new("../pkg/bin.js")
         );
+    }
+
+    #[test]
+    fn buildkit_filesync_accepts_peer_closed_after_protocol_fin() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (daemon, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let temp = tempfile::tempdir().expect("state root");
+        let state = Arc::new(super::DockerCompatState::new(temp.path()).expect("state"));
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            super::run_buildkit_session_transport(
+                daemon,
+                worker_state,
+                super::BuildkitSessionRegistration {
+                    uuid: "filesync-early-close".to_string(),
+                    methods: ["/moby.filesync.v1.FileSync/DiffCopy".to_string()]
+                        .into_iter()
+                        .collect(),
+                },
+                Duration::from_secs(3),
+            )
+            .expect("session worker");
+        });
+        let server = std::thread::spawn(move || {
+            client.set_nonblocking(true).expect("nonblocking client");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .expect("server runtime");
+            runtime.block_on(async move {
+                let client = tokio::net::UnixStream::from_std(client).expect("tokio client");
+                let mut connection = h2::server::handshake(client).await.expect("h2 server");
+                let (request, mut respond) = connection
+                    .accept()
+                    .await
+                    .expect("request")
+                    .expect("valid request");
+                let handler = tokio::spawn(async move {
+                    let mut incoming = request.into_body();
+                    let response = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/grpc")
+                        .body(())
+                        .expect("response");
+                    let mut outgoing = respond
+                        .send_response(response, false)
+                        .expect("send response");
+                    let end = super::FsutilPacket {
+                        packet_type: super::FsutilPacketType::Stat as i32,
+                        stat: None,
+                        id: 0,
+                        data: Vec::new(),
+                    };
+                    outgoing
+                        .send_data(super::grpc_message(&end), false)
+                        .expect("end stat");
+                    let receiver_fin = incoming
+                        .data()
+                        .await
+                        .expect("receiver protocol FIN")
+                        .expect("valid receiver protocol FIN");
+                    let mut packets = receiver_fin.to_vec();
+                    let packets = super::drain_grpc_packets(&mut packets).expect("decode FIN");
+                    assert!(packets.iter().any(|packet| {
+                        packet.packet_type == super::FsutilPacketType::Fin as i32
+                    }));
+                    let sender_fin = super::FsutilPacket {
+                        packet_type: super::FsutilPacketType::Fin as i32,
+                        stat: None,
+                        id: 0,
+                        data: Vec::new(),
+                    };
+                    outgoing
+                        .send_data(super::grpc_message(&sender_fin), true)
+                        .expect("sender protocol FIN");
+                });
+                tokio::pin!(handler);
+                loop {
+                    tokio::select! {
+                        result = &mut handler => { result.expect("stream handler"); break; }
+                        accepted = connection.accept() => {
+                            if accepted.is_none() { break; }
+                        }
+                    }
+                }
+            });
+        });
+
+        for _ in 0..100 {
+            if state
+                .buildkit_sessions
+                .lock()
+                .expect("registry")
+                .contains_key("filesync-early-close")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("receiver runtime");
+        let result = runtime.block_on(super::receive_buildkit_session_local(
+            state.as_ref(),
+            "filesync-early-close",
+            "context",
+            &temp.path().join("received"),
+            Duration::from_secs(2),
+        ));
+        server.join().expect("server thread");
+        worker.join().expect("worker thread");
+        result.expect("peer protocol FIN completed the transfer");
     }
 
     #[test]

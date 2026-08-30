@@ -13,11 +13,29 @@ import "google/rpc/status.proto";
 // This is the callback subset used by BuildKit's Client.Build gateway
 // forwarder. Field numbers match moby/buildkit v0.32.2.
 service LLBBridge {
+  rpc ResolveImageConfig(ResolveImageConfigRequest) returns (ResolveImageConfigResponse);
   rpc Solve(SolveRequest) returns (SolveResponse);
   rpc Ping(PingRequest) returns (PongResponse);
   rpc Return(ReturnRequest) returns (ReturnResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc Warn(WarnRequest) returns (WarnResponse);
+}
+
+message ResolveImageConfigRequest {
+  string Ref = 1;
+  pb.Platform Platform = 2;
+  string ResolveMode = 3;
+  string LogName = 4;
+  int32 ResolverType = 5;
+  string SessionID = 6;
+  string StoreID = 7;
+  repeated moby.buildkit.v1.sourcepolicy.Policy SourcePolicies = 8;
+}
+
+message ResolveImageConfigResponse {
+  string Digest = 1;
+  bytes Config = 2;
+  string Ref = 3;
 }
 
 message Result {

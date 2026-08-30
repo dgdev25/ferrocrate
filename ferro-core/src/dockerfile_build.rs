@@ -374,6 +374,37 @@ pub fn dockerfile_external_base_images_with_build_args(
     Ok(bases)
 }
 
+/// Return image references used as external `COPY --from` sources.
+pub fn dockerfile_external_copy_images_with_build_args(
+    dockerfile_path: &Path,
+    build_args: &HashMap<String, String>,
+) -> Result<Vec<String>, DockerfileBuildError> {
+    if !dockerfile_path.exists() {
+        return Err(DockerfileBuildError::MissingDockerfile(
+            dockerfile_path.display().to_string(),
+        ));
+    }
+    let stages = parse_stages_with_build_args(&fs::read_to_string(dockerfile_path)?, build_args)?;
+    let stage_names = stages
+        .iter()
+        .filter_map(|stage| stage.name.as_deref())
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut images = Vec::new();
+    for stage in stages {
+        for copy in stage.copy_from.iter().chain(stage.copy_from_after_run.iter()) {
+            if copy.from.parse::<usize>().is_err()
+                && !stage_names.contains(&copy.from.to_ascii_lowercase())
+                && seen.insert(copy.from.clone())
+            {
+                images.push(copy.from.clone());
+            }
+        }
+    }
+    Ok(images)
+}
+
 pub fn prepare_dockerfile_build_with_contexts(
     dockerfile_path: &Path,
     tag: Option<&str>,
@@ -2965,10 +2996,10 @@ fn canonicalize_named_contexts(
     let mut canonical = HashMap::new();
     for (name, path) in contexts {
         if name.is_empty()
-            || name.len() > 64
+            || name.len() > 255
             || !name
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:@".contains(&byte))
         {
             return Err(DockerfileBuildError::Invalid(format!(
                 "invalid named build context: {name}"
@@ -4911,6 +4942,7 @@ fn parse_run_with_workdir(
         }
     }
     let mut tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    let original_token_count = tokens.len();
     let mut cache_mounts = Vec::new();
     let mut secret_mounts = Vec::new();
     let mut ssh_mounts = Vec::new();
@@ -5255,7 +5287,15 @@ fn parse_run_with_workdir(
             )));
         }
     }
-    let command = tokens.join(" ");
+    let consumed_frontend_tokens = original_token_count.saturating_sub(tokens.len());
+    let mut command = trimmed;
+    for _ in 0..consumed_frontend_tokens {
+        command = command.trim_start();
+        command = command
+            .find(char::is_whitespace)
+            .map_or("", |separator| &command[separator..]);
+    }
+    let command = command.trim_start().to_string();
     if command.starts_with('[') {
         // A leading '[' may open JSON exec form or a POSIX '[' test utility
         // command. Only JSON exec form when the text actually parses as a
@@ -5646,6 +5686,21 @@ fn apply_stage_workdir(rootfs: &Path, workdir: Option<&str>) -> Result<(), Docke
     Ok(())
 }
 
+fn uid_map_has_initial_namespace_root(raw: &str) -> bool {
+    let mut fields = raw.split_whitespace();
+    matches!(
+        (fields.next(), fields.next(), fields.next(), fields.next()),
+        (Some("0"), Some("0"), Some("4294967295"), None)
+    )
+}
+
+fn has_direct_root_authority() -> bool {
+    nix::unistd::Uid::effective().is_root()
+        && fs::read_to_string("/proc/self/uid_map")
+            .map(|raw| uid_map_has_initial_namespace_root(&raw))
+            .unwrap_or(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_stage_commands(
     rootfs: &Path,
@@ -5661,7 +5716,10 @@ fn run_stage_commands(
 ) -> Result<(), DockerfileBuildError> {
     let seccomp_profile = load_build_seccomp_profile()?;
     let limits = &control.limits;
-    let running_as_root = nix::unistd::Uid::effective().is_root();
+    // A daemon re-executed in a root-mapped user namespace has euid 0 but
+    // cannot use the direct mount/chroot sandbox. Treat it as rootless so
+    // bubblewrap supplies the nested mount, pid, and proc namespaces.
+    let running_as_root = has_direct_root_authority();
     fs::create_dir_all(cache_root)?;
     for (run_index, run) in runs.iter().enumerate() {
         if run.args.is_empty() {
@@ -5699,13 +5757,16 @@ fn run_stage_commands(
         } else {
             None
         };
-        if rootless_bwrap.is_some() {
-            provision_rootless_build_network_files(rootfs)?;
-        }
+        provision_build_network_files(rootfs)?;
         let cgroup_namespace = child_requires_cgroup_namespace(execution_options);
         let cgroup_mount_target = cgroup_namespace.then(|| rootfs.join("sys/fs/cgroup"));
         let cgroup_mount_existed = cgroup_mount_target.as_ref().is_some_and(|target| target.exists());
         if let Some(target) = &cgroup_mount_target {
+            fs::create_dir_all(target)?;
+        }
+        let proc_mount_target = running_as_root.then(|| rootfs.join("proc"));
+        let proc_mount_existed = proc_mount_target.as_ref().is_some_and(|target| target.exists());
+        if let Some(target) = &proc_mount_target {
             fs::create_dir_all(target)?;
         }
         let mut cmd = if let Some(bwrap) = &rootless_bwrap {
@@ -5808,6 +5869,7 @@ fn run_stage_commands(
         let run_cgroup = prepare_build_run_cgroup(execution_options, run_index)?;
         let child_cgroup = run_cgroup.as_ref().map(|cgroup| cgroup.path.clone());
         let child_cgroup_mount = cgroup_mount_target.clone();
+        let child_proc_mount = proc_mount_target.clone();
         let child_ulimits = execution_options.ulimits.clone();
         let child_security_insecure = security_insecure;
         let ssh_socket = std::env::var_os("FERROCRATE_BUILD_SSH_AUTH_SOCK")
@@ -6018,6 +6080,7 @@ fn run_stage_commands(
         // sandboxing primitives that must be process-local (namespaces/seccomp/chroot).
         unsafe {
             cmd.pre_exec(move || {
+                create_build_process_group()?;
                 if let Some(cgroup) = child_cgroup.as_ref() {
                     fs::write(cgroup.join("cgroup.procs"), std::process::id().to_string())
                         .map_err(|err| io::Error::new(err.kind(), format!(
@@ -6026,7 +6089,7 @@ fn run_stage_commands(
                 }
                 if running_as_root {
                     setup_build_namespace_root(
-                        network_mode != DockerfileNetworkMode::Host,
+                        should_isolate_build_network(network_mode),
                         child_cgroup.is_some(),
                     )
                     .map_err(|err| {
@@ -6034,6 +6097,19 @@ fn run_stage_commands(
                             err.kind(),
                             format!("build pre_exec unshare root namespaces: {err}"),
                         )
+                    })?;
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(target) = child_proc_mount.as_ref() {
+                    mount(
+                        Some("proc"),
+                        target,
+                        Some("proc"),
+                        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                        None::<&str>,
+                    )
+                    .map_err(|err| {
+                        io::Error::other(format!("build pre_exec mount proc: {err}"))
                     })?;
                 }
                 #[cfg(target_os = "linux")]
@@ -6304,6 +6380,11 @@ fn run_stage_commands(
                     cgroup_mount_existed,
                     &rootfs,
                 );
+                if !proc_mount_existed {
+                    if let Some(target) = proc_mount_target.as_ref() {
+                        let _ = fs::remove_dir(target);
+                    }
+                }
                 return Err(DockerfileBuildError::Invalid(format!(
                     "RUN sandbox spawn failed: {err}"
                 )));
@@ -6384,6 +6465,7 @@ fn run_stage_commands(
             }
             thread::sleep(Duration::from_millis(20));
         };
+        terminate_build_process_group(child.id());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         for drain in output_drains {
@@ -6454,6 +6536,11 @@ fn run_stage_commands(
             cgroup_mount_existed,
             &rootfs,
         );
+        if !proc_mount_existed {
+            if let Some(target) = proc_mount_target.as_ref() {
+                let _ = fs::remove_dir(target);
+            }
+        }
         if let Some(err) = cleanup_error {
             return Err(err);
         }
@@ -6472,15 +6559,15 @@ fn run_stage_commands(
     Ok(())
 }
 
-/// Give a rootless Dockerfile RUN the same outbound resolver configuration as
-/// a rootless workload. Bubblewrap shares the host network until a dedicated
-/// slirp namespace is attached, so its rootfs must still contain a resolver
-/// file rather than inheriting the host mount namespace's `/etc`.
-fn provision_rootless_build_network_files(rootfs: &Path) -> Result<(), DockerfileBuildError> {
+/// Give every Dockerfile RUN the daemon's outbound resolver configuration.
+/// Both chroot and bubblewrap replace the host mount namespace's `/etc`, so an
+/// image without its own resolv.conf would otherwise lose DNS despite having
+/// an attached network.
+fn provision_build_network_files(rootfs: &Path) -> Result<(), DockerfileBuildError> {
     let source = Path::new("/etc/resolv.conf");
     let bytes = fs::read(source).map_err(|error| {
         DockerfileBuildError::Invalid(format!(
-            "rootless RUN cannot read host resolver {}: {error}",
+            "RUN cannot read host resolver {}: {error}",
             source.display()
         ))
     })?;
@@ -6493,6 +6580,13 @@ fn provision_rootless_build_network_files(rootfs: &Path) -> Result<(), Dockerfil
     }
     fs::write(&target, bytes)?;
     Ok(())
+}
+
+fn should_isolate_build_network(network_mode: DockerfileNetworkMode) -> bool {
+    // The current sandbox executor shares the daemon network, as the rootless
+    // bubblewrap path already does. `none` remains a distinct empty namespace;
+    // `host` is separately entitlement-gated before execution.
+    network_mode == DockerfileNetworkMode::None
 }
 
 /// Resolve a Dockerfile mount target without following symlinks in the
@@ -6813,6 +6907,23 @@ fn setup_build_namespace_root(
     unshare(flags)
         .map_err(|err| io::Error::other(err.to_string()))?;
     make_mount_namespace_private()
+}
+
+#[cfg(unix)]
+fn create_build_process_group() -> io::Result<()> {
+    let process = nix::unistd::Pid::from_raw(0);
+    nix::unistd::setpgid(process, process).map_err(|error| io::Error::other(error.to_string()))
+}
+
+#[cfg(unix)]
+fn terminate_build_process_group(leader: u32) {
+    let Ok(leader) = i32::try_from(leader) else {
+        return;
+    };
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(leader),
+        nix::sys::signal::Signal::SIGKILL,
+    );
 }
 
 fn child_requires_cgroup_namespace(options: &DockerfileExecutionOptions) -> bool {
@@ -8356,6 +8467,26 @@ mod tests {
     }
 
     #[test]
+    fn dockerfile_external_copy_images_exclude_stages_and_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            "FROM scratch AS base\nCOPY --from=tonistiigi/hellofs /hellofs /bin/hellofs\nCOPY --from=base /x /x\nCOPY --from=0 /y /y\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::dockerfile_external_copy_images_with_build_args(
+                &dockerfile,
+                &HashMap::new()
+            )
+            .unwrap(),
+            vec!["tonistiigi/hellofs"]
+        );
+    }
+
+    #[test]
     fn from_platform_automatic_args_expand_and_unknown_args_fail_early() {
         let valid = parse_stages("FROM --platform=$BUILDPLATFORM scratch\n").unwrap();
         assert_eq!(valid[0].base, "scratch");
@@ -8740,6 +8871,17 @@ mod tests {
             &contexts,
         )
         .is_err());
+    }
+
+    #[test]
+    fn image_reference_is_valid_named_context_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let contexts = HashMap::from([(
+            "tonistiigi/hellofs:latest".to_string(),
+            temp.path().to_path_buf(),
+        )]);
+        let canonical = super::canonicalize_named_contexts(&contexts).unwrap();
+        assert!(canonical.contains_key("tonistiigi/hellofs:latest"));
     }
     use crate::image_fetch::resolve_layer_paths_with_store;
     use crate::image_store::LocalImageStore;
@@ -11655,6 +11797,69 @@ mod tests {
         assert!(invalid
             .to_string()
             .contains("security \"privileged\" is not valid"));
+    }
+
+    #[test]
+    fn shell_run_preserves_quoted_tabs_after_frontend_flags() {
+        let command =
+            "--security=sandbox [ \"CapBnd:\t00000000a80425fb\" = \"CapBnd:\t00000000a80425fb\" ]";
+        let run = parse_run(command, &["/bin/sh".into(), "-c".into()]).expect("shell RUN parses");
+        assert_eq!(
+            run.args.last().map(String::as_str),
+            Some("[ \"CapBnd:\t00000000a80425fb\" = \"CapBnd:\t00000000a80425fb\" ]")
+        );
+    }
+
+    #[test]
+    fn direct_root_authority_rejects_root_mapped_user_namespace() {
+        assert!(super::uid_map_has_initial_namespace_root(
+            "         0          0 4294967295\n"
+        ));
+        assert!(!super::uid_map_has_initial_namespace_root(
+            "         0       1000          1\n"
+        ));
+        assert!(!super::uid_map_has_initial_namespace_root(
+            "0 1000 1\n1 100000 65535\n"
+        ));
+    }
+
+    #[test]
+    fn only_none_network_uses_an_empty_build_namespace() {
+        assert!(super::should_isolate_build_network(
+            super::DockerfileNetworkMode::None
+        ));
+        assert!(!super::should_isolate_build_network(
+            super::DockerfileNetworkMode::Sandbox
+        ));
+        assert!(!super::should_isolate_build_network(
+            super::DockerfileNetworkMode::Host
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_run_terminates_background_processes_holding_output_pipes() {
+        use std::os::unix::process::CommandExt;
+
+        let started = std::time::Instant::now();
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 &"])
+            .stdout(std::process::Stdio::piped());
+        unsafe {
+            command.pre_exec(super::create_build_process_group);
+        }
+        let mut child = command.spawn().expect("spawn process-group probe");
+        let mut output = child.stdout.take().expect("captured stdout");
+        child.wait().expect("shell exits without waiting for background job");
+        super::terminate_build_process_group(child.id());
+        let mut captured = Vec::new();
+        std::io::Read::read_to_end(&mut output, &mut captured)
+            .expect("background output pipe closes after process-group cleanup");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "background process must not hold RUN output capture open"
+        );
     }
 
     #[cfg(target_os = "linux")]

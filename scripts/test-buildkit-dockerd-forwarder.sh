@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 forwarder="$ROOT_DIR/bench/suites/buildkit-dockerfile/dockerd-forwarder.py"
+runner="$ROOT_DIR/bench/suites/run-suite.sh"
 
-python3 - "$forwarder" <<'PYEOF'
+python3 - "$forwarder" "$runner" <<'PYEOF'
 import importlib.util
 import json
 import os
@@ -15,7 +16,7 @@ import sys
 import tempfile
 import time
 
-forwarder = sys.argv[1]
+forwarder, runner = sys.argv[1:3]
 spec = importlib.util.spec_from_file_location("dockerd_forwarder", forwarder)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -83,6 +84,11 @@ with tempfile.TemporaryDirectory() as work:
     stdout, stderr = proc.communicate(timeout=5)
     assert proc.returncode == 0, (proc.returncode, stdout, stderr)
     assert "Traceback" not in stderr, stderr
+
+runner_source = pathlib.Path(runner).read_text()
+assert 'PRE=(unshare -Ur env TEST_DOCKERD=1' in runner_source
+assert '--privileged --pid host --network host' in runner_source
+assert 'exec "$container" chmod 666 "/host$socket"' in runner_source
 
 print("buildkit dockerd forwarder tests passed")
 PYEOF

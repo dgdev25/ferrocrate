@@ -45,11 +45,16 @@ echo $$ > "$LOCKFILE.pid"
 # this script. Later paths register what they need cleaned by setting these
 # variables; they must never call `trap ... EXIT` themselves.
 CLEANUP_DAEMON=""; CLEANUP_PATHS=""; CLEANUP_DOCKER_CONTEXT=""
-CLEANUP_EXTRA_DAEMONS=(); CLEANUP_EXTRA_PATHS=()
+CLEANUP_EXTRA_DAEMONS=(); CLEANUP_EXTRA_PATHS=(); CLEANUP_DOCKER_CONTAINERS=()
 suite_cleanup() {
   [ -n "$CLEANUP_DAEMON" ] && kill "$CLEANUP_DAEMON" 2>/dev/null
   local daemon path
   for daemon in "${CLEANUP_EXTRA_DAEMONS[@]}"; do kill "$daemon" 2>/dev/null || true; done
+  local container
+  for container in "${CLEANUP_DOCKER_CONTAINERS[@]}"; do
+    docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+      container rm -f "$container" >/dev/null 2>&1 || true
+  done
   [ -n "$CLEANUP_DOCKER_CONTEXT" ] && docker context rm -f "$CLEANUP_DOCKER_CONTEXT" >/dev/null 2>&1
   for path in "${CLEANUP_EXTRA_PATHS[@]}"; do rm -f "$path"; done
   # shellcheck disable=SC2086
@@ -325,19 +330,42 @@ FROZEN
         start_entitlement_daemon() {
           local variant="$1" socket="$2"; shift 2
           local variant_home="$FERROCRATE_HOME/home-$variant"
+          local container="ferro-suite-$variant-$$"
           mkdir -p "$variant_home"
-          HOME="$variant_home" FERROCRATE_HOME="$variant_home" \
+          # Device entitlement tests exercise loop mounts and /dev/fuse. The
+          # harness itself only needs mapped root to pass requireRoot, while a
+          # worker in that user namespace cannot perform those operations and
+          # AppArmor rejects apk's fd-based package triggers. Run only these
+          # explicitly configured workers rootfully in a privileged container.
+          # --pid=host is required so peer-PID authentication can inspect the
+          # mapped-root forwarder through the host /proc mounted by the chroot.
+          docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+            image inspect alpine:3.22 >/dev/null 2>&1 || {
+            echo "BuildKit entitlement workers require the cached alpine:3.22 image" >&2
+            exit 2
+          }
+          docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+            run -d --rm --name "$container" --privileged --pid host --network host \
+            --volume /:/host alpine:3.22 chroot /host env \
+            HOME="$variant_home" FERROCRATE_HOME="$variant_home" \
             FERROCRATE_RUNTIME_DIR="$variant_home" \
             "$WORK/ferro-suite-engine" daemon --docker-compat \
-            --socket "$socket" "$@" > "$WORK/daemon-$variant.log" 2>&1 &
-          local daemon=$!
+            --socket "$socket" "$@" >/dev/null
           for _ in $(seq 1 100); do [ -S "$socket" ] && break; sleep 0.1; done
           [ -S "$socket" ] || {
             echo "Ferrocrate $variant entitlement daemon did not create $socket; see $WORK/daemon-$variant.log" >&2
-            kill "$daemon" 2>/dev/null || true
+            docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+              logs "$container" > "$WORK/daemon-$variant.log" 2>&1 || true
+            docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+              container rm -f "$container" >/dev/null 2>&1 || true
             exit 2
           }
-          CLEANUP_EXTRA_DAEMONS+=("$daemon")
+          # The daemon deliberately creates a root-only socket. The forwarder
+          # runs as the invoking user, so make this throwaway suite socket
+          # connectable without weakening product defaults.
+          docker --host "${DOCKER_ORACLE_HOST:-unix:///var/run/docker.sock}" \
+            exec "$container" chmod 666 "/host$socket"
+          CLEANUP_DOCKER_CONTAINERS+=("$container")
           CLEANUP_EXTRA_PATHS+=("$socket")
         }
         NETWORK_HOST_SOCK="$WORK/network-host.sock"

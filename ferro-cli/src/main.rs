@@ -18672,6 +18672,8 @@ struct BuildkitBuild {
     gateway_warnings: Mutex<Vec<buildkit_proto::moby::buildkit::v1::VertexWarning>>,
     error: Mutex<Option<String>>,
     dockerfile_source: Mutex<Option<BuildkitDockerfileSource>>,
+    gateway_references: Mutex<HashMap<String, BuildkitGatewayReference>>,
+    next_gateway_reference: AtomicU64,
     is_completed: AtomicBool,
     completed: tokio::sync::Notify,
 }
@@ -18681,6 +18683,12 @@ struct BuildkitBuild {
 struct BuildkitDockerfileSource {
     filename: String,
     data: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct BuildkitGatewayReference {
+    files: HashMap<String, Vec<u8>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -19068,6 +19076,8 @@ impl DockerCompatState {
             gateway_warnings: Mutex::new(Vec::new()),
             error: Mutex::new(None),
             dockerfile_source: Mutex::new(None),
+            gateway_references: Mutex::new(HashMap::new()),
+            next_gateway_reference: AtomicU64::new(0),
             is_completed: AtomicBool::new(false),
             completed: tokio::sync::Notify::new(),
         });
@@ -19125,23 +19135,14 @@ impl DockerCompatState {
         // then submits its generated LLB here. Inputs has already produced
         // the Dockerfile result (including its lint warnings), so this is not
         // an arbitrary LLB solve.
-        let is_prepared_client_llb = request.frontend.is_empty()
-            && request.definition.is_some()
-            && build
-                .result
-                .lock()
-                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
-                .is_some();
-        if !(is_dockerfile && request.definition.is_none()) && !is_prepared_client_llb {
+        let is_llb_definition = request.frontend.is_empty() && request.definition.is_some();
+        if !(is_dockerfile && request.definition.is_none()) && !is_llb_definition {
             return Err("buildkit gateway: only dockerfile.v0 frontend solves are supported".to_string());
         }
         let mut callback = build
             .gateway_solve
             .lock()
             .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?;
-        if callback.is_some() && !is_prepared_client_llb {
-            return Err("buildkit gateway: duplicate frontend solve".to_string());
-        }
         *callback = Some(request);
         drop(callback);
         Ok(build)
@@ -26078,13 +26079,30 @@ async fn handle_buildkit_control_request(
         let build = state
             .wait_for_buildkit_build(build_id, Duration::from_secs(3))
             .await?;
-        let source = build
-            .dockerfile_source
-            .lock()
-            .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
-            .clone()
-            .ok_or_else(|| "buildkit gateway: Dockerfile source is unavailable".to_string())?;
-        let data = buildkit_gateway_read_file(&source, &read)?;
+        let data = if read.r#ref.is_empty() {
+            let source = build
+                .dockerfile_source
+                .lock()
+                .map_err(|error| format!("buildkit Dockerfile source lock poisoned: {error}"))?
+                .clone()
+                .ok_or_else(|| "buildkit gateway: Dockerfile source is unavailable".to_string())?;
+            buildkit_gateway_read_file(&source, &read)?
+        } else {
+            let references = build
+                .gateway_references
+                .lock()
+                .map_err(|error| format!("buildkit gateway reference registry poisoned: {error}"))?;
+            let reference = references
+                .get(&read.r#ref)
+                .ok_or_else(|| format!("buildkit gateway: unknown reference {}", read.r#ref))?;
+            let file = reference.files.get(&read.file_path).ok_or_else(|| {
+                format!(
+                    "buildkit gateway: file {} is unavailable in reference {}",
+                    read.file_path, read.r#ref
+                )
+            })?;
+            buildkit_gateway_read_range(file, read.range.as_ref())?
+        };
         response_stream
             .send_data(grpc_message(&ReadFileResponse { data }), false)
             .map_err(|error| format!("buildkit gateway read file: response failed: {error}"))?;
@@ -26270,51 +26288,97 @@ async fn handle_buildkit_control_request(
         state
             .wait_for_buildkit_build(build_id, Duration::from_secs(3))
             .await?;
-        let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
-        let result = if solve.frontend.is_empty() && solve.definition.is_some() {
-            build
-                .result
+        let prepared_client_llb = solve.frontend.is_empty()
+            && solve.definition.is_some()
+            && state
+                .buildkit_build(build_id)?
+                .gateway_solve
                 .lock()
-                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
-                .clone()
-                .ok_or_else(|| "buildkit gateway: client LLB solve has no prepared Dockerfile result".to_string())
+                .map_err(|error| format!("buildkit gateway solve poisoned: {error}"))?
+                .is_none();
+        let build = state.record_buildkit_gateway_solve(build_id, solve.clone())?;
+        let result = if let Some(definition) = solve.definition.as_ref() {
+            if let Some((url, filename, checksum)) = buildkit_http_source(definition)? {
+                let reference = execute_buildkit_http_source(url, filename, checksum).await?;
+                let sequence = build
+                    .next_gateway_reference
+                    .fetch_add(1, Ordering::Relaxed);
+                let reference_id = format!("ferrocrate-{build_id}-source-{sequence}");
+                build
+                    .gateway_references
+                    .lock()
+                    .map_err(|error| {
+                        format!("buildkit gateway reference registry poisoned: {error}")
+                    })?
+                    .insert(reference_id.clone(), reference);
+                GatewayResult {
+                    result: Some(result::Result::Ref(Ref {
+                        id: reference_id,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }
+            } else if prepared_client_llb {
+                let prepared = build
+                    .result
+                    .lock()
+                    .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
+                    .clone()
+                    .ok_or_else(|| {
+                        "buildkit gateway: client LLB solve has no prepared Dockerfile result"
+                            .to_string()
+                    })?;
+                GatewayResult {
+                    result: Some(result::Result::Ref(Ref {
+                        id: format!("ferrocrate-{build_id}"),
+                        ..Default::default()
+                    })),
+                    metadata: prepared.metadata,
+                    ..Default::default()
+                }
+            } else {
+                return send_buildkit_frontend_error(
+                    &mut response_stream,
+                    "buildkit gateway: unsupported LLB definition",
+                    build.as_ref(),
+                );
+            }
         } else {
-            execute_buildkit_frontend(
+            let built = match execute_buildkit_frontend(
                 state.as_ref(),
                 execution.clone(),
                 build.as_ref(),
                 &solve,
             )
             .await
-        };
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                *build
-                    .error
-                    .lock()
-                    .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
-                    Some(error.clone());
-                return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
-            }
-        };
-        *build
-            .result
-            .lock()
-            .map_err(|error| format!("buildkit solve result poisoned: {error}"))? = Some(result);
-        let result = GatewayResult {
-            result: Some(result::Result::Ref(Ref {
-                id: format!("ferrocrate-{build_id}"),
-                ..Default::default()
-            })),
-            metadata: build
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    *build
+                        .error
+                        .lock()
+                        .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                        Some(error.clone());
+                    return send_buildkit_frontend_error(
+                        &mut response_stream,
+                        &error,
+                        build.as_ref(),
+                    );
+                }
+            };
+            *build
                 .result
                 .lock()
-                .map_err(|error| format!("buildkit solve result poisoned: {error}"))?
-                .as_ref()
-                .map(|result| result.metadata.clone())
-                .unwrap_or_default(),
-            ..Default::default()
+                .map_err(|error| format!("buildkit solve result poisoned: {error}"))? =
+                Some(built.clone());
+            GatewayResult {
+                result: Some(result::Result::Ref(Ref {
+                    id: format!("ferrocrate-{build_id}"),
+                    ..Default::default()
+                })),
+                metadata: built.metadata,
+                ..Default::default()
+            }
         };
         response_stream
             .send_data(
@@ -27138,7 +27202,14 @@ fn buildkit_gateway_read_file(
     if request.file_path != source.filename {
         return Err(format!("buildkit gateway: file {} is unavailable", request.file_path));
     }
-    let range = request.range.as_ref();
+    buildkit_gateway_read_range(&source.data, request.range.as_ref())
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_gateway_read_range(
+    data: &[u8],
+    range: Option<&buildkit_proto::moby::buildkit::v1::frontend::FileRange>,
+) -> Result<Vec<u8>, String> {
     let offset = range.map(|range| range.offset).unwrap_or_default();
     let length = range.map(|range| range.length).unwrap_or_default();
     if offset < 0 || length < 0 {
@@ -27146,20 +27217,122 @@ fn buildkit_gateway_read_file(
     }
     let start = usize::try_from(offset)
         .map_err(|_| "buildkit gateway: file range offset is invalid".to_string())?;
-    if start > source.data.len() {
-        return Err("buildkit gateway: file range starts beyond Dockerfile".to_string());
+    if start > data.len() {
+        return Err("buildkit gateway: file range starts beyond file".to_string());
     }
     let end = if length == 0 {
-        source.data.len()
+        data.len()
     } else {
         start
             .checked_add(usize::try_from(length).map_err(|_| {
                 "buildkit gateway: file range length is invalid".to_string()
             })?)
-            .filter(|end| *end <= source.data.len())
-            .ok_or_else(|| "buildkit gateway: file range ends beyond Dockerfile".to_string())?
+            .filter(|end| *end <= data.len())
+            .ok_or_else(|| "buildkit gateway: file range ends beyond file".to_string())?
     };
-    Ok(source.data[start..end].to_vec())
+    Ok(data[start..end].to_vec())
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_http_source(
+    definition: &buildkit_proto::pb::Definition,
+) -> Result<Option<(String, String, Option<String>)>, String> {
+    use buildkit_proto::pb::{op, Op};
+
+    let mut source = None;
+    for encoded in &definition.def {
+        let operation = Op::decode(encoded.as_slice())
+            .map_err(|error| format!("buildkit gateway: invalid LLB operation: {error}"))?;
+        match operation.op {
+            Some(op::Op::Source(candidate))
+                if candidate.identifier.starts_with("http://")
+                    || candidate.identifier.starts_with("https://") =>
+            {
+                if source.is_some() {
+                    return Err(
+                        "buildkit gateway: HTTP LLB definition has multiple sources".to_string(),
+                    );
+                }
+                let url = reqwest::Url::parse(&candidate.identifier)
+                    .map_err(|error| format!("buildkit gateway: invalid HTTP source: {error}"))?;
+                let filename = candidate
+                    .attrs
+                    .get("http.filename")
+                    .cloned()
+                    .or_else(|| {
+                        url.path_segments()?
+                            .next_back()
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "download".to_string());
+                if filename == "."
+                    || filename == ".."
+                    || filename.contains('/')
+                    || filename.contains('\\')
+                    || filename.contains('\0')
+                {
+                    return Err("buildkit gateway: invalid HTTP source filename".to_string());
+                }
+                source = Some((
+                    candidate.identifier,
+                    filename,
+                    candidate.attrs.get("http.checksum").cloned(),
+                ));
+            }
+            Some(op::Op::Source(_)) => return Ok(None),
+            Some(_) => return Ok(None),
+            None => {}
+        }
+    }
+    Ok(source)
+}
+
+#[cfg(target_os = "linux")]
+async fn execute_buildkit_http_source(
+    url: String,
+    filename: String,
+    checksum: Option<String>,
+) -> Result<BuildkitGatewayReference, String> {
+    const MAX_HTTP_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("buildkit gateway: HTTP source client failed: {error}"))?
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("buildkit gateway: HTTP source fetch failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("buildkit gateway: HTTP source fetch failed: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HTTP_SOURCE_BYTES as u64)
+    {
+        return Err("buildkit gateway: HTTP source exceeds 64 MiB".to_string());
+    }
+    let data = response
+        .bytes()
+        .await
+        .map_err(|error| format!("buildkit gateway: HTTP source body failed: {error}"))?;
+    if data.len() > MAX_HTTP_SOURCE_BYTES {
+        return Err("buildkit gateway: HTTP source exceeds 64 MiB".to_string());
+    }
+    if let Some(checksum) = checksum {
+        let expected = checksum
+            .strip_prefix("sha256:")
+            .ok_or_else(|| "buildkit gateway: unsupported HTTP source checksum".to_string())?;
+        let actual = format!("{:x}", Sha256::digest(&data));
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "buildkit gateway: HTTP source checksum mismatch: expected {checksum}, got sha256:{actual}"
+            ));
+        }
+    }
+    Ok(BuildkitGatewayReference {
+        files: HashMap::from([(filename, data.to_vec())]),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -38051,6 +38224,73 @@ volumes:
                 },
             )
             .expect("client LLB after prepared inputs is accepted");
+    }
+
+    #[test]
+    fn buildkit_gateway_accepts_http_llb_source_callbacks() {
+        use super::buildkit_proto::{
+            moby::buildkit::v1::{frontend, SolveRequest},
+            pb::{op, Definition, Op, SourceOp},
+        };
+        use prost::Message as _;
+
+        let temp = tempfile::tempdir().expect("state root");
+        let state = super::DockerCompatState::new(temp.path()).expect("state");
+        state
+            .register_buildkit_solve(SolveRequest {
+                r#ref: "http-source-build".to_string(),
+                session: "session-id".to_string(),
+                ..Default::default()
+            })
+            .expect("register outer solve");
+        let definition = Definition {
+            def: vec![Op {
+                op: Some(op::Op::Source(SourceOp {
+                    identifier: "https://example.invalid/README.md".to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }
+            .encode_to_vec()],
+            ..Default::default()
+        };
+
+        state
+            .record_buildkit_gateway_solve(
+                "http-source-build",
+                frontend::SolveRequest {
+                    definition: Some(definition),
+                    ..Default::default()
+                },
+            )
+            .expect("real client frontends may submit an HTTP LLB source before Dockerfile solves");
+    }
+
+    #[tokio::test]
+    async fn buildkit_gateway_materializes_http_llb_reference_files() {
+        use sha2::Digest as _;
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("fixture request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).expect("read fixture request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncallback")
+                .expect("write fixture response");
+        });
+
+        let reference = super::execute_buildkit_http_source(
+            format!("http://{address}/README.md"),
+            "README.md".to_string(),
+            Some(format!("sha256:{:x}", sha2::Sha256::digest(b"callback"))),
+        )
+        .await
+        .expect("HTTP LLB source materializes");
+        server.join().expect("fixture server");
+        assert_eq!(reference.files.get("README.md"), Some(&b"callback".to_vec()));
     }
 
     #[test]

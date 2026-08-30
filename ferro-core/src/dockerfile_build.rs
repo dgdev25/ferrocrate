@@ -6655,9 +6655,12 @@ fn prepare_build_run_cgroup(
         let root = std::env::var_os("FERROCRATE_CGROUP_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"));
-        let parent = options.cgroup_parent.as_deref().unwrap_or("ferrocrate-build");
+        let parent = options
+            .cgroup_parent
+            .as_deref()
+            .unwrap_or("ferrocrate-build")
+            .trim_start_matches('/');
         if parent.is_empty()
-            || parent.starts_with('/')
             || parent.split('/').any(|part| part.is_empty() || part == "." || part == "..")
             || parent.contains('\\')
             || parent.contains('\0')
@@ -11372,6 +11375,24 @@ mod tests {
         };
         assert!(super::stage_ignores_cache(&stages[0], &named));
         assert!(!super::stage_ignores_cache(&stages[1], &named));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_cgroup_parent_accepts_docker_absolute_cgroupfs_path() {
+        let temp = tempfile::tempdir().expect("cgroup root");
+        fs::write(temp.path().join("cgroup.controllers"), "").expect("v2 marker");
+        let _guard = ScopedEnvVar::set("FERROCRATE_CGROUP_ROOT", temp.path());
+        let options = super::DockerfileExecutionOptions {
+            cgroup_parent: Some("/docker-builds".to_string()),
+            ..Default::default()
+        };
+
+        let group = super::prepare_build_run_cgroup(&options, 7)
+            .expect("Docker accepts an absolute cgroupfs parent")
+            .expect("cgroup parent requests a RUN leaf");
+        assert!(group.path.starts_with(temp.path().join("docker-builds")));
+        group.cleanup().expect("remove RUN leaf");
     }
 
     #[test]

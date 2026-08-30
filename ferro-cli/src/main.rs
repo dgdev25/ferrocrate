@@ -26948,6 +26948,18 @@ fn buildkit_frontend_execution_options(
         }
         Ok(Some(value))
     };
+    let positive_i64 = |name: &str| -> Result<Option<u64>, String> {
+        let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("buildkit solve: invalid {name} value: {raw}"))?;
+        if value <= 0 {
+            return Err(format!("buildkit solve: invalid {name} value: must be > 0"));
+        }
+        Ok(Some(value as u64))
+    };
     let signed = |name: &str| -> Result<Option<i64>, String> {
         let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
             return Ok(None);
@@ -26998,7 +27010,7 @@ fn buildkit_frontend_execution_options(
             .map(str::to_string)
             .collect::<Vec<_>>()
     });
-    let memory = unsigned("memory")?;
+    let memory = positive_i64("memory")?;
     let memory_swap = signed("memswap")?;
     if memory_swap.is_some_and(|value| value < -1 || value == 0) {
         return Err("buildkit solve: memswap must be -1 or > 0".to_string());
@@ -27029,7 +27041,7 @@ fn buildkit_frontend_execution_options(
         memory,
         memory_swap,
         cpu_shares: unsigned("cpushares")?,
-        cpu_quota: unsigned("cpuquota")?,
+        cpu_quota: positive_i64("cpuquota")?,
         cpu_period: unsigned("cpuperiod")?,
         cpuset_cpus,
         cpuset_mems,
@@ -27045,19 +27057,29 @@ fn buildkit_frontend_execution_options(
 
 #[cfg(target_os = "linux")]
 fn validate_buildkit_cpuset(name: &str, value: &str) -> Result<(), String> {
+    const MAX_CPU: u32 = 8192;
     for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
         let (start, end) = item
             .split_once('-')
             .map(|(start, end)| (start, Some(end)))
             .unwrap_or((item, None));
         let start = start
+            .trim()
             .parse::<u32>()
             .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
+        if start > MAX_CPU {
+            return Err(format!("buildkit solve: invalid {name} value: {value}"));
+        }
         if let Some(end) = end {
             let end = end
+                .trim()
                 .parse::<u32>()
                 .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
-            if end < start {
+            if end < start || end > MAX_CPU {
                 return Err(format!("buildkit solve: invalid {name} value: {value}"));
             }
         }
@@ -38317,6 +38339,49 @@ volumes:
         )
         .expect("positive byte count parses");
         assert_eq!(options.shm_size, Some(134_217_728));
+    }
+
+    #[test]
+    fn buildkit_frontend_resource_values_match_linux_resource_contract() {
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::new(),
+            &HashMap::from([
+                ("memory".to_string(), "67108864".to_string()),
+                ("memswap".to_string(), "-1".to_string()),
+                ("cpushares".to_string(), u64::MAX.to_string()),
+                ("cpuperiod".to_string(), u64::MAX.to_string()),
+                ("cpuquota".to_string(), i64::MAX.to_string()),
+                ("cpusetcpus".to_string(), " 0 , 2 - 3 ".to_string()),
+                ("cpusetmems".to_string(), "0".to_string()),
+                ("cgroup-parent".to_string(), "/docker-builds".to_string()),
+            ]),
+            &[],
+        )
+        .expect("valid BuildKit LinuxResources values parse");
+        assert_eq!(options.memory, Some(67_108_864));
+        assert_eq!(options.memory_swap, Some(-1));
+        assert_eq!(options.cpu_shares, Some(u64::MAX));
+        assert_eq!(options.cpu_period, Some(u64::MAX));
+        assert_eq!(options.cpu_quota, Some(i64::MAX as u64));
+        assert_eq!(options.cpuset_cpus.as_deref(), Some(" 0 , 2 - 3 "));
+        assert_eq!(options.cgroup_parent.as_deref(), Some("/docker-builds"));
+
+        for (name, value) in [
+            ("memory", "9223372036854775808"),
+            ("cpuquota", "9223372036854775808"),
+            ("cpusetcpus", "8193"),
+            ("cpusetmems", "0-8193"),
+        ] {
+            assert!(
+                super::buildkit_frontend_execution_options(
+                    &HashMap::new(),
+                    &HashMap::from([(name.to_string(), value.to_string())]),
+                    &[],
+                )
+                .is_err(),
+                "BuildKit rejects {name}={value}",
+            );
+        }
     }
 
     #[test]

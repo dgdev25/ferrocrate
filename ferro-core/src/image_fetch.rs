@@ -1046,6 +1046,9 @@ mod tests {
                 "GET",
                 format!("/v2/library/layer-swap/blobs/{layer_digest}"),
             ))
+            // fetch_verified_layer retries the download after a validation
+            // failure, so the mock must accept repeated requests.
+            .times(1..)
             .respond_with(status_code(200).body("substituted payload")),
         );
         let temp = tempfile::tempdir().unwrap();
@@ -1275,6 +1278,9 @@ mod tests {
                 "GET",
                 format!("/v2/library/layer-size/blobs/{layer_digest}"),
             ))
+            // fetch_verified_layer retries the download after a validation
+            // failure, so the mock must accept repeated requests.
+            .times(1..)
             .respond_with(status_code(200).body(layer_bytes.to_vec())),
         );
         let temp = tempfile::tempdir().unwrap();

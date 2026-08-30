@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use crate::capabilities::drop_all_capabilities;
+use crate::capabilities::set_capabilities;
 use crate::image_fetch::{pull_image_with_store, resolve_layer_paths_with_store};
 use crate::image_manifest::parse_image_manifest;
 use crate::image_manifest::{
@@ -118,6 +118,7 @@ pub struct DockerfileExecutionOptions {
     pub no_cache: Option<Vec<String>>,
     pub network_mode: DockerfileNetworkMode,
     pub allow_network_host: bool,
+    pub allow_security_insecure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +134,33 @@ pub enum DockerfileNetworkMode {
     Sandbox,
     None,
     Host,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DockerfileSecurityMode {
+    #[default]
+    Sandbox,
+    Insecure,
+}
+
+fn dockerfile_default_capabilities() -> Vec<caps::Capability> {
+    use caps::Capability::*;
+    vec![
+        CAP_CHOWN,
+        CAP_DAC_OVERRIDE,
+        CAP_FOWNER,
+        CAP_FSETID,
+        CAP_KILL,
+        CAP_SETGID,
+        CAP_SETUID,
+        CAP_SETPCAP,
+        CAP_NET_BIND_SERVICE,
+        CAP_NET_RAW,
+        CAP_SYS_CHROOT,
+        CAP_MKNOD,
+        CAP_AUDIT_WRITE,
+        CAP_SETFCAP,
+    ]
 }
 
 impl ImageBuildPlan {
@@ -3884,6 +3912,14 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
                 Some(DockerfileNetworkMode::Host) => "host",
             },
         );
+        append_stage_identity_str(
+            buffer,
+            "run.security",
+            match run.security {
+                DockerfileSecurityMode::Sandbox => "sandbox",
+                DockerfileSecurityMode::Insecure => "insecure",
+            },
+        );
     }
     for port in &stage.exposed_ports {
         append_stage_identity_str(buffer, "expose", port);
@@ -4509,6 +4545,7 @@ struct RunSpec {
     tmpfs_mounts: Vec<TmpfsMount>,
     bind_mounts: Vec<BindMount>,
     network: Option<DockerfileNetworkMode>,
+    security: DockerfileSecurityMode,
 }
 
 #[derive(Debug, Clone)]
@@ -4683,6 +4720,7 @@ fn parse_run_with_workdir(
                 tmpfs_mounts: Vec::new(),
                 bind_mounts: Vec::new(),
                 network: None,
+                security: DockerfileSecurityMode::Sandbox,
             });
         }
     }
@@ -4693,6 +4731,7 @@ fn parse_run_with_workdir(
     let mut tmpfs_mounts = Vec::new();
     let mut bind_mounts = Vec::new();
     let mut network = None;
+    let mut security = DockerfileSecurityMode::Sandbox;
     loop {
         if let Some(value) = tokens
             .first()
@@ -4708,6 +4747,22 @@ fn parse_run_with_workdir(
                     )))
                 }
             });
+            tokens.remove(0);
+            continue;
+        }
+        if let Some(value) = tokens
+            .first()
+            .and_then(|token| token.strip_prefix("--security="))
+        {
+            security = match value {
+                "sandbox" => DockerfileSecurityMode::Sandbox,
+                "insecure" => DockerfileSecurityMode::Insecure,
+                other => {
+                    return Err(DockerfileBuildError::Invalid(format!(
+                        "unsupported security mode {other:?}"
+                    )))
+                }
+            };
             tokens.remove(0);
             continue;
         }
@@ -5012,6 +5067,7 @@ fn parse_run_with_workdir(
                 tmpfs_mounts,
                 bind_mounts,
                 network,
+                security,
             });
         }
         // Not a JSON array: shell form, so mount flags stay valid.
@@ -5032,6 +5088,7 @@ fn parse_run_with_workdir(
         tmpfs_mounts,
         bind_mounts,
         network,
+        security,
     })
 }
 
@@ -5413,7 +5470,13 @@ fn run_stage_commands(
             && !execution_options.allow_network_host
         {
             return Err(DockerfileBuildError::Invalid(
-                "network.host is not allowed; grant the network.host entitlement".to_string(),
+                "entitlement network.host is not allowed".to_string(),
+            ));
+        }
+        let security_insecure = run.security == DockerfileSecurityMode::Insecure;
+        if security_insecure && !execution_options.allow_security_insecure {
+            return Err(DockerfileBuildError::Invalid(
+                "entitlement security.insecure is not allowed".to_string(),
             ));
         }
         if rootless_bwrap.is_some() {
@@ -5465,6 +5528,25 @@ fn run_stage_commands(
             if network_mode == DockerfileNetworkMode::None {
                 command.arg("--unshare-net");
             }
+            if !security_insecure {
+                command.arg("--cap-drop").arg("ALL");
+                for capability in dockerfile_default_capabilities() {
+                    command
+                        .arg("--cap-add")
+                        .arg(format!("{capability:?}"));
+                }
+            } else {
+                for device in [
+                    "/dev/kmsg",
+                    "/dev/cuse",
+                    "/dev/fuse",
+                    "/dev/kvm",
+                    "/dev/net/tun",
+                    "/dev/loop-control",
+                ] {
+                    command.arg("--dev-bind-try").arg(device).arg(device);
+                }
+            }
             if cgroup_namespace {
                 command.arg("--unshare-cgroup-try");
                 command
@@ -5507,6 +5589,7 @@ fn run_stage_commands(
         let child_cgroup = run_cgroup.as_ref().map(|cgroup| cgroup.path.clone());
         let child_cgroup_mount = cgroup_mount_target.clone();
         let child_ulimits = execution_options.ulimits.clone();
+        let child_security_insecure = security_insecure;
         let ssh_socket = std::env::var_os("FERROCRATE_BUILD_SSH_AUTH_SOCK")
             .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
             .map(PathBuf::from);
@@ -5808,38 +5891,41 @@ fn run_stage_commands(
                         io::Error::new(err.kind(), format!("build pre_exec set identity: {err}"))
                     })?;
                 }
-                if running_as_root {
-                if let Err(err) = set_no_new_privileges() {
-                    if err.raw_os_error() == Some(nix::libc::EINVAL)
-                        || err.raw_os_error() == Some(nix::libc::EPERM)
-                    {
-                        log::warn!("build pre_exec ignoring no_new_privs error: {err}");
-                    } else {
-                        return Err(io::Error::new(
-                            err.kind(),
-                            format!("build pre_exec set no_new_privs: {err}"),
-                        ));
-                    }
-                }
-                drop_all_capabilities()
-                    .map_err(|err| io::Error::other(format!("build pre_exec drop capabilities: {err}")))?;
-                if let Some(profile) = &seccomp {
-                    if let Err(err) = apply_seccomp_profile(profile) {
-                        let err_text = err.to_string();
-                        let invalid_arg = err_text.contains("Invalid argument")
-                            || err_text.contains("invalid argument");
-                        if invalid_arg {
-                            log::warn!(
-                                "build pre_exec seccomp apply failed, continuing without seccomp: {}",
-                                err
-                            );
+                if running_as_root && !child_security_insecure {
+                    if let Err(err) = set_no_new_privileges() {
+                        if err.raw_os_error() == Some(nix::libc::EINVAL)
+                            || err.raw_os_error() == Some(nix::libc::EPERM)
+                        {
+                            log::warn!("build pre_exec ignoring no_new_privs error: {err}");
                         } else {
-                            return Err(io::Error::other(format!(
-                                "build pre_exec apply seccomp: {err}"
-                            )));
+                            return Err(io::Error::new(
+                                err.kind(),
+                                format!("build pre_exec set no_new_privs: {err}"),
+                            ));
                         }
                     }
-                }
+                    set_capabilities(&dockerfile_default_capabilities()).map_err(|err| {
+                        io::Error::other(format!(
+                            "build pre_exec set sandbox capabilities: {err}"
+                        ))
+                    })?;
+                    if let Some(profile) = &seccomp {
+                        if let Err(err) = apply_seccomp_profile(profile) {
+                            let err_text = err.to_string();
+                            let invalid_arg = err_text.contains("Invalid argument")
+                                || err_text.contains("invalid argument");
+                            if invalid_arg {
+                                log::warn!(
+                                    "build pre_exec seccomp apply failed, continuing without seccomp: {}",
+                                    err
+                                );
+                            } else {
+                                return Err(io::Error::other(format!(
+                                    "build pre_exec apply seccomp: {err}"
+                                )));
+                            }
+                        }
+                    }
                 }
                 apply_build_limits(&child_limits).map_err(|err| {
                     io::Error::new(err.kind(), format!("build pre_exec apply limits: {err}"))
@@ -11207,6 +11293,66 @@ mod tests {
         )
         .expect_err("unknown network mode fails before execution");
         assert!(invalid.to_string().contains("unsupported network mode"));
+    }
+
+    #[test]
+    fn run_security_mode_is_parsed_as_instruction_metadata() {
+        let insecure = parse_run(
+            "--security=insecure echo privileged",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("per-RUN security mode parses");
+        assert_eq!(insecure.security, super::DockerfileSecurityMode::Insecure);
+        assert_eq!(
+            insecure.args.last().map(String::as_str),
+            Some("echo privileged"),
+            "the Dockerfile flag must not reach the RUN shell",
+        );
+
+        let sandbox = parse_run(
+            "--security=sandbox echo confined",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect("explicit sandbox mode parses");
+        assert_eq!(sandbox.security, super::DockerfileSecurityMode::Sandbox);
+        assert_eq!(
+            sandbox.args.last().map(String::as_str),
+            Some("echo confined"),
+        );
+
+        let invalid = parse_run(
+            "--security=privileged true",
+            &["/bin/sh".into(), "-c".into()],
+        )
+        .expect_err("unknown security mode fails before execution");
+        assert!(invalid.to_string().contains("unsupported security mode"));
+    }
+
+    #[test]
+    fn sandbox_capability_set_matches_docker_default() {
+        let names = super::dockerfile_default_capabilities()
+            .into_iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "CAP_CHOWN",
+                "CAP_DAC_OVERRIDE",
+                "CAP_FOWNER",
+                "CAP_FSETID",
+                "CAP_KILL",
+                "CAP_SETGID",
+                "CAP_SETUID",
+                "CAP_SETPCAP",
+                "CAP_NET_BIND_SERVICE",
+                "CAP_NET_RAW",
+                "CAP_SYS_CHROOT",
+                "CAP_MKNOD",
+                "CAP_AUDIT_WRITE",
+                "CAP_SETFCAP",
+            ]
+        );
     }
 
     #[test]

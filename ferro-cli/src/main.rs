@@ -762,6 +762,10 @@ pub enum Commands {
         /// Local peer authentication (`pidfd` or opt-in `legacy-peercred`).
         #[arg(long)]
         peer_auth: Option<String>,
+        /// Permit a requested BuildKit insecure entitlement (`network.host` or
+        /// `security.insecure`); repeat for multiple entitlements.
+        #[arg(long = "allow-insecure-entitlement")]
+        allow_insecure_entitlement: Vec<String>,
         #[arg(long)]
         lan_mirror: bool,
         #[arg(long)]
@@ -5113,6 +5117,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
             docker_compat,
             ref metrics_addr,
             ref peer_auth,
+            ref allow_insecure_entitlement,
             lan_mirror,
             ref lan_mirror_addr,
             ref lan_mirror_secret,
@@ -5122,7 +5127,10 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 socket,
                 docker_compat,
                 metrics_addr.as_deref(),
-                peer_auth.as_deref(),
+                DaemonAccessOptions {
+                    peer_auth: peer_auth.as_deref(),
+                    allow_insecure_entitlement,
+                },
                 lan_mirror,
                 lan_mirror_addr.as_deref(),
                 lan_mirror_secret.as_deref(),
@@ -18718,6 +18726,19 @@ struct BuildkitExecutionContext {
     store: Arc<LocalImageStore>,
     origin: RequestOrigin,
     authorization: SurfaceAuthorization,
+    daemon_entitlements: Arc<HashSet<String>>,
+}
+
+#[cfg(target_os = "linux")]
+struct DaemonAccessOptions<'a> {
+    peer_auth: Option<&'a str>,
+    allow_insecure_entitlement: &'a [String],
+}
+
+#[cfg(target_os = "linux")]
+struct DockerCompatAccess {
+    peer_auth_mode: PeerAuthMode,
+    buildkit_daemon_entitlements: Arc<HashSet<String>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -19952,7 +19973,7 @@ fn run_daemon(
     socket: &str,
     docker_compat: bool,
     metrics_addr: Option<&str>,
-    peer_auth: Option<&str>,
+    access_options: DaemonAccessOptions<'_>,
     lan_mirror: bool,
     lan_mirror_addr: Option<&str>,
     lan_mirror_secret: Option<&str>,
@@ -19962,8 +19983,13 @@ fn run_daemon(
     if !docker_compat {
         return Err("daemon: --docker-compat is required".to_string());
     }
-    let peer_auth_mode = resolve_peer_auth_mode(peer_auth)?;
-    if peer_auth_mode == PeerAuthMode::LegacyPeercred {
+    let access = Arc::new(DockerCompatAccess {
+        peer_auth_mode: resolve_peer_auth_mode(access_options.peer_auth)?,
+        buildkit_daemon_entitlements: Arc::new(validate_buildkit_daemon_entitlements(
+            access_options.allow_insecure_entitlement,
+        )?),
+    });
+    if access.peer_auth_mode == PeerAuthMode::LegacyPeercred {
         eprintln!("WARN peer authentication legacy-peercred active; PID reuse can race identity resolution");
     }
     if packet_filter_backend().is_none() {
@@ -20054,6 +20080,7 @@ fn run_daemon(
                 let store = store.clone();
                 let volume_store = volume_store.clone();
                 let state = state.clone();
+                let access = access.clone();
                 std::thread::spawn(move || {
                     if let Err(error) = handle_docker_compat_connection(
                         stream,
@@ -20062,7 +20089,7 @@ fn run_daemon(
                         store,
                         volume_store,
                         state,
-                        peer_auth_mode,
+                        access,
                     ) {
                         // Hijacked/streaming requests have already sent their
                         // upgrade headers before the lifecycle loop runs. A
@@ -20157,6 +20184,35 @@ fn parse_peer_auth_mode(selected: &str) -> Result<PeerAuthMode, String> {
             "daemon: invalid peer authentication mode `{selected}`; expected pidfd or legacy-peercred"
         )),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_buildkit_daemon_entitlements(
+    configured: &[String],
+) -> Result<HashSet<String>, String> {
+    let mut allowed = HashSet::new();
+    for entitlement in configured {
+        if !matches!(entitlement.as_str(), "network.host" | "security.insecure") {
+            return Err(format!(
+                "daemon: unsupported insecure entitlement {entitlement:?}"
+            ));
+        }
+        allowed.insert(entitlement.clone());
+    }
+    Ok(allowed)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_buildkit_solve_entitlements(
+    requested: &[String],
+    allowed: &HashSet<String>,
+) -> Result<(), String> {
+    for entitlement in requested {
+        if !allowed.contains(entitlement) {
+            return Err(format!("entitlement {entitlement} is not allowed"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -20422,7 +20478,7 @@ fn handle_docker_compat_connection(
     store: Arc<LocalImageStore>,
     volume_store: Arc<LocalVolumeStore>,
     state: Arc<DockerCompatState>,
-    peer_auth_mode: PeerAuthMode,
+    access: Arc<DockerCompatAccess>,
 ) -> Result<(), String> {
     let qualification_before = ferro_core::observability::authorization_metrics_snapshot();
     let mut event_request: Option<DockerEventRequest> = None;
@@ -20440,7 +20496,7 @@ fn handle_docker_compat_connection(
             ferro_cli::authorization_surfaces::authenticate_docker_peer_with_mode(
                 socket,
                 ferro_cli::authorization_surfaces::DockerTelemetry::new(),
-                peer_auth_mode,
+                access.peer_auth_mode,
             )
             .map(|peer| peer.request_origin())
             .map_err(|error| format!("docker peer authentication failed: {error}"))
@@ -20848,7 +20904,7 @@ fn handle_docker_compat_connection(
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/info") => {
-                let body = docker_info_payload(&runtime, &store, peer_auth_mode)?;
+                let body = docker_info_payload(&runtime, &store, access.peer_auth_mode)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
             ("GET", "/system/df") => {
@@ -22417,6 +22473,7 @@ fn handle_docker_compat_connection(
                     store: store.clone(),
                     origin: origin.clone(),
                     authorization: surface_authorization,
+                    daemon_entitlements: access.buildkit_daemon_entitlements.clone(),
                 }));
                 docker_buildkit_control_hijack_headers()
             }
@@ -26161,6 +26218,19 @@ async fn handle_buildkit_control_request(
             "received BuildKit outer solve"
         );
         let build = state.register_buildkit_solve(solve)?;
+        if let Err(error) = validate_buildkit_solve_entitlements(
+            &build.request.entitlements,
+            execution.daemon_entitlements.as_ref(),
+        ) {
+            *build
+                .error
+                .lock()
+                .map_err(|lock| format!("buildkit solve error poisoned: {lock}"))? =
+                Some(error.clone());
+            build.is_completed.store(true, Ordering::Release);
+            build.completed.notify_waiters();
+            return send_buildkit_frontend_error(&mut response_stream, &error, build.as_ref());
+        }
         if build.request.frontend == "dockerfile.v0" {
             let frontend = buildkit_proto::moby::buildkit::v1::frontend::SolveRequest {
                 frontend: build.request.frontend.clone(),
@@ -26937,6 +27007,9 @@ fn buildkit_frontend_execution_options(
         no_cache,
         network_mode,
         allow_network_host: entitlements.iter().any(|value| value == "network.host"),
+        allow_security_insecure: entitlements
+            .iter()
+            .any(|value| value == "security.insecure"),
     })
 }
 
@@ -38190,6 +38263,46 @@ volumes:
         assert_eq!(options.no_cache, Some(vec!["build".into(), "package".into()]));
         assert_eq!(options.network_mode, DockerfileNetworkMode::None);
         assert!(options.allow_network_host);
+    }
+
+    #[test]
+    fn daemon_parses_buildkit_insecure_entitlement_allow_list() {
+        use clap::Parser as _;
+
+        let cli = super::Cli::try_parse_from([
+            "ferrocrate",
+            "daemon",
+            "--docker-compat",
+            "--allow-insecure-entitlement",
+            "security.insecure",
+            "--allow-insecure-entitlement",
+            "network.host",
+        ])
+        .expect("daemon accepts Docker-compatible BuildKit entitlement configuration");
+        let super::Commands::Daemon {
+            allow_insecure_entitlement,
+            ..
+        } = cli.command
+        else {
+            panic!("expected daemon command");
+        };
+        let allowed = super::validate_buildkit_daemon_entitlements(
+            &allow_insecure_entitlement,
+        )
+        .expect("configured entitlements validate");
+        assert!(super::validate_buildkit_solve_entitlements(
+            &["security.insecure".to_string(), "network.host".to_string()],
+            &allowed,
+        )
+        .is_ok());
+        for entitlement in ["security.insecure", "network.host"] {
+            let denied = super::validate_buildkit_solve_entitlements(
+                &[entitlement.to_string()],
+                &std::collections::HashSet::new(),
+            )
+            .expect_err("daemon permission is required in addition to the client request");
+            assert_eq!(denied, format!("entitlement {entitlement} is not allowed"));
+        }
     }
 
     #[test]

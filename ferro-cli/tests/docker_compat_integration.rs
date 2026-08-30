@@ -4911,6 +4911,83 @@ fn docker_compat_compose_labeled_networks_remain_resolvable_at_container_start()
 }
 
 #[test]
+fn docker_compat_two_compose_services_publish_on_the_same_named_bridge() {
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/s209-publish:latest");
+    let network = "s209_default";
+    let create_network = serde_json::json!({
+        "Name": network,
+        "Driver": "bridge",
+        "Labels": {
+            "com.docker.compose.network": "default",
+            "com.docker.compose.project": "s209"
+        }
+    })
+    .to_string();
+    let (status, response) = harness.request_bytes(
+        "POST",
+        "/v1.45/networks/create",
+        "application/json",
+        create_network.as_bytes(),
+    );
+    assert_eq!(status, 201, "network create response={response}");
+
+    for (service, host_port, container_port) in
+        [("alpha", "18094", "8091/tcp"), ("beta", "18095", "8092/tcp")]
+    {
+        let name = format!("s209-{service}-1");
+        let create = serde_json::json!({
+            "Image": "compat/s209-publish:latest",
+            "Cmd": ["/bin/busybox", "sleep", "30"],
+            "Labels": {
+                "com.docker.compose.project": "s209",
+                "com.docker.compose.service": service
+            },
+            "HostConfig": {
+                "NetworkMode": network,
+                "PortBindings": {
+                    (container_port): [{"HostPort": host_port}]
+                }
+            },
+            "NetworkingConfig": {
+                "EndpointsConfig": {
+                    (network): {"Aliases": [service, name.as_str()]}
+                }
+            }
+        })
+        .to_string();
+        let (status, response) = harness.request_bytes(
+            "POST",
+            &format!("/v1.45/containers/create?name={name}"),
+            "application/json",
+            create.as_bytes(),
+        );
+        assert_eq!(status, 201, "create {service} response={response}");
+        let (status, response) =
+            harness.request("POST", &format!("/v1.45/containers/{name}/start"));
+        assert_eq!(
+            status, 204,
+            "published service {service} must start on the shared bridge: {response}"
+        );
+    }
+
+    for service in ["alpha", "beta"] {
+        let name = format!("s209-{service}-1");
+        let (status, response) =
+            harness.request("GET", &format!("/v1.45/containers/{name}/json"));
+        assert_eq!(status, 200, "inspect {service} response={response}");
+        let inspect: serde_json::Value =
+            serde_json::from_str(&response).expect("container inspect JSON");
+        assert_eq!(inspect["State"]["Status"], "running", "{response}");
+        let (status, response) =
+            harness.request("DELETE", &format!("/v1.45/containers/{name}?force=true"));
+        assert_eq!(status, 204, "remove {service} response={response}");
+    }
+    let (status, response) = harness.request("DELETE", &format!("/v1.45/networks/{network}"));
+    assert_eq!(status, 204, "remove network response={response}");
+}
+
+#[test]
 fn docker_compat_dual_stack_network_preserves_ipv6_ipam_on_list_and_inspect() {
     let harness = DaemonHarness::spawn();
     let create_body = r#"{

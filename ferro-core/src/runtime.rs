@@ -146,7 +146,8 @@ use crate::rootfs_diff;
 use crate::rootless::{bubblewrap_execution_diagnostic_cached, nested_bubblewrap_diagnostic};
 #[cfg(target_os = "linux")]
 use crate::seccomp::{
-    apply_seccomp_profile, default_seccomp_profile, parse_seccomp_profile, SeccompProfile,
+    apply_seccomp_profile, default_seccomp_profile, export_seccomp_profile_bpf,
+    parse_seccomp_profile, SeccompProfile,
 };
 use crate::sqlite_container_store::SqliteContainerStore;
 use dashmap::DashMap;
@@ -183,9 +184,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
-#[cfg(test)]
-use std::io::Seek;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -7558,6 +7557,27 @@ fn spawn_process_with_logs(
     Ok(child_id)
 }
 
+fn prepare_bwrap_seccomp_filter(
+    profile: &SeccompProfile,
+) -> Result<std::fs::File, RuntimeError> {
+    let name = c"ferrocrate-seccomp";
+    let raw_fd = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_memfd_create,
+            name.as_ptr(),
+            nix::libc::MFD_CLOEXEC,
+        )
+    } as i32;
+    if raw_fd < 0 {
+        return Err(RuntimeError::Io(io::Error::last_os_error()));
+    }
+    let mut filter = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    export_seccomp_profile_bpf(profile, &mut filter)
+        .map_err(|error| RuntimeError::InvalidCommand(format!("seccomp profile: {error}")))?;
+    filter.seek(io::SeekFrom::Start(0))?;
+    Ok(filter)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_bwrap_command(
     rootfs: &Path,
@@ -7567,6 +7587,7 @@ fn build_bwrap_command(
     workdir: Option<&str>,
     readonly_rootfs: bool,
     disable_userns: bool,
+    seccomp_fd: Option<i32>,
 ) -> Result<Command, RuntimeError> {
     if !command_available("bwrap") {
         return Err(RuntimeError::InvalidCommand(
@@ -7581,7 +7602,7 @@ fn build_bwrap_command(
     let mut bwrap = Command::new(bwrap_path);
     let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
     bwrap
-        .arg("--bind")
+        .arg(if readonly_rootfs { "--ro-bind" } else { "--bind" })
         .arg(rootfs)
         .arg("/")
         .arg("--proc")
@@ -7593,12 +7614,18 @@ fn build_bwrap_command(
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    // Do not drop the user-namespace capability set here.  Bubblewrap's
-    // --cap-add only applies to a privileged caller, so adding CAP_CHOWN
-    // after --cap-drop ALL does not restore it for this rootless workload.
-    // Image entrypoints such as nginx need CAP_CHOWN while initializing their
-    // owned cache directories.  These capabilities are confined to the
-    // container user namespace and grant no host privilege.
+    if let Some(fd) = seccomp_fd {
+        // The rootless bridge first creates and maps its outer user namespace.
+        // Loading the workload filter before that helper chain completes can
+        // make Bubblewrap's nested namespace clone fail with EPERM. Bubblewrap
+        // accepts libseccomp's exported BPF and installs it after namespace and
+        // mount setup, immediately before the image process starts.
+        bwrap.arg("--seccomp").arg(fd.to_string());
+    }
+    // Do not drop the user-namespace capability set here. Bubblewrap's
+    // --cap-add only applies to a privileged caller, so adding CAP_CHOWN after
+    // --cap-drop ALL does not restore it for this rootless workload. These
+    // capabilities remain confined to the mapped container user namespace.
     if disable_userns {
         // Followers enter the leader's user namespace through an inherited
         // descriptor and use a BusyBox nsenter handoff for the network. The
@@ -7660,6 +7687,18 @@ fn build_command(
     let running_as_root = nix::unistd::Uid::effective().is_root();
     let rootless_shared_netns = netns_name.is_some_and(|value| value.starts_with("pid:"));
     let direct_container_setup = running_as_root && netns_name.is_some();
+    const BWRAP_SECCOMP_FD: i32 = 9;
+    let bwrap_seccomp = if !running_as_root
+        && rootfs_dir.is_some()
+        && (rootless_shared_netns || unshare_netns)
+    {
+        seccomp_profile
+            .map(prepare_bwrap_seccomp_filter)
+            .transpose()?
+    } else {
+        None
+    };
+    let bwrap_seccomp_fd = bwrap_seccomp.as_ref().map(|_| BWRAP_SECCOMP_FD);
     // Keep the launcher shell outside a rootful image. A shell-less OCI image
     // (for example, FROM scratch with a static binary) cannot execute the
     // launcher after chroot. Bubblewrap enters the image after the launcher
@@ -7723,7 +7762,14 @@ fn build_command(
                 workdir,
                 readonly_rootfs,
                 false,
+                bwrap_seccomp_fd,
             )?;
+            let launcher = std::env::current_exe().map_err(RuntimeError::Io)?;
+            let unshare = crate::rootless::trusted_executable_path("unshare").ok_or_else(|| {
+                RuntimeError::InvalidCommand(
+                    "mapped rootless launch requires a trusted unshare executable".into(),
+                )
+            })?;
             let mut shared_cmd = Command::new(nsenter);
             shared_cmd.arg("-t").arg(pid.to_string()).args([
                 "-U",
@@ -7731,7 +7777,13 @@ fn build_command(
                 "-n",
                 "--",
             ]);
-            shared_cmd.arg(bwrap.get_program()).args(bwrap.get_args());
+            shared_cmd
+                .arg(launcher)
+                .arg("__ferrocrate_mapped_bwrap")
+                .arg("--")
+                .arg(unshare)
+                .arg(bwrap.get_program())
+                .args(bwrap.get_args());
             shared_cmd
         } else {
             let mut direct_cmd = Command::new(&cmd[0]);
@@ -7775,7 +7827,7 @@ fn build_command(
                         .to_string(),
                 )
             })?;
-        let mut unshare_cmd = Command::new(unshare_path);
+        let mut unshare_cmd = Command::new(&unshare_path);
         // Creating a network namespace alone is not permitted for an
         // unprivileged caller. Pair it with a still-unmapped user namespace;
         // the parent installs the authenticated caller-plus-subordinate map
@@ -7823,9 +7875,16 @@ fn build_command(
                 workdir,
                 readonly_rootfs,
                 false,
+                bwrap_seccomp_fd,
             )?;
-            unshare_cmd.arg(inner.get_program());
-            unshare_cmd.args(inner.get_args());
+            let launcher = std::env::current_exe().map_err(RuntimeError::Io)?;
+            unshare_cmd
+                .arg(launcher)
+                .arg("__ferrocrate_mapped_bwrap")
+                .arg("--")
+                .arg(&unshare_path)
+                .arg(inner.get_program())
+                .args(inner.get_args());
         } else {
             unshare_cmd.args(cmd);
         }
@@ -7853,6 +7912,7 @@ fn build_command(
                 workdir,
                 readonly_rootfs,
                 false,
+                None,
             )?
         } else {
             return Err(RuntimeError::InvalidCommand(
@@ -7911,7 +7971,10 @@ fn build_command(
     }
 
     let caps = capabilities.to_vec();
-    let seccomp = seccomp_profile.cloned();
+    let seccomp = bwrap_seccomp
+        .is_none()
+        .then(|| seccomp_profile.cloned())
+        .flatten();
     let seccomp_permissive = seccomp_permissive_mode();
     let setup_netns = if direct_container_setup {
         netns_name.map(str::to_string)
@@ -7927,6 +7990,14 @@ fn build_command(
     let detached_cli = std::env::var("FERROCRATE_DETACH_WORKLOAD").as_deref() == Ok("1");
     unsafe {
         command.pre_exec(move || {
+            if let Some(filter) = bwrap_seccomp.as_ref() {
+                if nix::libc::dup2(filter.as_raw_fd(), BWRAP_SECCOMP_FD) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if nix::libc::fcntl(BWRAP_SECCOMP_FD, nix::libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             if !detached_cli
                 && nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGKILL) != 0
             {
@@ -8016,6 +8087,96 @@ fn rootfs_launcher_available() -> bool {
         executable.file_stem().and_then(|stem| stem.to_str()),
         Some("ferro-cli") | Some("ferro-cri")
     )
+}
+
+fn identity_map_for_nested_user_namespace(path: &Path) -> Result<String, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("read mapped launcher {}: {error}", path.display()))?;
+    let mut nested = String::new();
+    for line in raw.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(format!("malformed mapped launcher {}", path.display()));
+        }
+        let container_id = fields[0]
+            .parse::<u32>()
+            .map_err(|_| format!("malformed mapped launcher {}", path.display()))?;
+        let size = fields[2]
+            .parse::<u32>()
+            .map_err(|_| format!("malformed mapped launcher {}", path.display()))?;
+        nested.push_str(&format!("{container_id} {container_id} {size}\n"));
+    }
+    if nested.is_empty() {
+        return Err(format!("empty mapped launcher {}", path.display()));
+    }
+    Ok(nested)
+}
+
+/// Start Bubblewrap in a child user namespace that preserves the outer
+/// caller-plus-subordinate mapping. Bubblewrap's normal automatic user
+/// namespace maps only uid/gid 0 and would make image identities such as
+/// nginx's uid 101 unusable again.
+pub fn run_mapped_bwrap_launcher(args: &[String]) -> Result<i32, String> {
+    let args = args
+        .strip_prefix(&["--".to_string()])
+        .ok_or_else(|| "mapped bwrap launcher requires -- before arguments".to_string())?;
+    let (unshare, args) = args
+        .split_first()
+        .ok_or_else(|| "mapped bwrap launcher requires unshare arguments".to_string())?;
+    let (bwrap, args) = args
+        .split_first()
+        .ok_or_else(|| "mapped bwrap launcher requires bubblewrap arguments".to_string())?;
+    let unshare = Path::new(unshare);
+    let bwrap = Path::new(bwrap);
+    if !unshare.is_absolute() || unshare.file_name() != Some(OsStr::new("unshare")) {
+        return Err("mapped bwrap launcher requires an absolute unshare path".to_string());
+    }
+    if !bwrap.is_absolute() || bwrap.file_name() != Some(OsStr::new("bwrap")) {
+        return Err("mapped bwrap launcher requires an absolute bubblewrap path".to_string());
+    }
+    let shell = crate::rootless::trusted_executable_path("sh")
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+    let mut namespace_child = Command::new(unshare)
+        .args(["--user", "--"])
+        .arg(shell)
+        .args(["-c", "kill -STOP $$; sleep infinity"])
+        .spawn()
+        .map_err(|error| format!("start mapped bwrap user namespace: {error}"))?;
+    let user_namespace = (|| {
+        wait_until_launch_stopped(namespace_child.id())
+            .map_err(|error| format!("wait for mapped bwrap user namespace: {error}"))?;
+        let namespace_proc = PathBuf::from(format!("/proc/{}", namespace_child.id()));
+        let uid_map =
+            identity_map_for_nested_user_namespace(Path::new("/proc/self/uid_map"))?;
+        let gid_map =
+            identity_map_for_nested_user_namespace(Path::new("/proc/self/gid_map"))?;
+        fs::write(namespace_proc.join("setgroups"), "deny\n")
+            .map_err(|error| format!("deny mapped bwrap setgroups: {error}"))?;
+        fs::write(namespace_proc.join("uid_map"), uid_map)
+            .map_err(|error| format!("install mapped bwrap uid map: {error}"))?;
+        fs::write(namespace_proc.join("gid_map"), gid_map)
+            .map_err(|error| format!("install mapped bwrap gid map: {error}"))?;
+        std::fs::File::open(namespace_proc.join("ns/user"))
+            .map_err(|error| format!("open mapped bwrap user namespace: {error}"))
+    })();
+    let _ = namespace_child.kill();
+    let _ = namespace_child.wait();
+    let user_namespace = user_namespace?;
+    if unsafe { nix::libc::fcntl(user_namespace.as_raw_fd(), nix::libc::F_SETFD, 0) } < 0 {
+        return Err(format!(
+            "inherit mapped bwrap user namespace: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let status = Command::new(bwrap)
+        .arg("--userns")
+        .arg(user_namespace.as_raw_fd().to_string())
+        .args(args)
+        .status()
+        .map_err(|error| format!("start mapped bwrap: {error}"))?;
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
 }
 
 fn enter_runtime_netns(netns_name: &str) -> io::Result<()> {
@@ -19873,6 +20034,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             true,
             false,
+            None,
         )
         .expect("bubblewrap command");
         let args = command
@@ -19901,6 +20063,7 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             None,
             false,
             false,
+            None,
         )
         .expect("bubblewrap command");
         let args = command
@@ -19912,6 +20075,44 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
                 .windows(2)
                 .any(|window| window == ["--cap-drop", "ALL"]),
             "rootless image initialization must retain CAP_CHOWN: {args:?}"
+        );
+    }
+
+    #[test]
+    fn mapped_rootless_bwrap_loads_seccomp_after_namespace_setup() {
+        if !super::command_available("bwrap") {
+            return;
+        }
+        let command = super::build_bwrap_command(
+            Path::new("/"),
+            &["/bin/true".into()],
+            &[],
+            &[],
+            None,
+            false,
+            false,
+            Some(9),
+        )
+        .expect("bubblewrap command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2).any(|window| window == ["--seccomp", "9"]),
+            "mapped rootless workloads must defer seccomp to bwrap: {args:?}"
+        );
+    }
+
+    #[test]
+    fn nested_bwrap_preserves_the_outer_subordinate_id_range() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let map = temp.path().join("uid_map");
+        std::fs::write(&map, "0 1000 1\n1 100000 65535\n").expect("write uid map");
+
+        assert_eq!(
+            super::identity_map_for_nested_user_namespace(&map).expect("nested uid map"),
+            "0 0 1\n1 1 65535\n"
         );
     }
 

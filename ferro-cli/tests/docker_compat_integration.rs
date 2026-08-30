@@ -396,7 +396,14 @@ fn docker_compat_ipc_mode_host_shares_dev_shm() {
     while !host_marker.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
     }
-    let content = fs::read_to_string(&host_marker).expect("host IPC marker");
+    let content = fs::read_to_string(&host_marker).unwrap_or_else(|error| {
+        let (_, inspect) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
+        let (_, logs) = harness.request("GET", &format!("/v1.45/containers/{id}/logs"));
+        panic!(
+            "host IPC marker: {error}; inspect={inspect}; logs={logs}; daemon_stderr={}",
+            harness.daemon_stderr()
+        )
+    });
     fs::remove_file(&host_marker).expect("remove host IPC marker");
     assert_eq!(content, "shared\n");
 }

@@ -1,4 +1,6 @@
-# Closeout roadmap — 2026-08-30
+# Closeout roadmaps — 2026-08-30
+
+## S162
 
 Source: `bench/tickets/S162.md` and the 2026-08-30 s161-162 boundary supplied by the user.
 Done when: every box below is ticked and all acceptance commands pass.
@@ -11,3 +13,14 @@ Test command: `cargo test --workspace && scripts/verify-no-warnings.sh && script
 - [x] S5: Implement complete Docker-compatible invalid-option diagnostics — add failing diagnostic cases, implement validation, verify, and commit separately.
 - [x] S6: Repair the dockerd forwarder if it blocks product verdicts — reproduce and fix the accept-loop crash only if encountered.
 - [x] S7: Close S162 precisely and run every acceptance gate — update the boundary honestly, build the isolated release binary, run all requested gates, and commit the ticket closeout.
+
+## S161
+
+Source: `bench/tickets/S161.md`, especially the 2026-08-30 remaining boundary.
+Done when: every box below is ticked and the S161 census plus merge gate pass.
+Test command: `bash scripts/merge-gate.sh`
+
+- [ ] S1: Confirm upstream platform contracts — Record BuildKit's OS-version expression and multi-platform exporter/provenance behavior plus the local blast radius.
+- [ ] S2: Evaluate TARGETOSVERSION at the frontend boundary — Add a failing regression, implement the BuildKit-compatible evaluation point, and commit it independently.
+- [ ] S3: Represent supported multi-platform exporter metadata — Add failing gateway/export regressions, preserve platform mappings and provenance-facing fields, and commit independently.
+- [ ] S4: Close the S161 census and acceptance gates — Run the focused upstream census, all required conformance modes, and `scripts/merge-gate.sh`; close the ticket only if the remainder passes.

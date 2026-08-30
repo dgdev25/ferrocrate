@@ -27187,6 +27187,7 @@ fn buildkit_lint_warnings_with_context(
     let mut defined_variables = std::collections::HashSet::from(["PATH".to_string()]);
     let mut declared_from_args = buildkit_automatic_platform_arg_names();
     let mut seen_from = false;
+    let mut custom_shell = false;
     for (line, keyword, text) in &instructions {
         let wrong_case = (majority == "uppercase" && keyword != &keyword.to_ascii_uppercase())
             || (majority == "lowercase" && keyword != &keyword.to_ascii_lowercase());
@@ -27228,6 +27229,7 @@ fn buildkit_lint_warnings_with_context(
             }
         }
         if (keyword.eq_ignore_ascii_case("CMD") || keyword.eq_ignore_ascii_case("ENTRYPOINT"))
+            && !custom_shell
             && text
                 .split_once(char::is_whitespace)
                 .is_some_and(|(_, arguments)| !arguments.trim_start().starts_with('['))
@@ -27313,6 +27315,8 @@ fn buildkit_lint_warnings_with_context(
                     defined_variables.insert(name.to_string());
                 }
             }
+        } else if keyword.eq_ignore_ascii_case("SHELL") {
+            custom_shell = true;
         }
     }
     warnings
@@ -27580,18 +27584,22 @@ fn buildkit_lint_warning(
     detail: String,
     line: usize,
 ) -> BuildkitLintWarning {
-    let slug = rule_name
-        .chars()
-        .enumerate()
-        .flat_map(|(index, character)| {
-            if character.is_ascii_uppercase() && index > 0 {
-                ['-', character.to_ascii_lowercase()]
-            } else {
-                ['\0', character.to_ascii_lowercase()]
-            }
-        })
-        .filter(|character| *character != '\0')
-        .collect::<String>();
+    let slug = if rule_name == "JSONArgsRecommended" {
+        "json-args-recommended".to_string()
+    } else {
+        rule_name
+            .chars()
+            .enumerate()
+            .flat_map(|(index, character)| {
+                if character.is_ascii_uppercase() && index > 0 {
+                    ['-', character.to_ascii_lowercase()]
+                } else {
+                    ['\0', character.to_ascii_lowercase()]
+                }
+            })
+            .filter(|character| *character != '\0')
+            .collect::<String>()
+    };
     BuildkitLintWarning {
         rule_name: rule_name.to_string(),
         description: description.to_string(),
@@ -36376,6 +36384,10 @@ volumes:
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].rule_name, "JSONArgsRecommended");
         assert_eq!(
+            warnings[0].url,
+            "https://docs.docker.com/go/dockerfile/rule/json-args-recommended/"
+        );
+        assert_eq!(
             warnings[0].detail,
             "JSON arguments recommended for CMD to prevent unintended behavior related to OS signals"
         );
@@ -36391,6 +36403,11 @@ volumes:
         );
         assert_eq!(selected_by_option.len(), 1);
         assert_eq!(selected_by_option[0].rule_name, "JSONArgsRecommended");
+
+        let custom_shell = super::buildkit_lint_warnings(
+            "FROM scratch\nSHELL [\"/usr/bin/customshell\"]\nCMD echo hello\n",
+        );
+        assert!(custom_shell.is_empty());
     }
 
     #[cfg(target_os = "linux")]

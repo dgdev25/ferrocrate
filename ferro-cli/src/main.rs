@@ -27001,14 +27001,113 @@ fn buildkit_frontend_build_args(
 }
 
 #[cfg(target_os = "linux")]
+fn buildkit_csv_fields(value: &str) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = value.chars().peekable();
+    let mut quoted = false;
+    let mut quote_closed = false;
+    while let Some(ch) = chars.next() {
+        if quoted {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                    quote_closed = true;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            ',' => {
+                fields.push(std::mem::take(&mut field));
+                quote_closed = false;
+            }
+            '"' if field.is_empty() && !quote_closed => quoted = true,
+            _ if quote_closed => {
+                return Err("failed to parse CSV ulimits: invalid character after quote".into())
+            }
+            _ => field.push(ch),
+        }
+    }
+    if quoted {
+        return Err("failed to parse CSV ulimits: unterminated quoted field".into());
+    }
+    fields.push(field);
+    Ok(fields)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_buildkit_ulimits(
+    value: &str,
+) -> Result<Vec<ferro_core::dockerfile_build::DockerfileUlimit>, String> {
+    use ferro_core::dockerfile_build::DockerfileUlimit;
+
+    buildkit_csv_fields(value)?
+        .into_iter()
+        .map(|entry| {
+            let (name, limits) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("invalid ulimit argument: {entry}"))?;
+            if !matches!(
+                name,
+                "core"
+                    | "cpu"
+                    | "data"
+                    | "fsize"
+                    | "locks"
+                    | "memlock"
+                    | "msgqueue"
+                    | "nice"
+                    | "nofile"
+                    | "nproc"
+                    | "rss"
+                    | "rtprio"
+                    | "rttime"
+                    | "sigpending"
+                    | "stack"
+            ) {
+                return Err(format!("invalid ulimit type: {name}"));
+            }
+            let values = limits.split(':').collect::<Vec<_>>();
+            if values.len() > 2 {
+                return Err(format!(
+                    "too many limit value arguments - {limits}, can only have up to two, `soft[:hard]`"
+                ));
+            }
+            let soft = values[0]
+                .parse::<i64>()
+                .map_err(|error| error.to_string())?;
+            let hard = values
+                .get(1)
+                .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
+                .transpose()?
+                .unwrap_or(soft);
+            if hard != -1 && (soft == -1 || soft > hard) {
+                return Err(format!(
+                    "ulimit soft limit must be less than or equal to hard limit: {soft} > {hard}"
+                ));
+            }
+            Ok(DockerfileUlimit {
+                name: name.to_string(),
+                soft,
+                hard,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn buildkit_frontend_execution_options(
     outer: &HashMap<String, String>,
     frontend: &HashMap<String, String>,
     entitlements: &[String],
 ) -> Result<ferro_core::dockerfile_build::DockerfileExecutionOptions, String> {
-    use ferro_core::dockerfile_build::{
-        DockerfileExecutionOptions, DockerfileNetworkMode, DockerfileUlimit,
-    };
+    use ferro_core::dockerfile_build::{DockerfileExecutionOptions, DockerfileNetworkMode};
 
     let get = |name: &str| frontend.get(name).or_else(|| outer.get(name));
     let unsigned = |name: &str| -> Result<Option<u64>, String> {
@@ -27023,6 +27122,18 @@ fn buildkit_frontend_execution_options(
         }
         Ok(Some(value))
     };
+    let positive_i64 = |name: &str| -> Result<Option<u64>, String> {
+        let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("buildkit solve: invalid {name} value: {raw}"))?;
+        if value <= 0 {
+            return Err(format!("buildkit solve: invalid {name} value: must be > 0"));
+        }
+        Ok(Some(value as u64))
+    };
     let signed = |name: &str| -> Result<Option<i64>, String> {
         let Some(raw) = get(name).filter(|value| !value.is_empty()) else {
             return Ok(None);
@@ -27034,29 +27145,8 @@ fn buildkit_frontend_execution_options(
     let ulimits = get("ulimit")
         .filter(|value| !value.is_empty())
         .map(|value| {
-            value
-                .split(',')
-                .map(|entry| {
-                    let (name, limits) = entry.split_once('=').ok_or_else(|| {
-                        format!("buildkit solve: invalid ulimit {entry}")
-                    })?;
-                    let (soft, hard) = limits.split_once(':').unwrap_or((limits, limits));
-                    let soft = soft.parse::<u64>().map_err(|_| {
-                        format!("buildkit solve: invalid ulimit soft value: {entry}")
-                    })?;
-                    let hard = hard.parse::<u64>().map_err(|_| {
-                        format!("buildkit solve: invalid ulimit hard value: {entry}")
-                    })?;
-                    if name.is_empty() || soft > hard {
-                        return Err(format!("buildkit solve: invalid ulimit {entry}"));
-                    }
-                    Ok(DockerfileUlimit {
-                        name: name.to_string(),
-                        soft,
-                        hard,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()
+            parse_buildkit_ulimits(value)
+                .map_err(|error| format!("buildkit solve: failed to parse ulimit: {error}"))
         })
         .transpose()?
         .unwrap_or_default();
@@ -27073,7 +27163,7 @@ fn buildkit_frontend_execution_options(
             .map(str::to_string)
             .collect::<Vec<_>>()
     });
-    let memory = unsigned("memory")?;
+    let memory = positive_i64("memory")?;
     let memory_swap = signed("memswap")?;
     if memory_swap.is_some_and(|value| value < -1 || value == 0) {
         return Err("buildkit solve: memswap must be -1 or > 0".to_string());
@@ -27086,8 +27176,17 @@ fn buildkit_frontend_execution_options(
     if let Some(value) = cpuset_mems.as_deref() {
         validate_buildkit_cpuset("cpusetmems", value)?;
     }
+    let shm_size = get("shm-size")
+        .filter(|value| !value.is_empty())
+        .map(|raw| {
+            raw.parse::<i64>()
+                .map_err(|_| format!("buildkit solve: invalid shm-size value: {raw}"))
+        })
+        .transpose()?
+        .filter(|value| *value > 0)
+        .map(|value| value as u64);
     Ok(DockerfileExecutionOptions {
-        shm_size: unsigned("shm-size")?,
+        shm_size,
         ulimits,
         cgroup_parent: get("cgroup-parent")
             .filter(|value| !value.is_empty())
@@ -27095,7 +27194,7 @@ fn buildkit_frontend_execution_options(
         memory,
         memory_swap,
         cpu_shares: unsigned("cpushares")?,
-        cpu_quota: unsigned("cpuquota")?,
+        cpu_quota: positive_i64("cpuquota")?,
         cpu_period: unsigned("cpuperiod")?,
         cpuset_cpus,
         cpuset_mems,
@@ -27111,19 +27210,29 @@ fn buildkit_frontend_execution_options(
 
 #[cfg(target_os = "linux")]
 fn validate_buildkit_cpuset(name: &str, value: &str) -> Result<(), String> {
+    const MAX_CPU: u32 = 8192;
     for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
         let (start, end) = item
             .split_once('-')
             .map(|(start, end)| (start, Some(end)))
             .unwrap_or((item, None));
         let start = start
+            .trim()
             .parse::<u32>()
             .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
+        if start > MAX_CPU {
+            return Err(format!("buildkit solve: invalid {name} value: {value}"));
+        }
         if let Some(end) = end {
             let end = end
+                .trim()
                 .parse::<u32>()
                 .map_err(|_| format!("buildkit solve: invalid {name} value: {value}"))?;
-            if end < start {
+            if end < start || end > MAX_CPU {
                 return Err(format!("buildkit solve: invalid {name} value: {value}"));
             }
         }
@@ -38889,6 +38998,111 @@ FROM --platform=linux/${MYARCH} busybox\n";
         assert_eq!(options.no_cache, Some(vec!["build".into(), "package".into()]));
         assert_eq!(options.network_mode, DockerfileNetworkMode::None);
         assert!(options.allow_network_host);
+    }
+
+    #[test]
+    fn buildkit_frontend_shm_size_matches_dockerfile_frontend_semantics() {
+        for value in ["0", "-1"] {
+            let options = super::buildkit_frontend_execution_options(
+                &HashMap::new(),
+                &HashMap::from([("shm-size".to_string(), value.to_string())]),
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("Dockerfile frontend accepts shm-size={value}: {error}"));
+            assert_eq!(
+                options.shm_size, None,
+                "non-positive shm-size leaves BuildKit's default /dev/shm mount unchanged",
+            );
+        }
+
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::new(),
+            &HashMap::from([("shm-size".to_string(), "134217728".to_string())]),
+            &[],
+        )
+        .expect("positive byte count parses");
+        assert_eq!(options.shm_size, Some(134_217_728));
+    }
+
+    #[test]
+    fn buildkit_frontend_resource_values_match_linux_resource_contract() {
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::new(),
+            &HashMap::from([
+                ("memory".to_string(), "67108864".to_string()),
+                ("memswap".to_string(), "-1".to_string()),
+                ("cpushares".to_string(), u64::MAX.to_string()),
+                ("cpuperiod".to_string(), u64::MAX.to_string()),
+                ("cpuquota".to_string(), i64::MAX.to_string()),
+                ("cpusetcpus".to_string(), " 0 , 2 - 3 ".to_string()),
+                ("cpusetmems".to_string(), "0".to_string()),
+                ("cgroup-parent".to_string(), "/docker-builds".to_string()),
+            ]),
+            &[],
+        )
+        .expect("valid BuildKit LinuxResources values parse");
+        assert_eq!(options.memory, Some(67_108_864));
+        assert_eq!(options.memory_swap, Some(-1));
+        assert_eq!(options.cpu_shares, Some(u64::MAX));
+        assert_eq!(options.cpu_period, Some(u64::MAX));
+        assert_eq!(options.cpu_quota, Some(i64::MAX as u64));
+        assert_eq!(options.cpuset_cpus.as_deref(), Some(" 0 , 2 - 3 "));
+        assert_eq!(options.cgroup_parent.as_deref(), Some("/docker-builds"));
+
+        for (name, value) in [
+            ("memory", "9223372036854775808"),
+            ("cpuquota", "9223372036854775808"),
+            ("cpusetcpus", "8193"),
+            ("cpusetmems", "0-8193"),
+        ] {
+            assert!(
+                super::buildkit_frontend_execution_options(
+                    &HashMap::new(),
+                    &HashMap::from([(name.to_string(), value.to_string())]),
+                    &[],
+                )
+                .is_err(),
+                "BuildKit rejects {name}={value}",
+            );
+        }
+    }
+
+    #[test]
+    fn buildkit_frontend_ulimits_match_docker_parser_contract() {
+        let options = super::buildkit_frontend_execution_options(
+            &HashMap::new(),
+            &HashMap::from([(
+                "ulimit".to_string(),
+                "\"nofile=1062:1062\",nproc=-1:-1".to_string(),
+            )]),
+            &[],
+        )
+        .expect("Docker CSV and infinity ulimit forms parse");
+        assert_eq!(options.ulimits.len(), 2);
+        assert_eq!(options.ulimits[0].name, "nofile");
+        assert_eq!(options.ulimits[0].soft, 1062);
+        assert_eq!(options.ulimits[0].hard, 1062);
+        assert_eq!(options.ulimits[1].name, "nproc");
+        assert_eq!(options.ulimits[1].soft, -1);
+        assert_eq!(options.ulimits[1].hard, -1);
+
+        for value in [
+            "unknown=1:1",
+            "nofile=-1:1024",
+            "nofile=1025:1024",
+            "nofile=1:2:3",
+            "\"nofile=1024:1024",
+        ] {
+            assert!(
+                super::buildkit_frontend_execution_options(
+                    &HashMap::new(),
+                    &HashMap::from([("ulimit".to_string(), value.to_string())]),
+                    &[],
+                )
+                .is_err(),
+                "Docker rejects ulimit {value:?}",
+            );
+        }
     }
 
     #[test]

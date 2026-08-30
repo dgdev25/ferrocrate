@@ -26768,6 +26768,7 @@ async fn execute_buildkit_frontend(
             .get("build-arg:BUILDKIT_DOCKERFILE_CHECK")
             .map(String::as_str),
     );
+    let from_validation_error = buildkit_from_validation_error(&dockerfile_contents);
     if request.frontend_opt.get("requestid").map(String::as_str) == Some("frontend.lint") {
         let warnings = buildkit_lint_warnings_with_context(
             &dockerfile_contents,
@@ -26777,6 +26778,11 @@ async fn execute_buildkit_frontend(
                 .map(String::as_str),
             dockerignore.as_deref(),
         );
+        let lint_violation_error = (lint_config.error && !warnings.is_empty())
+            .then(|| buildkit_lint_violation_error(&warnings));
+        let build_error = from_validation_error
+            .as_deref()
+            .or(lint_violation_error.as_deref());
         return Ok(BuildkitBuildResult {
             image_name: "local/build:lint".to_string(),
             image_digest: "sha256:lint".to_string(),
@@ -26786,7 +26792,7 @@ async fn execute_buildkit_frontend(
                 &warnings,
                 &dockerfile_contents,
                 filename,
-                lint_config.error,
+                build_error,
             )?,
             warnings,
             solve_error: None,
@@ -26802,6 +26808,17 @@ async fn execute_buildkit_frontend(
             .map(String::as_str),
         dockerignore.as_deref(),
     );
+    if let Some(error) = from_validation_error {
+        return Ok(BuildkitBuildResult {
+            image_name: "local/build:lint-error".to_string(),
+            image_digest: "sha256:lint-error".to_string(),
+            output: String::new(),
+            steps: Vec::new(),
+            metadata: HashMap::new(),
+            warnings: lint_warnings,
+            solve_error: Some(error),
+        });
+    }
     if let Some(source) = dockerignore
         .as_deref()
         .and_then(|ignore| buildkit_first_ignored_copy_source(&dockerfile_contents, ignore))
@@ -27168,6 +27185,8 @@ fn buildkit_lint_warnings_with_context(
     let majority = if uppercase >= lowercase { "uppercase" } else { "lowercase" };
     let mut warnings = Vec::new();
     let mut defined_variables = std::collections::HashSet::from(["PATH".to_string()]);
+    let mut declared_from_args = buildkit_automatic_platform_arg_names();
+    let mut seen_from = false;
     for (line, keyword, text) in &instructions {
         let wrong_case = (majority == "uppercase" && keyword != &keyword.to_ascii_uppercase())
             || (majority == "lowercase" && keyword != &keyword.to_ascii_lowercase());
@@ -27180,6 +27199,21 @@ fn buildkit_lint_warnings_with_context(
             ));
         }
         if keyword.eq_ignore_ascii_case("FROM") {
+            for variable in buildkit_dockerfile_variables(text) {
+                if declared_from_args.contains(&variable) {
+                    continue;
+                }
+                let suggestion = buildkit_nearest_variable(&variable, &declared_from_args)
+                    .map(|candidate| format!(" (did you mean {candidate}?)"))
+                    .unwrap_or_default();
+                warnings.push(buildkit_lint_warning(
+                    "UndefinedArgInFrom",
+                    "FROM command must use declared ARGs",
+                    format!("FROM argument '{variable}' is not declared{suggestion}"),
+                    *line,
+                ));
+            }
+            seen_from = true;
             let words = text.split_whitespace().collect::<Vec<_>>();
             if let Some(as_index) = words.iter().position(|word| word.eq_ignore_ascii_case("as")) {
                 let as_word = words[as_index];
@@ -27269,6 +27303,9 @@ fn buildkit_lint_warnings_with_context(
                 .filter(|name| !name.is_empty())
             {
                 defined_variables.insert(name.to_string());
+                if !seen_from {
+                    declared_from_args.insert(name.to_string());
+                }
             }
         } else if keyword.eq_ignore_ascii_case("ENV") {
             for assignment in arguments.split_whitespace() {
@@ -27284,6 +27321,77 @@ fn buildkit_lint_warnings_with_context(
             !skipped_rules.contains("all") && !skipped_rules.contains(warning.rule_name.as_str())
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_automatic_platform_arg_names() -> std::collections::HashSet<String> {
+    [
+        "BUILDPLATFORM",
+        "BUILDOS",
+        "BUILDARCH",
+        "BUILDVARIANT",
+        "TARGETPLATFORM",
+        "TARGETOS",
+        "TARGETARCH",
+        "TARGETVARIANT",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_from_validation_error(dockerfile: &str) -> Option<String> {
+    let mut declared = buildkit_automatic_platform_arg_names();
+    let mut seen_from = false;
+    for line in dockerfile.lines() {
+        let trimmed = line.trim();
+        let (keyword, arguments) = match trimmed.split_once(char::is_whitespace) {
+            Some(parts) => parts,
+            None => continue,
+        };
+        if keyword.eq_ignore_ascii_case("ARG") && !seen_from {
+            if let Some(name) = arguments
+                .trim()
+                .split(['=', ' '])
+                .next()
+                .filter(|name| !name.is_empty())
+            {
+                declared.insert(name.to_string());
+            }
+            continue;
+        }
+        if !keyword.eq_ignore_ascii_case("FROM") {
+            continue;
+        }
+        seen_from = true;
+        let platform = arguments
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix("--platform="));
+        let Some(platform) = platform else {
+            continue;
+        };
+        for variable in buildkit_dockerfile_variables(platform) {
+            if declared.contains(&variable) {
+                continue;
+            }
+            let suggestion = buildkit_nearest_variable(&variable, &declared)
+                .map(|candidate| format!(" (did you mean {candidate}?)"))
+                .unwrap_or_default();
+            if platform == format!("${variable}") || platform == format!("${{{variable}}}") {
+                return Some(format!(
+                    "empty platform value from expression {platform}{suggestion}"
+                ));
+            }
+            let expanded = platform
+                .replace(&format!("${{{variable}}}"), "")
+                .replace(&format!("${variable}"), "");
+            return Some(format!(
+                "failed to parse platform {platform}: \"\" is an invalid component of \"{expanded}\": platform specifier component must match \"^[A-Za-z0-9_.-]+$\": invalid argument{suggestion}"
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -27498,17 +27606,26 @@ fn buildkit_lint_result_metadata(
     warnings: &[BuildkitLintWarning],
     dockerfile: &str,
     filename: &str,
-    return_as_error: bool,
+    build_error_message: Option<&str>,
 ) -> Result<HashMap<String, Vec<u8>>, String> {
     use base64::Engine as _;
     let ranges = |line: usize| serde_json::json!([{
         "start": {"line": line, "character": 0},
         "end": {"line": line, "character": 0}
     }]);
-    let build_error = (return_as_error && !warnings.is_empty()).then(|| {
-        let line = warnings[0].line;
+    let build_error = build_error_message.map(|message| {
+        let line = warnings.first().map(|warning| warning.line).unwrap_or_else(|| {
+            dockerfile
+                .lines()
+                .position(|line| {
+                    line.trim_start().to_ascii_uppercase().starts_with("FROM ")
+                        && line.contains("--platform=")
+                })
+                .map(|line| line + 1)
+                .unwrap_or(1)
+        });
         serde_json::json!({
-            "message": buildkit_lint_violation_error(warnings),
+            "message": message,
             "location": {"sourceIndex": 0, "ranges": ranges(line)},
         })
     });
@@ -36296,11 +36413,12 @@ FROM scratch as base\ncopy Dockerfile .\n";
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].rule_name, "FromAsCasing");
         assert_eq!(warnings[0].line, 2);
+        let lint_error = super::buildkit_lint_violation_error(&warnings);
         let metadata = super::buildkit_lint_result_metadata(
             &warnings,
             dockerfile,
             "Dockerfile",
-            true,
+            Some(&lint_error),
         )
         .expect("lint metadata");
         let result: serde_json::Value = serde_json::from_slice(&metadata["result.json"])
@@ -36401,6 +36519,50 @@ COPY $DIR_ASSET .\n";
         );
         assert_eq!(before_declaration.len(), 1);
         assert_eq!(before_declaration[0].line, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_lint_reports_undeclared_from_arguments_with_suggestions() {
+        let dockerfile = "FROM --platform=$BULIDPLATFORM scratch\nCOPY Dockerfile .\n";
+        let warnings = super::buildkit_lint_warnings(dockerfile);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_name, "UndefinedArgInFrom");
+        assert_eq!(warnings[0].line, 1);
+        assert_eq!(
+            warnings[0].detail,
+            "FROM argument 'BULIDPLATFORM' is not declared (did you mean BUILDPLATFORM?)"
+        );
+        assert_eq!(
+            super::buildkit_from_validation_error(dockerfile).as_deref(),
+            Some(
+                "empty platform value from expression $BULIDPLATFORM (did you mean BUILDPLATFORM?)"
+            )
+        );
+
+        assert!(super::buildkit_lint_warnings(
+            "ARG base=scratch\nFROM $base\nCOPY Dockerfile .\n"
+        )
+        .is_empty());
+        let skipped = super::buildkit_lint_warnings_with_check(
+            dockerfile,
+            Some("skip=UndefinedArgInFrom"),
+        );
+        assert!(skipped.is_empty());
+
+        let component = "ARG MY_OS=linux\nARG MY_ARCH=amd64\n\
+FROM --platform=linux/${MYARCH} busybox\n";
+        let component_warnings = super::buildkit_lint_warnings(component);
+        assert_eq!(
+            component_warnings[0].detail,
+            "FROM argument 'MYARCH' is not declared (did you mean MY_ARCH?)"
+        );
+        assert_eq!(
+            super::buildkit_from_validation_error(component).as_deref(),
+            Some(
+                "failed to parse platform linux/${MYARCH}: \"\" is an invalid component of \"linux/\": platform specifier component must match \"^[A-Za-z0-9_.-]+$\": invalid argument (did you mean MY_ARCH?)"
+            )
+        );
     }
 
     #[cfg(target_os = "linux")]

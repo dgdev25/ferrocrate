@@ -1,0 +1,57 @@
+{"app":"battleships","engine":"docker","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"info","status":"pass","exit":0,"ms":2304,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"docker: unknown command: docker doctor\n\nRun 'docker --help' for more information\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"pull-base","status":"pass","exit":0,"ms":2005,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"build","status":"pass","exit":0,"ms":8309,"stderr_tail":"0ffd60f8667 done\n#11 exporting manifest list sha256:1adeb7a39c8f249f83d73d4423e93027e7a934b842fc759acc0bea4341be5d52 done\n#11 naming to docker.io/bench/battleships:latest done\n#11 unpacking to docker.io/bench/battleships:latest\n#11 unpacking to docker.io/bench/battleships:latest 0.6s done\n#11 DONE 2.8s\n\nView build details: docker-desktop://dashboard/build/default/default/qhmjkw8jjp045nxprpoymuiqi\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"images","status":"pass","exit":0,"ms":507,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"history","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"save","status":"pass","exit":0,"ms":1904,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"rmi-tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"load","status":"pass","exit":0,"ms":703,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"run-detached","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"health","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"stats","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"cp-out","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"diff","status":"pass","exit":0,"ms":403,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"pause","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"unpause","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"restart","status":"pass","exit":0,"ms":11313,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"stop","status":"pass","exit":0,"ms":10311,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"start","status":"pass","exit":0,"ms":1203,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"rename","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"commit","status":"pass","exit":0,"ms":4305,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"export","status":"pass","exit":0,"ms":1003,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"kill","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"wait","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"rm","status":"pass","exit":0,"ms":604,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"rmi-committed","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"data-write","status":"pass","exit":0,"ms":402,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"data-read","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"volume-ls","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"volume-inspect","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"volume-rm","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"network-ls","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"network-run","status":"pass","exit":0,"ms":2404,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"network-rm","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"compose-up","status":"pass","exit":0,"ms":603,"stderr_tail":"ating \n Network battleships_default Creating \n Volume battleships_battleships_data Created \n Volume battleships_battleships_data Created \n Network battleships_default Created \n Network battleships_default Created \n Container battleships-battleships-1 Creating \n Container battleships-battleships-1 Created \n Container battleships-battleships-1 Starting \n Container battleships-battleships-1 Started \n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"compose-health","status":"pass","exit":0,"ms":1104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"compose-ps","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"compose-logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"compose-down","status":"pass","exit":0,"ms":11110,"stderr_tail":" Container battleships-battleships-1 Stopping \n Container battleships-battleships-1 Stopped \n Container battleships-battleships-1 Removing \n Container battleships-battleships-1 Removed \n Volume battleships_battleships_data Removing \n Network battleships_default Removing \n Volume battleships_battleships_data Removed \n Network battleships_default Removed \n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"err-port-in-use","status":"pass","exit":0,"ms":803,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"events","status":"pass","exit":0,"ms":5106,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"system-df","status":"pass","exit":0,"ms":4206,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"container-prune","status":"pass","exit":0,"ms":1103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"image-prune","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"docker","step":"search","status":"pass","exit":0,"ms":503,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}

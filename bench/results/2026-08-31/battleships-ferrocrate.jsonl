@@ -1,0 +1,57 @@
+{"app":"battleships","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":104,"stderr_tail":"cli\u001b[0m\u001b[2m:\u001b[0m rootless daemon socket not found; probed /run/user/1000/ferrocrate.sock (missing), /run/user/1000/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/goal/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/goal/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":9710,"stderr_tail":"6a32049aeb6b435920ca93f9285: registry (verified)\nlayer sha256:51c53f95c2cae3d00dfc0350297c92dea913fe129ec38b8deb8313e5f3e0297d: registry (verified)\nlayer sha256:3cddab114edadc7cf5a7b0b591e59f6312aade3dc4fb68e88aacca5eb1cc1c03: registry (verified)\nlayer sha256:0282d618b52cd2eb8fcf041e780cd66b15e7ebae519a4054c5d293eae6b6d34f: registry (verified)\npull: image=registry-1.docker.io/library/node:22-slim\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"build","status":"pass","exit":0,"ms":7208,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"images","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"image-inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"history","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"tag","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"save","status":"pass","exit":0,"ms":1604,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"rmi-tag","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"load","status":"pass","exit":0,"ms":9913,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"run-detached","status":"pass","exit":0,"ms":3105,"stderr_tail":"run: container_id=2d276df52898ee84b3e7a7861530db716ce41b0653570adcada5a036eee896df pid=1614382 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"health","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"logs","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"inspect","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"top","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"stats","status":"pass","exit":0,"ms":102,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"exec","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"cp-out","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"cp-in","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"diff","status":"pass","exit":0,"ms":303,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"pause","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"unpause","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"restart","status":"pass","exit":0,"ms":1205,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"stop","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"start","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"rename","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"commit","status":"pass","exit":0,"ms":12113,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"export","status":"pass","exit":0,"ms":505,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"kill","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"wait","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"rmi-committed","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"data-write","status":"pass","exit":0,"ms":2605,"stderr_tail":"run: container_id=b71d7f46178fc064eee438971141fe15213f794721fd345a83d768d84d7587fc pid=1620013 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"data-read","status":"pass","exit":0,"ms":2405,"stderr_tail":"run: container_id=4b2eff6629a407f52d67a410c4c3b51f8917bca1f2b2018f998efce0d6920d04 pid=1620307 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"volume-ls","status":"pass","exit":0,"ms":105,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"volume-inspect","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"volume-rm","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"network-run","status":"pass","exit":0,"ms":5708,"stderr_tail":"run: container_id=f34256396c743c62122e86f521b01f75df95a56103444717cbb5739f8ba37af7 pid=1621678 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":4108,"stderr_tail":"run: container_id=6443478879e0a1a43d0380cb4d0fdb997e7a263d7e3cb8acdffa5bc54df1d5da pid=1623866 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"compose-health","status":"pass","exit":0,"ms":1105,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":304,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"err-port-in-use","status":"pass","exit":0,"ms":7110,"stderr_tail":"run: container_id=fd1cc4a7b8ee4ab7f404c2ba22c35e83dc4682e8234723cda2855067a1a871e8 pid=1624976 network_backend=ebpf\n","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":204,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}
+{"app":"battleships","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T06:06Z","head":"0ead01b9"}

@@ -1,17 +1,17 @@
 # Real-app bench scoreboard
 
-Generated 2026-08-28 11:57Z from the newest result file per app and engine.
+Generated 2026-08-31 06:09Z from the newest result file per app and engine.
 Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Boundary = manifest skip.
 
 | App | Run | Ferrocrate pass | Docker pass | Product | App/env | Boundary | Unpaired |
 |---|---|---:|---:|---:|---:|---:|---:|
-| actix-basics | 2026-08-28T11:18Z | 50/52 | 52/52 | 2 | 0 | 0 | 0 |
-| battleships | 2026-08-28T11:21Z | 53/57 | 57/57 | 4 | 0 | 0 | 0 |
-| docker-flask | 2026-08-28T11:24Z | 14/52 | 19/52 | 5 | 0 | 33 | 0 |
-| docker-todo | 2026-08-28T11:27Z | 40/52 | 52/52 | 12 | 0 | 0 | 0 |
-| fastapi-fullstack | 2026-08-28T11:32Z | 14/47 | 14/47 | 0 | 0 | 33 | 0 |
-| flask-tutorial | 2026-08-28T11:32Z | 54/57 | 57/57 | 3 | 0 | 0 | 0 |
-| gin-basic | 2026-08-28T11:34Z | 50/52 | 52/52 | 2 | 0 | 0 | 0 |
+| actix-basics | 2026-08-28T12:05Z | 50/52 | 52/52 | 2 | 0 | 0 | 0 |
+| battleships | 2026-08-31T06:06Z | 57/57 | 57/57 | 0 | 0 | 0 | 0 |
+| docker-flask | 2026-08-28T12:10Z | 14/52 | 19/52 | 5 | 0 | 33 | 0 |
+| docker-todo | 2026-08-28T12:12Z | 40/52 | 52/52 | 12 | 0 | 0 | 0 |
+| fastapi-fullstack | 2026-08-28T12:18Z | 14/47 | 14/47 | 0 | 0 | 33 | 0 |
+| flask-tutorial | 2026-08-28T12:18Z | 54/57 | 57/57 | 3 | 0 | 0 | 0 |
+| gin-basic | 2026-08-28T12:20Z | 27/27 | 52/52 | 0 | 0 | 0 | 0 |
 | gitea | 2026-08-28T11:35Z | 21/52 | 52/52 | 31 | 0 | 0 | 0 |
 | kutt | 2026-08-28T11:54Z | 18/52 | 19/52 | 1 | 0 | 33 | 0 |
 | mdn-static | 2026-08-28T11:40Z | 42/52 | 52/52 | 10 | 0 | 0 | 0 |
@@ -27,12 +27,12 @@ Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Bounda
 |---|---:|---:|---:|---:|
 | engine | 44 | 0 | 0 | 1 |
 | image | 81 | 14 | 0 | 40 |
-| lifecycle | 131 | 76 | 0 | 138 |
+| lifecycle | 129 | 70 | 0 | 138 |
 | data | 15 | 0 | 0 | 5 |
-| network | 50 | 2 | 1 | 7 |
-| compose | 42 | 10 | 2 | 1 |
-| errors | 37 | 2 | 0 | 6 |
-| extras | 72 | 0 | 0 | 3 |
+| network | 46 | 2 | 1 | 7 |
+| compose | 37 | 10 | 2 | 1 |
+| errors | 34 | 2 | 0 | 6 |
+| extras | 67 | 0 | 0 | 3 |
 | other | 0 | 0 | 0 | 0 |
 
 ## Open product failures (ticket candidates)
@@ -40,48 +40,40 @@ Product = fails on Ferrocrate, passes on Docker. App/env = fails on both. Bounda
 | App | Step | Exit | Ferrocrate stderr (tail) |
 |---|---|---:|---|
 | actix-basics | start | 1 | `` |
-| actix-basics | kill | 1 | `kill: bench-actix-basics-r: cannot kill container: 0f89282cbf17008830f0d5e55a584fcedeb16b3493ed4116e25ed7a057c7d8a4: container 0f89282cbf17008830f0d5e55a584fced` |
-| battleships | start | 1 | `` |
-| battleships | commit | 1 | `2026-08-28T11:24:21.494754Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
-error: commit: bind and tmpfs` |
-| battleships | kill | 1 | `kill: bench-battleships-r: cannot kill container: 5e5bba47fcda783b6c5540b926a22b366b6ebf5a57aa8f530d70671f193c9ef0: container 5e5bba47fcda783b6c5540b926a22b366b` |
-| battleships | rmi-committed | 1 | `rmi: bench/battleships:committed: rmi: not found registry-1.docker.io/bench/battleships:committed
-2026-08-28T11:24:22.714682Z ERROR ferro_cli::linux_cli: rmi: 1` |
-| docker-flask | compose-up | 1 | `2026-08-28T11:25:08.840070Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build
+| actix-basics | kill | 1 | `kill: bench-actix-basics-r: cannot kill container: 0783750864e74fb9a1749929d6799c12231394e0a867395802f456242a866b01: container 0783750864e74fb9a1749929d6799c122` |
+| docker-flask | compose-up | 1 | `2026-08-28T12:10:41.617070Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build
 error: compose validation error: ` |
 | docker-flask | compose-health | 1 | `` |
-| docker-flask | compose-ps | 1 | `2026-08-28T11:27:10.073035Z ERROR ferro_cli::linux_cli: compose validation error: service 'web' must specify image or build
-error: compose validation error: ser` |
-| docker-flask | compose-logs | 1 | `2026-08-28T11:27:10.197004Z ERROR ferro_cli::linux_cli: compose validation error: service 'css' must specify image or build
-error: compose validation error: ser` |
-| docker-flask | compose-down | 1 | `2026-08-28T11:27:10.321000Z ERROR ferro_cli::linux_cli: compose validation error: service 'js' must specify image or build
+| docker-flask | compose-ps | 1 | `2026-08-28T12:12:42.656110Z ERROR ferro_cli::linux_cli: compose validation error: service 'js' must specify image or build
 error: compose validation error: serv` |
+| docker-flask | compose-logs | 1 | `2026-08-28T12:12:42.778902Z ERROR ferro_cli::linux_cli: compose validation error: service 'worker' must specify image or build
+error: compose validation error: ` |
+| docker-flask | compose-down | 1 | `2026-08-28T12:12:42.897822Z ERROR ferro_cli::linux_cli: compose validation error: service 'web' must specify image or build
+error: compose validation error: ser` |
 | docker-todo | health | 1 | `` |
-| docker-todo | top | 1 | `2026-08-28T11:29:00.003165Z ERROR ferro_cli::linux_cli: container 6d19502fde4a8a57beb77136fae97d1d5df9b8a9041d3df9e8e375f9d5c2f5cc is not running
+| docker-todo | top | 1 | `2026-08-28T12:14:56.950472Z ERROR ferro_cli::linux_cli: container aea230157f140ad5192f727ff7fbca1c2663974dc7c1deb36a4cbd0efd7428f5 is not running
 error: contain` |
-| docker-todo | exec | 1 | `2026-08-28T11:29:00.251738Z ERROR ferro_cli::linux_cli: container 6d19502fde4a8a57beb77136fae97d1d5df9b8a9041d3df9e8e375f9d5c2f5cc is not running
+| docker-todo | exec | 1 | `2026-08-28T12:14:57.187549Z ERROR ferro_cli::linux_cli: container aea230157f140ad5192f727ff7fbca1c2663974dc7c1deb36a4cbd0efd7428f5 is not running
 error: contain` |
-| docker-todo | cp-out | 1 | `2026-08-28T11:29:00.364504Z ERROR ferro_cli::linux_cli: docker: archive path is unavailable: No such file or directory (os error 2)
+| docker-todo | cp-out | 1 | `2026-08-28T12:14:57.305453Z ERROR ferro_cli::linux_cli: docker: archive path is unavailable: No such file or directory (os error 2)
 error: docker: archive path ` |
-| docker-todo | cp-in | 1 | `2026-08-28T11:29:00.557317Z ERROR ferro_cli::linux_cli: container 6d19502fde4a8a57beb77136fae97d1d5df9b8a9041d3df9e8e375f9d5c2f5cc is not running
+| docker-todo | cp-in | 1 | `2026-08-28T12:14:57.457369Z ERROR ferro_cli::linux_cli: container aea230157f140ad5192f727ff7fbca1c2663974dc7c1deb36a4cbd0efd7428f5 is not running
 error: contain` |
 | docker-todo | pause | 1 | `pause: bench-docker-todo: cgroup error: io error: No such process (os error 3)
-2026-08-28T11:29:00.896058Z ERROR ferro_cli::linux_cli: pause: 1 container operat` |
+2026-08-28T12:14:57.669132Z ERROR ferro_cli::linux_cli: pause: 1 container operat` |
 | docker-todo | unpause | 1 | `unpause: bench-docker-todo: cgroup error: io error: No such process (os error 3)
-2026-08-28T11:29:01.083026Z ERROR ferro_cli::linux_cli: unpause: 1 container op` |
+2026-08-28T12:14:57.788905Z ERROR ferro_cli::linux_cli: unpause: 1 container op` |
 | docker-todo | restart | 1 | `` |
 | docker-todo | start | 1 | `` |
-| docker-todo | kill | 1 | `kill: bench-docker-todo-r: cannot kill container: 6d19502fde4a8a57beb77136fae97d1d5df9b8a9041d3df9e8e375f9d5c2f5cc: container 6d19502fde4a8a57beb77136fae97d1d5d` |
-| docker-todo | compose-up | 1 | `9c2c517662698e5 creation failed, cleaning up resources
-2026-08-28T11:30:16.653828Z  WARN ferro_core::runtime: [rollback] container 77a15e5ddc3d578fdfaba8adb60ea` |
+| docker-todo | kill | 1 | `kill: bench-docker-todo-r: cannot kill container: aea230157f140ad5192f727ff7fbca1c2663974dc7c1deb36a4cbd0efd7428f5: container aea230157f140ad5192f727ff7fbca1c26` |
+| docker-todo | compose-up | 1 | `cfc1e2264840c10 creation failed, cleaning up resources
+2026-08-28T12:16:12.564702Z  WARN ferro_core::runtime: [rollback] container 1b501fb7735db3a9912bc88300623` |
 | docker-todo | compose-health | 1 | `` |
 | flask-tutorial | start | 1 | `` |
-| flask-tutorial | commit | 1 | `2026-08-28T11:34:25.255403Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
+| flask-tutorial | commit | 1 | `2026-08-28T12:20:27.185951Z ERROR ferro_cli::linux_cli: commit: bind and tmpfs mounts must be removed before committing the rootfs
 error: commit: bind and tmpfs` |
 | flask-tutorial | rmi-committed | 1 | `rmi: bench/flask-tutorial:committed: rmi: not found registry-1.docker.io/bench/flask-tutorial:committed
-2026-08-28T11:34:26.377709Z ERROR ferro_cli::linux_cli: ` |
-| gin-basic | start | 1 | `` |
-| gin-basic | kill | 1 | `kill: bench-gin-basic-r: cannot kill container: 2d3ea2cae199ee5dd637bd0cf68bd1eb3026343d6d61af4d68662cdd058f8fe7: container 2d3ea2cae199ee5dd637bd0cf68bd1eb3026` |
+2026-08-28T12:20:28.190452Z ERROR ferro_cli::linux_cli: ` |
 | gitea | build | 1 | `2026-08-28T11:36:56.276772Z ERROR ferro_cli::linux_cli: invalid Dockerfile: FROM --platform must use OS/architecture form
 error: invalid Dockerfile: FROM --plat` |
 | gitea | image-inspect | 1 | `2026-08-28T11:36:56.515768Z ERROR ferro_cli::linux_cli: image inspect: not found registry-1.docker.io/bench/gitea:latest

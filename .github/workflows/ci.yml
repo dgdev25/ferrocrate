@@ -1,5 +1,7 @@
 name: CI
 on:
+  workflow_call:
+  workflow_dispatch:
   pull_request:
     paths-ignore: ['docs/**', '**/*.md']
   push:
@@ -27,6 +29,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_TARGET_DIR: ${{ matrix.target_dir }}
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     steps:
@@ -62,6 +66,24 @@ jobs:
           npm run --prefix apps/ferro-desktop-ui build
           cargo test --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml
           npm run --prefix apps/ferro-desktop-ui test
+          npm run --prefix apps/ferro-desktop-ui typecheck
+          npm run --prefix apps/ferro-desktop-ui lint
+      - name: Supported runtime tests
+        shell: bash
+        run: cargo test --workspace --all-features --locked -- --test-threads=1
+      - name: Release regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 scripts/test_readiness_scope.py
+          node --test scripts/release-artifacts.test.mjs
+      - name: Dependency policy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 scripts/check-advisory-exceptions.py
+          cargo audit --deny warnings
+          npm audit --prefix apps/ferro-desktop-ui --audit-level=low
       - name: Warning gate
         if: runner.os != 'Windows'
         shell: bash

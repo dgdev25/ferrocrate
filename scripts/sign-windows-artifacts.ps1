@@ -16,13 +16,19 @@ if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
   throw "WINDOWS_PFX_PASSWORD env var is required"
 }
 
-$pfxPath = Join-Path $env:RUNNER_TEMP "codesign-cert.pfx"
-[IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
-
 $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
 if ($null -eq $signtool) {
   throw "signtool.exe not found"
 }
 
-& signtool.exe sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_PFX_PASSWORD /tr $TimestampUrl /td SHA256 $MsiPath
-Write-Host "signed windows artifact: $MsiPath"
+$pfxPath = Join-Path $env:RUNNER_TEMP ("codesign-" + [guid]::NewGuid().ToString() + ".pfx")
+try {
+  [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+  & signtool.exe sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_PFX_PASSWORD /tr $TimestampUrl /td SHA256 $MsiPath
+  if ($LASTEXITCODE -ne 0) { throw "signtool signing failed with exit code $LASTEXITCODE" }
+  & signtool.exe verify /pa /all /v $MsiPath
+  if ($LASTEXITCODE -ne 0) { throw "signtool verification failed with exit code $LASTEXITCODE" }
+  Write-Host "signed windows artifact: $MsiPath"
+} finally {
+  if (Test-Path $pfxPath) { Remove-Item -LiteralPath $pfxPath -Force }
+}

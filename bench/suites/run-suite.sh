@@ -66,7 +66,7 @@ trap suite_cleanup EXIT
 SRC="${SUITE_SRC:-/data/dev/bench-suites}"; mkdir -p "$SRC"
 export PATH="$HOME/.local/go-install/go/bin:$PATH"
 DATE="$(date -u +%Y-%m-%d)"; RUN="$(date -u +%Y-%m-%dT%H:%MZ)"
-HEAD="$(git -C "$BENCH/.." rev-parse --short HEAD)"
+HEAD="$(git -C "$BENCH/.." rev-parse HEAD)"
 OUT="$BENCH/results/$DATE/suite-$SUITE-$ENGINE.jsonl"; mkdir -p "$(dirname "$OUT")"; : > "$OUT"
 # The socket lives under FERROCRATE_HOME, not /run/user/1000: every agent on
 # this host gets its own FERROCRATE_HOME, so per-suite runtimes never collide,
@@ -122,7 +122,8 @@ if [ "$SUITE" = compose-e2e ]; then
   fi
 fi
 
-echo "== $SUITE @ $(git -C "$DIR" rev-parse --short HEAD) on $ENGINE"
+SUITE_HEAD="$(git -C "$DIR" rev-parse HEAD)"
+echo "== $SUITE @ $SUITE_HEAD on $ENGINE"
 
 # --- engine under test ---
 # critest speaks CRI, not the Docker API, so it needs the ferro-cri server on its
@@ -187,8 +188,8 @@ skip_re="$( [ -f "$SKIPFILE" ] && grep -vE '^\s*(#|$)' "$SKIPFILE" | paste -sd'|
 
 record() { # name status ms tail
   local tail; tail="$(printf '%s' "${4:-}" | tail -c 400 | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read())[1:-1])')"
-  printf '{"source":"%s","suite":"%s","engine":"%s","step":"%s","status":"%s","exit":%d,"ms":%d,"stderr_tail":"%s","run":"%s","head":"%s"}\n' \
-    "$SUITE" "$SUITE" "$ENGINE" "$1" "$2" "${5:-0}" "${3:-0}" "$tail" "$RUN" "$HEAD" >> "$OUT"
+  printf '{"source":"%s","suite":"%s","engine":"%s","step":"%s","status":"%s","exit":%d,"ms":%d,"stderr_tail":"%s","run":"%s","head":"%s","suite_head":"%s"}\n' \
+    "$SUITE" "$SUITE" "$ENGINE" "$1" "$2" "${5:-0}" "${3:-0}" "$tail" "$RUN" "$HEAD" "$SUITE_HEAD" >> "$OUT"
 }
 
 # Suites that spin up a local OCI registry as a process (buildkit's mirror,
@@ -474,42 +475,10 @@ PYEOF
       head -5 "$WORK/go.err" >&2
     fi
     [ -n "${GATEPID:-}" ] && kill "$GATEPID" 2>/dev/null
-    python3 - "$WORK/go.json" "$OUT" "$SUITE" "$ENGINE" "$RUN" "$HEAD" "${skip_re:-__none__}" <<'PY'
-import json, re, sys
-src, out, suite, engine, run, head, skip = sys.argv[1:8]
-skip_re = re.compile(skip) if skip != "__none__" else None
-tests, fails = {}, {}
-for line in open(src, errors="replace"):
-    line = line.strip()
-    if not line.startswith("{"): continue
-    try: ev = json.loads(line)
-    except ValueError: continue
-    name = ev.get("Test")
-    if not name: continue
-    action = ev.get("Action")
-    if action in ("pass", "fail", "skip"): tests[name] = action
-    elif action == "output": fails.setdefault(name, []).append(ev.get("Output", ""))
-with open(out, "a") as fh:
-    for name, action in sorted(tests.items()):
-        status = {"pass": "pass", "fail": "fail", "skip": "skip"}[action]
-        if skip_re and skip_re.search(name): status = "skip"
-        # compose's failure cleanup (framework.go:147) lists the whole config
-        # dir after the real error and pushes it out of any fixed tail. Drop
-        # those lines, keep the last 800 chars of what is left.
-        out = "".join(fails.get(name, []))
-        out = "".join(l for l in out.splitlines(keepends=True)
-                      if "framework.go:147" not in l)
-        tail = out[-800:] if status == "fail" else ""
-        fh.write(json.dumps({"source": suite, "suite": suite, "engine": engine, "step": name,
-                             "status": status, "exit": 0 if status != "fail" else 1, "ms": 0,
-                             "stderr_tail": tail, "run": run, "head": head},
-                            separators=(",", ":")) + "\n")
-print(f"{suite}/{engine}: {sum(1 for a in tests.values() if a=='pass')} pass, "
-      f"{sum(1 for a in tests.values() if a=='fail')} fail, {sum(1 for a in tests.values() if a=='skip')} skip")
-if not tests:
-    print(f"{suite}/{engine}: collected no tests at all; the suite did not run", file=sys.stderr)
-    raise SystemExit(2)
-PY
+    python3 "$BENCH/suites/parse-results.py" go \
+      --input "$WORK/go.json" --output "$OUT" --suite "$SUITE" --engine "$ENGINE" \
+      --run "$RUN" --head "$HEAD" --suite-head "$SUITE_HEAD" \
+      --skip-pattern "${skip_re:-}" || { echo "suite parser reported a harness error" >&2; exit 2; }
     ;;
   oci-runtime)
     # runtime-tools validates the container the runtime actually produced against
@@ -567,36 +536,12 @@ PY
     record "critest-summary" "$([ "${total_fail:-1}" = 0 ] && echo pass || echo fail)" 0 "$(tail -c 400 "$WORK/critest.out")" "${total_fail:-1}"
     # record one line per spec from the ginkgo JSON report (no Docker oracle
     # here by design: the CRI API is the contract, so a fail is a fail)
-    critest_py_status=critest
-    python3 - "$WORK/critest.json" "$OUT" "$RUN" "$HEAD" "$SUITE" "$ENGINE" <<'PY' || critest_py_status=fallback
-import json, sys
-rep, out, run, head, suite, engine = sys.argv[1:7]
-try:
-    with open(rep) as fh: r = json.load(fh)
-except Exception:
-    sys.exit(1)
-def walk(node):
-    for s in node.get("SpecReports", []):
-        st = s["State"]
-        status = {"passed": "pass", "failed": "fail", "skipped": "skip", "pending": "skip"}.get(st, "fail")
-        # BeforeSuite/AfterSuite nodes carry null ContainerHierarchyTexts/LeafNodeText
-        name = " / ".join(c for c in (s.get("ContainerHierarchyTexts") or []) if c) + " " + (s.get("LeafNodeText") or "")
-        tail = ""
-        if status == "fail":
-            fl = s.get("Failures") or ([s["Failure"]] if s.get("Failure") else [])
-            tail = " | ".join((f.get("Message") or "") for f in fl)[:800]
-        with open(out, "a") as fh:
-            fh.write(json.dumps({"source": suite, "suite": suite, "engine": engine, "step": name.strip(),
-                                 "status": status, "exit": 0 if status != "fail" else 1, "ms": 0,
-                                 "stderr_tail": tail, "run": run, "head": head},
-                                separators=(",", ":")) + "\n")
-# the report is a list of suite reports; specs live in SpecReports
-for suite_report in r if isinstance(r, list) else [r]:
-    walk(suite_report)
-PY
-    if [ "$critest_py_status" = fallback ]; then
-      record "critest-summary" "$([ "${total_fail:-1}" = 0 ] && echo pass || echo fail)" 0 "$(tail -c 400 "$WORK/critest.out")" "${total_fail:-1}"
-    fi
+    python3 "$BENCH/suites/parse-results.py" critest \
+      --input "$WORK/critest.json" --output "$OUT" --suite "$SUITE" --engine "$ENGINE" \
+      --run "$RUN" --head "$HEAD" --suite-head "$SUITE_HEAD" || {
+        echo "CRI parser reported a harness error; summary alone cannot qualify the suite" >&2
+        exit 2
+      }
     echo "critest/$ENGINE: $total_pass passed, $total_fail failed (detail in $WORK/critest.out)"
     ;;
 esac

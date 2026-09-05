@@ -18,12 +18,15 @@ const patterns = [
   ['windows-x86_64', /setup\.exe$/i],
 ];
 for (const [platform, pattern] of patterns) {
-  const file = files.find((candidate) => pattern.test(candidate));
-  if (!file) continue;
+  const matches = files.filter((candidate) => pattern.test(basename(candidate)));
+  if (matches.length !== 1) throw new Error(`expected exactly one ${platform} artifact; found ${matches.length}`);
+  const [file] = matches;
   const signature = `${file}.sig`;
   if (!files.includes(signature)) throw new Error(`missing signature for ${file}`);
+  const signatureText = (await readFile(join(args.dir, signature), 'utf8')).trim();
+  if (!signatureText) throw new Error(`empty signature for ${file}`);
   platforms[platform] = {
-    signature: (await readFile(join(args.dir, signature), 'utf8')).trim(),
+    signature: signatureText,
     url: `https://github.com/${args.repo}/releases/download/${args.tag}/${basename(file)}`,
   };
 }

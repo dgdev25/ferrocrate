@@ -79,7 +79,6 @@ impl EnrollmentRpc for EnrollmentServiceImpl {
 #[derive(Clone)]
 pub struct ControlServiceImpl {
     builder: Arc<DesiredStateBuilder>,
-    revision: u64,
     store: Arc<ManagerStore>,
     active_nodes: Arc<Mutex<HashSet<String>>>,
     controller: Option<Arc<ControllerGrantIssuer>>,
@@ -96,7 +95,6 @@ impl ControlServiceImpl {
         let fleet_hub = Arc::new(ControlHub::new(store.clone()));
         Self {
             builder: Arc::new(DesiredStateBuilder::new(cluster_id, epoch, signing_key)),
-            revision: 1,
             store,
             active_nodes: Arc::new(Mutex::new(HashSet::new())),
             controller: None,

@@ -220,19 +220,68 @@ pub fn authorize_plugin_call(
     Ok(())
 }
 
-fn read_bounded<R: Read>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut output)?;
-    Ok(output)
+// Own the process group as soon as spawn succeeds. Every return path (including
+// I/O errors) kills descendants and reaps the direct child before cgroup removal.
+struct PluginChild {
+    child: std::process::Child,
+    cgroup: Option<PathBuf>,
 }
 
-fn spawn_reader<R: Read + Send + 'static>(
-    reader: R,
+impl Drop for PluginChild {
+    fn drop(&mut self) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        if let Some(path) = &self.cgroup {
+            kill_plugin_cgroup(path);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(path) = &self.cgroup {
+            cleanup_plugin_cgroup(path);
+        }
+    }
+}
+
+fn nonblocking(pipe: &impl std::os::fd::AsFd) -> std::io::Result<()> {
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    let flags = fcntl(pipe, FcntlArg::F_GETFL).map_err(std::io::Error::from)?;
+    fcntl(
+        pipe,
+        FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+    )
+    .map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+fn drain_pipe<R: Read>(
+    pipe: &mut Option<R>,
+    output: &mut Vec<u8>,
     limit: u64,
-) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    thread::spawn(move || read_bounded(reader, limit))
+) -> Result<(), PluginExecutionError> {
+    let Some(reader) = pipe else {
+        return Ok(());
+    };
+    let mut buffer = [0; 8192];
+    match reader.read(&mut buffer) {
+        Ok(0) => {
+            *pipe = None;
+        }
+        Ok(n) => {
+            if (output.len() as u64).saturating_add(n as u64) > limit {
+                return Err(PluginExecutionError::OutputLimit);
+            }
+            output.extend_from_slice(&buffer[..n]);
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn plugin_command(
@@ -615,7 +664,10 @@ fn execute_plugin_inner(
             return Err(error);
         }
     };
-    let mut child = match command
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    let deadline = Instant::now() + Duration::from_secs(manifest.limits.timeout_secs);
+    let child = match command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -631,98 +683,86 @@ fn execute_plugin_inner(
             return Err(PluginExecutionError::SpawnIo(error));
         }
     };
-    if let Some(path) = cgroup.as_ref() {
-        if let Err(error) = fs::write(path.join("cgroup.procs"), child.id().to_string()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            cleanup_plugin_cgroup(path);
-            return Err(PluginExecutionError::Cgroup(format!(
-                "move child into cgroup: {error}"
-            )));
-        }
+    let mut process = PluginChild { child, cgroup };
+    if let Some(path) = process.cgroup.as_ref() {
+        fs::write(path.join("cgroup.procs"), process.child.id().to_string()).map_err(|error| {
+            PluginExecutionError::Cgroup(format!("move child into cgroup: {error}"))
+        })?;
     }
-    if let Some(mut pipe) = child.stdin.take() {
-        pipe.write_all(stdin)?;
-    }
-    let stdout = spawn_reader(
-        child
-            .stdout
-            .take()
+    let mut input = process.child.stdin.take();
+    let mut stdout_pipe = process.child.stdout.take();
+    let mut stderr_pipe = process.child.stderr.take();
+    nonblocking(input.as_ref().ok_or(PluginExecutionError::Entrypoint)?)?;
+    nonblocking(
+        stdout_pipe
+            .as_ref()
             .ok_or(PluginExecutionError::Entrypoint)?,
-        manifest.limits.max_output_bytes,
-    );
-    let stderr = spawn_reader(
-        child
-            .stderr
-            .take()
+    )?;
+    nonblocking(
+        stderr_pipe
+            .as_ref()
             .ok_or(PluginExecutionError::Entrypoint)?,
-        manifest.limits.max_output_bytes,
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(manifest.limits.timeout_secs);
+    )?;
+    let mut sent = 0;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut status = None;
     let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
+    loop {
         if Instant::now() >= deadline {
             timed_out = true;
-            let _ = child.kill();
-            if let Some(path) = cgroup.as_ref() {
-                kill_plugin_cgroup(path);
+            break;
+        }
+        // All three pipes share the same deadline. No blocking worker can
+        // outlive this call or hang a join when a descendant inherits a pipe.
+        drain_pipe(
+            &mut stdout_pipe,
+            &mut stdout,
+            manifest.limits.max_output_bytes,
+        )?;
+        drain_pipe(
+            &mut stderr_pipe,
+            &mut stderr,
+            manifest.limits.max_output_bytes,
+        )?;
+        if sent == stdin.len() {
+            input = None;
+        }
+        if let Some(pipe) = &mut input {
+            let end = sent.saturating_add(8192).min(stdin.len());
+            match pipe.write(&stdin[sent..end]) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "plugin stdin closed",
+                    )
+                    .into())
+                }
+                Ok(n) => sent += n,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error.into()),
             }
-            break child.wait()?;
         }
-        thread::sleep(Duration::from_millis(5));
-    };
-    let stdout = match stdout.join() {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            if let Some(path) = cgroup.as_ref() {
-                cleanup_plugin_cgroup(path);
-            }
-            return Err(PluginExecutionError::Io(error));
+        if status.is_none() {
+            status = process.child.try_wait()?;
         }
-        Err(_) => {
-            if let Some(path) = cgroup.as_ref() {
-                cleanup_plugin_cgroup(path);
-            }
-            return Err(PluginExecutionError::Io(std::io::Error::other(
-                "plugin stdout reader panicked",
-            )));
+        if status.is_some() && input.is_none() && stdout_pipe.is_none() && stderr_pipe.is_none() {
+            break;
         }
-    };
-    let stderr = match stderr.join() {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            if let Some(path) = cgroup.as_ref() {
-                cleanup_plugin_cgroup(path);
-            }
-            return Err(PluginExecutionError::Io(error));
-        }
-        Err(_) => {
-            if let Some(path) = cgroup.as_ref() {
-                cleanup_plugin_cgroup(path);
-            }
-            return Err(PluginExecutionError::Io(std::io::Error::other(
-                "plugin stderr reader panicked",
-            )));
-        }
-    };
-    if stdout.len() as u64 > manifest.limits.max_output_bytes
-        || stderr.len() as u64 > manifest.limits.max_output_bytes
-    {
-        if let Some(path) = cgroup.as_ref() {
-            cleanup_plugin_cgroup(path);
-        }
-        return Err(PluginExecutionError::OutputLimit);
+        thread::sleep(Duration::from_millis(1));
     }
-    if let Some(path) = cgroup.as_ref() {
-        kill_plugin_cgroup(path);
-        cleanup_plugin_cgroup(path);
-    }
+    // Drop kills the group even when the leader exited successfully. Closing
+    // our pipes is immediate; cleanup never waits for inherited-pipe EOF.
+    drop(input);
+    drop(stdout_pipe);
+    drop(stderr_pipe);
+    drop(process);
     Ok(PluginExecutionResult {
-        exit_code: status.code().unwrap_or(-1),
+        exit_code: status.and_then(|status| status.code()).unwrap_or(-1),
         stdout,
         stderr,
         timed_out,
@@ -841,6 +881,62 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("script");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
         path.display().to_string()
+    }
+
+    #[test]
+    fn deadline_covers_blocked_stdin_and_inherited_output_pipes() {
+        for body in ["sleep 3", "sleep 3 & exit 0"] {
+            let temp = tempfile::tempdir().unwrap();
+            let key = SigningKey::from_bytes(&[33; 32]);
+            let marker = temp.path().join("started");
+            let manifest = signed_manifest(
+                &script(&temp, &format!("touch {}; {body}", marker.display())),
+                PluginLimits {
+                    timeout_secs: 1,
+                    ..Default::default()
+                },
+                &key,
+            );
+            let input = if body == "sleep 3" {
+                vec![0; 1024 * 1024]
+            } else {
+                vec![]
+            };
+            let result = execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], &input);
+            // Other tests serialize PATH changes with the spawn lock. Measure
+            // child lifetime, excluding time spent waiting to acquire that lock.
+            let elapsed = fs::metadata(&marker)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .elapsed()
+                .unwrap();
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "deadline excluded pipes: {elapsed:?}"
+            );
+            assert!(result.unwrap().timed_out);
+        }
+    }
+
+    #[test]
+    fn drains_output_while_sending_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[34; 32]);
+        let manifest = signed_manifest(
+            &script(&temp, "head -c 131072 /dev/zero; cat"),
+            PluginLimits {
+                timeout_secs: 2,
+                max_output_bytes: 1024 * 1024,
+                ..Default::default()
+            },
+            &key,
+        );
+        let input = vec![42; 131072];
+        let result =
+            execute_plugin(&manifest, &key.verifying_key(), "read_logs", &[], &input).unwrap();
+        assert!(!result.timed_out);
+        assert_eq!(&result.stdout[131072..], &input);
     }
 
     #[test]

@@ -1,12 +1,4 @@
 [advisories]
-# These unmaintained transitive crates are explicitly tracked in
-# docs/SECURITY_RISK_ACCEPTANCE.md. New advisories remain fatal in CI.
-ignore = [
-  "RUSTSEC-2025-0141",
-  "RUSTSEC-2025-0057",
-  "RUSTSEC-2024-0384",
-  # No fixed release is published for these 2026 unsoundness warnings yet;
-  # each is tracked in the risk-acceptance register with a revalidation date.
-  "RUSTSEC-2026-0190",
-  "RUSTSEC-2026-0097",
-]
+# Existing time-bounded maintenance exception; owner, dependency path and expiry
+# are enforced by scripts/check-advisory-exceptions.py and recorded in the register.
+ignore = ["RUSTSEC-2025-0141"]

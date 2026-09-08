@@ -13,20 +13,28 @@ jobs:
     # An isolated, privileged qualification host is required. Ordinary build
     # runners must never silently stand in for host/fault qualification.
     runs-on: [self-hosted, linux, x64, ferro-release-qualified]
+    environment: release
     timeout-minutes: 180
     env:
       CARGO_BUILD_JOBS: 1
       CARGO_INCREMENTAL: 0
       FERROCRATE_READINESS_REQUIRED: rootful,apparmor,rootless
+      FERROCRATE_ROOTLESS_TEST_USER: ${{ vars.FERROCRATE_ROOTLESS_TEST_USER }}
+      FERROCRATE_CANDIDATE_EVIDENCE_ROOT: ${{ vars.FERROCRATE_CANDIDATE_EVIDENCE_ROOT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci --prefix apps/ferro-desktop-ui
       - name: Qualify this exact tag
         shell: bash
         run: |
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/ferro-release-target"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/ferro-release-target-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          : "${FERROCRATE_ROOTLESS_TEST_USER:?configure an unprivileged qualification account}"
+          : "${FERROCRATE_CANDIDATE_EVIDENCE_ROOT:?configure the protected candidate evidence directory}"
+          export FERROCRATE_CANDIDATE_EVIDENCE="$FERROCRATE_CANDIDATE_EVIDENCE_ROOT/$GITHUB_SHA/manifest.json"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(id -u)" = 0
           bash scripts/local-release-gate.sh --version "$GITHUB_REF_NAME"
@@ -46,6 +54,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && rustup target add ${{ matrix.target }}
@@ -74,6 +84,8 @@ jobs:
       TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && cargo clippy --version
@@ -124,6 +136,8 @@ jobs:
       TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && rustup target add ${{ matrix.target }} && cargo clippy --version
@@ -179,6 +193,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && cargo clippy --version
@@ -240,6 +256,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/download-artifact@v4

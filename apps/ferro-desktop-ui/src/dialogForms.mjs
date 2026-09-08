@@ -1,6 +1,7 @@
 import { createElement as h } from "react";
+import { DialogFocusScope } from "./modalFocus.mjs";
 import { Icon } from "./iconSystem.mjs";
-import { buildRunContainerInvokeArgs } from "./runContainer.mjs";
+import { buildRunContainerInvokeArgs, LAUNCHER_PRESETS } from "./runContainer.mjs";
 import { ActionErrorNotice, HostPathField, hostPathError } from "./resourcePages.mjs";
 
 function field(id, label, inputProps, className, element = "input") {
@@ -12,14 +13,16 @@ function field(id, label, inputProps, className, element = "input") {
 
 function dialog(open, id, className, eyebrow, title, closeLabel, onClose, content, actions) {
   if (!open) return null;
-  return h("div", { className: "modal-backdrop", role: "presentation" },
-    h("section", { className, role: "dialog", "aria-modal": true, "aria-labelledby": id },
-      h("div", { className: "drawer-header" },
-        h("div", null, h("p", { className: "eyebrow" }, eyebrow), h("h2", { id }, title)),
-        h("button", { className: "btn btn-secondary", onClick: onClose }, closeLabel),
+  return h(DialogFocusScope, { dialogId: id, onClose },
+    h("div", { className: "modal-backdrop", role: "presentation" },
+      h("section", { className, role: "dialog", "aria-modal": true, "aria-labelledby": id, tabIndex: -1 },
+        h("div", { className: "drawer-header" },
+          h("div", null, h("p", { className: "eyebrow" }, eyebrow), h("h2", { id }, title)),
+          h("button", { className: "btn btn-secondary", onClick: onClose }, closeLabel),
+        ),
+        content,
+        actions,
       ),
-      content,
-      actions,
     ),
   );
 }
@@ -87,7 +90,17 @@ export function InstallDialog({ open, installerResult, busy, onClose, onPreview,
   );
 }
 
-export function RunContainerDialog({ open, draft, busy, error, onDraftChange, onCancel, onRun, onInvalid, onStart, onReviewLicensing, onDoctor }) {
+export function RunContainerDialog({ open, draft, busy, error, onDraftChange, onCancel, onRun, onInvalid, onStart, onReviewLicensing, onDoctor, onPreset, conflict, confirmation = '', onConfirmationChange, onAlternative, onReplace, onBack }) {
+  if (conflict) return dialog(open, "port-conflict-title", "run-dialog", "Port conflict", `Port ${conflict.port} is already in use`, "Cancel", onCancel,
+    h("div", { className: "editor-grid" },
+      h("p", { className: "detail-span" }, conflict.conflict ? `${conflict.conflict.name} (${conflict.conflict.image}) publishes this port.` : 'Another process uses this port. Its identity cannot be verified as a container.'),
+      h("p", { className: "detail-span" }, `The runtime host suggests port ${conflict.suggested}. Availability will be checked again before launch.`),
+      conflict.conflict ? h("div", { className: "detail-span" }, h("p", null, 'Replacement stops and removes this container. Named volumes are retained.'), field("replacement-confirmation", `Type ${conflict.conflict.name} to confirm replacement`, { value: confirmation, onChange: event => onConfirmationChange?.(event.target.value), autoComplete: 'off' })) : null,
+      error ? h(ActionErrorNotice, { error }) : null),
+    h("div", { className: "panel-actions dialog-actions" },
+      h("button", { className: "btn btn-secondary", disabled: busy, onClick: onBack }, 'Back to settings'),
+      h("button", { className: "btn btn-primary", disabled: busy, onClick: onAlternative }, `Use port ${conflict.suggested}`),
+      conflict.conflict ? h("button", { className: "btn btn-danger", disabled: busy || confirmation !== conflict.conflict.name, onClick: onReplace }, `Replace ${conflict.conflict.name}`) : null));
   const { image, name, command, pullIfMissing, ports, volumes, environment, memoryMb, cpus } = draft;
   const change = (field, value) => onDraftChange({ ...draft, [field]: value });
   const submit = () => {
@@ -108,6 +121,7 @@ export function RunContainerDialog({ open, draft, busy, error, onDraftChange, on
   );
   return dialog(open, "run-dialog-title", "run-dialog run-container-dialog", "New workload", "Run container", "Cancel", onCancel,
     h("div", { className: "editor-grid" },
+      onPreset ? h("div", { className: "detail-span" }, h("p", { className: "eyebrow" }, 'Start from a preset'), h("div", { className: "panel-actions" }, LAUNCHER_PRESETS.map(preset => h("button", { key: preset.id, className: "btn btn-secondary", disabled: busy, onClick: () => onPreset(preset.id) }, preset.label))), h("p", { className: "muted" }, 'Preset ports are checked on your runtime host and data uses a named volume.')) : null,
       field("run-container-image", "Image", { value: image, onChange: (event) => change("image", event.target.value), placeholder: "alpine:latest" }),
       field("run-container-name", "Name", { value: name, onChange: (event) => change("name", event.target.value), placeholder: "optional name" }),
       field("run-container-command", "Command (optional)", { value: command, onChange: (event) => change("command", event.target.value), placeholder: 'sh -c "echo ready"' }, "detail-span"),

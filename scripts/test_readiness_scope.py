@@ -9,7 +9,7 @@ SCRIPT = Path(__file__).with_name("verify-release-readiness.sh").resolve()
 
 
 class ReadinessScopeTests(unittest.TestCase):
-    def run_gate(self, scope="rootful,apparmor,rootless", uid="1000", rootless=0, apparmor=0):
+    def run_gate(self, scope="rootful,apparmor,rootless", uid="1000", rootless=0, apparmor=0, rootless_user="fixture"):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "scripts").mkdir()
@@ -17,11 +17,17 @@ class ReadinessScopeTests(unittest.TestCase):
             for name in ["verify-host-matrix-evidence", "test-cri-rootful-recovery", "verify-mac-policy", "test-apparmor-enforcement", "compat-evidence", "test-check-linux-binary-compat", "verify-rootless"]:
                 code = rootless if name == "verify-rootless" else 0
                 (root / "scripts" / f"{name}.sh").write_text(f"#!/bin/bash\nexit {code}\n")
-            for name, body in {"cargo": "exit 0", "id": f"echo {uid}", "aa-status": f"exit {apparmor}"}.items():
+            for name, body in {"cargo": "exit 0", "id": f'if [[ "$#" -gt 1 ]]; then echo 1000; else echo {uid}; fi',
+                               "aa-status": f"exit {apparmor}",
+                               "getent": f"echo fixture:x:1000:1000:fixture:{temp}:/bin/bash",
+                               "runuser": '[[ "$1" == -u && "$2" == fixture && "$3" == -- ]] || exit 92; shift 3; exec "$@"'}.items():
                 p = root / "bin" / name
                 p.write_text(f"#!/bin/bash\n{body}\n")
                 p.chmod(0o755)
             env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}", FERROCRATE_REPO_ROOT=temp, FERROCRATE_READINESS_REQUIRED=scope)
+            env.pop("FERROCRATE_ROOTLESS_TEST_USER", None)
+            if rootless_user is not None:
+                env["FERROCRATE_ROOTLESS_TEST_USER"] = rootless_user
             return subprocess.run(["bash", str(SCRIPT)], env=env, text=True, capture_output=True)
 
     def test_required_rootful_cannot_skip(self):
@@ -45,6 +51,14 @@ class ReadinessScopeTests(unittest.TestCase):
 
     def test_misspelled_scope_fails_closed(self):
         self.assertNotEqual(self.run_gate(scope="rootles").returncode, 0)
+
+    def test_root_cannot_stand_in_for_rootless_user(self):
+        result = self.run_gate(uid="0", rootless_user=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FERROCRATE_ROOTLESS_TEST_USER", result.stderr)
+
+    def test_rootless_account_failure_is_not_ignored_by_root_gate(self):
+        self.assertNotEqual(self.run_gate(uid="0", rootless=1).returncode, 0)
 
 
 if __name__ == "__main__":

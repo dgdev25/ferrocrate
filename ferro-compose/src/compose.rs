@@ -64,6 +64,21 @@ impl ComposeProject {
         })
     }
 
+    /// Resolve profiles using Compose precedence: explicit flags, process
+    /// environment (including an explicitly empty value), then project .env.
+    pub fn active_profiles(&self, explicit: &[String]) -> ComposeResult<Vec<String>> {
+        let environment = std::env::var("COMPOSE_PROFILES").ok();
+        if !explicit.is_empty() || environment.is_some() {
+            return Ok(select_profiles(explicit, environment.as_deref(), None));
+        }
+        let dotenv = load_env_file(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
+        Ok(select_profiles(
+            explicit,
+            None,
+            dotenv.get("COMPOSE_PROFILES").map(String::as_str),
+        ))
+    }
+
     /// Validates service dependencies and builds a dependency graph.
     ///
     /// # Errors
@@ -162,6 +177,26 @@ pub fn compose_logs(project: &ComposeProject) -> ComposeResult<Vec<String>> {
     Ok(project.services())
 }
 
+// Matches compose-go cli.WithDefaultProfiles: CLI profiles replace the
+// environment defaults, whose comma-separated entries are whitespace-trimmed.
+fn select_profiles(
+    explicit: &[String],
+    environment: Option<&str>,
+    dotenv: Option<&str>,
+) -> Vec<String> {
+    if !explicit.is_empty() {
+        return explicit.to_vec();
+    }
+    let mut profiles = Vec::new();
+    for profile in environment.or(dotenv).unwrap_or_default().split(',') {
+        let profile = profile.trim();
+        if !profile.is_empty() && !profiles.iter().any(|existing| existing == profile) {
+            profiles.push(profile.to_string());
+        }
+    }
+    profiles
+}
+
 /// Loads environment variables from a .env file in the given directory.
 fn load_env_file(dir: &Path) -> ComposeResult<HashMap<String, String>> {
     let mut env = HashMap::new();
@@ -177,7 +212,12 @@ fn load_env_file(dir: &Path) -> ComposeResult<HashMap<String, String>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let (key, raw_value) = trimmed
+        let assignment = trimmed
+            .strip_prefix("export ")
+            .or_else(|| trimmed.strip_prefix("export\t"))
+            .unwrap_or(trimmed)
+            .trim_start();
+        let (key, raw_value) = assignment
             .split_once('=')
             .ok_or_else(|| ComposeError::Parse(format!("invalid .env entry: {trimmed}")))?;
         let mut value = raw_value.trim().to_string();
@@ -307,6 +347,57 @@ services:
     #[test]
     fn compose_command_enum() {
         assert_eq!(ComposeCommand::Up, ComposeCommand::Up);
+    }
+
+    #[test]
+    fn compose_profiles_reads_exported_dotenv_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".env"),
+            "export COMPOSE_PROFILES=postgres,redis,assets,web,worker\n",
+        ).unwrap();
+        let env = super::load_env_file(dir.path()).unwrap();
+        assert_eq!(
+            env.get("COMPOSE_PROFILES").map(String::as_str),
+            Some("postgres,redis,assets,web,worker"),
+        );
+        assert!(!env.contains_key("export COMPOSE_PROFILES"));
+    }
+
+    #[test]
+    fn compose_profiles_use_cli_then_environment_then_dotenv() {
+        let explicit = vec!["debug".to_string(), "tools".to_string()];
+        assert_eq!(
+            super::select_profiles(&explicit, Some("web"), Some("database")),
+            explicit,
+        );
+        assert_eq!(
+            super::select_profiles(&[], Some("web, worker,web,, "), Some("database")),
+            vec!["web", "worker"],
+        );
+        assert!(super::select_profiles(&[], Some(""), Some("database")).is_empty());
+        assert_eq!(
+            super::select_profiles(&[], None, Some("postgres, redis, web")),
+            vec!["postgres", "redis", "web"],
+        );
+        assert!(super::select_profiles(&[], None, None).is_empty());
+        assert_eq!(super::select_profiles(&[], Some("*"), None), vec!["*"]);
+    }
+
+    #[test]
+    fn compose_profiles_preserve_quoted_export_values_and_ordinary_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".env"),
+            "export\tCOMPOSE_PROFILES='web, worker'\nexported=value\nIMAGE=nginx:latest\n",
+        ).unwrap();
+        let env = super::load_env_file(dir.path()).unwrap();
+        assert_eq!(
+            super::select_profiles(&[], None, env.get("COMPOSE_PROFILES").map(String::as_str)),
+            vec!["web", "worker"],
+        );
+        assert_eq!(env.get("exported").map(String::as_str), Some("value"));
+        assert_eq!(env.get("IMAGE").map(String::as_str), Some("nginx:latest"));
     }
 
     #[test]

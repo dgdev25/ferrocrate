@@ -290,3 +290,9 @@ test("friendly licensing dialog avoids account jargon and invokes technical sett
   findButton(resourcePages.LicensingDialog(props), "Open technical settings").props.onClick();
   assert.equal(settings, 1);
 });
+
+test("initial bridge failure has an actionable unavailable state instead of loading forever", () => {
+  assert.equal(resourcePages.runtimeSurfaceState(null, "containers", "Connection refused"), "unavailable");
+  assert.equal(resourcePages.runtimeSurfaceState(null, "containers"), "loading");
+  assert.equal(resourcePages.runtimeSurfaceState(null, "doctor", "Connection refused"), "resource");
+});

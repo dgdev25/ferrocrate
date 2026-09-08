@@ -12985,9 +12985,16 @@ fn start_rootless_network_lease_owner() -> Result<(Child, u32, u64), RuntimeErro
             "rootless network leases require a trusted root-owned sleep executable".into(),
         )
     })?;
+    let shell = crate::rootless::trusted_executable_path("sh").ok_or_else(|| {
+        RuntimeError::InvalidCommand(
+            "rootless network leases require a trusted root-owned shell executable".into(),
+        )
+    })?;
     let mut command = Command::new(unshare);
     command
-        .args(["--user", "--map-root-user", "--net", "--"])
+        .args(["--user", "--net", "--"])
+        .arg(shell)
+        .args(["-c", "kill -STOP $$; exec \"$@\"", "ferrocrate-lease-owner"])
         .arg(sleep)
         .arg("infinity")
         .stdin(Stdio::null())
@@ -13035,6 +13042,31 @@ fn start_rootless_network_lease_owner() -> Result<(Child, u32, u64), RuntimeErro
     ))
 }
 
+/// Retire only this newly spawned owner and reservation when mapping admission,
+/// mapping execution, or its witness completion fails.
+#[cfg(target_os = "linux")]
+fn finish_rootless_lease_user_setup(
+    result: Result<(), String>,
+    child: &mut Child,
+    runtime_dir: &Path,
+    registry: &mut RootlessNetworkLeaseRegistry,
+    id: &str,
+    generation: &str,
+) -> Result<(), RuntimeError> {
+    if let Err(error) = result {
+        let _ = child.kill();
+        let _ = child.wait();
+        registry
+            .leases
+            .retain(|candidate| candidate.id != id || candidate.generation != generation);
+        save_rootless_network_lease_registry(runtime_dir, registry).map_err(|cleanup| {
+            RuntimeError::InvalidState(format!("{error}; remove lease reservation: {cleanup}"))
+        })?;
+        return Err(RuntimeError::InvalidState(error));
+    }
+    Ok(())
+}
+
 /// Acquire a project-owned rootless namespace/slirp lease.  The registry lock
 /// spans reservation, process creation, and stable publication, so a runtime
 /// opener/reaper cannot observe the slirp helper as unowned in between.
@@ -13042,6 +13074,8 @@ fn start_rootless_network_lease_owner() -> Result<(Child, u32, u64), RuntimeErro
 pub fn acquire_rootless_network_lease(
     runtime_dir: &Path,
     key: &str,
+    authorization: &crate::authorization::surface::SurfaceAuthorization,
+    origin: &RequestOrigin,
 ) -> Result<RootlessNetworkLeaseAcquisition, RuntimeError> {
     if nix::unistd::Uid::effective().is_root() {
         return Err(RuntimeError::InvalidState(
@@ -13094,6 +13128,46 @@ pub fn acquire_rootless_network_lease(
             return Err(error);
         }
     };
+
+    let user_setup_result = (|| {
+        wait_until_launch_stopped(owner_pid)
+            .map_err(|err| format!("wait for lease owner stop: {err}"))?;
+        let config = crate::rootless::RootlessConfig::from_system()
+            .map_err(|err| format!("resolve rootless config: {err}"))?;
+        // The UUID generation is part of the canonical name; process start time
+        // binds the execution generation to this exact namespace owner.
+        let canonical_name = format!("lease/{key}/{id}/{generation}");
+        let permit = authorization
+            .authorize_named(
+                origin,
+                Action::RootlessMapping,
+                ResourceKind::RootlessMapping,
+                &canonical_name,
+                owner_start_time,
+            )
+            .map_err(|err| format!("authorize lease owner mapping: {err}"))?;
+        crate::rootless::apply_user_namespace_mappings_authorized(
+            Path::new("/proc"),
+            owner_pid,
+            &config,
+            &canonical_name,
+            owner_start_time,
+            permit,
+        )
+        .map_err(|err| format!("apply user namespace mappings to lease owner: {err}"))?;
+        crate::process_lifecycle::signal_pid(owner_pid, nix::sys::signal::Signal::SIGCONT)
+            .map_err(|err| format!("resume lease owner: {err}"))?;
+        Ok::<(), String>(())
+    })();
+
+    finish_rootless_lease_user_setup(
+        user_setup_result,
+        &mut child,
+        runtime_dir,
+        &mut registry,
+        &id,
+        &generation,
+    )?;
     entry.owner_pid = Some(owner_pid);
     entry.owner_start_time = Some(owner_start_time);
     if let Some(current) = registry
@@ -18477,6 +18551,55 @@ mod tests {
             !status.success(),
             "orphaned bwrap launcher must be terminated"
         );
+    }
+
+    #[test]
+    fn rootless_lease_mapping_failure_reaps_owner_and_removes_only_its_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut registry = super::RootlessNetworkLeaseRegistry {
+            schema_version: super::rootless_network_lease_registry_version(),
+            leases: Vec::new(),
+        };
+        let entry = super::RootlessNetworkLeaseEntry {
+            key: "compose-fixture".into(),
+            id: uuid::Uuid::new_v4().to_string(),
+            generation: uuid::Uuid::new_v4().to_string(),
+            state: super::RootlessNetworkLeaseState::Reserved,
+            owner_pid: None,
+            owner_start_time: None,
+            slirp_pid: None,
+            slirp_start_time: None,
+            forwards: Vec::new(),
+        };
+        let mut successor = entry.clone();
+        successor.generation = uuid::Uuid::new_v4().to_string();
+        registry.leases = vec![entry.clone(), successor.clone()];
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let result = super::finish_rootless_lease_user_setup(
+            Err("mapping denied or failed".into()),
+            &mut child,
+            root.path(),
+            &mut registry,
+            &entry.id,
+            &entry.generation,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("mapping denied or failed"));
+        let reaped = child.try_wait().unwrap().is_some();
+        if !reaped {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(reaped, "owner was reaped");
+        assert_eq!(registry.leases.len(), 1);
+        assert_eq!(registry.leases[0].generation, successor.generation);
+        let persisted = super::load_rootless_network_lease_registry(root.path()).unwrap();
+        assert_eq!(persisted.leases[0].generation, successor.generation);
     }
 
     #[test]

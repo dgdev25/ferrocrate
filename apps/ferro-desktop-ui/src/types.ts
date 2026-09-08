@@ -232,3 +232,6 @@ export type DoctorSummary = {
   ok: boolean;
   raw: DoctorPayload;
 };
+
+export type PortOwner = { id: string; name: string; image: string };
+export type LaunchPort = { port: number; available: boolean; suggested: number; conflict: PortOwner | null };

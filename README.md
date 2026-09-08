@@ -15,12 +15,13 @@ or the fleet control plane. On Linux a container is a normal process the
 kernel isolates, and that is where the speed comes from. Every capability the
 project claims is backed by a dated test report you can read.
 
-**Status: alpha release.** The Linux engine passes its full gate on the
-qualified hosts below, and Windows and macOS run the same engine inside WSL2
-or a lightweight Linux VM (desktop acceptance passed on 2026-08-26). Expect
-rough edges, API changes between releases, and the open items listed in
-[`docs/remediation/FOLLOW-UPS.md`](docs/remediation/FOLLOW-UPS.md).
-Cross-architecture builds are not supported.
+**Status: alpha release.** Production qualification is in progress on the
+[active readiness roadmap](docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md).
+Historical host and desktop test reports describe their dated scope; they do
+not qualify the current candidate. See the
+[candidate support contract](docs/operations/candidate-support-2026-09-05.md)
+for required host, runtime, installer and UI evidence. All CI and release jobs
+use self-hosted runners only.
 
 <p align="center">
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">

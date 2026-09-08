@@ -11,7 +11,8 @@ usage() {
   cat <<'USAGE'
 Usage: local-release-gate.sh [options]
 
-Runs the reproducible, non-network release gate used when hosted CI is absent.
+Runs the release contract on a qualified self-hosted runner. Dependency scans
+may use the network. Full qualification requires FERROCRATE_CANDIDATE_EVIDENCE.
 
 Options:
   --version <tag>       Semver release tag (default: FERROCRATE_RELEASE_VERSION or v0.1.0)
@@ -34,6 +35,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$repo_root"
+candidate_head="$(git rev-parse HEAD)"
+if [[ -n "${GITHUB_SHA:-}" && "$candidate_head" != "$GITHUB_SHA" ]]; then
+  echo "local release gate: checkout differs from GITHUB_SHA" >&2
+  exit 1
+fi
+
+echo "[gate] release, evidence, and harness regression contracts"
+python3 scripts/check-release-workflows.py
+python3 scripts/test_release_workflow_contracts.py
+python3 scripts/test_local_release_gate.py
+python3 scripts/test_candidate_evidence.py
+python3 scripts/test_readiness_scope.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bench -p 'test_suite_*.py'
+node --test scripts/release-artifacts.test.mjs
+bash scripts/test-qualification-fault-matrix.sh
+python3 scripts/check-advisory-exceptions.py
+
+if (( ! skip_workspace && ! skip_format )); then
+  : "${FERROCRATE_CANDIDATE_EVIDENCE:?full release gate requires a candidate evidence manifest; see docs/operations/candidate-evidence.md}"
+  python3 scripts/check-candidate-evidence.py --manifest "$FERROCRATE_CANDIDATE_EVIDENCE" \
+    --candidate "$candidate_head" --repo "$repo_root"
+fi
 # sudo commonly replaces PATH with a system-only value. Resolve the invoking
 # operator's pinned Rust toolchain before the first Cargo step so privileged
 # qualification fails with a useful prerequisite message instead of a shell
@@ -63,6 +86,15 @@ else
   fi
 fi
 export FERROCRATE_CARGO="$cargo_bin"
+export PATH="$(dirname "$cargo_bin"):$PATH"
+echo "[gate] current Rust and frontend dependency policy"
+"$cargo_bin" audit --deny warnings
+npm audit --prefix apps/ferro-desktop-ui --audit-level=low
+echo "[gate] frontend tests, types, lint and production build"
+npm run --prefix apps/ferro-desktop-ui test
+npm run --prefix apps/ferro-desktop-ui typecheck
+npm run --prefix apps/ferro-desktop-ui lint
+npm run --prefix apps/ferro-desktop-ui build
 release_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 release_target_owned=0
 if [[ -z "${CARGO_TARGET_DIR:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -85,7 +117,7 @@ if [[ "$release_target" != /* ]]; then
 fi
 if (( ! skip_format )); then
   echo "[gate] cargo fmt --check"
-  cargo fmt --all -- --check
+  "$cargo_bin" fmt --all -- --check
 else
   echo "[gate] cargo fmt --check (SKIPPED by request)"
 fi
@@ -129,7 +161,7 @@ if command -v docker >/dev/null 2>&1; then
   if [[ ! -x "$release_target/release/ferro-cli" ||
         "$release_target/release/ferro-cli" -ot "$repo_root/ferro-cli/src/main.rs" ]]; then
     echo "[gate] building Docker-compatible release CLI"
-    cargo build -p ferro-cli --release
+    "$cargo_bin" build -p ferro-cli --release --locked
   fi
   FERROCRATE_DOCKER_CLI_REQUIRED=1 \
     FERROCRATE_DOCKER_CLI_REBUILD_STALE=1 \
@@ -165,11 +197,11 @@ bash scripts/test-shell-out-audit.sh
 
 if (( ! skip_workspace )); then
   echo "[gate] serialized all-features workspace tests"
-  cargo test --workspace --all-features --offline -- --test-threads=1
+  "$cargo_bin" test --workspace --all-features --locked --offline -- --test-threads=1
 fi
 
 echo "[gate] release-readiness and compatibility checks"
-cargo test -p ferro-core --offline registry::tests -- --test-threads=1
+"$cargo_bin" test -p ferro-core --locked --offline registry::tests -- --test-threads=1
 bash scripts/verify-release-readiness.sh
 
 echo "[gate] public release build and channel verification"
@@ -183,4 +215,10 @@ bash scripts/test-build-release-target-dir.sh
 bash scripts/verify-release-channel-artifacts.sh \
   --channel public --version "$version" --artifact-dir "$artifact_dir"
 
-echo "local release gate passed (version=$version)"
+if (( skip_workspace || skip_format )); then
+  echo "local release checks partial (version=$version); requested skips prohibit release qualification"
+else
+  python3 scripts/check-candidate-evidence.py --manifest "$FERROCRATE_CANDIDATE_EVIDENCE" \
+    --candidate "$candidate_head" --repo "$repo_root"
+  echo "local release gate passed (version=$version, candidate=$candidate_head)"
+fi

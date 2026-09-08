@@ -658,9 +658,99 @@ fn value_string(value: &Value) -> Result<&str, String> {
         .ok_or_else(|| "invalid command action".to_string())
 }
 
+fn published_tcp_ports(records: &Value) -> Result<Vec<u16>, String> {
+    Ok(records
+        .as_array()
+        .ok_or("invalid container list for port preflight")?
+        .iter()
+        .filter(|record| {
+            record
+                .get("State")
+                .or_else(|| record.get("status"))
+                .and_then(Value::as_str)
+                == Some("running")
+        })
+        .flat_map(|record| {
+            record
+                .get("Ports")
+                .or_else(|| record.get("ports"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|mapping| mapping.get("Type").or_else(|| mapping.get("protocol")).and_then(Value::as_str).unwrap_or("tcp") == "tcp")
+        .filter_map(|mapping| {
+            mapping
+                .get("PublicPort")
+                .or_else(|| mapping.get("host_port"))
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+        })
+        .collect())
+}
+
 impl CommandDispatcher for ProcessDispatcher {
     fn dispatch(&self, request: CommandRequest, events: EventHub) -> Result<Value, String> {
         match request {
+            CommandRequest::PreflightContainerPorts(args) => {
+                let records = run_json(&["ps", "--all", "--format", "json"])?;
+                let excluded = published_tcp_ports(&records)?;
+                let probes = ferro_desktop::ports::probe_ports(&args.ports, &excluded)?;
+                let mut results = Vec::new();
+                for probe in probes {
+                    let owners = ferro_desktop::launch::published_owners(&records, probe.port)?;
+                    let conflict = if owners.len() == 1 {
+                        owners.into_iter().next()
+                    } else {
+                        None
+                    };
+                    results.push(json!({ "port": probe.port, "available": probe.available && conflict.is_none(), "suggested": probe.suggested, "conflict": conflict }));
+                }
+                Ok(json!(results))
+            }
+            CommandRequest::ReplacePortConflict(args) => {
+                let expected: ferro_desktop::launch::PortOwner =
+                    serde_json::from_value(args.expected).map_err(|error| error.to_string())?;
+                let records = run_json(&["ps", "--all", "--format", "json"])?;
+                let owners = ferro_desktop::launch::published_owners(&records, args.port)?;
+                let actual = if owners.len() == 1 {
+                    owners.first()
+                } else {
+                    None
+                };
+                ferro_desktop::launch::verify_replacement(&expected, actual, &args.confirmation)?;
+                let stopped = self.dispatch(
+                    CommandRequest::RunDesktopAction(ferro_web::DesktopActionArgs {
+                        action: json!("stop_container"),
+                        target: Some(expected.id.clone()),
+                    }),
+                    events.clone(),
+                )?;
+                if stopped["ok"] != true {
+                    return Ok(stopped);
+                }
+                let detail = run_json(&["inspect", &expected.id, "--format", "json"])?;
+                let detail = container_detail(&detail);
+                if detail["id"] != expected.id
+                    || detail["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim_start_matches('/')
+                        != expected.name
+                    || detail["image"] != expected.image
+                {
+                    return Err(
+                        "Container identity changed after stopping; removal cancelled.".into(),
+                    );
+                }
+                self.dispatch(
+                    CommandRequest::RunDesktopAction(ferro_web::DesktopActionArgs {
+                        action: json!("remove_container"),
+                        target: Some(expected.id),
+                    }),
+                    events,
+                )
+            }
             CommandRequest::GetDesktopSnapshot => self.snapshot(),
             CommandRequest::GetContainerStats(args) => {
                 let started = Instant::now();
@@ -1046,7 +1136,10 @@ mod tests {
 
     #[tokio::test]
     async fn built_dashboard_assets_are_served() {
-        assert!(unavailable_message().is_none(), "test requires built dashboard assets");
+        assert!(
+            unavailable_message().is_none(),
+            "test requires built dashboard assets"
+        );
         let server = Server::spawn_loopback(
             "127.0.0.1:0".parse().unwrap(),
             "test-token".to_string(),
@@ -1060,7 +1153,11 @@ mod tests {
             .expect("request dashboard");
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert!(response.text().await.expect("dashboard body").contains("<html"));
+        assert!(response
+            .text()
+            .await
+            .expect("dashboard body")
+            .contains("<html"));
         server.shutdown().await;
     }
 

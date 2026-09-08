@@ -13,7 +13,7 @@ test("desktop tabs follow the binding order with counts and right-aligned system
     doctorIssues: 2,
     onSelect: () => {},
   }));
-  const labels = ["Containers", "Images", "Builds", "Compose", "Volumes", "Networks", "Fleet"];
+  const labels = ["Workspaces", "Images", "Build activity", "Resources", "Compose", "Volumes", "Networks", "Fleet"];
   let previous = -1;
   for (const label of labels) {
     const position = markup.indexOf(label);
@@ -23,11 +23,12 @@ test("desktop tabs follow the binding order with counts and right-aligned system
   assert.match(markup, /class="desktop-tabs"/);
   assert.match(markup, /class="tab-spacer"/);
   assert.match(markup, /aria-label="Settings"/);
-  assert.doesNotMatch(markup, /<span>Settings<\/span>/);
-  assert.match(markup, /<span class="visually-hidden">Settings<\/span>/);
+  assert.match(markup, /<span>Settings<\/span>/);
+  assert.match(markup, /folded-forge-mark.png/);
   assert.match(markup, /aria-current="page"/);
+  assert.match(markup, /<details class="sidebar-resources"><summary/);
   assert.equal((markup.match(/class="tab-count"/g) || []).length, 7);
-  assert.doesNotMatch(markup, /sidebar|☀|☾|⚙|▶|🩺/u);
+  assert.doesNotMatch(markup, /☀|☾|⚙|▶|🩺/u);
 });
 
 test("desktop tabs report every selection through one navigation callback", () => {
@@ -38,9 +39,11 @@ test("desktop tabs report every selection through one navigation callback", () =
     doctorIssues: 0,
     onSelect: (section) => selected.push(section),
   });
-  for (const child of bar.props.children.flat(Infinity)) {
-    if (child?.type === "button") child.props.onClick();
+  function visit(node) {
+    if (node?.type === "button") node.props.onClick();
+    for (const child of [node?.props?.children].flat(Infinity)) if (child && typeof child === "object") visit(child);
   }
+  visit(bar);
   assert.deepEqual(selected, ["containers", "images", "builds", "compose", "volumes", "networks", "fleet", "doctor", "settings"]);
 });
 

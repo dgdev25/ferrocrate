@@ -44,3 +44,6 @@ prd2build.config.json
 *.db-wal
 .superpowers/
 bench/fuzz/__pycache__/
+
+# Local launcher state and session-bearing bridge logs
+/logs/

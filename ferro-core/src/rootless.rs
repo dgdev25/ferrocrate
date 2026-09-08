@@ -511,14 +511,16 @@ pub fn apply_user_namespace_mappings_authorized(
     generation: u64,
     permit: SurfacePermit,
 ) -> Result<(), RootlessError> {
-    SurfaceAuthorization::validate_execution(
+    let result = SurfaceAuthorization::validate_execution(
         &permit,
         Action::RootlessMapping,
         ResourceKind::RootlessMapping,
         canonical_name,
         generation,
-    )?;
-    let result = apply_user_namespace_mappings(proc_root, pid, config);
+    )
+    .map_err(RootlessError::from)
+    .and_then(|()| apply_user_namespace_mappings(proc_root, pid, config));
+    // A binding rejection is a known failed execution, not an abandoned intent.
     permit.finish(result.is_ok())?;
     result
 }
@@ -940,6 +942,157 @@ mod tests {
             "/sys/fs/cgroup/user.slice/cgroup.subtree_control",
         ));
         assert!(message.contains("probed /sys/fs/cgroup/user.slice/cgroup.subtree_control"));
+    }
+
+    #[test]
+    fn rootless_lease_mapping_authorization_witnesses_every_result() {
+        use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
+        use crate::witness::{
+            decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessOutcome,
+        };
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.path().join("journal"),
+                [71; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let authorization = super::SurfaceAuthorization::local_administrative(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::compatibility_disabled(),
+            ))),
+            journal.clone(),
+            [72; 16],
+        );
+        let origin = RequestOrigin::cli_current().unwrap();
+        let config = RootlessConfig {
+            username: "fixture".into(),
+            uid_mapping: vec![RootlessMapping {
+                container_id: 0,
+                host_id: 1000,
+                size: 1,
+            }],
+            gid_mapping: vec![RootlessMapping {
+                container_id: 0,
+                host_id: 1000,
+                size: 1,
+            }],
+        };
+        let canonical = "lease/compose-fixture/uuid/generation";
+        for case in ["allow", "action", "resource", "generation", "write-failure"] {
+            let proc_root = root.path().join(case);
+            fs::create_dir_all(proc_root.join("4242")).unwrap();
+            fs::write(proc_root.join("4242/setgroups"), "").unwrap();
+            if case == "write-failure" {
+                fs::create_dir(proc_root.join("4242/uid_map")).unwrap();
+            }
+            let permit = authorization
+                .authorize_named(
+                    &origin,
+                    if case == "action" {
+                        super::Action::NetworkCreate
+                    } else {
+                        super::Action::RootlessMapping
+                    },
+                    if case == "action" {
+                        super::ResourceKind::Network
+                    } else {
+                        super::ResourceKind::RootlessMapping
+                    },
+                    if case == "resource" {
+                        "other-lease"
+                    } else {
+                        canonical
+                    },
+                    if case == "generation" { 8 } else { 7 },
+                )
+                .unwrap();
+            let result = super::apply_user_namespace_mappings_authorized(
+                &proc_root, 4242, &config, canonical, 7, permit,
+            );
+            assert_eq!(result.is_ok(), case == "allow", "{case}: {result:?}");
+            if matches!(case, "action" | "resource" | "generation") {
+                assert!(!proc_root.join("4242/uid_map").exists(), "{case}");
+                assert_eq!(
+                    fs::read_to_string(proc_root.join("4242/setgroups")).unwrap(),
+                    ""
+                );
+            }
+            assert!(
+                journal.pending().unwrap().is_empty(),
+                "{case} must complete its witness"
+            );
+            let records = journal.records().unwrap();
+            let terminal = decode_record(records.last().unwrap()).unwrap();
+            assert_eq!(
+                terminal.outcome(),
+                if case == "allow" {
+                    WitnessOutcome::Succeeded
+                } else {
+                    WitnessOutcome::Failed
+                },
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn rootless_lease_mapping_denial_has_no_mapping_or_pending_intent() {
+        use crate::authorization::{gate::AuthorizationGate, policy::PolicyStore, RequestOrigin};
+        use crate::witness::{
+            decode_record, JournalConfig, JournalMode, WitnessJournal, WitnessOutcome,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        // Rootless leases categorically reject root callers; this fixture exercises
+        // the same supported unprivileged caller boundary.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let policy = root.path().join("policy.toml");
+        fs::write(
+            &policy,
+            "schema_version = 1\ngeneration = 1\nmode = \"enforce\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&policy, fs::Permissions::from_mode(0o600)).unwrap();
+        let journal = Arc::new(
+            WitnessJournal::open(JournalConfig::new(
+                root.path().join("journal"),
+                [73; 16],
+                JournalMode::Required,
+            ))
+            .unwrap(),
+        );
+        let authorization = super::SurfaceAuthorization::local_administrative(
+            Arc::new(AuthorizationGate::new(Arc::new(
+                PolicyStore::load(&policy).unwrap(),
+            ))),
+            journal.clone(),
+            [74; 16],
+        );
+        let result = authorization.authorize_named(
+            &RequestOrigin::cli_current().unwrap(),
+            super::Action::RootlessMapping,
+            super::ResourceKind::RootlessMapping,
+            "lease/compose-fixture/uuid/generation",
+            7,
+        );
+        assert!(matches!(
+            result,
+            Err(super::SurfaceAuthorizationError::Denied(_))
+        ));
+        assert!(journal.pending().unwrap().is_empty());
+        let records = journal.records().unwrap();
+        assert_eq!(
+            decode_record(records.last().unwrap()).unwrap().outcome(),
+            WitnessOutcome::Denied
+        );
+        assert!(!root.path().join("4242").exists());
     }
 
     #[test]

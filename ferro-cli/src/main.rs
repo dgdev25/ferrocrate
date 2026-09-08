@@ -16047,10 +16047,14 @@ fn ensure_rootless_compose_network_lease(
     project: &ComposeProject,
     runtime_dir: &Path,
     network: &str,
+    authorization: &SurfaceAuthorization,
+    origin: &RequestOrigin,
 ) -> Result<ferro_core::runtime::RootlessNetworkLeaseAcquisition, String> {
     let acquisition = ferro_core::runtime::acquire_rootless_network_lease(
         runtime_dir,
         &rootless_compose_network_lease_key(project, network),
+        authorization,
+        origin,
     )
     .map_err(|error| error.to_string())?;
     let project_key = compose_project_key(project);
@@ -16377,8 +16381,13 @@ fn handle_compose(
                 if rootless_network_leases.contains_key(&logical) {
                     continue;
                 }
-                let acquisition =
-                    ensure_rootless_compose_network_lease(&project, &runtime_dir(), &logical)?;
+                let acquisition = ensure_rootless_compose_network_lease(
+                    &project,
+                    &runtime_dir(),
+                    &logical,
+                    &surface_authorization,
+                    &parent_origin,
+                )?;
                 if acquisition.created {
                     rootless_lease_cleanup.track(acquisition.lease.clone());
                 }
@@ -17038,12 +17047,15 @@ fn build_compose_enabled_set(
     project: &ComposeProject,
     profiles: &[String],
 ) -> Result<HashSet<String>, String> {
+    let profiles = project.active_profiles(profiles).map_err(|error| error.to_string())?;
     let mut enabled = HashSet::new();
     for (name, service) in &project.compose.services {
         let active = match service.profiles.as_ref() {
             None => true,
             Some(list) if list.is_empty() => true,
-            Some(list) => profiles.iter().any(|profile| list.contains(profile)),
+            Some(list) => profiles
+                .iter()
+                .any(|profile| profile == "*" || list.contains(profile)),
         };
         if active {
             enabled.insert(name.clone());

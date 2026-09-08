@@ -1,9 +1,10 @@
 import { dialogAvailable, invoke, listen, open } from "./desktopRuntime";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CommandResult,
+  LaunchPort,
   BuildProgressFrame,
   ComposeAction,
   ComposeServiceSummary,
@@ -53,7 +54,7 @@ import {
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import { runtimeActionAvailability } from "./runtimeActions.mjs";
-import { submitRunContainer } from "./runContainer.mjs";
+import { submitRunContainer, applyLauncherPreset, requestedHostPorts, recoverPortConflict } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -64,12 +65,10 @@ import { formatVolumeMount, volumeIsInUse } from "./volumeView.mjs";
 import {
   beginContainerStatsPoll,
   daemonStatusPresentation,
-  containerRemoveAvailability,
   containerStatsUnavailableMessage,
   filterContainers,
   filterContainersByStatus,
   formatBytes,
-  groupContainers,
   mergeContainerStats,
   parseContainerStats,
   parseContainerRows,
@@ -77,10 +76,10 @@ import {
   shellKeyboardCommand,
   shouldPollContainerStats,
   tabKeyboardTarget,
-  statusLabel,
   statusTone,
 } from "./forgeShell.mjs";
 import type { ContainerStatusFilter } from "./forgeShell.mjs";
+import { WorkspaceCard, workspaceGroups } from "./workspaceCards.mjs";
 import { FleetApp } from "./FleetApp";
 
 const EMPTY = "Nothing to show.";
@@ -115,6 +114,7 @@ function LocalApp(): JSX.Element {
   const [documentVisible, setDocumentVisible] = useState(document.visibilityState === "visible");
   const [authState, setAuthState] = useState<PaidAuthState | null>(null);
   const [loading, setLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [sectionErrors, setSectionErrors] = useState<Partial<Record<AppSection, string>>>({});
   const [licensingDialogOpen, setLicensingDialogOpen] = useState(false);
@@ -122,6 +122,10 @@ function LocalApp(): JSX.Element {
   const [theme, setTheme] = useState<ThemeMode>("dark");
   const [activeSection, setActiveSection] = useState<AppSection>("containers");
   const [containerStatusFilter, setContainerStatusFilter] = useState<ContainerStatusFilter>("all");
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorWidth, setInspectorWidth] = useState(480);
+  const inspectorTriggerRef = useRef<HTMLElement | null>(null);
+  const inspectorCloseRef = useRef<HTMLButtonElement | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("logs");
   const [globalSearch, setGlobalSearch] = useState("");
   const [imageTarget, setImageTarget] = useState("alpine:latest");
@@ -176,6 +180,9 @@ function LocalApp(): JSX.Element {
   const [detailCpuPeriod, setDetailCpuPeriod] = useState("");
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [runDialogError, setRunDialogError] = useState<string | null>(null);
+  const [runConflict, setRunConflict] = useState<{ payload: RunContainerInvokeArgs; probe: LaunchPort } | null>(null);
+  const [replacementConfirmation, setReplacementConfirmation] = useState("");
+  const launcherGenerationRef = useRef(0);
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
   const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
   const resourceDialogGenerationRef = useRef(0);
@@ -363,6 +370,9 @@ function LocalApp(): JSX.Element {
   }
 
   function dismissDialogs(): void {
+    launcherGenerationRef.current += 1;
+    setRunConflict(null);
+    setReplacementConfirmation("");
     setRunDialogOpen(false);
     setRunDialogError(null);
     setPullImageDialogOpen(false);
@@ -393,6 +403,7 @@ function LocalApp(): JSX.Element {
         event.preventDefault();
         globalSearchRef.current?.focus();
       } else if (command === "close-dialog") {
+        if (!document.querySelector('[role="dialog"]')) closeInspector();
         dismissDialogs();
       }
     };
@@ -402,11 +413,13 @@ function LocalApp(): JSX.Element {
 
   async function refresh(): Promise<void> {
     setLoading(true);
+    setSnapshotError(null);
     setError(null);
     try {
       const next = await invoke<DesktopSnapshot>("get_desktop_snapshot");
       setSnapshot(next);
     } catch (err) {
+      setSnapshotError(String(err));
       setError(String(err));
     } finally {
       setLoading(false);
@@ -850,9 +863,28 @@ function LocalApp(): JSX.Element {
     }
   }
 
+  function closeInspector(): void {
+    setInspectorOpen(false);
+    inspectorTriggerRef.current?.focus();
+  }
+
+  async function openServiceInspector(target: string, tab: DetailTab): Promise<void> {
+    if (terminalActiveRef.current && target !== containerTarget) {
+      await closeTerminal();
+      if (terminalActiveRef.current) return;
+    }
+    inspectorTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setInspectorOpen(true);
+    setDetailTab(tab);
+    await inspectContainer(target);
+    if (tab === "logs") await startLogFollow(target);
+    requestAnimationFrame(() => inspectorCloseRef.current?.focus());
+  }
+
   async function inspectContainer(target = containerTarget): Promise<void> {
     const selectedTarget = target.trim();
     if (!selectedTarget || !beginRuntimeAction()) return;
+    setInspectorOpen(true);
     setContainerTarget(selectedTarget);
     setContainerDetail(null);
     setInspectorError(null);
@@ -904,7 +936,62 @@ function LocalApp(): JSX.Element {
     }
   }
 
+  async function chooseLauncherPreset(id: string): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    const generation = ++launcherGenerationRef.current;
+    setRunDialogError(null);
+    try {
+      const draft = await applyLauncherPreset(id, (command, args) => invoke<LaunchPort[]>(command, args));
+      if (generation === launcherGenerationRef.current) setNewContainerDraft(draft);
+    } catch (error) {
+      if (generation === launcherGenerationRef.current) setRunDialogError(String(error));
+    } finally { finishRuntimeAction(); }
+  }
+
+  async function resolveLaunchConflict(replace: boolean): Promise<void> {
+    if (!runConflict || !beginRuntimeAction()) return;
+    const { payload, probe } = runConflict;
+    const generation = launcherGenerationRef.current;
+    let next = payload;
+    setRunDialogError(null);
+    try {
+      if (replace) {
+        if (!probe.conflict || replacementConfirmation !== probe.conflict.name) throw new Error("Confirm the container name before replacement");
+        const result = await invoke<CommandResult>("replace_port_conflict", { port: probe.port, expected: probe.conflict, confirmation: replacementConfirmation });
+        if (!result.ok) throw new Error(commandMessage(result, "Container replacement failed"));
+      } else {
+        next = { ...payload, ports: payload.ports.map(mapping => Number(mapping.split(":")[0]) === probe.port ? `${probe.suggested}:${mapping.split(":")[1]}` : mapping) };
+        setNewContainerDraft(current => ({ ...current, ports: current.ports.map(mapping => Number(mapping.host) === probe.port ? { ...mapping, host: String(probe.suggested) } : mapping) }));
+      }
+      if (generation !== launcherGenerationRef.current) return;
+      setRunConflict(null);
+      setReplacementConfirmation("");
+    } catch (error) {
+      setRunDialogError(String(error));
+      return;
+    } finally { finishRuntimeAction(); }
+    await runNewContainer(next);
+  }
+
   async function runNewContainer(payload: RunContainerInvokeArgs): Promise<void> {
+    if (!beginRuntimeAction()) return;
+    const generation = ++launcherGenerationRef.current;
+    setRunDialogError(null);
+    try {
+      const ports = requestedHostPorts(payload);
+      const probes = ports.length ? await invoke<LaunchPort[]>("preflight_container_ports", { ports }) : [];
+      if (generation !== launcherGenerationRef.current) return;
+      if (probes.length !== ports.length || probes.some((probe, index) => probe.port !== ports[index])) throw new Error("Runtime host returned an incomplete port check");
+      const conflict = probes.find(probe => !probe.available);
+      if (conflict) {
+        setReplacementConfirmation("");
+        setRunConflict({ payload, probe: conflict });
+        return;
+      }
+    } catch (error) {
+      setRunDialogError(String(error));
+      return;
+    } finally { finishRuntimeAction(); }
     await submitRunContainer<CommandResult>({
       invoke,
       payload,
@@ -915,7 +1002,14 @@ function LocalApp(): JSX.Element {
         setActionLabel("Container Run");
       },
       onResult: setLastAction,
-      onError: setRunDialogError,
+      onError: (message) => {
+        setRunDialogError(message);
+        void recoverPortConflict(message, payload, (command, args) => invoke<LaunchPort[]>(command, args)).then(probe => {
+          if (!probe || generation !== launcherGenerationRef.current) return;
+          setReplacementConfirmation("");
+          setRunConflict({ payload, probe });
+        });
+      },
       onSuccess: async () => {
         setRunDialogOpen(false);
         setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
@@ -1236,7 +1330,7 @@ function LocalApp(): JSX.Element {
     filterContainers(containerRows, globalSearch),
     containerStatusFilter,
   ), [containerRows, containerStatusFilter, globalSearch]);
-  const containerGroups = useMemo(() => groupContainers(visibleContainers), [visibleContainers]);
+  const containerGroups = useMemo(() => workspaceGroups(visibleContainers, volumes, networks, containerRows), [visibleContainers, volumes, networks, containerRows]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
   const visibleImages = useMemo(() => filterNamedResources(imageRows, globalSearch, (image) => image.reference), [imageRows, globalSearch]);
   const visibleVolumes = useMemo(() => filterNamedResources(volumes, globalSearch), [volumes, globalSearch]);
@@ -1258,11 +1352,11 @@ function LocalApp(): JSX.Element {
   const networkPage = resourcePageState("networks", networks.length);
   const customNetworksAvailable = customNetworkCreateAvailable(snapshot?.daemon);
   const composePage = resourcePageState("compose", composeSnapshot?.services.length ?? 0, { loaded: composeSnapshot != null });
-  const runtimeSurface = runtimeSurfaceState(snapshot, activeSection);
+  const runtimeSurface = runtimeSurfaceState(snapshot, activeSection, snapshotError);
   const surfaceError = error ?? snapshotFailureDetail(snapshot, activeSection);
   const registryAccountName = registryStatus ? registryStatusText(registryStatus) : "Sign in";
   const sectionTitles: Record<AppSection, string> = {
-    containers: "Containers",
+    containers: "Workspaces",
     images: "Images",
     builds: "Builds",
     volumes: "Volumes",
@@ -1287,7 +1381,6 @@ function LocalApp(): JSX.Element {
   return (
     <div className="forge-shell">
       <header className="titlebar">
-        <div className="traffic" aria-hidden="true"><span /><span /><span /></div>
         <div className="logo">Ferrocrate <em>{productSurfaceLabel()}</em></div>
         <label className="global-search">
           <Icon name="search" size={16} />
@@ -1315,7 +1408,7 @@ function LocalApp(): JSX.Element {
       <DesktopTabBar
         activeSection={activeSection}
         counts={{
-          containers: containerRows.length,
+          containers: containerGroups.length,
           images: imageCount,
           builds: buildHistory.length,
           compose: composeSnapshot?.services.length ?? 0,
@@ -1331,6 +1424,16 @@ function LocalApp(): JSX.Element {
         <main className="main-area">
           {runtimeSurface === "loading" ? (
             <div className="page-content first-run-page"><RuntimeLoadingState /></div>
+          ) : runtimeSurface === "unavailable" ? (
+            <div className="page-content first-run-page">
+              <section className="panel empty-page-panel" role="alert">
+                <h1>Let’s reconnect your workspace.</h1>
+                <p>The desktop connection is unavailable. Your containers and data have not been changed.</p>
+                <button className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>Retry connection</button>
+                <button className="btn btn-ghost" onClick={() => setActiveSection("doctor")}>Open Doctor</button>
+                <details><summary>Connection details</summary><pre>{snapshotError}</pre></details>
+              </section>
+            </div>
           ) : runtimeSurface === "first-run" ? (
             <div className="page-content first-run-page">
               <FirstRunState
@@ -1344,11 +1447,12 @@ function LocalApp(): JSX.Element {
           <>
           <div className="page-header">
             <div>
-              <p className="eyebrow">Local runtime</p>
+              <p className="eyebrow">{activeSection === "containers" ? "Make space for what you're building" : "Local runtime"}</p>
               <div className="title-line">
-                <h1>{sectionTitles[activeSection]}</h1>
+                <h1>{activeSection === "containers" ? "Your work, in one place." : sectionTitles[activeSection]}</h1>
                 {activeSection === "containers" ? <span className="status-chip">{runningContainers} running</span> : null}
               </div>
+              {activeSection === "containers" ? <p className="workspace-subtitle">Every service. Every dependency. Right where it belongs.</p> : null}
             </div>
             {activeSection === "containers" ? (
               <div className="status-filters" role="group" aria-label="Filter containers by status">
@@ -1405,154 +1509,24 @@ function LocalApp(): JSX.Element {
                 </section>
               ) : (
               <>
-                <section className="panel table-panel" aria-label="Containers">
-                  <div className="table-toolbar">
-                    <span className="count-badge">{containerRows.length}</span>
-                    <details className="image-toolbar-overflow">
-                      <summary aria-label="More container actions"><Icon name="more" size={16} /></summary>
-                      <div className="overflow-menu">
-                        <button onClick={() => void refresh()} disabled={loading}>Refresh containers</button>
-                        <button className="danger-action" onClick={() => void runAction("container_prune", "Container Prune")} disabled={runtimeBusy}>Prune stopped containers</button>
-                      </div>
-                    </details>
+                <section className="workspace-card-list" aria-label="Workspaces">
+                  <div className="workspace-overview" aria-label="Runtime resource usage">
+                    <div><span>Services running</span><strong>{runningContainers}</strong><small>of {containerRows.length} services</small></div>
+                    <div><span>CPU usage</span><strong>{resourceUsage.cpu ?? "—"}</strong>{!resourceUsage.cpu ? <small>Unavailable</small> : null}</div>
+                    <div><span>Memory usage</span><strong>{resourceUsage.memory ?? "—"}</strong>{!resourceUsage.memory ? <small>Unavailable</small> : null}</div>
+                  </div>
+                  <div className="workspace-list-toolbar">
+                    <span className="muted">{containerGroups.length} workspaces · {visibleContainers.length} services</span>
+                    <button className="btn btn-secondary" onClick={() => void Promise.all([refresh(), refreshVolumes(), refreshNetworks()])} disabled={loading || volumesLoading || networksLoading}><Icon name="refresh" size={14} /> Refresh</button>
+                    <details className="image-toolbar-overflow"><summary aria-label="More container actions"><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("container_prune", "Container Prune")} disabled={runtimeBusy}>Prune stopped containers</button></div></details>
                   </div>
                   {liveStatsUnavailable ? <p className="muted" role="status">{containerStatsUnavailableMessage()}</p> : null}
-                  <div className="mobile-target">
-                    <input value={containerTarget} onChange={(event) => setContainerTarget(event.target.value)} placeholder="Container name or ID" />
-                    <button className="btn btn-secondary" onClick={() => void inspectContainer()} disabled={runtimeBusy || !containerTarget.trim()}>Open</button>
-                  </div>
-                  <div className="table-scroll">
-                    <table>
-                      <thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Ports</th><th>Started</th><th>CPU</th><th>Memory</th><th aria-label="Actions" /></tr></thead>
-                      <tbody>
-                        {containerGroups.map((group) => (
-                          <Fragment key={group.name}>
-                            <tr className="container-group-row">
-                              <td colSpan={8}>
-                                <strong>{group.name}</strong>
-                                <span>{group.compose ? "Compose project" : "Not managed by Compose"}</span>
-                                <span className="group-summary">{group.rows.length} container{group.rows.length === 1 ? "" : "s"} · {group.running} running</span>
-                              </td>
-                            </tr>
-                            {group.rows.map((row) => {
-                              const tone = statusTone(row);
-                              const selected = selectedRow?.id === row.id;
-                              const remove = containerRemoveAvailability(row);
-                              return (
-                                <tr key={row.id} className={selected ? "selected" : ""} onClick={() => void inspectContainer(row.id)}>
-                                  <td><div className="container-name">{row.composeService || row.name}</div>{row.composeService ? <div className="container-runtime-name mono">{row.name}</div> : null}</td>
-                                  <td className="mono muted-cell">{row.image}</td>
-                                  <td><span className={`container-status ${tone}`}><i />{statusLabel(row)}</span></td>
-                                  <td className="mono muted-cell">{row.ports}</td>
-                                  <td className="mono muted-cell">{formatUnix(row.startedAt)}</td>
-                                  <td className="mono muted-cell">{row.cpu}</td>
-                                  <td className="mono muted-cell">{row.memory}</td>
-                                  <td className="row-actions">
-                                    <details className="row-menu" onClick={(event) => event.stopPropagation()}>
-                                      <summary aria-label={`Actions for ${row.name}`}><Icon name="more" size={16} /></summary>
-                                      <div className="overflow-menu">
-                                        <button onClick={() => void runAction(row.state === "running" ? "stop_container" : "start_container", row.state === "running" ? "Container Stop" : "Container Start", row.id)}><Icon name={row.state === "running" ? "stop" : "play"} size={16} />{row.state === "running" ? "Stop container" : "Start container"}</button>
-                                        <button onClick={() => { setContainerTarget(row.id); setDetailTab("logs"); void startLogFollow(row.id); }}><Icon name="terminal" size={16} />Follow logs</button>
-                                        <button onClick={() => { setContainerTarget(row.id); setDetailTab("terminal"); void inspectContainer(row.id); }}><Icon name="terminal" size={16} />Open terminal</button>
-                                        <button className="danger-action" onClick={() => void runAction("remove_container", "Container Remove", row.id)} disabled={!remove.allowed} title={remove.reason || undefined}><Icon name="trash" size={16} />{remove.allowed ? "Remove container" : "Stop before removing"}</button>
-                                      </div>
-                                    </details>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </Fragment>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  {volumesLoading || networksLoading ? <p className="muted" role="status">Loading workspace resources…</p> : null}
+                  {containerGroups.map(group => <WorkspaceCard key={group.name} group={group} selectedId={selectedRow?.id} busy={runtimeBusy} onAction={(action, label, target) => void runAction(action, label, target)} onInspect={(target, tab) => void openServiceInspector(target, tab)} />)}
+                  <p className="workspace-library-note">Resources are associated through service attachments. Unattached resources remain available in Volumes and Networks.</p>
                 </section>
 
-                <section className="panel detail-panel bottom-inspector" aria-label="Container inspector">
-                  <div className="detail-head">
-                    <span className={`container-status ${selectedRow ? statusTone(selectedRow) : "stopped"}`}><i /></span>
-                    <div className="detail-identity"><strong>{selectedRow?.name || containerDetail?.name || "Select a container"}</strong><span>{selectedRow?.image || containerDetail?.image || "Choose a row to view details"}</span></div>
-                    {selectedRow ? <span className="detail-meta">{selectedRow.status}</span> : null}
-                  </div>
-                  <div className="detail-tabs" role="tablist">
-                    {DETAIL_TABS.map((tab) => (
-                      <button
-                        key={tab}
-                        id={`container-tab-${tab}`}
-                        data-detail-tab={tab}
-                        role="tab"
-                        aria-controls={`container-panel-${tab}`}
-                        aria-selected={detailTab === tab}
-                        tabIndex={detailTab === tab ? 0 : -1}
-                        className={detailTab === tab ? "active" : ""}
-                        onClick={() => setDetailTab(tab)}
-                        onKeyDown={(event) => {
-                          const next = tabKeyboardTarget(DETAIL_TABS, tab, event.key) as DetailTab | null;
-                          if (!next) return;
-                          event.preventDefault();
-                          setDetailTab(next);
-                          event.currentTarget.parentElement
-                            ?.querySelector<HTMLButtonElement>(`[data-detail-tab="${next}"]`)
-                            ?.focus();
-                        }}
-                      >{tab[0].toUpperCase() + tab.slice(1)}</button>
-                    ))}
-                  </div>
-                  {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
-                  <div id="container-panel-logs" role="tabpanel" aria-labelledby="container-tab-logs" className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
-                    <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
-                    <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
-                    <div className="detail-foot">
-                      <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
-                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy || logsFollowing}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
-                      <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
-                      <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
-                      <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
-                      <span className="detail-meta">{logsFollowing ? "streaming" : "idle"} · {visibleLogText ? visibleLogText.split("\n").length : 0} lines</span>
-                    </div>
-                  </div>
-
-                  <div id="container-panel-terminal" role="tabpanel" aria-labelledby="container-tab-terminal" className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
-                    <div className="terminal-config">
-                      <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
-                      <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
-                      <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
-                      <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
-                    </div>
-                    <div className="terminal-host" ref={setTerminalHost} aria-label="Interactive container terminal" />
-                    <div className="detail-foot">
-                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || !containerTarget.trim()}>Open shell</button>
-                      <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
-                      <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
-                    </div>
-                  </div>
-
-                  <div id="container-panel-inspect" role="tabpanel" aria-labelledby="container-tab-inspect" className={`detail-pane inspect-pane ${detailTab === "inspect" ? "active" : ""}`}>
-                    {containerDetail ? (
-                      <>
-                        <dl className="detail-grid">
-                          <div><dt>Status</dt><dd>{containerDetail.status}</dd></div><div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
-                          <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div><div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
-                          <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
-                          <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
-                        </dl>
-                        <section className="drawer-section"><div className="drawer-section-header"><h3>Environment</h3><button className="btn btn-ghost" onClick={() => setShowEnvironment((visible) => !visible)}>{showEnvironment ? "Mask values" : "Reveal values"}</button></div><pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre></section>
-                        <section className="drawer-section"><h3>Mounts</h3>{containerDetail.mounts.length ? <ul className="mount-list">{containerDetail.mounts.map((mount, index) => <li key={`${mount.destination}:${index}`}>{mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})</li>)}</ul> : <p className="muted">No mounts.</p>}</section>
-                      </>
-                    ) : <div className="empty-state"><strong>No inspection loaded</strong><span>Select a container row.</span></div>}
-                  </div>
-
-                  <div id="container-panel-stats" role="tabpanel" aria-labelledby="container-tab-stats" className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
-                    {containerDetail ? (
-                      <>
-                        {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}
-                        <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
-                        <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
-                      </>
-                    ) : <div className="empty-state"><strong>No stats loaded</strong><span>Select a container row.</span></div>}
-                  </div>
-                </section>
               </>
               )
             ) : null}
@@ -1673,7 +1647,7 @@ function LocalApp(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Service</th><th>Status</th><th>Container</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replace(/_/g, " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${service.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}><Icon name="terminal" size={16} />Follow logs</button></div></details></td></tr>)}
+                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replace(/_/g, " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${service.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setInspectorOpen(true); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}><Icon name="terminal" size={16} />Follow logs</button></div></details></td></tr>)}
                   </tbody></table></div>
                   <details className="compose-config"><summary>Validated configuration</summary><pre>{composeSnapshot?.config}</pre></details>
                 </section>
@@ -1698,6 +1672,99 @@ function LocalApp(): JSX.Element {
           </div>
           </>
           )}
+                <section className="panel detail-panel right-inspector" aria-label="Container inspector" hidden={!inspectorOpen || activeSection !== "containers" || runtimeSurface !== "resource"} style={{ width: inspectorWidth }}>
+                  <div className="inspector-resize" role="separator" aria-label="Resize inspector" aria-orientation="vertical" aria-valuenow={Math.min(inspectorWidth, window.innerWidth - 24)} aria-valuemin={Math.min(340, window.innerWidth - 24)} aria-valuemax={Math.max(340, window.innerWidth - 24)} tabIndex={0}
+                    onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+                    onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; setInspectorWidth(Math.min(window.innerWidth - 24, Math.max(340, window.innerWidth - event.clientX))); }}
+                    onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
+                    onKeyDown={(event) => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setInspectorWidth(width => Math.min(window.innerWidth - 24, Math.max(340, width + (event.key === "ArrowLeft" ? 32 : -32)))); }} />
+                  <div className="detail-head">
+                    <button ref={inspectorCloseRef} className="btn btn-ghost inspector-close" onClick={closeInspector} aria-label="Close inspector">×</button>
+                    <span className={`container-status ${selectedRow ? statusTone(selectedRow) : "stopped"}`}><i /></span>
+                    <div className="detail-identity"><strong>{selectedRow?.name || containerDetail?.name || "Select a container"}</strong><span>{selectedRow?.image || containerDetail?.image || "Choose a row to view details"}</span></div>
+                    {selectedRow ? <span className="detail-meta">{selectedRow.status}</span> : null}
+                  </div>
+                  <div className="detail-tabs" role="tablist">
+                    {DETAIL_TABS.map((tab) => (
+                      <button
+                        key={tab}
+                        id={`container-tab-${tab}`}
+                        data-detail-tab={tab}
+                        role="tab"
+                        aria-controls={`container-panel-${tab}`}
+                        aria-selected={detailTab === tab}
+                        tabIndex={detailTab === tab ? 0 : -1}
+                        className={detailTab === tab ? "active" : ""}
+                        onClick={() => setDetailTab(tab)}
+                        onKeyDown={(event) => {
+                          const next = tabKeyboardTarget(DETAIL_TABS, tab, event.key) as DetailTab | null;
+                          if (!next) return;
+                          event.preventDefault();
+                          setDetailTab(next);
+                          event.currentTarget.parentElement
+                            ?.querySelector<HTMLButtonElement>(`[data-detail-tab="${next}"]`)
+                            ?.focus();
+                        }}
+                      >{tab[0].toUpperCase() + tab.slice(1)}</button>
+                    ))}
+                  </div>
+                  {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
+
+                  <div id="container-panel-logs" role="tabpanel" aria-labelledby="container-tab-logs" className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
+                    <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
+                    <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
+                    <div className="detail-foot">
+                      <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
+                      <button className="btn btn-secondary" onClick={() => selectedRow && void startLogFollow(selectedRow.id)} disabled={!selectedRow || runtimeBusy || logsFollowing}><Icon name="terminal" size={16} />{logsFollowing ? "Following" : "Follow"}</button>
+                      <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!visibleLogText}>Copy</button>
+                      <button className="btn btn-ghost" onClick={exportLogs} disabled={!visibleLogText}>Export</button>
+                      <button className="btn btn-danger" onClick={() => void stopLogFollow()} disabled={!logsFollowing || runtimeActionBusy}>Stop</button>
+                      <span className="detail-meta">{logsFollowing ? "streaming" : "idle"} · {visibleLogText ? visibleLogText.split("\n").length : 0} lines</span>
+                    </div>
+                  </div>
+
+                  <div id="container-panel-terminal" role="tabpanel" aria-labelledby="container-tab-terminal" className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
+                    {selectedRow?.state !== "running" ? <p className="muted" role="status">Start this service to open a shell.</p> : null}
+                    <details className="terminal-options"><summary>Shell options</summary><div className="terminal-config">
+                      <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
+                      <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
+                      <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
+                      <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
+                    </div>
+                    </details>
+                    <div className="terminal-host" ref={setTerminalHost} aria-label="Interactive container terminal" />
+                    <div className="detail-foot">
+                      <button className="btn btn-primary" onClick={() => void startTerminal()} disabled={runtimeBusy || terminalActive || selectedRow?.state !== "running"}>Open shell</button>
+                      <button className="btn btn-danger" onClick={() => void closeTerminal()} disabled={!terminalActive || runtimeActionBusy}>Detach</button>
+                      <span className="detail-meta">{terminalActive ? "attached" : "detached"}</span>
+                    </div>
+                  </div>
+
+                  <div id="container-panel-inspect" role="tabpanel" aria-labelledby="container-tab-inspect" className={`detail-pane inspect-pane ${detailTab === "inspect" ? "active" : ""}`}>
+                    {containerDetail ? (
+                      <>
+                        <dl className="detail-grid">
+                          <div><dt>Status</dt><dd>{containerDetail.status}</dd></div><div><dt>Image</dt><dd>{containerDetail.image}</dd></div>
+                          <div><dt>User</dt><dd>{containerDetail.user || "default"}</dd></div><div><dt>Working directory</dt><dd>{containerDetail.working_dir || "/"}</dd></div>
+                          <div className="detail-span"><dt>Command</dt><dd>{containerDetail.command.join(" ") || "image default"}</dd></div>
+                          <div className="detail-span"><dt>Restart policy</dt><dd>{containerDetail.restart_policy.name || "no"}</dd></div>
+                        </dl>
+                        <section className="drawer-section"><div className="drawer-section-header"><h3>Environment</h3><button className="btn btn-ghost" onClick={() => setShowEnvironment((visible) => !visible)}>{showEnvironment ? "Mask values" : "Reveal values"}</button></div><pre>{(showEnvironment ? containerDetail.environment : maskEnvironment(containerDetail.environment)).join("\n") || EMPTY}</pre></section>
+                        <section className="drawer-section"><h3>Mounts</h3>{containerDetail.mounts.length ? <ul className="mount-list">{containerDetail.mounts.map((mount, index) => <li key={`${mount.destination}:${index}`}>{mount.kind} · {mount.source || "daemon-managed"} → {mount.destination} ({mount.access})</li>)}</ul> : <p className="muted">No mounts.</p>}</section>
+                      </>
+                    ) : <div className="empty-state"><strong>No inspection loaded</strong><span>Select a container row.</span></div>}
+                  </div>
+
+                  <div id="container-panel-stats" role="tabpanel" aria-labelledby="container-tab-stats" className={`detail-pane stats-pane ${detailTab === "stats" ? "active" : ""}`}>
+                    {containerDetail ? (
+                      <>
+                        {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}
+                        <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
+                        <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
+                      </>
+                    ) : <div className="empty-state"><strong>No stats loaded</strong><span>Select a container row.</span></div>}
+                  </div>
+                </section>
         </main>
       </div>
 
@@ -1714,7 +1781,7 @@ function LocalApp(): JSX.Element {
 
       <InstallDialog open={settingsDialog === "install"} installerResult={installerResult} busy={runtimeBusy} onClose={() => setSettingsDialog(null)} onPreview={() => void runInstaller(true, false)} onInstall={() => void runInstaller(false, true)} />
 
-      <RunContainerDialog open={runDialogOpen} draft={newContainerDraft} busy={runtimeBusy} error={runDialogError} onDraftChange={setNewContainerDraft} onCancel={() => { setRunDialogError(null); setRunDialogOpen(false); }} onRun={(payload) => void runNewContainer(payload)} onInvalid={(error) => setRunDialogError(String(error))} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} />
+      <RunContainerDialog onPreset={(id) => void chooseLauncherPreset(id)} conflict={runConflict?.probe} confirmation={replacementConfirmation} onConfirmationChange={setReplacementConfirmation} onAlternative={() => void resolveLaunchConflict(false)} onReplace={() => void resolveLaunchConflict(true)} onBack={() => { setRunConflict(null); setRunDialogError(null); setReplacementConfirmation(""); }} open={runDialogOpen} draft={newContainerDraft} busy={runtimeBusy} error={runDialogError} onDraftChange={setNewContainerDraft} onCancel={() => { launcherGenerationRef.current += 1; setRunConflict(null); setReplacementConfirmation(""); setRunDialogError(null); setRunDialogOpen(false); }} onRun={(payload) => void runNewContainer(payload)} onInvalid={(error) => setRunDialogError(String(error))} onStart={() => void recoverFirstRun()} onReviewLicensing={(detail) => { setRunDialogOpen(false); setLicensingDetail(detail); setLicensingDialogOpen(true); }} onDoctor={() => { setRunDialogOpen(false); setActiveSection("doctor"); }} />
 
       <ResourceCreateDialog
         kind={resourceDialog}

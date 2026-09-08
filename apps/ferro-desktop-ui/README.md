@@ -1,13 +1,13 @@
-# FerroCrate Desktop UI (MVP Scaffold)
+# FerroCrate Desktop UI
 
-This app is the initial Desktop UI scaffold for FerroCrate.
+The production frontend is being integrated with the approved Folded Forge workspace design. Release qualification remains open in the active production roadmap.
 
 ## Current status
 - Tauri backend command bridge implemented.
 - React frontend shell implemented.
 - Runtime/containers/images read-only snapshot view implemented.
 - Dark/light mode toggle with persisted theme preference implemented.
-- UI tokens aligned to `docs/design/mockups/orca_style_guide.html`.
+- UI tokens aligned to the approved rust / patinated-steel workspace mockup and `.superdesign/design-system.md`.
 - Action controls implemented for VM start/stop, image pull/remove/prune, container start/stop/remove/logs.
 - Paid auth panel implemented:
   - backend endpoint configuration (`release_base_url`, `token_endpoint`)
@@ -20,7 +20,7 @@ This app is the initial Desktop UI scaffold for FerroCrate.
 
 ## Dev prerequisites
 - Rust toolchain
-- Node 20+
+- Node 20.19+ or 22.12+
 - Tauri build dependencies (per OS)
 
 ## Run locally

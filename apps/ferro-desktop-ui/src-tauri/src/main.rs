@@ -1,14 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+mod launch_ports;
 mod web_bridge;
 #[cfg(target_os = "linux")]
 mod webkit_rendering;
 
 use base64::Engine as _;
 use ferro_desktop::backend::{
-    select_backend, Backend, BackendState, BackendStatus, DuplexStream, ExecStream,
-    ExecRequest as BackendExecRequest, TerminalRequest,
+    select_backend, Backend, BackendState, BackendStatus, DuplexStream,
+    ExecRequest as BackendExecRequest, ExecStream, TerminalRequest,
 };
 #[cfg(target_os = "macos")]
 use ferro_desktop::backend::{LinuxNativeBackend, LinuxNativeConfig};
@@ -1795,7 +1796,9 @@ fn backend_command_request(
         } else {
             (binary.to_string(), args.to_vec())
         };
-    let mut request = BackendExecRequest::new(program).args(routed_args).stdin(stdin);
+    let mut request = BackendExecRequest::new(program)
+        .args(routed_args)
+        .stdin(stdin);
     for (name, value) in envs {
         request = request.env(*name, value.clone());
     }
@@ -1860,7 +1863,9 @@ fn backend_stream_with(
     args: &[String],
 ) -> Result<Box<dyn ExecStream>, String> {
     let request = backend_command_request(binary, args, &[], Vec::new())?;
-    backend.exec_stream(request).map_err(|error| error.to_string())
+    backend
+        .exec_stream(request)
+        .map_err(|error| error.to_string())
 }
 
 fn start_log_follow_stream_with(
@@ -1875,7 +1880,11 @@ fn start_image_build_stream_with(
     context: &str,
     tag: &str,
 ) -> Result<Box<dyn ExecStream>, String> {
-    backend_stream_with(backend, "ferro-desktop", &build_bridge_command(context, tag)?)
+    backend_stream_with(
+        backend,
+        "ferro-desktop",
+        &build_bridge_command(context, tag)?,
+    )
 }
 
 fn log_follow_command(target: &str) -> Vec<String> {
@@ -1976,10 +1985,7 @@ fn emit_terminal_output<R: Read>(mut reader: R, events: EventSink, stderr: bool)
     }
 }
 
-fn clear_terminal_slot_if_matches(
-    slot: &Mutex<Option<TerminalProcess>>,
-    exec_id: &str,
-) -> bool {
+fn clear_terminal_slot_if_matches(slot: &Mutex<Option<TerminalProcess>>, exec_id: &str) -> bool {
     let Ok(mut current) = slot.lock() else {
         return false;
     };
@@ -2788,6 +2794,20 @@ fn update_container_resources(
 }
 
 #[tauri::command]
+fn preflight_container_ports(ports: Vec<u16>) -> Result<Vec<launch_ports::LaunchPort>, String> {
+    launch_ports::preflight(&ports)
+}
+
+#[tauri::command]
+fn replace_port_conflict(
+    port: u16,
+    expected: launch_ports::PortOwner,
+    confirmation: String,
+) -> Result<CommandResult, String> {
+    launch_ports::replace(port, expected, confirmation)
+}
+
+#[tauri::command]
 // Tauri IPC requires the command signature to expose each frontend field by name.
 #[allow(clippy::too_many_arguments)]
 fn run_new_container(
@@ -3086,8 +3106,7 @@ fn doctor_with_backend_payload(mut payload: JsonValue, backend: JsonValue) -> Js
 
     let state = backend["state"].as_str().unwrap_or("unavailable");
     let reported_healthy = backend["healthy"].as_bool().unwrap_or(false);
-    let backend_healthy = reported_healthy
-        && !matches!(state, "failed" | "unavailable");
+    let backend_healthy = reported_healthy && !matches!(state, "failed" | "unavailable");
     let backend_name = backend["backend"].as_str().unwrap_or("desktop");
     let reason = backend["reason"]
         .as_str()
@@ -3101,7 +3120,12 @@ fn doctor_with_backend_payload(mut payload: JsonValue, backend: JsonValue) -> Js
         |capabilities| {
             let enabled = capabilities
                 .iter()
-                .filter_map(|(name, enabled)| enabled.as_bool().filter(|enabled| *enabled).map(|_| name.replace('_', " ")))
+                .filter_map(|(name, enabled)| {
+                    enabled
+                        .as_bool()
+                        .filter(|enabled| *enabled)
+                        .map(|_| name.replace('_', " "))
+                })
                 .collect::<Vec<_>>();
             if enabled.is_empty() {
                 "none".to_string()
@@ -3125,7 +3149,10 @@ fn doctor_with_backend_payload(mut payload: JsonValue, backend: JsonValue) -> Js
         }));
     }
     let doctor_healthy = object["healthy"].as_bool().unwrap_or(false);
-    object.insert("healthy".to_string(), JsonValue::Bool(doctor_healthy && backend_healthy));
+    object.insert(
+        "healthy".to_string(),
+        JsonValue::Bool(doctor_healthy && backend_healthy),
+    );
     object.insert("desktop_backend".to_string(), backend);
     payload
 }
@@ -3332,6 +3359,8 @@ fn main() {
             run_network_action,
             update_container_resources,
             run_new_container,
+            preflight_container_ports,
+            replace_port_conflict,
             get_registry_auth_status,
             login_registry,
             logout_registry,
@@ -3376,12 +3405,12 @@ mod tests {
         ferrocrate_proxy_command, log_channel, log_follow_command, network_proxy_command,
         network_summaries, normalize_nullable_list_output, parse_container_stats_json,
         parse_nullable_json_list, parse_terminal_exec_id, parse_web_mode, registry_login_command,
-        registry_logout_command, run_backend_command_with,
-        run_container_bridge_command, start_image_build_stream_with, start_log_follow_stream_with,
-        terminal_exec_command, terminal_resize_command, volume_proxy_command, BuildProgressFrame,
-        CommandResult, ComposeAction, ComposeContainerRecord, ContainerNetworkRecord,
-        ContainerPortRecord, JsonValue, LogBuffer, NativeContainerStats, NetworkAction,
-        NetworkInspectRecord, NetworkIpam, NetworkIpamConfig, NetworkListRecord, TerminalProcess,
+        registry_logout_command, run_backend_command_with, run_container_bridge_command,
+        start_image_build_stream_with, start_log_follow_stream_with, terminal_exec_command,
+        terminal_resize_command, volume_proxy_command, BuildProgressFrame, CommandResult,
+        ComposeAction, ComposeContainerRecord, ContainerNetworkRecord, ContainerPortRecord,
+        JsonValue, LogBuffer, NativeContainerStats, NetworkAction, NetworkInspectRecord,
+        NetworkIpam, NetworkIpamConfig, NetworkListRecord, TerminalProcess,
         TimedNativeContainerStats, VolumeAction, VolumeListResponse,
     };
     use ferro_desktop::backend::{
@@ -3477,7 +3506,9 @@ mod tests {
             self.0.write(buffer)
         }
 
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     impl DuplexStream for TestDuplex {
@@ -3485,29 +3516,71 @@ mod tests {
             Ok(Box::new(Self::default()))
         }
 
-        fn shutdown_write(&self) -> Result<(), BackendError> { Ok(()) }
+        fn shutdown_write(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
     }
 
     impl Backend for RecordingBackend {
-        fn name(&self) -> &'static str { "recording" }
-        fn platform(&self) -> Platform { Platform::Linux }
-        fn capabilities(&self) -> BackendCapabilities { BackendCapabilities::native() }
-        fn start(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
-        fn stop(&self) -> Result<BackendStatus, BackendError> { unimplemented!() }
-        fn status(&self) -> BackendStatus { unimplemented!() }
-        fn health(&self) -> Result<bool, BackendError> { Ok(true) }
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        fn platform(&self) -> Platform {
+            Platform::Linux
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::native()
+        }
+        fn start(&self) -> Result<BackendStatus, BackendError> {
+            unimplemented!()
+        }
+        fn stop(&self) -> Result<BackendStatus, BackendError> {
+            unimplemented!()
+        }
+        fn status(&self) -> BackendStatus {
+            unimplemented!()
+        }
+        fn health(&self) -> Result<bool, BackendError> {
+            Ok(true)
+        }
         fn exec(&self, request: ExecRequest) -> Result<ExecResponse, BackendError> {
-            self.requests.lock().expect("requests").push((false, request));
-            Ok(ExecResponse { code: 0, stdout: Vec::new(), stderr: Vec::new() })
+            self.requests
+                .lock()
+                .expect("requests")
+                .push((false, request));
+            Ok(ExecResponse {
+                code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
         }
         fn exec_stream(&self, request: ExecRequest) -> Result<Box<dyn ExecStream>, BackendError> {
-            self.requests.lock().expect("requests").push((true, request));
+            self.requests
+                .lock()
+                .expect("requests")
+                .push((true, request));
             Ok(Box::new(TestExecStream::default()))
         }
-        fn request(&self, _request: TransportRequest) -> Result<TransportResponse, BackendError> { unimplemented!() }
-        fn open_terminal(&self, _request: TerminalRequest) -> Result<TerminalSession, BackendError> { unimplemented!() }
-        fn resize_terminal(&self, _exec_id: &str, _columns: u16, _rows: u16) -> Result<(), BackendError> { unimplemented!() }
-        fn socket_path(&self) -> Option<PathBuf> { None }
+        fn request(&self, _request: TransportRequest) -> Result<TransportResponse, BackendError> {
+            unimplemented!()
+        }
+        fn open_terminal(
+            &self,
+            _request: TerminalRequest,
+        ) -> Result<TerminalSession, BackendError> {
+            unimplemented!()
+        }
+        fn resize_terminal(
+            &self,
+            _exec_id: &str,
+            _columns: u16,
+            _rows: u16,
+        ) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        fn socket_path(&self) -> Option<PathBuf> {
+            None
+        }
     }
 
     // On Windows this exec runs through the WSL2 backend, which is unavailable to the
@@ -3553,7 +3626,10 @@ mod tests {
         assert_eq!(requests[0].1.args, ["logs", "--follow", "container-1"]);
         assert!(requests[1].0);
         assert_eq!(requests[1].1.program, "ferrocrate");
-        assert_eq!(requests[1].1.args.first().map(String::as_str), Some("build"));
+        assert_eq!(
+            requests[1].1.args.first().map(String::as_str),
+            Some("build")
+        );
         assert!(!requests[2].0);
         assert_eq!(requests[2].1.stdin, b"secret\n");
     }

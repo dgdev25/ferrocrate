@@ -10,7 +10,7 @@ export function resourcePageState(section: ResourceSection, itemCount: number, o
 };
 export function containerContentState(totalCount: number, visibleCount: number, query: string): "empty" | "filtered-empty" | "table";
 export function filterNamedResources<T>(rows: T[], query: string, getName?: (row: T) => string): T[];
-export function runtimeSurfaceState(snapshot: { containers?: { ok?: boolean; stderr?: string }; images?: { ok?: boolean; stderr?: string } } | null, activeSection: string): "loading" | "first-run" | "resource";
+export function runtimeSurfaceState(snapshot: { containers?: { ok?: boolean; stderr?: string }; images?: { ok?: boolean; stderr?: string } } | null, activeSection: string, loadError?: string | null): "loading" | "unavailable" | "first-run" | "resource";
 export function snapshotFailureDetail(snapshot: { containers?: { ok?: boolean; code?: number; stderr?: string }; images?: { ok?: boolean; code?: number; stderr?: string } } | null, activeSection?: string | null): string | null;
 export function applyRuntimeSurfaceTransition(surface: string, callbacks: Record<string, (() => void) | undefined>): boolean;
 export function runFirstRunRecovery(options: {

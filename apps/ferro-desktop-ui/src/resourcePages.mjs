@@ -89,9 +89,9 @@ export function shouldShowFirstRun(snapshot, activeSection) {
   ));
 }
 
-export function runtimeSurfaceState(snapshot, activeSection) {
+export function runtimeSurfaceState(snapshot, activeSection, loadError = null) {
   if (activeSection === "doctor" || activeSection === "settings") return "resource";
-  if (!snapshot) return "loading";
+  if (!snapshot) return loadError ? "unavailable" : "loading";
   return shouldShowFirstRun(snapshot, activeSection) ? "first-run" : "resource";
 }
 

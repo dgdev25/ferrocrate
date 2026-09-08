@@ -35,6 +35,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Toolchain present (self-hosted)
         shell: bash
         run: rustup show && cargo clippy --version
@@ -75,7 +77,13 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          python3 scripts/check-release-workflows.py
+          python3 scripts/test_release_workflow_contracts.py
+          python3 scripts/test_local_release_gate.py
+          python3 scripts/test_candidate_evidence.py
           python3 scripts/test_readiness_scope.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bench -p 'test_suite_*.py'
+          bash scripts/test-qualification-fault-matrix.sh
           node --test scripts/release-artifacts.test.mjs
       - name: Dependency policy
         if: runner.os == 'Linux'

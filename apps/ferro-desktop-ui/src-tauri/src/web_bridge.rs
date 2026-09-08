@@ -103,6 +103,14 @@ impl CommandDispatcher for DesktopDispatcher {
                     args.cpu_period,
                 ))
             }
+            CommandRequest::PreflightContainerPorts(args) => {
+                encode_result(preflight_container_ports(args.ports))
+            }
+            CommandRequest::ReplacePortConflict(args) => encode_result(replace_port_conflict(
+                args.port,
+                decode_action(args.expected)?,
+                args.confirmation,
+            )),
             CommandRequest::RunNewContainer(args) => encode_result(run_new_container(
                 args.image,
                 args.name,

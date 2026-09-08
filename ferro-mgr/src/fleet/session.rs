@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +76,7 @@ impl SessionStore {
 
 pub fn certificate_principal(pem: &[u8]) -> Result<String, String> {
     let mut reader = std::io::Cursor::new(pem);
-    let certificate = rustls_pemfile::certs(&mut reader)
+    let certificate = CertificateDer::pem_reader_iter(&mut reader)
         .next()
         .transpose()
         .map_err(|error| format!("failed to parse operator certificate: {error}"))?

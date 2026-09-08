@@ -576,6 +576,17 @@ pub struct DoctorArgs {
     pub confirm: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct LaunchPortsArgs {
+    pub ports: Vec<u16>,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReplacePortArgs {
+    pub port: u16,
+    pub expected: Value,
+    pub confirmation: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum CommandRequest {
     GetDesktopSnapshot,
@@ -591,6 +602,8 @@ pub enum CommandRequest {
     RunNetworkAction(NetworkActionArgs),
     UpdateContainerResources(ContainerResourcesArgs),
     RunNewContainer(NewContainerArgs),
+    PreflightContainerPorts(LaunchPortsArgs),
+    ReplacePortConflict(ReplacePortArgs),
     GetRegistryAuthStatus(RegistryArgs),
     LoginRegistry(RegistryLoginArgs),
     LogoutRegistry(RegistryArgs),
@@ -633,6 +646,8 @@ impl CommandRequest {
             "run_volume_action" => Self::RunVolumeAction(decode(args)?),
             "run_network_action" => Self::RunNetworkAction(decode(args)?),
             "update_container_resources" => Self::UpdateContainerResources(decode(args)?),
+            "preflight_container_ports" => Self::PreflightContainerPorts(decode(args)?),
+            "replace_port_conflict" => Self::ReplacePortConflict(decode(args)?),
             "run_new_container" => Self::RunNewContainer(decode(args)?),
             "get_registry_auth_status" => Self::GetRegistryAuthStatus(decode(args)?),
             "login_registry" => Self::LoginRegistry(decode(args)?),
@@ -682,6 +697,8 @@ impl CommandRequest {
             Self::RunVolumeAction(_) => "run_volume_action",
             Self::RunNetworkAction(_) => "run_network_action",
             Self::UpdateContainerResources(_) => "update_container_resources",
+            Self::PreflightContainerPorts(_) => "preflight_container_ports",
+            Self::ReplacePortConflict(_) => "replace_port_conflict",
             Self::RunNewContainer(_) => "run_new_container",
             Self::GetRegistryAuthStatus(_) => "get_registry_auth_status",
             Self::LoginRegistry(_) => "login_registry",

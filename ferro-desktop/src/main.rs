@@ -47,6 +47,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Probe TCP ports on this runtime host; suggestions are not reservations.
+    PortProbe {
+        #[arg(long, value_delimiter = ',')]
+        ports: Vec<u16>,
+        #[arg(long, value_delimiter = ',')]
+        exclude: Vec<u16>,
+    },
     Daemon {
         #[arg(long, default_value_t = desktop_addr_default())]
         addr: String,
@@ -1240,6 +1247,13 @@ fn main() {
         }
     }
     let result = match cli.command {
+        Commands::PortProbe { ports, exclude } => ferro_desktop::ports::probe_ports(&ports, &exclude)
+            .map_err(DesktopError::Invalid)
+            .and_then(|probes| {
+                let payload: Vec<_> = probes.into_iter().map(|probe| serde_json::json!({ "port": probe.port, "available": probe.available, "suggested": probe.suggested })).collect();
+                println!("{}", serde_json::to_string(&payload)?);
+                Ok(())
+            }),
         Commands::Daemon {
             addr,
             pipe_name,
@@ -1316,6 +1330,7 @@ fn command_requires_desktop_entitlement(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Daemon { .. }
+            | Commands::PortProbe { .. }
             | Commands::Exec { .. }
             | Commands::TerminalProxy { .. }
             | Commands::TerminalResize { .. }
@@ -3507,6 +3522,8 @@ fn vm_state_running(state: &VmState) -> bool {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::ensure_ssh_key;
+    #[cfg(windows)]
+    use super::select_exec_backend;
     use super::{
         backend_exec_request, backup_path_for_disk, build_vm_command, command_exists,
         command_requires_desktop_entitlement, command_targets_ferrocrate, container_proxy_request,
@@ -3521,8 +3538,6 @@ mod tests {
         volume_proxy_request, write_follow_frame, Cli, Commands, ExecMode, ExecRequest,
         FollowChannel, FollowFrame, ForwardCommands, ForwardEntry, VmCommands, VmConfig, VmState,
     };
-    #[cfg(windows)]
-    use super::select_exec_backend;
     #[cfg(target_os = "linux")]
     use super::{
         create_terminal_exec, daemon_health_response_ok, ferrocrate_daemon_command,
@@ -3907,7 +3922,11 @@ mod tests {
     #[test]
     fn executes_local_command() {
         #[cfg(windows)]
-        let cmd = vec!["cmd.exe".to_string(), "/C".to_string(), "echo ok".to_string()];
+        let cmd = vec![
+            "cmd.exe".to_string(),
+            "/C".to_string(),
+            "echo ok".to_string(),
+        ];
         #[cfg(not(windows))]
         let cmd = vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()];
         let req = ExecRequest {
@@ -3924,7 +3943,11 @@ mod tests {
         #[cfg(windows)]
         {
             let failed = ExecRequest {
-                cmd: vec!["cmd.exe".to_string(), "/C".to_string(), "exit 23".to_string()],
+                cmd: vec![
+                    "cmd.exe".to_string(),
+                    "/C".to_string(),
+                    "exit 23".to_string(),
+                ],
                 ..req
             };
             assert_eq!(run_request(&failed).expect("run command").code, 23);

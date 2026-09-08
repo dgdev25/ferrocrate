@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Fail closed on hosted-runner fallback or weakened candidate publication gates.
+
+Requires PyYAML supplied by the self-hosted runner's managed toolchain.
+"""
+from pathlib import Path
+import re
+try:
+    import yaml
+except ImportError:
+    raise SystemExit("workflow validation requires PyYAML on the self-hosted runner")
+
+
+def validate(workflows):
+    errors = []
+    def require(condition, message):
+        if not condition:
+            errors.append(message)
+
+    def self_hosted(value):
+        if isinstance(value, dict):
+            value = value.get("labels")
+        return value == "self-hosted" or isinstance(value, list) and "self-hosted" in value and all(isinstance(v, str) and "${{" not in v for v in value)
+
+    for filename, workflow in workflows.items():
+        for name, job in workflow.get("jobs", {}).items():
+            label = f"{filename}/{name}"
+            if "uses" in job:
+                local = job["uses"].removeprefix("./.github/workflows/")
+                require(job["uses"].startswith("./.github/workflows/") and local in workflows,
+                        label + ": reusable workflow must be a validated local file")
+                continue
+            runner = job.get("runs-on")
+            if runner == "${{ matrix.runner }}":
+                matrix = job.get("strategy", {}).get("matrix", {})
+                values = [entry.get("runner") for entry in matrix.get("include", [])]
+                values += matrix.get("runner", [])
+                require(bool(values) and all(self_hosted(value) for value in values), label + ": matrix runner must always be self-hosted")
+            else:
+                require(self_hosted(runner), label + ": runner must explicitly be self-hosted")
+    release = workflows.get("release.yml", {}).get("jobs", {})
+    ci = workflows.get("ci.yml", {}).get("jobs", {})
+    validation = release.get("candidate-validation", {})
+    qualification = release.get("candidate-qualification", {})
+    publish = release.get("publish", {})
+    require(validation.get("uses") == "./.github/workflows/ci.yml", "candidate-validation must invoke local CI")
+    needs = publish.get("needs", [])
+    require(isinstance(needs, list) and {"candidate-validation", "candidate-qualification", "cli", "linux-desktop", "macos-desktop", "windows-desktop"} <= set(needs), "publication must depend on all candidate and packaging jobs")
+    require(publish.get("if") in (None, "success()", "${{ success() }}"), "publication may not bypass dependency success")
+    require(qualification.get("needs") == "candidate-validation", "qualification must follow candidate validation")
+    require("ferro-release-qualified" in qualification.get("runs-on", []), "privileged qualification requires its dedicated runner label")
+    require(qualification.get("env", {}).get("FERROCRATE_READINESS_REQUIRED") == "rootful,apparmor,rootless", "qualification must retain all required host modes")
+    for name, job in [("candidate-validation", validation), ("candidate-qualification", qualification), *ci.items()]:
+        require(not job.get("continue-on-error"), name + ": candidate job cannot ignore failure")
+        for step in job.get("steps", []):
+            require(not step.get("continue-on-error"), name + ": candidate step cannot ignore failure")
+    for name, job in release.items():
+        for step in job.get("steps", []):
+            if step.get("uses", "").startswith("actions/checkout@"):
+                require(step.get("with", {}).get("ref") == "${{ github.sha }}", name + ": checkout must pin github.sha")
+    for name, job in ci.items():
+        for step in job.get("steps", []):
+            if step.get("uses", "").startswith("actions/checkout@"):
+                require(step.get("with", {}).get("ref") == "${{ github.sha }}", name + ": reusable CI checkout must pin github.sha")
+    gate_steps = [step for step in qualification.get("steps", []) if "local-release-gate.sh" in step.get("run", "")]
+    require(len(gate_steps) == 1, "qualification must run exactly one full local release gate")
+    for step in gate_steps:
+        script = step["run"]
+        require(step.get("shell") == "bash", "qualification gate must use fail-fast Bash")
+        require(re.search(r'^\s*bash scripts/local-release-gate\.sh --version "\$GITHUB_REF_NAME"\s*$', script, re.M), "local gate must be unconditional, full and failure-propagating")
+        require("set +e" not in script and "|| true" not in script, "local gate failure must not be masked")
+        require('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in script, "qualification must assert the candidate SHA")
+    return errors
+
+
+def main():
+    root = Path(__file__).resolve().parents[1]
+    workflows = {path.name: yaml.safe_load(path.read_text()) for path in (root / ".github/workflows").glob("*.yml")}
+    errors = validate(workflows)
+    if errors:
+        print("\n".join(errors))
+        return 1
+    print("Release workflow contracts passed: self-hosted only; candidate-bound failure-propagating publication")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

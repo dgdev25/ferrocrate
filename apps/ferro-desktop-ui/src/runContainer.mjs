@@ -42,6 +42,10 @@ export function parseCommandWords(command) {
 }
 
 export function buildRunContainerOptions({ command, ports, volumes, memoryMb, cpus }) {
+  for (const row of ports) {
+    if (!row.host.trim() && !row.container.trim()) continue;
+    requestedHostPorts({ ports: [`${row.host.trim()}:${row.container.trim()}`] });
+  }
   const memoryNumber = memoryMb.trim() ? Number(memoryMb) : null;
   const cpuNumber = cpus.trim() ? Number(cpus) : null;
   if (memoryNumber != null && (!Number.isFinite(memoryNumber) || memoryNumber <= 0)) throw new Error("Memory must be a positive number of MB");
@@ -90,5 +94,51 @@ export async function submitRunContainer({ invoke, payload, begin, onBegin, onRe
     return null;
   } finally {
     finish();
+  }
+}
+
+export const LAUNCHER_PRESETS = [
+  { id: 'postgres', label: 'PostgreSQL', image: 'postgres:17-alpine', port: 5432, target: '/var/lib/postgresql/data' },
+  { id: 'redis', label: 'Redis', image: 'redis:7-alpine', port: 6379, target: '/data' },
+  { id: 'nginx', label: 'Nginx', image: 'nginx:alpine', port: 8080, containerPort: 80, target: '/usr/share/nginx/html' },
+];
+
+export async function applyLauncherPreset(id, invoke, suffix = crypto.randomUUID().slice(0, 8)) {
+  const preset = LAUNCHER_PRESETS.find(preset => preset.id === id);
+  if (!preset || !/^[a-zA-Z0-9-]+$/.test(suffix)) throw new Error('Invalid launcher preset');
+  const probes = await invoke('preflight_container_ports', { ports: [preset.port] });
+  const port = probes[0];
+  if (!port || port.port !== preset.port || !Number.isInteger(port.suggested) || port.suggested < 1 || port.suggested > 65535) throw new Error('Runtime host did not return a valid port suggestion');
+  const name = `ferro-${id}-${suffix}`;
+  const password = crypto.randomUUID().replaceAll('-', '');
+  return {
+    image: preset.image, name, pullIfMissing: true,
+    command: id === 'redis' ? `redis-server --appendonly yes --requirepass ${password}` : '',
+    environment: id === 'postgres' ? `POSTGRES_PASSWORD=${password}` : '',
+    ports: [{ host: String(port.suggested), container: String(preset.containerPort ?? preset.port) }],
+    volumes: [{ source: `${name}-data`, target: preset.target }],
+    memoryMb: '', cpus: '',
+  };
+}
+
+export function requestedHostPorts(payload) {
+  return payload.ports.map(mapping => {
+    const parts = mapping.split(':');
+    if (parts.length !== 2 || parts.some(part => !/^\d+$/.test(part) || Number(part) < 1 || Number(part) > 65535)) throw new Error('Port mappings require numeric host and container ports from 1 to 65535');
+    return Number(parts[0]);
+  });
+}
+
+// A probe is advisory; a competing process can bind before the runtime starts.
+// Recover the current conflict for review without retrying or removing anything.
+export async function recoverPortConflict(message, payload, invoke) {
+  if (!/address already in use|eaddrinuse|port\b.{0,80}(?:in use|allocated)|bind\b.{0,60}(?:in use|allocated)/i.test(message)) return null;
+  try {
+    const ports = requestedHostPorts(payload);
+    const probes = await invoke('preflight_container_ports', { ports });
+    if (probes.length !== ports.length || probes.some((probe, index) => probe.port !== ports[index])) return null;
+    return probes.find(probe => !probe.available) ?? null;
+  } catch {
+    return null;
   }
 }

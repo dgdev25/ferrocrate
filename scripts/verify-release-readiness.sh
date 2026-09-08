@@ -24,7 +24,7 @@ record_unavailable() {
   fi
 }
 
-echo "[release] validating host-matrix manifest and qualified evidence"
+echo "[release] validating historical host-matrix inventory (not candidate qualification)"
 bash scripts/verify-host-matrix-evidence.sh
 
 echo "[release] validating Docker API contract"
@@ -53,11 +53,35 @@ fi
 
 echo "[release] recording rootless prerequisite diagnostics"
 mkdir -p target/release-readiness
-if FERROCRATE_ROOTLESS_STRICT=1 bash scripts/verify-rootless.sh --strict \
+run_rootless_diagnostics() {
+  if [[ "$(id -u)" != 0 ]]; then
+    FERROCRATE_ROOTLESS_STRICT=1 bash scripts/verify-rootless.sh --strict
+    return
+  fi
+  local test_user="${FERROCRATE_ROOTLESS_TEST_USER:-}" test_uid test_home
+  if [[ -z "$test_user" ]]; then
+    echo "rootful runner requires FERROCRATE_ROOTLESS_TEST_USER for unprivileged diagnostics" >&2
+    return 77
+  fi
+  test_uid="$(id -u "$test_user" 2>/dev/null)" || return 77
+  if [[ "$test_uid" == 0 || "$test_user" == root ]]; then
+    echo "FERROCRATE_ROOTLESS_TEST_USER must identify an unprivileged account" >&2
+    return 77
+  fi
+  command -v runuser >/dev/null 2>&1 || {
+    echo "rootless diagnostics require runuser on the privileged qualification host" >&2
+    return 77
+  }
+  test_home="$(getent passwd "$test_user" | cut -d: -f6)"
+  [[ -n "$test_home" ]] || return 77
+  runuser -u "$test_user" -- env HOME="$test_home" USER="$test_user" LOGNAME="$test_user" \
+    FERROCRATE_ROOTLESS_STRICT=1 bash "$repo_root/scripts/verify-rootless.sh" --strict
+}
+if run_rootless_diagnostics \
   >target/release-readiness/rootless-prerequisites.txt 2>&1; then
   echo "[release] rootless prerequisites=pass (workload qualification is separate)"
 else
-  record_unavailable rootless "strict prerequisites failed; see target/release-readiness/rootless-prerequisites.txt"
+  record_unavailable rootless "strict unprivileged prerequisites failed; root runners require FERROCRATE_ROOTLESS_TEST_USER; see target/release-readiness/rootless-prerequisites.txt"
 fi
 
 echo "[release] collecting compatibility evidence"

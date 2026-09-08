@@ -153,7 +153,7 @@ export function filterContainers(rows, query) {
   const needle = query.trim().toLowerCase();
   if (!needle) return rows;
   return rows.filter((row) => (
-    `${row.name} ${row.image} ${row.status} ${row.ports}`.toLowerCase().includes(needle)
+    `${row.composeProject || ""} ${row.composeService || ""} ${row.name} ${row.image} ${row.status} ${row.ports}`.toLowerCase().includes(needle)
   ));
 }
 

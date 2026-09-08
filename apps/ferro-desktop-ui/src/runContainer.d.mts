@@ -40,3 +40,8 @@ export function submitRunContainer<Result extends { ok: boolean; code: number; m
   onSuccess: (result: Result) => void | Promise<void>;
   finish: () => void;
 }): Promise<Result | null>;
+
+export const LAUNCHER_PRESETS: Array<{ id: string; label: string; image: string; port: number; containerPort?: number; target: string }>;
+export function applyLauncherPreset(id: string, invoke: (command: string, args: { ports: number[] }) => Promise<import('./types').LaunchPort[]>, suffix?: string): Promise<import('./dialogForms.mjs').RunContainerDraft>;
+export function requestedHostPorts(payload: { ports: string[] }): number[];
+export function recoverPortConflict(message: string, payload: { ports: string[] }, invoke: (command: string, args: { ports: number[] }) => Promise<import('./types').LaunchPort[]>): Promise<import('./types').LaunchPort | null>;

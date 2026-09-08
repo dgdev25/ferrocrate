@@ -35,3 +35,13 @@ test("active terminal dimensions can be synchronized immediately after exec star
   applyRemoteTerminalResize(90, 18, true, (columns, rows) => remote.push([columns, rows]));
   assert.deepEqual(remote, [[90, 18]]);
 });
+
+test('hidden or invalid terminal measurements preserve local and remote dimensions', () => {
+  for (const [width, height] of [[0, 300], [800, 0], [0, 0], [-1, 300], [NaN, 300], [800, Infinity]]) {
+    const local = [];
+    const remote = [];
+    applyTerminalResize(width, height, true, (...args) => local.push(args), (...args) => remote.push(args));
+    assert.deepEqual(local, [], `${width} by ${height}`);
+    assert.deepEqual(remote, [], `${width} by ${height}`);
+  }
+});

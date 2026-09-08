@@ -29,3 +29,5 @@ export function open(options?: {
 }) {
   return nativeTauriAvailable ? tauriOpen(options) : webRuntime!.open(options);
 }
+
+export function clearSession(): void { webRuntime?.clearSession(); }

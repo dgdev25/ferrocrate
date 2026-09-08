@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { invoke } from "./desktopRuntime";
+import { clearSession, invoke } from "./desktopRuntime";
 import { DesktopTabBar } from "./desktopChrome.mjs";
 import { Icon } from "./iconSystem.mjs";
 import {
@@ -96,8 +96,11 @@ export function FleetApp(): JSX.Element {
   const containers = useMemo(() => fleetContainerRows(hosts), [hosts]);
 
   async function refresh(): Promise<void> {
+    if (!session.current.active) return;
+    const generation = session.current.generation;
     try {
       const next = normalizeFleetSnapshot(await invoke<unknown>("get_fleet_snapshot", {}));
+      if (!session.current.active || generation !== session.current.generation) return;
       setSnapshot(next as FleetSnapshot);
       setError("");
       setRunHost((current) => chooseRunHost(current, next.hosts as FleetHost[]));
@@ -107,14 +110,13 @@ export function FleetApp(): JSX.Element {
         setDeployHosts(nextHosts.filter((host) => host.connected).map((host) => host.node_id));
       }
     } catch (nextError) {
+      if (!session.current.active || generation !== session.current.generation) return;
       if (isFleetSessionExpired(nextError)) {
         // A first visit has no stored token, so "expired" would be wrong: there
         // was never a session. Only say expired when one is actually being
         // discarded; otherwise the sign-in form speaks for itself.
         const hadSession = sessionStorage.getItem(TOKEN_KEY) !== null;
-        sessionStorage.removeItem(TOKEN_KEY);
-        sessionStorage.removeItem(ROLE_KEY);
-        setRole(null);
+        signOut();
         setError(hadSession ? "Session expired — sign in again" : "");
       } else if (shouldShowFleetRefreshError(role)) {
         setError(String(nextError));
@@ -126,9 +128,14 @@ export function FleetApp(): JSX.Element {
   }
 
   useEffect(() => {
+    session.current.active = true;
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 5_000);
-    return () => window.clearInterval(timer);
+    pollTimer.current = window.setInterval(() => void refresh(), 5_000);
+    return () => {
+      window.clearInterval(pollTimer.current);
+      session.current.active = false;
+      session.current.generation += 1;
+    };
   }, []);
 
   async function login(event: React.FormEvent): Promise<void> {
@@ -161,13 +168,17 @@ export function FleetApp(): JSX.Element {
   }
 
   async function runOperation(command: string, argumentsValue: Record<string, unknown>): Promise<void> {
+    if (!session.current.active) return;
+    const generation = session.current.generation;
     setBusy(true);
     setError("");
     try {
       const response = await invoke<Record<string, unknown>>(command, argumentsValue, { timeoutMs: 65_000 });
+      if (!session.current.active || generation !== session.current.generation) return;
       setResult(JSON.stringify(response, null, 2));
       await refresh();
     } catch (nextError) {
+      if (!session.current.active || generation !== session.current.generation) return;
       const message = String(nextError);
       setError(message);
       if (/unauthorized|command .* failed/i.test(message)) {
@@ -179,6 +190,14 @@ export function FleetApp(): JSX.Element {
   }
 
   function signOut(): void {
+    session.current.active = false;
+    session.current.generation += 1;
+    window.clearInterval(pollTimer.current);
+    clearSession();
+    setResult("");
+    setDeployHosts([]);
+    deploymentInitialized.current = false;
+    setLoading(false);
     sessionStorage.removeItem(TOKEN_KEY);
     sessionStorage.removeItem(ROLE_KEY);
     setRole(null);

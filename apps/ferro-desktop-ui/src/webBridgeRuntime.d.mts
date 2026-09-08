@@ -2,6 +2,7 @@ export type WebBridgeEvent<T> = { event: string; payload: T };
 export type WebBridgeUnlisten = () => void;
 
 export type WebBridgeRuntime = {
+  clearSession(): void;
   capabilities: { dialog: boolean };
   invoke<T>(command: string, args?: Record<string, unknown>, options?: { timeoutMs?: number }): Promise<T>;
   listen<T>(event: string, handler: (event: WebBridgeEvent<T>) => void): Promise<WebBridgeUnlisten>;

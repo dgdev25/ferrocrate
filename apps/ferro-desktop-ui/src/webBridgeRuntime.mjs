@@ -22,8 +22,10 @@ export function createWebBridgeRuntime(options = {}) {
   const target = options.target ?? globalThis;
   const dialogOpenImpl = options.dialogOpenImpl ?? target.__TAURI__?.dialog?.open;
   const dialogAvailable = typeof dialogOpenImpl === "function";
-  const token = options.token ?? extractWebBridgeToken(target);
+  let token = options.token ?? extractWebBridgeToken(target);
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+  let sessionGeneration = 0;
+  const requests = new Set();
   let eventSource;
   let eventSourceReady;
 
@@ -82,11 +84,22 @@ export function createWebBridgeRuntime(options = {}) {
 
   return {
     capabilities: { dialog: dialogAvailable },
+    clearSession() {
+      token = null;
+      sessionGeneration += 1;
+      target.sessionStorage?.removeItem(TOKEN_STORAGE_KEY);
+      for (const controller of requests) controller.abort();
+      eventSource?.close();
+      eventSource = undefined;
+      eventSourceReady = undefined;
+    },
 
     async invoke(command, args = {}, invokeOptions = {}) {
       if (!fetchImpl) throw new Error("web bridge fetch is unavailable");
+      const generation = sessionGeneration;
       const timeoutMs = invokeOptions.timeoutMs ?? defaultTimeoutMs;
       const controller = new AbortController();
+      requests.add(controller);
       const timeoutError = new Error(
         `${command} timed out after ${timeoutMs} ${timeoutMs === 1 ? "millisecond" : "milliseconds"}. Please try again.`,
       );
@@ -134,6 +147,7 @@ export function createWebBridgeRuntime(options = {}) {
           if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
             throw new Error(String(payload?.error ?? `command ${command} failed (HTTP ${response.status ?? "unknown"})`));
           }
+          if (generation !== sessionGeneration) throw new Error("Fleet session ended");
           return payload;
         } catch (error) {
           if (timedOut) throw timeoutError;
@@ -144,6 +158,7 @@ export function createWebBridgeRuntime(options = {}) {
         return await Promise.race([request, timeout]);
       } finally {
         clearTimeout(timeoutId);
+        requests.delete(controller);
       }
     },
 

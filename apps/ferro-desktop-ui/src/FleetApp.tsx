@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { invoke } from "./desktopRuntime";
 import { DesktopTabBar } from "./desktopChrome.mjs";
@@ -87,6 +87,10 @@ export function FleetApp(): JSX.Element {
   const [deployCommand, setDeployCommand] = useState('["sh","-c","echo rollout-ready"]');
   const [deployHosts, setDeployHosts] = useState<string[]>([]);
 
+  const session = useRef({ active: true, generation: 0 });
+  const deploymentInitialized = useRef(false);
+  const pollTimer = useRef<number>();
+
   const operate = canOperateFleet(role);
   const hosts = snapshot?.hosts ?? [];
   const containers = useMemo(() => fleetContainerRows(hosts), [hosts]);
@@ -97,7 +101,8 @@ export function FleetApp(): JSX.Element {
       setSnapshot(next as FleetSnapshot);
       setError("");
       setRunHost((current) => chooseRunHost(current, next.hosts as FleetHost[]));
-      if (!deployHosts.length) {
+      if (!deploymentInitialized.current) {
+        deploymentInitialized.current = true;
         const nextHosts = next.hosts as FleetHost[];
         setDeployHosts(nextHosts.filter((host) => host.connected).map((host) => host.node_id));
       }
@@ -226,7 +231,7 @@ export function FleetApp(): JSX.Element {
             onClick={() => setSection(target)}
             onKeyDown={(event) => {
               const next = tabKeyboardTarget(FLEET_SECTIONS, target, event.key);
-              if (next === target) return;
+              if (!next || next === target) return;
               event.preventDefault();
               setSection(next as FleetSection);
               document.getElementById(`fleet-tab-${next}`)?.focus();

@@ -15851,7 +15851,7 @@ fn prepare_compose_service(
             &HashMap::new(),
             build.args.as_ref().unwrap_or(&HashMap::new()),
             &ferro_core::dockerfile_build::DockerfileExecutionOptions {
-                context_dir: None,
+                context_dir: Some(project_dir.join(context)),
                 target_stage: build.target.clone(),
                 ..Default::default()
             },

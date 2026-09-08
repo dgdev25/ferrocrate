@@ -8381,6 +8381,99 @@ pub fn layer_blob_path(runtime_dir: &Path, digest: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn explicit_context_and_target_are_bound_and_used_by_authorized_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = temp.path().join("context");
+        fs::create_dir_all(context.join("docker")).unwrap();
+        let dockerfile = context.join("docker/Dockerfile");
+        fs::write(&dockerfile, "FROM scratch AS assets\nCOPY payload /payload\nFROM scratch AS final\nCOPY missing /wrong\n").unwrap();
+        fs::write(context.join("payload"), b"original").unwrap();
+        fs::write(context.join(".dockerignore"), "ignored\n").unwrap();
+        fs::write(context.join("ignored"), b"ignored").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let options = super::DockerfileExecutionOptions {
+            context_dir: Some(context.clone()),
+            target_stage: Some("assets".into()),
+            ..Default::default()
+        };
+        let prepare = || {
+            super::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+                &dockerfile,
+                Some("local/explicit:latest"),
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &HashMap::new(),
+                &HashMap::new(),
+                &options,
+            )
+            .unwrap()
+        };
+        let plan = prepare();
+        assert_eq!(
+            plan.stage_dependencies.len(),
+            1,
+            "target must exclude the later stage"
+        );
+        let authorize = |plan: &super::ImageBuildPlan| {
+            crate::authorization::surface::SurfaceAuthorization::compatibility()
+                .authorize_image_build_plan(
+                    &crate::authorization::RequestOrigin::cli_current().unwrap(),
+                    plan,
+                )
+                .unwrap()
+        };
+        let permit = authorize(&plan);
+        fs::write(context.join("payload"), b"updated").unwrap();
+        assert!(matches!(
+            super::execute_dockerfile_build_authorized(plan, &store, permit),
+            Err(DockerfileBuildError::Authorization(_))
+        ));
+        let plan = prepare();
+        let digest = plan.plan_digest();
+        fs::write(context.join("ignored"), b"ignore update").unwrap();
+        assert_eq!(
+            prepare().plan_digest(),
+            digest,
+            "explicit context .dockerignore must apply"
+        );
+        let permit = authorize(&plan);
+        let result = super::execute_dockerfile_build_authorized(plan, &store, permit).unwrap();
+        let layers = resolve_layer_paths_with_store(&runtime, &result.reference, &store).unwrap();
+        let root = temp.path().join("root");
+        crate::rootfs::construct_rootfs(&root, &layers).unwrap();
+        assert_eq!(fs::read(root.join("payload")).unwrap(), b"updated");
+        assert!(!root.join("wrong").exists());
+    }
+
+    #[test]
+    fn rejects_unknown_build_target_at_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(&dockerfile, "FROM scratch AS actual\n").unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).unwrap();
+        let options = super::DockerfileExecutionOptions {
+            target_stage: Some("missing".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            super::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
+                &dockerfile,
+                None,
+                &runtime,
+                CompressionFormat::Gzip,
+                &store,
+                &HashMap::new(),
+                &HashMap::new(),
+                &options
+            ),
+            Err(DockerfileBuildError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn a_stage_inherits_the_base_command_and_docker_s_entrypoint_rule() {
         let base_entry = vec!["/docker-entrypoint.sh".to_string()];
         let base_cmd = vec!["nginx".to_string(), "-g".to_string()];

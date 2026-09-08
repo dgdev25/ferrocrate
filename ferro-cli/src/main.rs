@@ -25914,9 +25914,8 @@ struct HttpRequest {
 #[cfg(target_os = "linux")]
 fn http_body_limit(method: &str, path: &str) -> usize {
     const ORDINARY: usize = 4 * 1024 * 1024;
-    // Docker accepts a streamed build context without an arbitrary byte cap.
-    // The request parser still bounds headers and validates tar paths/types.
-    const ARCHIVE: usize = usize::MAX;
+    // Bound retained request memory; declared lengths never drive allocation.
+    const ARCHIVE: usize = 1024 * 1024 * 1024;
     const IMAGE: usize = 1024 * 1024 * 1024;
     let route = path.split('?').next().unwrap_or(path);
     let route = normalize_docker_api_path(route);
@@ -25934,6 +25933,33 @@ fn http_body_limit(method: &str, path: &str) -> usize {
         }
         _ => ORDINARY,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_http_body_bytes(reader: &mut impl Read, body: &mut Vec<u8>, mut remaining: usize) -> Result<(), String> {
+    let mut chunk = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let count = remaining.min(chunk.len());
+        let read = reader.read(&mut chunk[..count]).map_err(|error| format!("docker: request body: {error}"))?;
+        if read == 0 { return Err("docker: incomplete request body".into()); }
+        body.try_reserve(read).map_err(|_| "docker: request allocation limit".to_string())?;
+        body.extend_from_slice(&chunk[..read]);
+        remaining -= read;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_http_metadata_line(reader: &mut impl BufRead, limit: usize) -> Result<String, String> {
+    let mut line = String::new();
+    // Limit the reader before read_line allocates, including an over-limit byte
+    // so a missing newline cannot retain an unbounded chunk extension/trailer.
+    reader.take(limit as u64 + 1).read_line(&mut line)
+        .map_err(|error| format!("docker: chunked request metadata: {error}"))?;
+    if line.len() > limit {
+        return Err("docker: chunked request metadata too large".into());
+    }
+    Ok(line)
 }
 
 #[cfg(target_os = "linux")]
@@ -26044,21 +26070,17 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     let mut body = Vec::new();
     if chunked {
         loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .map_err(|err| format!("docker: chunked request header: {err}"))?;
+            let mut line = read_http_metadata_line(&mut reader, MAX_HTTP_HEADER_BYTES)?;
             let size_text = line.trim().split(';').next().unwrap_or_default();
             let size = usize::from_str_radix(size_text, 16)
                 .map_err(|_| "docker: invalid chunk size".to_string())?;
             if size == 0 {
                 // Consume optional trailer headers through the terminating
                 // blank line before returning the request to the dispatcher.
+                let mut trailer_budget = MAX_HTTP_HEADER_BYTES;
                 loop {
-                    line.clear();
-                    reader
-                        .read_line(&mut line)
-                        .map_err(|err| format!("docker: chunked request trailer: {err}"))?;
+                    line = read_http_metadata_line(&mut reader, trailer_budget)?;
+                    trailer_budget -= line.len();
                     if line == "\r\n" || line == "\n" || line.is_empty() {
                         break;
                     }
@@ -26068,11 +26090,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
             if body.len().saturating_add(size) > max_body_bytes {
                 return Err("docker: request too large".to_string());
             }
-            let start = body.len();
-            body.resize(start + size, 0);
-            reader
-                .read_exact(&mut body[start..])
-                .map_err(|err| format!("docker: incomplete chunked request body: {err}"))?;
+            read_http_body_bytes(&mut reader, &mut body, size)?;
             let mut terminator = [0_u8; 2];
             reader
                 .read_exact(&mut terminator)
@@ -26082,10 +26100,7 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
             }
         }
     } else if content_length > 0 {
-        body.resize(content_length, 0);
-        reader
-            .read_exact(&mut body)
-            .map_err(|err| format!("docker: incomplete request body: {err}"))?;
+        read_http_body_bytes(&mut reader, &mut body, content_length)?;
     }
     Ok(HttpRequest {
         method,
@@ -30549,6 +30564,9 @@ fn load_env_file_map(path: &Path) -> Result<HashMap<String, String>, String> {
     Ok(env)
 }
 
+#[cfg(test)]
+mod http_audit_tests { include!("http_audit_tests.rs"); }
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use clap::CommandFactory;
@@ -31128,7 +31146,7 @@ mod tests {
         ] {
             let limit = super::http_body_limit("POST", route);
             assert!(limit > ordinary, "{route} retained the 4 MiB cap");
-            assert_eq!(limit, usize::MAX, "{route} retained a byte cap");
+            assert_eq!(limit, 1024 * 1024 * 1024, "{route} must bound retained memory");
         }
         for route in ["/ferrocrate/rvf/import", "/images/load", "/v1.44/images/load"] {
             assert_eq!(super::http_body_limit("POST", route), 1024 * 1024 * 1024);

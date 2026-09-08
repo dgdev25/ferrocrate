@@ -302,6 +302,14 @@ pub enum DependsOn {
 }
 
 impl DependsOn {
+    /// Whether absence or failure of this dependency blocks its consumer.
+    pub fn is_required(&self, name: &str) -> bool {
+        match self {
+            Self::Simple(_) => true,
+            Self::Conditional(map) => map.get(name).is_none_or(|condition| condition.required),
+        }
+    }
+
     /// Returns an iterator over dependency service names.
     pub fn iter(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
@@ -314,9 +322,14 @@ impl DependsOn {
 /// Condition for a service dependency (e.g., "service_healthy").
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DependsCondition {
+    /// Defaults to true; false makes unavailable dependencies non-fatal.
+    #[serde(default = "dependency_required_default")]
+    pub required: bool,
     /// The condition type: "service_started", "service_healthy", or "service_completed_successfully".
     pub condition: String,
 }
+
+fn dependency_required_default() -> bool { true }
 
 /// Health check configuration for determining container readiness.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -526,7 +539,7 @@ impl ComposeFile {
 
             if let Some(depends_on) = &service.depends_on {
                 for dep in depends_on.iter() {
-                    if !self.services.contains_key(dep) {
+                    if !self.services.contains_key(dep) && depends_on.is_required(dep) {
                         return Err(ComposeError::Validation(format!(
                             "service '{name}' depends on unknown service '{dep}'"
                         )));

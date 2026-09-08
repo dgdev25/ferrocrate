@@ -17084,7 +17084,7 @@ fn build_compose_enabled_set(
         }
         if let Some(depends_on) = &service.depends_on {
             for dep in depends_on.iter() {
-                if !enabled.contains(dep) {
+                if !enabled.contains(dep) && depends_on.is_required(dep) {
                     return Err(format!(
                         "compose: service {name} depends on disabled profile service {dep}"
                     ));
@@ -17116,7 +17116,7 @@ fn compose_service_selection(
             .get(&name)
             .ok_or_else(|| format!("compose: unknown service {name}"))?;
         if let Some(depends_on) = &service.depends_on {
-            pending.extend(depends_on.iter().cloned());
+            pending.extend(depends_on.iter().filter(|dep| depends_on.is_required(dep) || project.compose.services.contains_key(*dep)).cloned());
         }
     }
     Ok(selected)
@@ -17201,17 +17201,21 @@ fn wait_for_compose_dependencies(
         ComposeDependsOn::Simple(_) => Ok(()),
         ComposeDependsOn::Conditional(map) => {
             for (service, condition) in map {
-                match condition.condition.as_str() {
-                    "service_started" => {}
-                    "service_healthy" => wait_for_compose_health(runtime, service)?,
+                let result = match condition.condition.as_str() {
+                    "service_started" => compose_dependency_container_ids(runtime, project_name, service).map(|_| ()),
+                    "service_healthy" => wait_for_compose_health(runtime, project_name, service),
                     "service_completed_successfully" => {
-                        wait_for_compose_completion(runtime, service)?
+                        wait_for_compose_completion(runtime, project_name, service)
                     }
                     other => {
                         return Err(format!(
                             "compose: unknown depends_on condition {other} for {service}"
                         ));
                     }
+                };
+                if let Err(error) = result {
+                    if condition.required { return Err(error); }
+                    eprintln!("compose: optional dependency {service}: {error}");
                 }
             }
             Ok(())

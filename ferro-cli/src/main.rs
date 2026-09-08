@@ -16297,7 +16297,7 @@ fn handle_compose(
             // down` can reconcile them.
             unsafe { std::env::set_var("FERROCRATE_DETACH_WORKLOAD", "1") };
             let order = compose_up(&project).map_err(|err| err.to_string())?;
-            let enabled = build_compose_enabled_set(&project, &profile)?;
+            let enabled = build_compose_enabled_set(&project, &profile, &services)?;
             let requested = compose_service_selection(&project, &services)?;
             let selected_services: Vec<_> = order
                 .into_iter()
@@ -17064,6 +17064,7 @@ fn compose_pull_with_origin(
 fn build_compose_enabled_set(
     project: &ComposeProject,
     profiles: &[String],
+    services: &[String],
 ) -> Result<HashSet<String>, String> {
     let profiles = project.active_profiles(profiles).map_err(|error| error.to_string())?;
     let mut enabled = HashSet::new();
@@ -17078,6 +17079,10 @@ fn build_compose_enabled_set(
         if active {
             enabled.insert(name.clone());
         }
+    }
+
+    if !services.is_empty() {
+        enabled.extend(compose_service_selection(project, services)?);
     }
 
     for (name, service) in &project.compose.services {

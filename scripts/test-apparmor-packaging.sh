@@ -11,7 +11,9 @@ trap 'rm -rf "$tmp"' EXIT
 test -f "$profile"
 grep -Fqx 'profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(default_allow) {' "$profile"
 grep -Eq '^[[:space:]]+userns,$' "$profile"
-grep -Eq '^[[:space:]]+/usr/bin/bwrap ix,$' "$profile"
+grep -Eq '^[[:space:]]+/usr/bin/bwrap px -> usr\.local\.bin\.ferrocrate-bwrap,$' "$profile"
+grep -Fqx 'profile usr.local.bin.ferrocrate-bwrap flags=(default_allow) {' "$profile"
+grep -Eq '^[[:space:]]+userns,$' "$profile"
 grep -Fq '# This profile does not grant Linux capabilities or change UID/GID mappings.' "$profile"
 
 if command -v apparmor_parser >/dev/null 2>&1; then

@@ -15646,7 +15646,7 @@ fn compose_project_volume_spec(
         .unwrap_or_default()
         .to_string();
     Ok((
-        format!("{project}_{source}"),
+        definition.name.clone().unwrap_or_else(|| if definition.external { source.into() } else { format!("{project}_{source}") }),
         definition.driver.clone().unwrap_or_else(|| "local".to_string()),
         definition.driver_opts.clone(),
     ))
@@ -15879,6 +15879,12 @@ fn prepare_compose_service(
             }
             let (volume_name, driver, driver_opts) =
                 compose_project_volume_spec(project_dir, compose, source)?;
+            if compose.volumes.as_ref().and_then(|definitions| definitions.get(source)).is_some_and(|definition| definition.external) {
+                if volume_store.get(&volume_name).map_err(|error| error.to_string())?.is_none() {
+                    return Err(format!("compose: external volume {volume_name} was not found"));
+                }
+                continue;
+            }
             if planned_volumes.insert(volume_name.clone())
                 && volume_store
                     .get(&volume_name)
@@ -16812,7 +16818,7 @@ fn handle_compose(
         ComposeCommands::Config => {
             output = serde_yaml::to_string(&project.compose).map_err(|error| error.to_string())?;
         }
-        ComposeCommands::Down { services, volumes: _ } => {
+        ComposeCommands::Down { services, volumes } => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
             let containers = runtime.list().map_err(|err| err.to_string())?;
             let requested = compose_explicit_service_selection(&project, &services)?;
@@ -16992,6 +16998,20 @@ fn handle_compose(
                     "compose down partial result: {}",
                     failures.join("; ")
                 ));
+            }
+            if volumes {
+                let remaining = runtime.list().map_err(|error| error.to_string())?;
+                for volume in volume_store.list().map_err(|error| error.to_string())? {
+                    if volume.labels.get("com.docker.compose.project").map(String::as_str) != Some(project_name) { continue; }
+                    if project.compose.volumes.as_ref().is_some_and(|definitions| definitions.iter().any(|(name, definition)|
+                        definition.external && definition.name.as_deref().unwrap_or(name) == volume.name
+                    )) { continue; }
+                    if !docker_volume_mount_usage(&volume.path, &remaining).is_empty() { continue; }
+                    let permit = surface_authorization.authorize_named(
+                        &parent_origin, AuthorizationAction::VolumeDelete, ResourceKind::Volume, &volume.name, 1,
+                    ).map_err(|error| error.to_string())?;
+                    execute_volume_remove(volume_store, &volume.name, permit)?;
+                }
             }
             if services.is_empty() {
                 remove_owned_compose_networks(

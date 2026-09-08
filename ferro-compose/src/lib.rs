@@ -416,6 +416,11 @@ pub struct Network {
 /// Named volume configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Volume {
+    /// Existing externally managed volume; never create or remove it.
+    #[serde(default)]
+    pub external: bool,
+    /// Explicit engine volume name.
+    pub name: Option<String>,
     /// Volume driver ("local", "nfs", etc.).
     pub driver: Option<String>,
 

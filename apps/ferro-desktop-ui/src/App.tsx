@@ -22,7 +22,7 @@ import type {
   VolumeAction,
   VolumeSummary,
 } from "./types";
-import { ComposeFileDialog, composeChooserMode, composeLogTarget, composeStatusClass } from "./composeView.mjs";
+import { ComposeFileDialog, ComposeServiceLogsButton, composeChooserMode, composeLogTarget, composeStatusClass } from "./composeView.mjs";
 import { loadContainerSelection, maskEnvironment, parseOptionalLimit } from "./containerDetail.mjs";
 import { DesktopTabBar, showGlobalRunAction } from "./desktopChrome.mjs";
 import { productSurfaceLabel } from "./surfaceLabel.mjs";
@@ -54,7 +54,7 @@ import {
 } from "./resourcePages.mjs";
 import type { ResourceDialog } from "./resourcePages.mjs";
 import { runtimeActionAvailability } from "./runtimeActions.mjs";
-import { submitRunContainer, applyLauncherPreset, requestedHostPorts, recoverPortConflict } from "./runContainer.mjs";
+import { initialRunContainerDraft, submitRunContainer, applyLauncherPreset, requestedHostPorts, recoverPortConflict } from "./runContainer.mjs";
 import {
   applyRemoteTerminalResize,
   applyTerminalResize,
@@ -152,6 +152,7 @@ function LocalApp(): JSX.Element {
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const terminalActiveRef = useRef(false);
+  const terminalGenerationRef = useRef(0);
   const [terminalActive, setTerminalActive] = useState(false);
   const [terminalShell, setTerminalShell] = useState("sh");
   const [terminalEnv, setTerminalEnv] = useState(DEFAULT_TERMINAL_ENV);
@@ -190,17 +191,7 @@ function LocalApp(): JSX.Element {
   const [resourceDialog, setResourceDialog] = useState<ResourceDialog>(null);
   const [resourceDialogError, setResourceDialogError] = useState<string | null>(null);
   const resourceDialogGenerationRef = useRef(0);
-  const [newContainerDraft, setNewContainerDraft] = useState<RunContainerDraft>({
-    image: "alpine:latest",
-    name: "",
-    command: "",
-    pullIfMissing: true,
-    ports: [{ host: "", container: "" }],
-    volumes: [{ source: "", target: "" }],
-    environment: "",
-    memoryMb: "",
-    cpus: "",
-  });
+  const [newContainerDraft, setNewContainerDraft] = useState<RunContainerDraft>(initialRunContainerDraft);
   const [registryTarget, setRegistryTarget] = useState("registry-1.docker.io");
   const [registryUsername, setRegistryUsername] = useState("");
   const [registryPassword, setRegistryPassword] = useState("");
@@ -321,6 +312,7 @@ function LocalApp(): JSX.Element {
       });
       const stopError = await listen<string>("terminal-error", (event) => setError(event.payload));
       const stopEnded = await listen<boolean>("terminal-ended", (event) => {
+        terminalGenerationRef.current += 1;
         terminalActiveRef.current = false;
         setTerminalActive(false);
         terminalRef.current?.writeln(event.payload ? "\r\n[exec exited]" : "\r\n[exec failed]");
@@ -772,6 +764,7 @@ function LocalApp(): JSX.Element {
 
   async function startTerminal(): Promise<void> {
     if (!beginRuntimeAction()) return;
+    const generation = ++terminalGenerationRef.current;
     setError(null);
     terminalRef.current?.clear();
     try {
@@ -782,6 +775,7 @@ function LocalApp(): JSX.Element {
         user: terminalUser.trim() || null,
         workdir: terminalWorkdir.trim() || null,
       });
+      if (generation !== terminalGenerationRef.current) return;
       terminalActiveRef.current = true;
       setTerminalActive(true);
       const terminal = terminalRef.current;
@@ -1052,7 +1046,7 @@ function LocalApp(): JSX.Element {
       },
       onSuccess: async () => {
         setRunDialogOpen(false);
-        setNewContainerDraft((current) => ({ ...current, name: "", command: "", environment: "" }));
+        setNewContainerDraft(initialRunContainerDraft());
         await Promise.all([refresh(), refreshNetworks(), refreshVolumes()]);
       },
       finish: finishRuntimeAction,
@@ -1151,8 +1145,7 @@ function LocalApp(): JSX.Element {
 
   async function showComposeLogs(service: ComposeServiceSummary): Promise<void> {
     const target = composeLogTarget(service);
-    setContainerTarget(target);
-    await startLogFollow(target);
+    await openServiceInspector(target, "logs");
   }
 
   async function buildImage(): Promise<void> {
@@ -1597,7 +1590,7 @@ function LocalApp(): JSX.Element {
                           <td className="muted">{image.size}</td>
                           <td className="muted">{image.created}</td>
                           <td>{imageIsUsed(image, containerImageReferences) ? <span className="status-chip">In use</span> : <span className="muted">Not in use</span>}</td>
-                          <td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${image.reference}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runAction("remove_image", "Image Remove", image.fullReference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></div></details></td>
+                          <td className="row-actions"><button className="btn btn-ghost danger-action" aria-label={`Remove image ${image.reference}`} onClick={() => void runAction("remove_image", "Image Remove", image.fullReference)} disabled={runtimeBusy}><Icon name="trash" size={16} />Remove image</button></td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -1635,7 +1628,7 @@ function LocalApp(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th>Usage</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {visibleVolumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${volume.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></div></details></td></tr>)}
+                    {visibleVolumes.map((volume) => <tr key={volume.name}><td className="container-name">{volume.name}</td><td>{volume.driver}</td><td className="mono muted-cell">{volume.mountpoint}</td><td>{volume.mounts.length ? <ul className="mount-list compact-list">{volume.mounts.map((mount) => <li key={`${mount.container_id}:${mount.destination}`}>{formatVolumeMount(mount)}</li>)}</ul> : <span className="muted">Unused</span>}</td><td className="row-actions"><button className="btn btn-ghost danger-action" aria-label={`Remove volume ${volume.name}`} onClick={() => void runVolumeAction("remove", "Volume Remove", volume.name)} disabled={runtimeBusy || volumesLoading || volumeIsInUse(volume)}><Icon name="trash" size={16} />Remove volume</button></td></tr>)}
                   </tbody></table></div>
                 </section>
               )
@@ -1658,7 +1651,7 @@ function LocalApp(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Name</th><th>Driver</th><th>Subnet</th><th>Containers</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${network.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button className="danger-action" onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></div></details></td></tr>)}
+                    {visibleNetworks.map((network) => <tr key={network.name}><td className="container-name">{network.name}</td><td>{network.driver}</td><td className="mono muted-cell">{network.subnets.length ? network.subnets.join(", ") : "Managed automatically"}</td><td>{network.containers.length ? <ul className="mount-list compact-list">{network.containers.map((attachment) => <li key={`${network.name}:${attachment.container_id}`}>{formatNetworkAttachment(attachment)}</li>)}</ul> : <span className="muted">None attached</span>}</td><td className="row-actions"><button className="btn btn-ghost danger-action" aria-label={`Remove network ${network.name}`} onClick={() => void runNetworkAction("remove", "Network Remove", network.name)} disabled={runtimeBusy || networksLoading || !networkIsRemovable(network) || network.containers.length > 0}><Icon name="trash" size={16} />Remove network</button></td></tr>)}
                   </tbody></table></div>
                 </section>
               )}
@@ -1687,7 +1680,7 @@ function LocalApp(): JSX.Element {
                     </details>
                   </div>
                   <div className="table-scroll"><table><thead><tr><th>Service</th><th>Status</th><th>Container</th><th aria-label="Actions" /></tr></thead><tbody>
-                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replace(/_/g, " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><details className="row-menu"><summary aria-label={`Actions for ${service.name}`}><Icon name="more" size={16} /></summary><div className="overflow-menu"><button onClick={() => { void showComposeLogs(service); setActiveSection("containers"); setInspectorOpen(true); setDetailTab("logs"); }} disabled={runtimeBusy || service.status === "not_created"}><Icon name="terminal" size={16} />Follow logs</button></div></details></td></tr>)}
+                    {composeSnapshot?.services.map((service) => <tr key={service.name}><td className="container-name">{service.name}</td><td><span className={`service-status ${composeStatusClass(service.status)}`}>{service.status.replace(/_/g, " ")}</span></td><td className="mono muted-cell">{service.container_id || "Not created"}</td><td className="row-actions"><ComposeServiceLogsButton service={service} busy={runtimeBusy} onLogs={(selected) => { void showComposeLogs(selected); setActiveSection("containers"); setInspectorOpen(true); setDetailTab("logs"); }} /></td></tr>)}
                   </tbody></table></div>
                   <details className="compose-config"><summary>Validated configuration</summary><pre>{composeSnapshot?.config}</pre></details>
                 </section>
@@ -1817,7 +1810,7 @@ function LocalApp(): JSX.Element {
 
       <DoctorDialog open={doctorDialogOpen} fix={doctorFix} bootstrap={doctorBootstrap} dryRun={doctorDryRun} confirm={doctorConfirm} busy={runtimeBusy} onFixChange={(event) => setDoctorFix(event.target.checked)} onBootstrapChange={(event) => setDoctorBootstrap(event.target.checked)} onDryRunChange={(event) => setDoctorDryRun(event.target.checked)} onConfirmChange={(event) => setDoctorConfirm(event.target.checked)} onCancel={() => setDoctorDialogOpen(false)} onRun={() => void runDoctor()} />
 
-      <AccountDialog open={settingsDialog === "account"} releaseBaseUrl={releaseBaseUrl} tokenEndpoint={tokenEndpoint} issuanceEndpoint={issuanceEndpoint} customerId={customerId} accessToken={accessToken} sessionToken={sessionTokenInput} authLoading={authLoading} accountConnected={Boolean(sessionSummary?.token_present)} plan={sessionSummary?.plan ?? null} expiresText={sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : null} entitlement={authState?.entitlement ?? {}} onReleaseBaseUrlChange={(event) => setReleaseBaseUrl(event.target.value)} onTokenEndpointChange={(event) => setTokenEndpoint(event.target.value)} onIssuanceEndpointChange={(event) => setIssuanceEndpoint(event.target.value)} onCustomerIdChange={(event) => setCustomerId(event.target.value)} onAccessTokenChange={(event) => setAccessToken(event.target.value)} onSessionTokenChange={(event) => setSessionTokenInput(event.target.value)} onClose={() => setSettingsDialog(null)} onSaveBackend={() => void saveBackendConfig()} onConnect={() => void acquireSessionToken()} onDisconnect={() => void clearSessionToken()} onRefresh={() => void refreshAuthState()} onSaveSession={() => void saveSessionToken()} />
+      <AccountDialog error={errorForSection(sectionErrors, "settings")} open={settingsDialog === "account"} releaseBaseUrl={releaseBaseUrl} tokenEndpoint={tokenEndpoint} issuanceEndpoint={issuanceEndpoint} customerId={customerId} accessToken={accessToken} sessionToken={sessionTokenInput} authLoading={authLoading} accountConnected={Boolean(sessionSummary?.token_present)} plan={sessionSummary?.plan ?? null} expiresText={sessionSummary?.expires_at ? `Session expires ${formatUnix(sessionSummary.expires_at)}` : null} entitlement={authState?.entitlement ?? {}} onReleaseBaseUrlChange={(event) => setReleaseBaseUrl(event.target.value)} onTokenEndpointChange={(event) => setTokenEndpoint(event.target.value)} onIssuanceEndpointChange={(event) => setIssuanceEndpoint(event.target.value)} onCustomerIdChange={(event) => setCustomerId(event.target.value)} onAccessTokenChange={(event) => setAccessToken(event.target.value)} onSessionTokenChange={(event) => setSessionTokenInput(event.target.value)} onClose={() => setSettingsDialog(null)} onSaveBackend={() => void saveBackendConfig()} onConnect={() => void acquireSessionToken()} onDisconnect={() => void clearSessionToken()} onRefresh={() => void refreshAuthState()} onSaveSession={() => void saveSessionToken()} />
 
       <InstallDialog open={settingsDialog === "install"} installerResult={installerResult} busy={runtimeBusy} onClose={() => setSettingsDialog(null)} onPreview={() => void runInstaller(true, false)} onInstall={() => void runInstaller(false, true)} />
 
@@ -1842,7 +1835,7 @@ function LocalApp(): JSX.Element {
       {pullImageDialogOpen ? (
         <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
-      <ComposeFileDialog open={composeFileDialogOpen} value={composeDraft} busy={runtimeBusy || composeLoading} onChange={(event) => { setComposeDraft(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} onCancel={() => setComposeFileDialogOpen(false)} />
+      <ComposeFileDialog open={composeFileDialogOpen} value={composeDraft} busy={runtimeBusy || composeLoading} error={errorForSection(sectionErrors, "compose")} onChange={(event) => { setComposeDraft(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} onCancel={() => setComposeFileDialogOpen(false)} />
 
       <BuildImageDialog open={buildImageDialogOpen} context={buildContext} tag={buildTag} dialogAvailable={dialogAvailable} busy={runtimeBusy} onContextChange={(event) => setBuildContext(event.target.value)} onChooseContext={() => void chooseBuildContext()} onTagChange={(event) => setBuildTag(event.target.value)} onCancel={() => setBuildImageDialogOpen(false)} onBuild={() => void buildImage()} />
 
@@ -1860,7 +1853,7 @@ function LocalApp(): JSX.Element {
         onOpenSettings={() => { setLicensingDialogOpen(false); setActiveSection("settings"); }}
       />
 
-      <RegistryDialog open={registryDialogOpen} target={registryTarget} username={registryUsername} password={registryPassword} status={registryStatus} accountName={registryAccountName} busy={runtimeBusy} loading={registryLoading} onTargetChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} onUsernameChange={(event) => setRegistryUsername(event.target.value)} onPasswordChange={(event) => setRegistryPassword(event.target.value)} onCancel={() => setRegistryDialogOpen(false)} onCheck={() => void refreshRegistryAuth()} onLogout={() => void logoutRegistry()} onLogin={() => void loginRegistry()} />
+      <RegistryDialog error={error} open={registryDialogOpen} target={registryTarget} username={registryUsername} password={registryPassword} status={registryStatus} accountName={registryAccountName} busy={runtimeBusy} loading={registryLoading} onTargetChange={(event) => { setRegistryTarget(event.target.value); setRegistryStatus(null); }} onUsernameChange={(event) => setRegistryUsername(event.target.value)} onPasswordChange={(event) => setRegistryPassword(event.target.value)} onCancel={() => setRegistryDialogOpen(false)} onCheck={() => void refreshRegistryAuth()} onLogout={() => void logoutRegistry()} onLogin={() => void loginRegistry()} />
     </div>
   );
 

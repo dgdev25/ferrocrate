@@ -24,11 +24,10 @@ function tabButton(section, icon, label, activeSection, onSelect, count, iconOnl
     className: `desktop-tab${active ? " active" : ""}`,
     onClick: () => onSelect(section),
     "aria-current": active ? "page" : undefined,
-    "aria-label": label,
   },
   createElement(Icon, { name: icon, size: 16, className: "tab-icon" }),
   createElement("span", { className: iconOnly ? "visually-hidden" : undefined }, label),
-  count == null ? null : createElement("span", { className: "tab-count" }, count));
+  count == null ? null : createElement("span", { className: "tab-count" }, ` ${count}`));
 }
 
 export function DesktopTabBar({ activeSection, counts, onSelect }) {

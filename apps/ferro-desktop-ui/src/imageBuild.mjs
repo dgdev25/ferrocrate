@@ -1,3 +1,4 @@
+import { DialogFocusScope } from "./modalFocus.mjs";
 import { createElement } from "react";
 import { failurePresentation } from "./resourcePages.mjs";
 
@@ -91,7 +92,8 @@ export function BuildHistoryList({ builds, disabled, onNewBuild, onStart, onRevi
 
 export function BuildLicensingDialog({ open, detail, onClose, onOpenSettings }) {
   if (!open) return null;
-  return createElement("div", { className: "modal-backdrop", role: "presentation" },
+  return createElement(DialogFocusScope, { dialogId: "build-licensing-dialog-title", onClose: onClose },
+    createElement("div", { className: "modal-backdrop", role: "presentation" },
     createElement("section", { className: "run-dialog licensing-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": "build-licensing-dialog-title" },
       createElement("div", { className: "drawer-header" },
         createElement("div", null,
@@ -110,6 +112,7 @@ export function BuildLicensingDialog({ open, detail, onClose, onOpenSettings }) 
       createElement("div", { className: "panel-actions dialog-actions" },
         createElement("button", { className: "btn btn-secondary", onClick: onOpenSettings }, "Open technical settings"),
       ),
+    ),
     ),
   );
 }

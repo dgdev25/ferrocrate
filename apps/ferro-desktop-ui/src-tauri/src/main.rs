@@ -2375,10 +2375,26 @@ fn now_unix() -> u64 {
 }
 
 fn config_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("FERROCRATE_DESKTOP_AUTH_CONFIG") {
+        let path = desktop_auth_override_path(path)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create config dir: {err}"))?;
+        }
+        return Ok(path);
+    }
     let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
     let dir = PathBuf::from(home).join(".ferrocrate");
     fs::create_dir_all(&dir).map_err(|err| format!("failed to create config dir: {err}"))?;
     Ok(dir.join("desktop-ui-auth.json"))
+}
+
+fn desktop_auth_override_path(path: std::ffi::OsString) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err("FERROCRATE_DESKTOP_AUTH_CONFIG must be an absolute file path".to_string());
+    }
+    Ok(path)
 }
 
 fn read_paid_backend_config() -> Result<Option<PaidBackendConfig>, String> {
@@ -2487,6 +2503,42 @@ fn parse_jwt_claims(token: &str) -> Option<JsonValue> {
     serde_json::from_slice::<JsonValue>(&payload).ok()
 }
 
+fn validated_service_url(label: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| format!("{label} must be a valid HTTP or HTTPS URL"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
+    {
+        return Err(format!("{label} must be an HTTP or HTTPS URL without credentials or a fragment"));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_session_token_format(token: &str) -> Result<(), String> {
+    let invalid = || "Session token must be a signed JWT with a future expiry".to_string();
+    let parts: Vec<_> = token.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(invalid());
+    }
+    let decode = |value| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value);
+    let header: JsonValue = serde_json::from_slice(&decode(parts[0]).map_err(|_| invalid())?)
+        .map_err(|_| invalid())?;
+    let algorithm = header.get("alg").and_then(JsonValue::as_str).ok_or_else(invalid)?;
+    if algorithm.is_empty() || algorithm.eq_ignore_ascii_case("none")
+        || decode(parts[2]).map_err(|_| invalid())?.is_empty()
+    {
+        return Err(invalid());
+    }
+    let claims = parse_jwt_claims(token).ok_or_else(invalid)?;
+    if claims.get("exp").and_then(JsonValue::as_u64).is_none_or(|exp| exp <= now_unix()) {
+        return Err(invalid());
+    }
+    // Shape validation is not authentication. Call the configured real service
+    // before storing a token; its signature and entitlement checks are authoritative.
+    Ok(())
+}
+
 fn session_summary_from_token(token: Option<String>) -> SessionSummary {
     let Some(token) = token else {
         return SessionSummary {
@@ -2524,7 +2576,10 @@ fn query_entitlement_from_session(
     config: &PaidBackendConfig,
     session_token: &str,
 ) -> Result<EntitlementSummary, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|err| format!("token client initialization failed: {err}"))?;
     let resp = client
         .post(&config.token_endpoint)
         .header("Authorization", format!("Bearer {session_token}"))
@@ -2539,23 +2594,44 @@ fn query_entitlement_from_session(
     if !status.is_success() {
         return Err(format!("token endpoint rejected session: {body}"));
     }
-    let parsed = serde_json::from_str::<JsonValue>(&body)
-        .map_err(|err| format!("token endpoint invalid JSON: {err}"))?;
+    parse_entitlement_response(&body)
+}
+
+fn parse_entitlement_response(body: &str) -> Result<EntitlementSummary, String> {
+    let parsed = serde_json::from_str::<JsonValue>(body).map_err(|err| {
+        format!("Token service returned invalid JSON. Check the service connection: {err}")
+    })?;
+    if let Some(error) = parsed.get("error").filter(|error| !error.is_null()) {
+        return Err(format!("Token service rejected the session: {error}"));
+    }
+    let invalid = || {
+        "Token service returned an invalid success response. Check the Token service URL and try again; the session was not saved.".to_string()
+    };
+    // The real gateway contract is a newly issued token, its future expiry and
+    // a named plan. A 200 response from an unrelated JSON endpoint is not proof
+    // that the submitted session was authenticated.
+    parsed
+        .get("token")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
     let plan = parsed
         .get("plan")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string);
-    let message = parsed
-        .get("error")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string);
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
+    let expires_at = parsed
+        .get("expires_at")
+        .and_then(JsonValue::as_u64)
+        .filter(|expires_at| *expires_at > now_unix())
+        .ok_or_else(invalid)?;
     Ok(EntitlementSummary {
         status: "ok".to_string(),
-        plan,
+        plan: Some(plan.to_string()),
         subject: None,
-        expires_at: parsed.get("expires_at").and_then(|v| v.as_u64()),
+        expires_at: Some(expires_at),
         features: Vec::new(),
-        message,
+        message: None,
     })
 }
 
@@ -2860,38 +2936,91 @@ fn run_new_container(
     cpu_quota: Option<u64>,
     cpu_period: Option<u64>,
 ) -> Result<CommandResult, String> {
+    run_new_container_with(
+        image,
+        name,
+        command,
+        ports,
+        volumes,
+        pull_if_missing,
+        environment,
+        memory,
+        cpu_quota,
+        cpu_period,
+        |args| run_owned_command("ferro-desktop", args),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_new_container_with(
+    image: String,
+    name: Option<String>,
+    command: Vec<String>,
+    ports: Vec<String>,
+    volumes: Vec<String>,
+    pull_if_missing: bool,
+    environment: Vec<String>,
+    memory: Option<u64>,
+    cpu_quota: Option<u64>,
+    cpu_period: Option<u64>,
+    mut run: impl FnMut(&[String]) -> CommandResult,
+) -> Result<CommandResult, String> {
+    let mut run_image = image.trim().to_string();
     if pull_if_missing {
-        let images = run_owned_command(
-            "ferro-desktop",
-            &ferrocrate_proxy_command(&["images", "--format", "json"]),
-        );
+        let images = run(&ferrocrate_proxy_command(&["images", "--format", "json"]));
         if !images.ok {
             return Ok(images);
         }
         if !image_list_contains(&images.stdout, image.trim()) {
-            let pull = run_owned_command(
-                "ferro-desktop",
-                &ferrocrate_proxy_command(&["pull", image.trim()]),
-            );
+            let pull = run(&ferrocrate_proxy_command(&["pull", image.trim()]));
             if !pull.ok {
                 return Ok(pull);
             }
         }
+    } else {
+        let mut inspected = run(&ferrocrate_proxy_command(&[
+            "image-inspect",
+            image.trim(),
+            "--format",
+            "json",
+        ]));
+        if !inspected.ok {
+            inspected.message = format!(
+                "Cannot launch {} from local images. Pull image if it is not available locally is disabled. Pull the image first or enable that option.",
+                image.trim()
+            );
+            return Ok(inspected);
+        }
+        let payload: JsonValue = serde_json::from_str(&inspected.stdout).map_err(|_| {
+            "Local image inspection returned invalid JSON; launch was not started".to_string()
+        })?;
+        let digest = payload
+            .get("Id")
+            .and_then(JsonValue::as_str)
+            .filter(|id| {
+                id.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            })
+            .ok_or_else(|| {
+                "Local image inspection did not return a full image digest; launch was not started"
+                    .to_string()
+            })?;
+        // Native run treats raw full digests as local-only selectors. If this
+        // image disappears after inspection, run fails without a registry pull.
+        run_image = digest.to_string();
     }
-    Ok(run_owned_command(
-        "ferro-desktop",
-        &run_container_bridge_command(
-            &image,
-            name.as_deref(),
-            &command,
-            &ports,
-            &volumes,
-            &environment,
-            memory,
-            cpu_quota,
-            cpu_period,
-        )?,
-    ))
+    Ok(run(&run_container_bridge_command(
+        &run_image,
+        name.as_deref(),
+        &command,
+        &ports,
+        &volumes,
+        &environment,
+        memory,
+        cpu_quota,
+        cpu_period,
+    )?))
 }
 
 #[tauri::command]
@@ -2946,7 +3075,11 @@ fn get_paid_auth_state() -> Result<PaidAuthState, String> {
     let token = get_session_token()?;
     let session = session_summary_from_token(token.clone());
     let entitlement = match (&config, token) {
-        (Some(cfg), Some(token_value)) => query_entitlement_from_session(cfg, &token_value).ok(),
+        (Some(cfg), Some(token_value)) => Some(query_entitlement_from_session(cfg, &token_value)
+            .unwrap_or_else(|message| EntitlementSummary {
+                status: "error".to_string(), plan: None, subject: None, expires_at: None,
+                features: Vec::new(), message: Some(message),
+            })),
         _ => None,
     };
     Ok(PaidAuthState {
@@ -2962,13 +3095,11 @@ fn save_paid_backend_config(
     token_endpoint: String,
     issuance_endpoint: Option<String>,
 ) -> Result<(), String> {
-    if release_base_url.trim().is_empty() || token_endpoint.trim().is_empty() {
-        return Err("release_base_url and token_endpoint are required".to_string());
-    }
     write_paid_backend_config(&PaidBackendConfig {
-        release_base_url,
-        token_endpoint,
-        issuance_endpoint,
+        release_base_url: validated_service_url("Release service URL", &release_base_url)?,
+        token_endpoint: validated_service_url("Token service URL", &token_endpoint)?,
+        issuance_endpoint: issuance_endpoint.filter(|value| !value.trim().is_empty())
+            .map(|value| validated_service_url("Session service URL", &value)).transpose()?,
     })
 }
 
@@ -2977,8 +3108,13 @@ fn set_paid_session_token(token: String) -> Result<SessionSummary, String> {
     if token.trim().is_empty() {
         return Err("session token is required".to_string());
     }
-    set_session_token(token.trim())?;
-    Ok(session_summary_from_token(Some(token)))
+    let token = token.trim();
+    validate_session_token_format(token)?;
+    let config = read_paid_backend_config()?
+        .ok_or_else(|| "Save the service connection before saving a session".to_string())?;
+    query_entitlement_from_session(&config, token)?;
+    set_session_token(token)?;
+    Ok(session_summary_from_token(Some(token.to_string())))
 }
 
 #[tauri::command]
@@ -2995,7 +3131,9 @@ fn acquire_paid_session(
         .issuance_endpoint
         .ok_or_else(|| "issuance_endpoint is not configured".to_string())?;
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30)).build()
+        .map_err(|err| format!("session client initialization failed: {err}"))?;
     let mut req = client
         .post(issuance)
         .json(&serde_json::json!({ "customer_id": customer_id.trim() }));
@@ -3020,8 +3158,7 @@ fn acquire_paid_session(
         .get("session_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "session issuance response missing session_token".to_string())?;
-    set_session_token(token)?;
-    Ok(session_summary_from_token(Some(token.to_string())))
+    set_paid_session_token(token.to_string())
 }
 
 #[tauri::command]
@@ -3214,6 +3351,16 @@ fn doctor_command(fix: bool, bootstrap: bool, dry_run: bool, confirm: bool) -> V
 
 #[tauri::command]
 fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandResult {
+    run_desktop_action_with(action, target, |args| {
+        run_owned_command("ferro-desktop", args)
+    })
+}
+
+fn run_desktop_action_with(
+    action: DesktopAction,
+    target: Option<String>,
+    mut run: impl FnMut(&[String]) -> CommandResult,
+) -> CommandResult {
     let target = target.unwrap_or_default().trim().to_string();
     match action {
         DesktopAction::VmStart => match start_desktop_daemon() {
@@ -3240,51 +3387,34 @@ fn run_desktop_action(action: DesktopAction, target: Option<String>) -> CommandR
             if target.is_empty() {
                 return command_input_failure("target image is required");
             }
-            run_owned_command(
-                "ferro-desktop",
-                &ferrocrate_proxy_command(&["pull", &target]),
-            )
+            run(&ferrocrate_proxy_command(&["pull", &target]))
         }
         DesktopAction::RemoveImage => {
             if target.is_empty() {
                 return command_input_failure("target image is required");
             }
-            run_owned_command(
-                "ferro-desktop",
-                &ferrocrate_proxy_command(&["rmi", &target]),
-            )
+            run(&ferrocrate_proxy_command(&["rmi", &target]))
         }
         DesktopAction::StartContainer => {
             if target.is_empty() {
                 return command_input_failure("target container is required");
             }
-            run_owned_command(
-                "ferro-desktop",
-                &ferrocrate_proxy_command(&["start", &target]),
-            )
+            run(&ferrocrate_proxy_command(&["start", &target]))
         }
         DesktopAction::StopContainer => {
             if target.is_empty() {
                 return command_input_failure("target container is required");
             }
-            run_owned_command(
-                "ferro-desktop",
-                &ferrocrate_proxy_command(&["stop", &target]),
-            )
+            run(&ferrocrate_proxy_command(&["stop", &target]))
         }
         DesktopAction::RemoveContainer => {
             if target.is_empty() {
                 return command_input_failure("target container is required");
             }
-            run_owned_command("ferro-desktop", &ferrocrate_proxy_command(&["rm", &target]))
+            run(&ferrocrate_proxy_command(&["rm", &target]))
         }
-        DesktopAction::ContainerPrune => run_owned_command(
-            "ferro-desktop",
-            &ferrocrate_proxy_command(&["container-prune"]),
-        ),
-        DesktopAction::ImagePrune => {
-            run_owned_command("ferro-desktop", &ferrocrate_proxy_command(&["image-prune"]))
-        }
+        DesktopAction::ContainerPrune => run(&ferrocrate_proxy_command(&["container-prune"])),
+        DesktopAction::ImagePrune => run(&ferrocrate_proxy_command(&["image-prune", "--all"])),
     }
 }
 
@@ -3430,6 +3560,86 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires scripts/run-desktop-auth-fixture.sh"]
+    fn paid_session_lifecycle_with_real_isolated_services() {
+        assert_eq!(std::env::var("FERROCRATE_AUTH_FIXTURE_ACTIVE").as_deref(), Ok("1"));
+        let root = std::path::PathBuf::from(std::env::var_os("FERROCRATE_AUTH_FIXTURE_DIR").unwrap());
+        assert_eq!(super::config_path().unwrap(), root.join("desktop-auth.json"));
+        let info: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("fixture-info.json")).unwrap()).unwrap();
+        let release = info["release_base_url"].as_str().unwrap().to_string();
+        let endpoint = info["token_endpoint"].as_str().unwrap().to_string();
+        super::save_paid_backend_config(release.clone(), endpoint.clone(), None).unwrap();
+        assert!(super::save_paid_backend_config(release, "invalid".to_string(), None).is_err());
+        assert_eq!(super::read_paid_backend_config().unwrap().unwrap().token_endpoint, endpoint);
+        let token = std::fs::read_to_string(root.join("session.jwt")).unwrap();
+        super::set_paid_session_token(token.clone()).unwrap();
+        assert_eq!(super::get_session_token().unwrap().as_deref(), Some(token.as_str()));
+        assert!(super::set_paid_session_token("invalid".to_string()).is_err());
+        let mut forged = token.clone();
+        let signature_start = forged.rfind('.').unwrap() + 1;
+        let replacement = if &forged[signature_start..signature_start + 1] == "A" { "B" } else { "A" };
+        forged.replace_range(signature_start..signature_start + 1, replacement);
+        assert!(super::set_paid_session_token(forged).is_err());
+        assert_eq!(super::get_session_token().unwrap().as_deref(), Some(token.as_str()));
+        let state = super::get_paid_auth_state().unwrap();
+        assert!(state.session.token_present);
+        assert_eq!(state.entitlement.unwrap().plan.as_deref(), Some("pro"));
+        super::clear_paid_session().unwrap();
+        assert!(!super::get_paid_auth_state().unwrap().session.token_present);
+    }
+
+    #[test]
+    fn token_service_malformed_success_cannot_authenticate_a_session() {
+        let future = super::now_unix() + 600;
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"error": {"message": "invalid signature"}}),
+            serde_json::json!({"plan": "pro", "expires_at": future}),
+            serde_json::json!({"token": "", "plan": "pro", "expires_at": future}),
+            serde_json::json!({"token": "issued", "plan": "pro", "expires_at": 1}),
+            serde_json::json!({"token": "issued", "plan": 7, "expires_at": future}),
+            serde_json::json!({"token": "issued", "plan": "pro", "expires_at": "future"}),
+        ] {
+            assert!(
+                super::parse_entitlement_response(&value.to_string()).is_err(),
+                "accepted {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_urls_require_http_hosts_without_embedded_credentials() {
+        for invalid in ["", "not a URL", "ftp://example.com", "https://user:secret@example.com", "https://example.com/#secret"] {
+            assert!(super::validated_service_url("Token service URL", invalid).is_err());
+        }
+        assert_eq!(super::validated_service_url("Token service URL", " http://127.0.0.1:49190/v1/token ").unwrap(), "http://127.0.0.1:49190/v1/token");
+    }
+
+    #[test]
+    fn malformed_unsigned_and_expired_session_tokens_are_rejected() {
+        use base64::Engine;
+        let encode = |value: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value);
+        for token in ["garbage".to_string(), "a.b.c.d".to_string(),
+            format!("{}.{}.x", encode(r#"{"alg":"none"}"#), encode(r#"{"exp":9999999999}"#)),
+            format!("{}.{}.eA", encode(r#"{"alg":"HS256"}"#), encode(r#"{"exp":1}"#))] {
+            assert!(super::validate_session_token_format(&token).is_err());
+        }
+    }
+
+    #[test]
+    fn desktop_auth_override_requires_an_explicit_absolute_file() {
+        assert_eq!(
+            super::desktop_auth_override_path("/tmp/isolated/auth.json".into()).unwrap(),
+            std::path::PathBuf::from("/tmp/isolated/auth.json")
+        );
+        for invalid in ["", "auth.json", "/"] {
+            assert!(super::desktop_auth_override_path(invalid.into()).is_err());
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::io::{Cursor, Read, Write};
     use std::path::PathBuf;
@@ -4543,6 +4753,159 @@ mod tests {
                 "printf",
                 "sentinel-command",
             ]
+        );
+    }
+
+    #[test]
+    fn unchecked_launch_requires_local_inspect_and_runs_only_immutable_digest() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for image in [
+            "alpine",
+            "alpine:latest",
+            "docker.io/library/alpine:latest",
+            "alpine:3.20",
+        ] {
+            let mut calls = Vec::new();
+            let result = super::run_new_container_with(
+                image.into(),
+                None,
+                vec![],
+                vec![],
+                vec![],
+                false,
+                vec![],
+                None,
+                None,
+                None,
+                |args| {
+                    calls.push(args.to_vec());
+                    super::CommandResult {
+                        ok: true,
+                        code: 0,
+                        stdout: serde_json::json!({"Id": digest}).to_string(),
+                        stderr: String::new(),
+                        message: String::new(),
+                    }
+                },
+            )
+            .expect("run result");
+            assert!(result.ok);
+            assert_eq!(
+                calls[0],
+                super::ferrocrate_proxy_command(&["image-inspect", image, "--format", "json"])
+            );
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[1].last(), Some(&digest));
+            assert!(!calls
+                .iter()
+                .any(|args| args.iter().any(|arg| arg == "pull")));
+        }
+    }
+
+    #[test]
+    fn unchecked_launch_rejects_missing_or_malformed_image_without_run_or_pull() {
+        for (ok, output) in [
+            (false, "missing"),
+            (true, "null"),
+            (true, "{}"),
+            (true, "{\"Id\":\"alpine:latest\"}"),
+        ] {
+            let mut calls = Vec::new();
+            let result = super::run_new_container_with(
+                "missing:latest".into(),
+                None,
+                vec![],
+                vec![],
+                vec![],
+                false,
+                vec![],
+                None,
+                None,
+                None,
+                |args| {
+                    calls.push(args.to_vec());
+                    super::CommandResult {
+                        ok,
+                        code: if ok { 0 } else { 1 },
+                        stdout: output.into(),
+                        stderr: "image missing".into(),
+                        message: String::new(),
+                    }
+                },
+            );
+            assert!(result.is_err() || !result.unwrap().ok);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0][3], "image-inspect");
+        }
+    }
+
+    #[test]
+    fn checked_launch_still_pulls_missing_image_and_unchecked_disappearance_does_not_retry() {
+        for pull_if_missing in [true, false] {
+            let digest = format!("sha256:{}", "b".repeat(64));
+            let mut calls = Vec::new();
+            let result = super::run_new_container_with(
+                "alpine:3.20".into(),
+                None,
+                vec![],
+                vec![],
+                vec![],
+                pull_if_missing,
+                vec![],
+                None,
+                None,
+                None,
+                |args| {
+                    calls.push(args.to_vec());
+                    let command = args[3].as_str();
+                    super::CommandResult {
+                        ok: command != "run" || pull_if_missing,
+                        code: if command == "run" && !pull_if_missing {
+                            1
+                        } else {
+                            0
+                        },
+                        stdout: if command == "images" {
+                            "[]".into()
+                        } else {
+                            serde_json::json!({"Id": digest}).to_string()
+                        },
+                        stderr: String::new(),
+                        message: String::new(),
+                    }
+                },
+            )
+            .expect("result");
+            let commands: Vec<_> = calls.iter().map(|args| args[3].as_str()).collect();
+            if pull_if_missing {
+                assert!(result.ok);
+                assert_eq!(commands, ["images", "pull", "run"]);
+                assert_eq!(calls[2].last().map(String::as_str), Some("alpine:3.20"));
+            } else {
+                assert!(!result.ok);
+                assert_eq!(commands, ["image-inspect", "run"]);
+                assert_eq!(calls[1].last(), Some(&digest));
+            }
+        }
+    }
+
+    #[test]
+    fn prune_unused_images_includes_tagged_images_without_forcing_in_use_removal() {
+        let mut calls = Vec::new();
+        let result = super::run_desktop_action_with(super::DesktopAction::ImagePrune, None, |args| {
+            calls.push(args.to_vec());
+            super::CommandResult {
+                ok: true,
+                code: 0,
+                stdout: "pruned".into(),
+                stderr: String::new(),
+                message: String::new(),
+            }
+        });
+        assert!(result.ok);
+        assert_eq!(
+            calls,
+            vec![super::ferrocrate_proxy_command(&["image-prune", "--all"])]
         );
     }
 

@@ -1,5 +1,6 @@
 export type MappingRow = { source: string; target: string };
 export type PortRow = { host: string; container: string };
+export function initialRunContainerDraft(): import('./dialogForms.mjs').RunContainerDraft;
 export function parseCommandWords(command: string): string[];
 export function buildRunContainerOptions(input: {
   command: string;
@@ -31,7 +32,7 @@ export function buildRunContainerInvokeArgs(input: {
   cpuPeriod: number | null;
 };
 export function submitRunContainer<Result extends { ok: boolean; code: number; message?: string; stderr: string }>(options: {
-  invoke: (command: "run_new_container", payload: ReturnType<typeof buildRunContainerInvokeArgs>) => Promise<Result>;
+  invoke: (command: "run_new_container", payload: ReturnType<typeof buildRunContainerInvokeArgs>, options?: { timeoutMs: number }) => Promise<Result>;
   payload: ReturnType<typeof buildRunContainerInvokeArgs>;
   begin: () => boolean;
   onBegin: () => void;

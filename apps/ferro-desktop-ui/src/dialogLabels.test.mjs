@@ -3,10 +3,29 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AccountDialog, BuildImageDialog, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
-import { BuildLicensingDialog } from "./imageBuild.mjs";
+import { AccountDialog, BuildImageDialog, credentialErrorMessage, DoctorDialog, InstallDialog, RegistryDialog, RunContainerDialog } from "./dialogForms.mjs";
+import { ComposeFileDialog } from "./composeView.mjs";
 import { PullImageDialog } from "./imageView.mjs";
+import { BuildLicensingDialog } from "./imageBuild.mjs";
 import { LicensingDialog, ResourceCreateDialog } from "./resourcePages.mjs";
+import { DialogFocusScope } from "./modalFocus.mjs";
+
+test("standalone modal families connect shared keyboard isolation and close handling", () => {
+  const close = () => {};
+  for (const element of [
+    ComposeFileDialog({ open: true, value: "", onCancel: close }),
+    PullImageDialog({ open: true, imageTarget: "", onCancel: close }),
+    ResourceCreateDialog({ kind: "volume", name: "", onCancel: close }),
+    ResourceCreateDialog({ kind: "network", name: "", onCancel: close }),
+    LicensingDialog({ open: true, onClose: close }),
+    BuildLicensingDialog({ open: true, onClose: close }),
+  ]) {
+    assert.equal(element.type, DialogFocusScope);
+    assert.equal(element.props.onClose, close);
+    assert.ok(element.props.dialogId);
+    assert.doesNotMatch(renderToStaticMarkup(element), /autofocus/i);
+  }
+});
 import { submitRunContainer } from "./runContainer.mjs";
 
 const noop = () => {};
@@ -35,6 +54,37 @@ function appDialogProps() {
     registry: { open: true, target: "registry.example.com", username: "", password: "", status: null, accountName: "", busy: false, loading: false, onTargetChange: noop, onUsernameChange: noop, onPasswordChange: noop, onCancel: noop, onCheck: noop, onLogout: noop, onLogin: noop },
   };
 }
+
+test("account failures remain visible inside the editable modal", () => {
+  const props = appDialogProps().account;
+  for (const extra of [{ error: "Token service URL must be valid" },
+    { entitlement: { status: "error", message: "token endpoint rejected session" } }]) {
+    const markup = renderToStaticMarkup(createElement(AccountDialog, { ...props, ...extra }));
+    assert.match(markup, /role="alert"/);
+    assert.match(markup, /Token service URL must be valid|token endpoint rejected session/);
+    assert.match(markup, /id="account-token-service-url"/);
+  }
+});
+
+test("credential failures show safe actionable headlines without copying server responses", () => {
+  assert.match(credentialErrorMessage("Error: Token service URL must be a valid HTTP or HTTPS URL"), /Token service URL.*HTTP or HTTPS/);
+  assert.match(credentialErrorMessage("Error: Session token must be a signed JWT with a future expiry"), /valid.*unexpired/i);
+  assert.match(credentialErrorMessage("Error: token endpoint request failed: secret-response"), /cannot be reached/);
+  assert.match(credentialErrorMessage("Error: issuance_endpoint is not configured"), /Session service URL/);
+  const rejection = credentialErrorMessage("error: login: registry rejected credentials: 401 secret-response");
+  assert.match(rejection, /username.*password/i);
+  assert.doesNotMatch(rejection, /secret-response/);
+  assert.equal(credentialErrorMessage("unexpected secret-response"), undefined);
+});
+
+test("registry rejected credentials stay visible beside the retry form", () => {
+  const markup = renderToStaticMarkup(createElement(RegistryDialog, {
+    ...appDialogProps().registry, error: "login: registry rejected credentials: 401",
+  }));
+  assert.match(markup, /role="alert"/);
+  assert.match(markup, /Check the username and password/);
+  assert.match(markup, /id="registry-password"/);
+});
 
 test("every rendered dialog control has one stable explicit accessible name", () => {
   const props = appDialogProps();
@@ -94,4 +144,48 @@ test("Run container edits invoke the native command with the entered name and pa
   assert.equal(calls[0].command, "run_new_container");
   assert.equal(calls[0].payload.name, "sentinel-worker");
   assert.deepEqual(calls[0].payload.command, ["printf", "sentinel-command"]);
+});
+
+test("launcher starts with an explicit preset or custom choice and preserves custom draft settings", () => {
+  const props = { ...appDialogProps().run, onPreset: noop };
+  props.onDraftChange = draft => { props.draft = draft; };
+  let tree = RunContainerDialog(props);
+  assert.equal(findElement(tree, node => node.props?.id === "run-container-submit").props.disabled, true);
+  const custom = findElement(tree, node => node.type === "button" && node.props.children === "Custom image");
+  custom.props.onClick();
+  tree = RunContainerDialog(props);
+  assert.equal(findElement(tree, node => node.props?.id === "run-container-submit").props.disabled, false);
+  assert.equal(props.draft.image, "alpine:latest");
+  assert.equal(props.draft.pullIfMissing, true);
+  const markup = renderToStaticMarkup(tree);
+  assert.match(markup, /PostgreSQL database/);
+  assert.match(markup, /Redis cache/);
+  assert.match(markup, /Nginx web server/);
+});
+
+test("preset summary keeps credentials private and Advanced retains editable launch settings", async () => {
+  const props = { ...appDialogProps().run, onPreset: noop };
+  props.draft = { ...props.draft, image: "postgres:17-alpine", name: "ferro-postgres-test", ports: [{ host: "55432", container: "5432" }], volumes: [{ source: "db-data", target: "/var/lib/postgresql/data" }], environment: "POSTGRES_PASSWORD=generated-secret" };
+  props.onDraftChange = draft => { props.draft = draft; };
+  let payload;
+  props.onRun = value => { payload = value; };
+  let tree = RunContainerDialog(props);
+  const summary = findElement(tree, node => node.props?.["aria-label"] === "Launch setup");
+  const markup = renderToStaticMarkup(summary);
+  assert.match(markup, /postgres:17-alpine/);
+  assert.match(markup, /localhost:55432/);
+  assert.match(markup, /db-data/);
+  assert.doesNotMatch(markup, /generated-secret/);
+  findElement(tree, node => node.props?.id === "run-container-image").props.onChange({ target: { value: "postgres:18-alpine" } });
+  tree = RunContainerDialog(props);
+  assert.equal(findElement(tree, node => node.props?.id === "run-container-submit").props.disabled, false);
+  await findElement(tree, node => node.props?.id === "run-container-submit").props.onClick();
+  assert.equal(payload.image, "postgres:18-alpine");
+  assert.deepEqual(payload.ports, ["55432:5432"]);
+  assert.deepEqual(payload.volumes, ["db-data:/var/lib/postgresql/data"]);
+  assert.deepEqual(payload.environment, ["POSTGRES_PASSWORD=generated-secret"]);
+  assert.equal("launcherPreset" in payload, false);
+  props.error = "Memory must be a positive number of MB";
+  tree = RunContainerDialog(props);
+  assert.equal(findElement(tree, node => node.type === "details" && node.props.className?.includes("launcher-advanced")).props.open, true);
 });

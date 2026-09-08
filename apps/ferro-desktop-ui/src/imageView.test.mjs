@@ -130,3 +130,11 @@ test("rendered image page states have exactly one primary pull CTA", () => {
   assert.equal((empty.match(/btn btn-primary/g) || []).length, 1);
   assert.match(empty, /There are no local images\./);
 });
+
+test('digest-pinned running containers mark their tagged image in use', () => {
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const row = imageView.parseImageRows(JSON.stringify([{ Id: digest, RepoTags: ['registry-1.docker.io/library/alpine:latest'] }]))[0];
+  assert.equal(imageView.imageIsUsed(row, [`registry-1.docker.io/library/alpine@${digest}`]), true);
+  assert.equal(imageView.imageIsUsed(row, [digest]), true);
+  assert.equal(imageView.imageIsUsed(row, [`registry-1.docker.io/library/alpine@sha256:${'b'.repeat(64)}`]), false);
+});

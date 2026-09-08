@@ -32,3 +32,31 @@ test("Compose chooses a validated host-path fallback when native dialogs are una
   assert.match(markup, /\/srv\/app\/compose.yml/);
   assert.match(markup, /Load Compose file/);
 });
+
+test("failed Compose file loads keep an actionable error and editable path inside the dialog", () => {
+  const markup = renderToStaticMarkup(createElement(ComposeFileDialog, {
+    open: true, value: "/srv/app/broken.yml", busy: false,
+    error: "Could not parse Compose file: services must be a mapping",
+    onChange: () => {}, onSubmit: () => {}, onCancel: () => {},
+  }));
+  assert.match(markup, /role="dialog"[\s\S]*role="alert"[\s\S]*services must be a mapping[\s\S]*<\/section>/);
+  assert.match(markup, /value="\/srv\/app\/broken.yml"/);
+  assert.doesNotMatch(markup.match(/<input[^>]*>/)?.[0] || "", /disabled/);
+  assert.match(markup, /Technical details/);
+});
+
+test("Compose logs remain a direct service-specific action with unavailable-service guards", async () => {
+  const { ComposeServiceLogsButton } = await import("./composeView.mjs");
+  assert.equal(typeof ComposeServiceLogsButton, "function");
+  const service = { name: "api", container_id: "exact-container", status: "running" };
+  let selected;
+  const button = ComposeServiceLogsButton({ service, busy: false, onLogs: value => { selected = value; } });
+  button.props.onClick();
+  assert.equal(selected, service);
+  const markup = renderToStaticMarkup(button);
+  assert.match(markup, /aria-label="Logs for Compose service api"/);
+  assert.doesNotMatch(markup, /<details|<summary|overflow-menu/);
+  assert.match(markup, />Logs<\/button>/);
+  assert.match(renderToStaticMarkup(createElement(ComposeServiceLogsButton, { service: { ...service, status: "not_created" }, onLogs: () => {} })), /disabled/);
+  assert.match(renderToStaticMarkup(createElement(ComposeServiceLogsButton, { service, busy: true, onLogs: () => {} })), /disabled/);
+});

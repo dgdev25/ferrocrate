@@ -11,7 +11,7 @@ export type ImageRow = {
 export function formatImageSize(bytes: number | string | null | undefined): string;
 export function formatImageCreated(value: number | string | null | undefined): string;
 export function displayImageReference(reference: string): string;
-export function imageIsUsed(image: Pick<ImageRow, "reference" | "fullReference">, containerImages: string[]): boolean;
+export function imageIsUsed(image: Pick<ImageRow, "reference" | "fullReference"> & Partial<Pick<ImageRow, "id">>, containerImages: string[]): boolean;
 export function pullFailurePresentation(error: unknown): { kind: "daemon" | "license" | "binary" | "generic"; message: string; detail: string };
 export function pullCompletionState(result: { ok: boolean; stderr?: string; message?: string }): {
   open: boolean;

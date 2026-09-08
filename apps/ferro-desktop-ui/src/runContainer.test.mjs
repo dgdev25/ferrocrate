@@ -1,7 +1,45 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildRunContainerInvokeArgs, buildRunContainerOptions } from "./runContainer.mjs";
+import { buildRunContainerInvokeArgs, buildRunContainerOptions, initialRunContainerDraft } from "./runContainer.mjs";
+
+test('partially configured storage cannot silently launch without the requested mount', () => {
+  for (const volumes of [[{source:'data',target:''}], [{source:'',target:'/data'}]]) {
+    assert.throws(() => buildRunContainerOptions({command:'',ports:[],volumes,memoryMb:'',cpus:''}), /source and.*path/i);
+  }
+});
+
+test("successful-launch reset returns a fresh choice without credentials, resource bindings, or preset state", () => {
+  const previous = initialRunContainerDraft();
+  previous.image = "postgres:17-alpine";
+  previous.environment = "POSTGRES_PASSWORD=old-secret";
+  previous.ports[0].host = "5432";
+  previous.volumes[0].source = "existing-database";
+  previous.launcherPreset = "postgres";
+  previous.launcherMode = "custom";
+  const reset = initialRunContainerDraft();
+  assert.deepEqual(reset, {
+    image: "alpine:latest", name: "", command: "", pullIfMissing: true,
+    ports: [{ host: "", container: "" }], volumes: [{ source: "", target: "" }],
+    environment: "", memoryMb: "", cpus: "",
+  });
+  assert.notEqual(reset.ports[0], previous.ports[0]);
+  assert.notEqual(reset.volumes[0], previous.volumes[0]);
+  assert.equal(previous.environment, "POSTGRES_PASSWORD=old-secret", "reset must not mutate a retained failure/cancel draft");
+});
+
+test("launch permits image downloads to exceed the ordinary request timeout", async () => {
+  const { submitRunContainer } = await import('./runContainer.mjs');
+  let options;
+  let finished = false;
+  await submitRunContainer({
+    invoke: async (_command, _payload, config) => { options = config; return { ok: true }; },
+    payload: {}, begin: () => true, onBegin: () => {}, onResult: () => {},
+    onError: assert.fail, onSuccess: () => {}, finish: () => { finished = true; },
+  });
+  assert.equal(options?.timeoutMs, 600_000);
+  assert.equal(finished, true);
+});
 
 test("run dialog converts friendly fields into daemon run options", () => {
   assert.deepEqual(buildRunContainerOptions({

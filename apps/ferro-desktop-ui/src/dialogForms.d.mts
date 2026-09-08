@@ -19,6 +19,8 @@ export type RunContainerInvokeArgs = {
 };
 
 export type RunContainerDraft = {
+  launcherMode?: "custom";
+  launcherPreset?: string;
   image: string; name: string; command: string; pullIfMissing: boolean; ports: PortRow[]; volumes: MappingRow[];
   environment: string; memoryMb: string; cpus: string;
 };
@@ -30,6 +32,7 @@ export function DoctorDialog(props: {
 }): ReactElement | null;
 
 export function AccountDialog(props: {
+  error?: string | null;
   open: boolean; releaseBaseUrl: string; tokenEndpoint: string; issuanceEndpoint: string; customerId: string; accessToken: string; sessionToken: string;
   authLoading: boolean; accountConnected: boolean; plan: string | null; expiresText: string | null; entitlement: unknown;
   onReleaseBaseUrlChange: ControlHandler; onTokenEndpointChange: ControlHandler; onIssuanceEndpointChange: ControlHandler;
@@ -56,6 +59,7 @@ export function BuildImageDialog(props: {
 }): ReactElement | null;
 
 export function RegistryDialog(props: {
+  error?: string | null;
   open: boolean; target: string; username: string; password: string;
   status: { logged_in: boolean; registry: string } | null; accountName: string; busy: boolean; loading: boolean;
   onTargetChange: ControlHandler; onUsernameChange: ControlHandler; onPasswordChange: ControlHandler;

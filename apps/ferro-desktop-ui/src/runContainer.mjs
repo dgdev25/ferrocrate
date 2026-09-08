@@ -1,3 +1,12 @@
+export function initialRunContainerDraft() {
+  return {
+    image: "alpine:latest", name: "", command: "", pullIfMissing: true,
+    ports: [{ host: "", container: "" }],
+    volumes: [{ source: "", target: "" }],
+    environment: "", memoryMb: "", cpus: "",
+  };
+}
+
 export function parseCommandWords(command) {
   const words = [];
   let current = "";
@@ -42,6 +51,11 @@ export function parseCommandWords(command) {
 }
 
 export function buildRunContainerOptions({ command, ports, volumes, memoryMb, cpus }) {
+  for (const row of volumes) {
+    if (Boolean(row.source.trim()) !== Boolean(row.target.trim())) {
+      throw new Error("Storage needs both a source and a container path. Complete the row or clear both fields.");
+    }
+  }
   for (const row of ports) {
     if (!row.host.trim() && !row.container.trim()) continue;
     requestedHostPorts({ ports: [`${row.host.trim()}:${row.container.trim()}`] });
@@ -81,7 +95,7 @@ export async function submitRunContainer({ invoke, payload, begin, onBegin, onRe
   if (!begin()) return null;
   onBegin();
   try {
-    const result = await invoke("run_new_container", payload);
+    const result = await invoke("run_new_container", payload, { timeoutMs: 10 * 60_000 });
     onResult(result);
     if (!result.ok) {
       onError(result.message || result.stderr || `Container run failed with status ${result.code}`);

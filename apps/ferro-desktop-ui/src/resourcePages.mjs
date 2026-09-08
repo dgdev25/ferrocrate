@@ -1,3 +1,4 @@
+import { DialogFocusScope } from "./modalFocus.mjs";
 import { createElement } from "react";
 import { Icon } from "./iconSystem.mjs";
 
@@ -310,7 +311,8 @@ export function ResourceCreateDialog({
   if (kind !== "volume" && kind !== "network") return null;
   const isNetwork = kind === "network";
   const title = isNetwork ? "Create network" : "Create volume";
-  return createElement("div", { className: "modal-backdrop", role: "presentation" },
+  return createElement(DialogFocusScope, { dialogId: `${kind}-dialog-title`, onClose: onCancel },
+    createElement("div", { className: "modal-backdrop", role: "presentation" },
     createElement("section", { className: "run-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": `${kind}-dialog-title` },
       createElement("div", { className: "drawer-header" },
         createElement("div", null,
@@ -322,7 +324,7 @@ export function ResourceCreateDialog({
       createElement("div", { className: "editor-grid" },
         createElement("label", { className: "detail-span", htmlFor: `${kind}-name` },
           createElement("span", null, isNetwork ? "Network name" : "Volume name"),
-          createElement("input", { id: `${kind}-name`, value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data", autoFocus: true }),
+          createElement("input", { id: `${kind}-name`, value: name, onChange: onNameChange, placeholder: isNetwork ? "app-network" : "app-data" }),
         ),
         isNetwork ? createElement("label", { className: "detail-span", htmlFor: "network-subnet" },
           createElement("span", null, "Subnet (optional)"),
@@ -334,12 +336,14 @@ export function ResourceCreateDialog({
         createElement("button", { className: "btn btn-primary", onClick: onCreate, disabled: busy || !name.trim() }, busy ? "Creating…" : title),
       ),
     ),
+    ),
   );
 }
 
 export function LicensingDialog({ open, detail, onClose, onOpenSettings }) {
   if (!open) return null;
-  return createElement("div", { className: "modal-backdrop", role: "presentation" },
+  return createElement(DialogFocusScope, { dialogId: "licensing-dialog-title", onClose: onClose },
+    createElement("div", { className: "modal-backdrop", role: "presentation" },
     createElement("section", { className: "run-dialog licensing-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": "licensing-dialog-title" },
       createElement("div", { className: "drawer-header" },
         createElement("div", null,
@@ -358,6 +362,7 @@ export function LicensingDialog({ open, detail, onClose, onOpenSettings }) {
       createElement("div", { className: "panel-actions dialog-actions" },
         createElement("button", { className: "btn btn-secondary", onClick: onOpenSettings }, "Open technical settings"),
       ),
+    ),
     ),
   );
 }

@@ -3,10 +3,13 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { DialogFocusScope } from "./modalFocus.mjs";
+
 import * as resourcePages from "./resourcePages.mjs";
 
 function findButton(element, label) {
   if (!element || typeof element !== "object") return null;
+  if (element.type === DialogFocusScope) return findButton(element.props.children, label);
   if (typeof element.type === "function") return findButton(element.type(element.props), label);
   if (element.type === "button" && element.props.children === label) return element;
   const children = element.props?.children;

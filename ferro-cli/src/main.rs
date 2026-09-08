@@ -42455,6 +42455,20 @@ FROM --platform=linux/${MYARCH} busybox\n";
     }
 
     #[test]
+    fn run_missing_raw_digest_never_falls_back_to_registry_pull() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LocalImageStore::open(temp.path()).expect("store");
+        let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
+        let authorization = runtime.surface_authorization().expect("authorization");
+        let origin = super::RequestOrigin::cli_current().expect("origin");
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let error = super::ensure_image_present(&store, &digest, &origin, &authorization)
+            .expect_err("disappeared digest must remain local-only");
+        assert_eq!(error, format!("run: image {digest} was not found locally"));
+        assert!(store.list_references().expect("images").is_empty());
+    }
+
+    #[test]
     fn pull_handler_rejects_invalid_image() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = LocalImageStore::open(temp.path()).expect("store");

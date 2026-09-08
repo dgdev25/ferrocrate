@@ -21,6 +21,19 @@ function handlers(file, names, context) {
 const deferred = () => { let resolve; let reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const noop = () => {};
 
+test('terminal exit before start reply cannot restore attached state', async () => {
+  const context = {
+    beginRuntimeAction: () => true, finishRuntimeAction: noop, setError: value => { if (value) assert.fail(value); },
+    terminalGenerationRef: { current: 0 }, terminalActiveRef: { current: false },
+    terminalRef: { current: null }, containerTarget: 'a', terminalShell: 'sh',
+    terminalEnv: '', terminalUser: '', terminalWorkdir: '',
+    setTerminalActive: value => { context.terminalActiveRef.current = value; },
+    invoke: async () => { context.terminalGenerationRef.current += 1; },
+  };
+  await handlers('App.tsx', ['startTerminal'], context).startTerminal();
+  assert.equal(context.terminalActiveRef.current, false);
+});
+
 test('fleet refresh preserves a narrowed selection and an explicitly empty selection', async () => {
   let selection = [];
   const context = {
@@ -151,6 +164,34 @@ test('Fleet tab keyboard handler ignores Tab and other unhandled keys', () => {
   const handler=vm.runInNewContext(ts.transpileModule(`(${callback})`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   handler({key:'Tab',preventDefault:()=>changes.push('prevented')});
   assert.deepEqual(changes,[]);
+});
+
+test('Compose log navigation reloads inspection and closes the previous target terminal', async () => {
+  const calls = [];
+  let detail = { id: 'a' };
+  const context = {
+    composeLogTarget: service => service.container_id,
+    inspectorOpening: { current: false }, runtimeActionRef: { current: false },
+    containerTarget: 'a', logFollowRef: { current: true }, activeLogStream: { current: 'a-stream' },
+    terminalActiveRef: { current: true },
+    stopLogFollow: async () => { calls.push('stop-logs'); context.logFollowRef.current = false; },
+    closeTerminal: async () => { calls.push('close-terminal'); context.terminalActiveRef.current = false; },
+    setContainerTarget: value => { context.containerTarget = value; },
+    setLogOutput: noop, inspectorTriggerRef: {}, document: { activeElement: null }, HTMLElement: class {},
+    setInspectorOpen: noop, setDetailTab: noop, requestAnimationFrame: noop,
+    beginRuntimeAction: () => true, finishRuntimeAction: noop,
+    setContainerDetail: value => { detail = value; }, setInspectorError: noop,
+    loadContainerSelection: async (target, load) => ({ target, detail: await load(target), error: null }),
+    invoke: async (_command, args) => { calls.push(`inspect:${args.target}`); return { id: args.target, resources: { memory: 0, cpu_quota: 0, cpu_period: 0 } }; },
+    setShowEnvironment: noop, setDetailMemory: noop, setDetailCpuQuota: noop, setDetailCpuPeriod: noop,
+    startLogFollow: async target => { calls.push(`logs:${target}`); },
+  };
+  const { showComposeLogs } = handlers('App.tsx', ['showComposeLogs', 'openServiceInspector', 'inspectContainer'], context);
+  await showComposeLogs({ container_id: 'b' });
+  assert.deepEqual(calls, ['stop-logs', 'close-terminal', 'inspect:b', 'logs:b']);
+  assert.equal(detail.id, 'b');
+  assert.equal(context.containerTarget, 'b');
+  assert.equal(context.terminalActiveRef.current, false);
 });
 
 for (const payload of [null, undefined, {}, {ok: 'true'}, {ok: true, code: 0}]) {

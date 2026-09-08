@@ -1,3 +1,4 @@
+import { DialogFocusScope } from "./modalFocus.mjs";
 import { createElement } from "react";
 import { failurePresentation } from "./resourcePages.mjs";
 
@@ -33,6 +34,7 @@ export function displayImageReference(reference) {
 
 export function imageIsUsed(image, containerImages) {
   const candidates = new Set(containerImages.flatMap((reference) => [String(reference), displayImageReference(reference)]));
+  if (/^sha256:[a-f0-9]{64}$/i.test(image.id ?? "") && containerImages.some(reference => String(reference).split("@").at(-1) === image.id)) return true;
   return candidates.has(image.fullReference) || candidates.has(image.reference) || candidates.has(displayImageReference(image.fullReference));
 }
 
@@ -90,7 +92,8 @@ export function PullImageDialog({
     ),
   ) : null;
 
-  return createElement("div", { className: "modal-backdrop", role: "presentation" },
+  return createElement(DialogFocusScope, { dialogId: "pull-image-dialog-title", onClose: onCancel },
+    createElement("div", { className: "modal-backdrop", role: "presentation" },
     createElement("section", { className: "run-dialog", role: "dialog", "aria-modal": true, "aria-labelledby": "pull-image-dialog-title" },
       createElement("div", { className: "drawer-header" },
         createElement("div", null,
@@ -102,7 +105,7 @@ export function PullImageDialog({
       createElement("div", { className: "editor-grid" },
         createElement("label", { className: "detail-span", htmlFor: "pull-image-reference" },
           createElement("span", null, "Image reference"),
-          createElement("input", { id: "pull-image-reference", value: imageTarget, onChange: onImageTargetChange, placeholder: "alpine:latest", autoFocus: true }),
+          createElement("input", { id: "pull-image-reference", value: imageTarget, onChange: onImageTargetChange, placeholder: "alpine:latest" }),
         ),
         progress ? createElement("p", { className: "pull-progress detail-span", role: "status" },
           createElement("strong", null, "Pull progress"),
@@ -113,6 +116,7 @@ export function PullImageDialog({
       createElement("div", { className: "panel-actions dialog-actions" },
         createElement("button", { className: "btn btn-primary", onClick: onPull, disabled: busy || !imageTarget.trim() }, busy ? "Pulling…" : "Pull image"),
       ),
+    ),
     ),
   );
 }

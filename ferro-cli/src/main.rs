@@ -29628,6 +29628,33 @@ async fn store_buildkit_content(
     Ok(())
 }
 
+// The filesync staging directory is private and not handed to a builder until
+// this sequential receiver finishes. Never traverse a symlink supplied by a
+// previous entry, including when creating directories for a later entry.
+#[cfg(target_os = "linux")]
+fn buildkit_context_target(root: &Path, relative: &Path, directory: bool) -> Result<PathBuf, String> {
+    let mut target = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::CurDir) { continue; }
+            return Err("buildkit filesync: context path escapes root".into());
+        };
+        target.push(name);
+        if index + 1 < components.len() || directory {
+            match std::fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
+                Ok(_) => return Err("buildkit filesync: unsafe context parent".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&target).map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    Ok(target)
+}
+
 #[cfg(target_os = "linux")]
 async fn receive_buildkit_local(
     requests: &mut h2::client::SendRequest<Bytes>,
@@ -29714,18 +29741,16 @@ async fn receive_buildkit_local(
                             return Err("buildkit filesync: context exceeds transfer limit".to_string());
                         }
                     }
-                    let target = destination.join(relative);
+                    let target = buildkit_context_target(destination, relative, stat.mode & MODE_DIR != 0)?;
                     if stat.mode & MODE_DIR != 0 {
                         std::fs::create_dir_all(&target).map_err(|error| format!("buildkit filesync: create directory: {error}"))?;
                     } else if stat.mode & MODE_SYMLINK != 0 {
-                        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
                         std::os::unix::fs::symlink(&stat.linkname, &target)
                             .map_err(|error| format!("buildkit filesync: create symlink: {error}"))?;
                     } else {
-                        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("buildkit filesync: create parent: {error}"))?; }
                         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)
                             .map_err(|error| format!("buildkit filesync: create file: {error}"))?;
-                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(stat.mode & 0o7777))
+                        file.set_permissions(std::fs::Permissions::from_mode(stat.mode & 0o7777))
                             .map_err(|error| format!("buildkit filesync: set mode: {error}"))?;
                         open_files.insert(stats.len() as u32, (file, 0, stat.size as u64));
                     }

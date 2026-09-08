@@ -607,7 +607,7 @@ pub enum CommandRequest {
     GetRegistryAuthStatus(RegistryArgs),
     LoginRegistry(RegistryLoginArgs),
     LogoutRegistry(RegistryArgs),
-    StartLogFollow { target: String },
+    StartLogFollow { target: String, stream_id: String },
     StopLogFollow,
     StartTerminal(TerminalArgs),
     WriteTerminal(TerminalWriteArgs),
@@ -653,7 +653,14 @@ impl CommandRequest {
             "login_registry" => Self::LoginRegistry(decode(args)?),
             "logout_registry" => Self::LogoutRegistry(decode(args)?),
             "start_log_follow" => Self::StartLogFollow {
-                target: decode::<TargetArgs>(args)?.target,
+                target: decode::<TargetArgs>(args.clone())?.target,
+                stream_id: args
+                    .get("streamId")
+                    .or_else(|| args.get("stream_id"))
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| "streamId is required".to_string())?
+                    .to_string(),
             },
             "stop_log_follow" => {
                 decode::<serde_json::Map<String, Value>>(args)?;
@@ -751,11 +758,33 @@ mod tests {
         fn dispatch(&self, request: CommandRequest, events: EventHub) -> Result<Value, String> {
             match request {
                 CommandRequest::GetDesktopSnapshot => Ok(json!({ "surface": "dashboard" })),
-                CommandRequest::StartLogFollow { target } => {
-                    events.emit("container-log-batch", json!({ "text": target }));
+                CommandRequest::StartLogFollow { target, stream_id } => {
+                    events.emit(
+                        "container-log-batch",
+                        json!({ "stream_id": stream_id, "payload": { "text": target } }),
+                    );
                     Ok(Value::Null)
                 }
                 other => Err(format!("unsupported test command: {}", other.name())),
+            }
+        }
+    }
+
+    #[test]
+    fn log_follow_requires_and_preserves_client_stream_identity() {
+        assert!(CommandRequest::decode("start_log_follow", json!({"target":"a"})).is_err());
+        for key in ["streamId", "stream_id"] {
+            let request = CommandRequest::decode(
+                "start_log_follow",
+                json!({"target":"a", key:"generation-2"}),
+            )
+            .unwrap();
+            match request {
+                CommandRequest::StartLogFollow { target, stream_id } => {
+                    assert_eq!(target, "a");
+                    assert_eq!(stream_id, "generation-2");
+                }
+                _ => panic!("wrong request"),
             }
         }
     }

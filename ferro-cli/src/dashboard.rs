@@ -280,7 +280,7 @@ fn queue_log_chunks<R: Read>(mut reader: R, sender: SyncSender<String>) {
     }
 }
 
-fn publish_log_batches(events: EventHub, receiver: Receiver<String>) {
+fn publish_log_batches(events: EventHub, receiver: Receiver<String>, stream_id: String) {
     let mut buffer = LogBuffer::new(MAX_LOG_LINES, MAX_LOG_BYTES);
     let mut changed = false;
     let mut last_publish = Instant::now();
@@ -295,7 +295,7 @@ fn publish_log_batches(events: EventHub, receiver: Receiver<String>) {
                 if last_publish.elapsed() >= Duration::from_millis(100) {
                     events.emit(
                         "container-log-batch",
-                        json!({ "text": buffer.text(), "truncated": buffer.truncated }),
+                        json!({ "stream_id": stream_id, "payload": { "text": buffer.text(), "truncated": buffer.truncated } }),
                     );
                     changed = false;
                     last_publish = Instant::now();
@@ -304,7 +304,7 @@ fn publish_log_batches(events: EventHub, receiver: Receiver<String>) {
             Err(RecvTimeoutError::Timeout) if changed => {
                 events.emit(
                     "container-log-batch",
-                    json!({ "text": buffer.text(), "truncated": buffer.truncated }),
+                    json!({ "stream_id": stream_id, "payload": { "text": buffer.text(), "truncated": buffer.truncated } }),
                 );
                 changed = false;
                 last_publish = Instant::now();
@@ -314,10 +314,13 @@ fn publish_log_batches(events: EventHub, receiver: Receiver<String>) {
                 if changed {
                     events.emit(
                         "container-log-batch",
-                        json!({ "text": buffer.text(), "truncated": buffer.truncated }),
+                        json!({ "stream_id": stream_id, "payload": { "text": buffer.text(), "truncated": buffer.truncated } }),
                     );
                 }
-                events.emit("container-log-ended", true);
+                events.emit(
+                    "container-log-ended",
+                    json!({ "stream_id": stream_id, "payload": true }),
+                );
                 return;
             }
         }
@@ -500,7 +503,12 @@ impl ProcessDispatcher {
         }))
     }
 
-    fn start_log_follow(&self, target: String, events: EventHub) -> Result<Value, String> {
+    fn start_log_follow(
+        &self,
+        target: String,
+        stream_id: String,
+        events: EventHub,
+    ) -> Result<Value, String> {
         if target.trim().is_empty() {
             return Err("target container is required".to_string());
         }
@@ -525,7 +533,7 @@ impl ProcessDispatcher {
             .ok_or_else(|| "container log stream stdout unavailable".to_string())?;
         let (log_sender, log_receiver) = log_channel(LOG_CHANNEL_CAPACITY);
         let publish_events = events.clone();
-        thread::spawn(move || publish_log_batches(publish_events, log_receiver));
+        thread::spawn(move || publish_log_batches(publish_events, log_receiver, stream_id));
         thread::spawn(move || queue_log_chunks(stdout, log_sender));
         *slot = Some(child);
         Ok(Value::Null)
@@ -1006,7 +1014,9 @@ impl CommandDispatcher for ProcessDispatcher {
                 desktop_command(&values, Some(args.password.as_bytes())).map(command_result)
             }
             CommandRequest::LogoutRegistry(args) => run_command_result(&["logout", &args.registry]),
-            CommandRequest::StartLogFollow { target } => self.start_log_follow(target, events),
+            CommandRequest::StartLogFollow { target, stream_id } => {
+                self.start_log_follow(target, stream_id, events)
+            }
             CommandRequest::StopLogFollow => self.stop_log_follow(),
             CommandRequest::StartTerminal(args) => self.start_terminal(args, events),
             CommandRequest::WriteTerminal(args) => self.write_terminal(args.data),
@@ -1159,6 +1169,20 @@ mod tests {
             .expect("dashboard body")
             .contains("<html"));
         server.shutdown().await;
+    }
+
+    #[test]
+    fn log_batches_and_completion_keep_the_originating_stream_identity() {
+        let events = EventHub::new();
+        let (sender, receiver) = log_channel(2);
+        sender.send("old output".into()).unwrap();
+        drop(sender);
+        publish_log_batches(events.clone(), receiver, "old-generation".into());
+        let replay = events.replay_after(0);
+        assert_eq!(replay.events.len(), 2);
+        for event in replay.events {
+            assert_eq!(event.payload()["stream_id"], "old-generation");
+        }
     }
 
     #[test]

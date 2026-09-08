@@ -130,9 +130,9 @@ impl CommandDispatcher for DesktopDispatcher {
                 encode_result(login_registry(args.registry, args.username, args.password))
             }
             CommandRequest::LogoutRegistry(args) => encode_result(logout_registry(args.registry)),
-            CommandRequest::StartLogFollow { target } => {
-                encode_result(start_log_follow_impl(EventSink::Web(events), target))
-            }
+            CommandRequest::StartLogFollow { target, stream_id } => encode_result(
+                start_log_follow_impl(EventSink::Web(events), target, stream_id),
+            ),
             CommandRequest::StopLogFollow => encode_result(stop_log_follow()),
             CommandRequest::StartTerminal(args) => encode_result(start_terminal_impl(
                 EventSink::Web(events),

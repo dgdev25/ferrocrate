@@ -165,6 +165,10 @@ function LocalApp(): JSX.Element {
   const [networkSubnet, setNetworkSubnet] = useState("");
   const [networksLoading, setNetworksLoading] = useState(false);
   const [composeFile, setComposeFile] = useState("");
+  const [composeDraft, setComposeDraft] = useState("");
+  const composeGeneration = useRef(0);
+  const activeLogStream = useRef<string | null>(null);
+  const inspectorOpening = useRef(false);
   const [composeFileDialogOpen, setComposeFileDialogOpen] = useState(false);
   const [composeSnapshot, setComposeSnapshot] = useState<ComposeSnapshot | null>(null);
   const [composeLoading, setComposeLoading] = useState(false);
@@ -554,17 +558,20 @@ function LocalApp(): JSX.Element {
     let unlistenEnded: (() => void) | undefined;
 
     void (async () => {
-      const stopBatch = await listen<LogBatch>("container-log-batch", (event) => {
-        setLogOutput(event.payload.text);
+      const stopBatch = await listen<{ stream_id: string; payload: LogBatch }>("container-log-batch", (event) => {
+        if (event.payload.stream_id !== activeLogStream.current) return;
+        setLogOutput(event.payload.payload.text);
       });
-      const stopError = await listen<string>("container-log-error", (event) => {
-        setError(event.payload);
+      const stopError = await listen<{ stream_id: string; payload: string }>("container-log-error", (event) => {
+        if (event.payload.stream_id !== activeLogStream.current) return;
+        setError(event.payload.payload);
       });
-      const stopEnded = await listen<boolean>("container-log-ended", (event) => {
+      const stopEnded = await listen<{ stream_id: string; payload: boolean }>("container-log-ended", (event) => {
+        if (event.payload.stream_id !== activeLogStream.current) return;
         logFollowRef.current = false;
         setLogsFollowing(false);
         setLogsPaused(false);
-        if (!event.payload) setError("Container log stream ended unexpectedly");
+        if (!event.payload.payload) setError("Container log stream ended unexpectedly");
       });
       if (disposed) {
         stopBatch();
@@ -709,10 +716,16 @@ function LocalApp(): JSX.Element {
     setLogsPaused(false);
     setPausedLogOutput("");
     try {
-      await invoke("start_log_follow", { target });
+      await invoke("stop_log_follow");
+      const streamId = crypto.randomUUID();
+      activeLogStream.current = streamId;
       logFollowRef.current = true;
       setLogsFollowing(true);
+      await invoke("start_log_follow", { target, streamId });
     } catch (err) {
+      activeLogStream.current = null;
+      logFollowRef.current = false;
+      setLogsFollowing(false);
       setError(String(err));
     } finally {
       finishRuntimeAction();
@@ -720,9 +733,10 @@ function LocalApp(): JSX.Element {
   }
 
   async function stopLogFollow(): Promise<void> {
-    if (!logFollowRef.current || !beginRuntimeAction()) return;
+    if (!beginRuntimeAction()) return;
     try {
       await invoke("stop_log_follow");
+      activeLogStream.current = null;
       logFollowRef.current = false;
       setLogsFollowing(false);
       setLogsPaused(false);
@@ -869,16 +883,28 @@ function LocalApp(): JSX.Element {
   }
 
   async function openServiceInspector(target: string, tab: DetailTab): Promise<void> {
-    if (terminalActiveRef.current && target !== containerTarget) {
-      await closeTerminal();
-      if (terminalActiveRef.current) return;
+    if (inspectorOpening.current || runtimeActionRef.current) return;
+    inspectorOpening.current = true;
+    try {
+      if (target !== containerTarget || tab === "logs") {
+        await stopLogFollow();
+        if (logFollowRef.current) return;
+        activeLogStream.current = null;
+        setLogOutput("");
+      }
+      if (terminalActiveRef.current && target !== containerTarget) {
+        await closeTerminal();
+        if (terminalActiveRef.current) return;
+      }
+      inspectorTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setInspectorOpen(true);
+      setDetailTab(tab);
+      await inspectContainer(target);
+      if (tab === "logs") await startLogFollow(target);
+      requestAnimationFrame(() => inspectorCloseRef.current?.focus());
+    } finally {
+      inspectorOpening.current = false;
     }
-    inspectorTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setInspectorOpen(true);
-    setDetailTab(tab);
-    await inspectContainer(target);
-    if (tab === "logs") await startLogFollow(target);
-    requestAnimationFrame(() => inspectorCloseRef.current?.focus());
   }
 
   async function inspectContainer(target = containerTarget): Promise<void> {

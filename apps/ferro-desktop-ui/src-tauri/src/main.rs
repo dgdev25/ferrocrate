@@ -49,13 +49,27 @@ impl EventSink {
     }
 }
 
+#[derive(Clone)]
+struct LogEventSink {
+    events: EventSink,
+    stream_id: String,
+}
+impl LogEventSink {
+    fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
+        self.events.emit(
+            event,
+            serde_json::json!({ "stream_id": self.stream_id, "payload": payload }),
+        );
+    }
+}
+
 const KEYRING_SERVICE: &str = "ferrocrate-desktop-ui";
 const KEYRING_ACCOUNT: &str = "paid_session_token";
 const LOG_TRUNCATION_MARKER: &str = "[Earlier log output truncated]\n";
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_BYTES: usize = 512 * 1024;
 const LOG_CHANNEL_CAPACITY: usize = 128;
-static LOG_FOLLOW_PROCESS: Mutex<Option<Box<dyn ExecStream>>> = Mutex::new(None);
+static LOG_FOLLOW_PROCESS: Mutex<Option<(String, Box<dyn ExecStream>)>> = Mutex::new(None);
 static TERMINAL_PROCESS: Mutex<Option<TerminalProcess>> = Mutex::new(None);
 static DESKTOP_DAEMON_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static DESKTOP_DAEMON_STARTING: AtomicBool = AtomicBool::new(false);
@@ -2166,7 +2180,7 @@ struct LogBatch {
     truncated: bool,
 }
 
-fn emit_log_batch(events: &EventSink, buffer: &LogBuffer) {
+fn emit_log_batch(events: &LogEventSink, buffer: &LogBuffer) {
     events.emit(
         "container-log-batch",
         LogBatch {
@@ -2180,7 +2194,7 @@ fn log_channel(capacity: usize) -> (SyncSender<String>, Receiver<String>) {
     mpsc::sync_channel(capacity)
 }
 
-fn publish_log_batches(events: EventSink, receiver: Receiver<String>) {
+fn publish_log_batches(events: LogEventSink, receiver: Receiver<String>) {
     let mut buffer = LogBuffer::new(MAX_LOG_LINES, MAX_LOG_BYTES);
     let mut changed = false;
     let mut last_publish = Instant::now();
@@ -2231,7 +2245,7 @@ fn queue_log_lines<R: std::io::Read>(reader: R, sender: SyncSender<String>) {
     }
 }
 
-fn emit_log_errors<R: std::io::Read>(reader: R, events: EventSink) {
+fn emit_log_errors<R: std::io::Read>(reader: R, events: LogEventSink) {
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     while let Ok(bytes) = reader.read_line(&mut line) {
@@ -2243,16 +2257,24 @@ fn emit_log_errors<R: std::io::Read>(reader: R, events: EventSink) {
     }
 }
 
-fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String> {
+fn start_log_follow_impl(
+    events: EventSink,
+    target: String,
+    stream_id: String,
+) -> Result<(), String> {
+    let events = LogEventSink {
+        events,
+        stream_id: stream_id.clone(),
+    };
     let target = target.trim();
-    if target.is_empty() {
-        return Err("target container is required".to_string());
+    if target.is_empty() || stream_id.is_empty() {
+        return Err("target container and stream identity are required".to_string());
     }
 
     let mut current = LOG_FOLLOW_PROCESS
         .lock()
         .map_err(|_| "log follow state is unavailable".to_string())?;
-    if let Some(child) = current.as_mut() {
+    if let Some((_, child)) = current.as_mut() {
         if child
             .try_wait()
             .map_err(|err| format!("failed to inspect log follow process: {err}"))?
@@ -2277,7 +2299,7 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
     thread::spawn(move || queue_log_lines(stdout, log_sender));
     let stderr_events = events.clone();
     thread::spawn(move || emit_log_errors(stderr, stderr_events));
-    *current = Some(child);
+    *current = Some((stream_id.clone(), child));
     drop(current);
 
     thread::spawn(move || loop {
@@ -2286,9 +2308,12 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
                 Ok(process) => process,
                 Err(_) => return,
             };
-            let Some(child) = process.as_mut() else {
+            let Some((active_id, child)) = process.as_mut() else {
                 return;
             };
+            if active_id != &stream_id {
+                return;
+            }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     *process = None;
@@ -2312,8 +2337,12 @@ fn start_log_follow_impl(events: EventSink, target: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn start_log_follow(app: tauri::AppHandle, target: String) -> Result<(), String> {
-    start_log_follow_impl(EventSink::Tauri(app), target)
+fn start_log_follow(
+    app: tauri::AppHandle,
+    target: String,
+    stream_id: String,
+) -> Result<(), String> {
+    start_log_follow_impl(EventSink::Tauri(app), target, stream_id)
 }
 
 #[tauri::command]
@@ -2321,7 +2350,7 @@ fn stop_log_follow() -> Result<(), String> {
     let mut current = LOG_FOLLOW_PROCESS
         .lock()
         .map_err(|_| "log follow state is unavailable".to_string())?;
-    if let Some(mut child) = current.take() {
+    if let Some((_, mut child)) = current.take() {
         child
             .kill()
             .map_err(|err| format!("failed to stop container log stream: {err}"))?;
@@ -3975,6 +4004,54 @@ mod tests {
             ]
         );
         assert!(compose_bridge_command("  ", ComposeAction::Down).is_err());
+    }
+
+    #[test]
+    fn log_events_carry_generation_for_batches_errors_and_end() {
+        let hub = ferro_web::EventHub::new();
+        let sink = super::LogEventSink {
+            events: super::EventSink::Web(hub.clone()),
+            stream_id: "old-generation".into(),
+        };
+        let mut buffer = LogBuffer::new(10, 100);
+        buffer.push("old output".into());
+        super::emit_log_batch(&sink, &buffer);
+        sink.emit("container-log-error", "error");
+        sink.emit("container-log-ended", true);
+        let replay = hub.replay_after(0);
+        assert_eq!(replay.events.len(), 3);
+        for event in replay.events {
+            assert_eq!(event.payload()["stream_id"], "old-generation");
+        }
+    }
+
+    #[test]
+    fn compose_projection_rejects_other_projects_prefixes_and_unlabelled_names() {
+        let containers: Vec<ComposeContainerRecord> = serde_json::from_value(serde_json::json!([
+            {"Id":"other","Names":["db"],"State":"running","Labels":{"com.docker.compose.project":"other","com.docker.compose.service":"db"}},
+            {"Id":"admin","Names":["db-admin"],"State":"running","Labels":{"com.docker.compose.project":"shop","com.docker.compose.service":"db-admin"}},
+            {"Id":"unlabelled","Names":["db-1"],"State":"running"}
+        ])).unwrap();
+        let rows = compose_service_rows("shop", vec!["db".into()], &containers);
+        assert_eq!(rows[0].container_id, None);
+    }
+
+    #[test]
+    fn resource_projections_preserve_authoritative_ownership() {
+        let volumes: super::VolumeListResponse =
+            serde_json::from_value(serde_json::json!({"Volumes":[{
+                "Name":"opaque", "Driver":"local", "Mountpoint":"/data", "CreatedAt":"now",
+                "Labels":{"com.docker.compose.project":"retained"}
+            }]}))
+            .unwrap();
+        let value = serde_json::to_value(&volumes.volumes[0]).unwrap();
+        assert_eq!(value["labels"]["com.docker.compose.project"], "retained");
+        let networks = serde_json::from_value(serde_json::json!([{
+            "Name":"opaque", "Driver":"bridge", "Labels":{"com.docker.compose.project":"retained"}
+        }]))
+        .unwrap();
+        let rows = network_summaries(networks, &BTreeMap::new(), &[]);
+        assert_eq!(rows[0].labels["com.docker.compose.project"], "retained");
     }
 
     #[test]

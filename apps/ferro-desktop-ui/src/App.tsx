@@ -484,11 +484,16 @@ function LocalApp(): JSX.Element {
   }
 
   async function readComposeSnapshot(file: string): Promise<void> {
+    const generation = ++composeGeneration.current;
     setComposeLoading(true);
+    setComposeSnapshot(null);
     try {
-      setComposeSnapshot(await invoke<ComposeSnapshot>("get_compose_snapshot", { file }));
+      const next = await invoke<ComposeSnapshot>("get_compose_snapshot", { file });
+      if (generation !== composeGeneration.current) return;
+      setComposeFile(file);
+      setComposeSnapshot(next);
     } finally {
-      setComposeLoading(false);
+      if (generation === composeGeneration.current) setComposeLoading(false);
     }
   }
 
@@ -500,7 +505,6 @@ function LocalApp(): JSX.Element {
         filters: [{ name: "Compose files", extensions: ["yml", "yaml"] }],
       });
       if (typeof selected !== "string") return;
-      setComposeFile(selected);
       setError(null);
       await readComposeSnapshot(selected);
     } catch (err) {
@@ -514,17 +518,17 @@ function LocalApp(): JSX.Element {
       void chooseComposeFile();
       return;
     }
+    setComposeDraft(composeFile);
     setComposeFileDialogOpen(true);
   }
 
   async function loadComposeHostPath(): Promise<void> {
-    const file = composeFile.trim();
+    const file = composeDraft.trim();
     const validationError = hostPathError(file, "file");
     if (validationError) {
       setError(validationError);
       return;
     }
-    setComposeFile(file);
     setError(null);
     try {
       await readComposeSnapshot(file);
@@ -1114,7 +1118,7 @@ function LocalApp(): JSX.Element {
   }
 
   async function runComposeAction(action: ComposeAction, label: string): Promise<void> {
-    if (!beginRuntimeAction()) return;
+    if (!composeSnapshot || composeLoading || !beginRuntimeAction()) return;
     setError(null);
     setActionLabel(label);
     try {
@@ -1828,7 +1832,7 @@ function LocalApp(): JSX.Element {
       {pullImageDialogOpen ? (
         <PullImageDialog open={pullImageDialogOpen} imageTarget={imageTarget} progress={pullProgress} failure={pullFailure} busy={runtimeBusy} onCancel={() => setPullImageDialogOpen(false)} onImageTargetChange={(event) => setImageTarget(event.target.value)} onPull={() => void pullImage()} onStart={() => void startFerrocrate()} onReviewLicensing={() => { setPullImageDialogOpen(false); setActiveSection("settings"); }} onDoctor={() => { setPullImageDialogOpen(false); setActiveSection("doctor"); }} />
       ) : null}
-      <ComposeFileDialog open={composeFileDialogOpen} value={composeFile} busy={runtimeBusy || composeLoading} onChange={(event) => { setComposeFile(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} onCancel={() => setComposeFileDialogOpen(false)} />
+      <ComposeFileDialog open={composeFileDialogOpen} value={composeDraft} busy={runtimeBusy || composeLoading} onChange={(event) => { setComposeDraft(event.target.value); setError(null); }} onSubmit={() => void loadComposeHostPath()} onCancel={() => setComposeFileDialogOpen(false)} />
 
       <BuildImageDialog open={buildImageDialogOpen} context={buildContext} tag={buildTag} dialogAvailable={dialogAvailable} busy={runtimeBusy} onContextChange={(event) => setBuildContext(event.target.value)} onChooseContext={() => void chooseBuildContext()} onTagChange={(event) => setBuildTag(event.target.value)} onCancel={() => setBuildImageDialogOpen(false)} onBuild={() => void buildImage()} />
 

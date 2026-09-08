@@ -432,10 +432,7 @@ fn open_terminal_via_host<H: BackendHost + ?Sized>(
     .body(create_body);
     let response = host.request(transport, &create)?;
     if !(200..300).contains(&response.status) {
-        return Err(BackendError::Transport(format!(
-            "terminal create returned HTTP {}",
-            response.status
-        )));
+        return Err(terminal_response_error("create", response.status, &response.body));
     }
     let exec_id = serde_json::from_slice::<serde_json::Value>(&response.body)
         .ok()
@@ -459,11 +456,13 @@ fn open_terminal_via_host<H: BackendHost + ?Sized>(
     wire.push_str("\r\n");
     stream.write_all(wire.as_bytes())?;
     stream.write_all(body)?;
-    let status = read_http_status(stream.as_mut())?;
+    let (status, content_length) = read_http_status(stream.as_mut())?;
     if status != 101 {
-        return Err(BackendError::Transport(format!(
-            "terminal attach returned HTTP {status}"
-        )));
+        let mut body = Vec::new();
+        stream
+            .take(content_length.unwrap_or(16 * 1024).min(16 * 1024))
+            .read_to_end(&mut body)?;
+        return Err(terminal_response_error("attach", status, &body));
     }
     Ok(TerminalSession { exec_id, stream })
 }
@@ -1121,7 +1120,7 @@ fn request_duplex(
     parse_response_with_timeout(stream, Duration::from_secs(5))
 }
 
-fn read_http_status(stream: &mut dyn DuplexStream) -> Result<u16, BackendError> {
+fn read_http_status(stream: &mut dyn DuplexStream) -> Result<(u16, Option<u64>), BackendError> {
     let mut headers = Vec::new();
     let mut byte = [0_u8; 1];
     while !headers.ends_with(b"\r\n\r\n") {
@@ -1131,12 +1130,42 @@ fn read_http_status(stream: &mut dyn DuplexStream) -> Result<u16, BackendError> 
             return Err(BackendError::Transport("HTTP headers are too large".into()));
         }
     }
-    std::str::from_utf8(&headers)
-        .ok()
-        .and_then(|value| value.lines().next())
+    let headers = std::str::from_utf8(&headers)
+        .map_err(|_| BackendError::Transport("malformed HTTP headers".into()))?;
+    let status = headers
+        .lines()
+        .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse().ok())
-        .ok_or_else(|| BackendError::Transport("malformed HTTP status".into()))
+        .ok_or_else(|| BackendError::Transport("malformed HTTP status".into()))?;
+    let content_length = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse().ok());
+    Ok((status, content_length))
+}
+
+fn terminal_response_error(operation: &str, status: u16, body: &[u8]) -> BackendError {
+    let text = String::from_utf8_lossy(&body[..body.len().min(16 * 1024)]);
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .or_else(|| value.get("error"))
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| text.trim().to_string());
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    BackendError::Transport(format!(
+        "terminal {operation} returned HTTP {status}{suffix}"
+    ))
 }
 
 fn percent_encode_path(value: &str) -> String {
@@ -1365,5 +1394,106 @@ mod timeout_tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(error.to_string().contains("timed out"));
         assert!(*canceled.0.lock().expect("cancel state"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_handshake_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    fn open_against(responses: Vec<Vec<u8>>) -> Result<TerminalSession, BackendError> {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("terminal.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    headers.push(byte[0]);
+                }
+                let length = String::from_utf8_lossy(&headers)
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                    })
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                stream.read_exact(&mut vec![0; length]).unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        let result = open_terminal_via_host(
+            &SystemBackendHost::default(),
+            &Transport::UnixSocket(socket),
+            &TerminalRequest {
+                container: "test".into(),
+                command: vec!["sh".into()],
+                env: vec![],
+                user: None,
+                workdir: None,
+            },
+        );
+        server.join().unwrap();
+        result
+    }
+
+    fn response(status: u16, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn terminal_create_preserves_daemon_error_message() {
+        let error = open_against(vec![response(
+            404,
+            r#"{"message":"container no longer exists"}"#,
+        )])
+        .err()
+        .expect("create must fail");
+        assert!(
+            error.to_string().contains("container no longer exists"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn terminal_attach_preserves_daemon_error_message() {
+        let error = open_against(vec![
+            response(201, r#"{"Id":"test-exec"}"#),
+            response(
+                400,
+                r#"{"message":"attached exec overrides are unsupported"}"#,
+            ),
+        ])
+        .err()
+        .expect("attach must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("attached exec overrides are unsupported"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("HTTP 400"));
+    }
+
+    #[test]
+    fn successful_terminal_upgrade_preserves_first_output_bytes() {
+        let mut session = open_against(vec![
+            response(201, r#"{"Id":"test-exec"}"#),
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n/ $ "
+                .to_vec(),
+        ])
+        .expect("terminal opens");
+        let mut bytes = Vec::new();
+        session.stream.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"/ $ ");
     }
 }

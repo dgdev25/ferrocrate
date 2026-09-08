@@ -15962,6 +15962,11 @@ fn ensure_compose_networks(
         }
         if external {
             if records.iter().any(|record| record.name == name) {
+                if !nix::unistd::Uid::effective().is_root() {
+                    return Err(format!(
+                        "compose: external network {name} requires rootful networking; use a rootful runtime to join this network, or remove external: true to use an isolated project-owned rootless network"
+                    ));
+                }
                 continue;
             }
             return Err(format!("compose: external network {name} was not found"));
@@ -21927,6 +21932,14 @@ fn handle_docker_compat_connection(
                         .map_err(|error| format!("docker: invalid exec start payload: {error}"))?
                 };
                 validate_docker_exec_start(start.tty)?;
+                let upgraded = request.headers.get("connection").is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+                }) && request
+                    .headers
+                    .get("upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
                 let spec = {
                     let mut execs = state
                         .execs
@@ -21938,17 +21951,15 @@ fn handle_docker_compat_connection(
                     if spec.running {
                         return Err(format!("docker: exec already running: {id}"));
                     }
+                    if upgraded
+                        && !start.detach
+                        && (!spec.env.is_empty() || spec.user.is_some() || spec.working_dir.is_some())
+                    {
+                        return Err("attached exec with environment, user, or working-directory overrides is unsupported; clear shell overrides and retry".to_string());
+                    }
                     spec.running = true;
                     spec.clone()
                 };
-                let upgraded = request.headers.get("connection").is_some_and(|value| {
-                    value
-                        .split(',')
-                        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-                }) && request
-                    .headers
-                    .get("upgrade")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("tcp"));
                 if upgraded && !start.detach {
                     exec_hijack_session = Some((
                         id.to_string(),
@@ -23413,13 +23424,7 @@ fn handle_docker_compat_connection(
     }
     if let Some((exec_id, spec, tty, request_origin)) = exec_hijack_session {
         let input = if spec.attach_stdin {
-            Some(
-                Box::new(
-                    stream
-                        .try_clone()
-                        .map_err(|error| format!("docker: cloning exec stream failed: {error}"))?,
-                ) as Box<dyn Read + Send>,
-            )
+            Some(Box::new(docker_exec_stdin_stream(&stream)?) as Box<dyn Read + Send>)
         } else {
             None
         };
@@ -23469,6 +23474,7 @@ fn handle_docker_compat_connection(
                 exec.tty_device = None;
             }
         }
+        finish_docker_exec_hijack(&stream);
         result.map_err(|error| error.to_string())?;
         return Ok(());
     }
@@ -25332,6 +25338,15 @@ fn docker_container_list_entry(
     image_id: &str,
 ) -> serde_json::Value {
     let name = record.name.clone().unwrap_or_else(|| record.id.clone());
+    let status = if record.status == "running"
+        && matches!(
+            record.health_status.as_str(),
+            "healthy" | "unhealthy" | "starting"
+        ) {
+        format!("{} ({})", record.status, record.health_status)
+    } else {
+        record.status.clone()
+    };
     serde_json::json!({
         "Id": record.id,
         "Image": record.image,
@@ -25339,7 +25354,7 @@ fn docker_container_list_entry(
         "Command": record.command.join(" "),
         "Created": record.created_at_unix,
         "State": record.status,
-        "Status": record.status,
+        "Status": status,
         "Names": [format!("/{name}")],
         "Labels": record.labels,
         "Ports": docker_port_summaries(&record.ports),
@@ -26190,6 +26205,25 @@ fn docker_chunked_headers(status: u16, content_type: &str) -> Vec<u8> {
         "HTTP/1.1 {status_line}\r\nTransfer-Encoding: chunked\r\nContent-Type: {content_type}\r\nConnection: keep-alive\r\n\r\n"
     )
     .into_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn finish_docker_exec_hijack(stream: &UnixStream) {
+    // The stdin worker owns a cloned socket. Dropping the handler's stream
+    // alone leaves the client waiting for EOF and the worker waiting for input.
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+#[cfg(target_os = "linux")]
+fn docker_exec_stdin_stream(stream: &UnixStream) -> Result<UnixStream, String> {
+    // The HTTP parser deadline must not terminate a healthy idle terminal.
+    // UnixStream clones share socket timeouts, so clear it before stdin handoff.
+    stream
+        .set_read_timeout(None)
+        .map_err(|error| format!("docker: clearing exec read timeout failed: {error}"))?;
+    stream
+        .try_clone()
+        .map_err(|error| format!("docker: cloning exec stream failed: {error}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -34160,6 +34194,35 @@ volumes:
     }
 
     #[test]
+    fn compose_existing_external_network_never_becomes_an_unrelated_rootless_lease() {
+        let runtime_dir = tempfile::tempdir().expect("runtime directory");
+        let network = super::create_network_record("shared", None, None, None, None)
+            .expect("network record");
+        super::save_networks(runtime_dir.path(), &[network]).expect("persist external network");
+        let project = super::ComposeProject {
+            path: runtime_dir.path().join("compose.yml"),
+            compose: serde_json::from_value(serde_json::json!({
+                "services": {"web": {"image": "alpine:latest", "networks": ["shared"]}},
+                "networks": {"shared": {"external": true}}
+            })).expect("compose project"),
+        };
+        let authorization = test_surface_authorization(runtime_dir.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        let result = super::ensure_compose_networks(
+            &project, runtime_dir.path(), "project_default", &origin, &authorization,
+        );
+        if nix::unistd::Uid::effective().is_root() {
+            assert!(result.expect("rootful external network remains supported").is_empty());
+        } else {
+            let error = result.expect_err("external rootful bridge cannot become a private rootless lease");
+            assert!(error.contains("external network shared requires rootful networking"), "{error}");
+        }
+        assert_eq!(super::load_networks(runtime_dir.path()).expect("network records").len(), 1);
+        assert!(super::load_compose_network_ownership(runtime_dir.path()).expect("ownership").is_empty());
+        assert!(!runtime_dir.path().join("rootless-network-leases.json").exists());
+    }
+
+    #[test]
     fn compose_network_provisioning_creates_and_tracks_missing_bridge() {
         // This fixture asserts kernel-backed bridge provisioning. A normal
         // release-gate invocation is non-root and must not turn the explicit
@@ -34711,6 +34774,62 @@ volumes:
             request.headers.get("upgrade").map(String::as_str),
             Some("tcp")
         );
+    }
+
+    #[test]
+    fn completed_exec_hijack_closes_output_and_unblocks_retained_stdin() {
+        let (mut client, mut server) = StdUnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut input = super::docker_exec_stdin_stream(&server).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let relay = std::thread::spawn(move || {
+            let result = std::io::copy(&mut input, &mut std::io::sink());
+            let _ = sender.send(result);
+        });
+        server.write_all(b"final output").unwrap();
+        super::finish_docker_exec_hijack(&server);
+        let mut output = Vec::new();
+        let eof = client.read_to_end(&mut output);
+        let input_finished = receiver.recv_timeout(Duration::from_secs(1));
+        // Always unblock the worker, including when checking the broken behavior.
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        relay.join().unwrap();
+        eof.expect("completed exec must send EOF despite retained stdin socket clone");
+        input_finished.expect("completion must unblock the stdin worker").unwrap();
+        assert_eq!(output, b"final output");
+    }
+
+    #[test]
+    fn exec_hijack_stdin_survives_idle_past_http_parser_timeout() {
+        let (mut client, mut server) = StdUnixStream::pair().expect("socket pair");
+        client
+            .write_all(b"POST /exec/test/start HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+            .expect("HTTP request");
+        read_http_request(&mut server).expect("parse request");
+        // Compress the parser's five-second timeout to keep the regression fast.
+        server
+            .set_read_timeout(Some(Duration::from_millis(30)))
+            .unwrap();
+        let mut input = super::docker_exec_stdin_stream(&server).expect("handoff input");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let relay = std::thread::spawn(move || {
+            let mut delivered = Vec::new();
+            let result = std::io::copy(&mut input, &mut delivered);
+            sender.send((result, delivered)).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(120));
+        client
+            .write_all(b"echo after-idle\r")
+            .expect("send delayed terminal input");
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let (result, delivered) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stdin relay completed");
+        relay.join().unwrap();
+        result.expect("idle must not terminate the stdin relay");
+        assert_eq!(delivered, b"echo after-idle\r");
     }
 
     #[test]
@@ -38792,6 +38911,33 @@ FROM --platform=linux/${MYARCH} busybox\n";
 
         let payload = docker_inspect_payload(&record, false);
         assert_eq!(payload["Config"]["Tty"], true);
+    }
+
+    #[test]
+    fn docker_container_list_preserves_health_for_workspace_filters() {
+        for health in ["healthy", "unhealthy", "starting", "none"] {
+            let mut record: ferro_core::container_store::ContainerRecord =
+                serde_json::from_value(serde_json::json!({
+                    "id": "health-list", "pid": 4242, "image": "alpine:latest",
+                    "command": ["sleep", "60"], "created_at_unix": 1,
+                    "stdout_path": "", "stderr_path": "", "status": "running",
+                    "health_status": health
+                }))
+                .expect("health record");
+            let payload = super::docker_container_list_entry(&record, "");
+            assert_eq!(payload["State"], "running");
+            let expected = if health == "none" {
+                "running".to_string()
+            } else {
+                format!("running ({health})")
+            };
+            assert_eq!(payload["Status"], expected);
+            record.status = "exited".into();
+            assert_eq!(
+                super::docker_container_list_entry(&record, "")["Status"],
+                "exited"
+            );
+        }
     }
 
     #[test]

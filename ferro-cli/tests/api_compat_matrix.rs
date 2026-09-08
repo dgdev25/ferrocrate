@@ -1549,3 +1549,49 @@ fn docker_create_identity_is_inspectable_before_start() {
     let (status, body) = harness.request("GET", &format!("/containers/{remove_id}/json"), "");
     assert_eq!(status, 404, "removed post-restart inspect response: {body}");
 }
+
+#[test]
+fn attached_exec_overrides_fail_before_upgrade_and_running_state() {
+    let harness = DaemonHarness::spawn();
+    let (status, body) = harness.request(
+        "POST",
+        "/containers/create",
+        r#"{"Image":"alpine:latest","Cmd":["sh"]}"#,
+    );
+    assert_eq!(status, 201, "{body}");
+    let container: serde_json::Value = serde_json::from_str(&body).unwrap();
+    for overrides in [
+        serde_json::json!({"Env":["UI_SHELL=ok"]}),
+        serde_json::json!({"User":"1000"}),
+        serde_json::json!({"WorkingDir":"/tmp"}),
+    ] {
+        let mut create = serde_json::json!({"Cmd":["sh"],"AttachStdin":true,"Tty":true});
+        create
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
+        let (status, body) = harness.request(
+            "POST",
+            &format!("/containers/{}/exec", container["Id"].as_str().unwrap()),
+            &create.to_string(),
+        );
+        assert_eq!(status, 201, "{body}");
+        let exec: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = exec["Id"].as_str().unwrap();
+        let body = r#"{"Detach":false,"Tty":true}"#;
+        let (status, response) = harness.request_raw(&format!("POST /exec/{id}/start HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: {}\r\n\r\n{body}",body.len()));
+        assert_eq!(
+            status, 400,
+            "unsupported overrides must not upgrade: {response}"
+        );
+        assert!(response.contains(
+            "attached exec with environment, user, or working-directory overrides is unsupported"
+        ));
+        let (status, inspect) = harness.request("GET", &format!("/exec/{id}/json"), "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inspect).unwrap()["Running"],
+            false
+        );
+    }
+}

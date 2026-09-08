@@ -15683,6 +15683,48 @@ fn update_health(
     db.update_health(id, status, failures, checked_at_unix, health_log)
 }
 
+fn run_health_probe(
+    record: &ContainerRecord,
+    config: &HealthConfig,
+    runtime_dir: &Path,
+) -> Result<crate::container_exec::ExecResult, crate::container_exec::ContainerExecError> {
+    if !nix::unistd::Uid::effective().is_root() {
+        let rootfs = runtime_dir
+            .join("containers")
+            .join(&record.id)
+            .join("rootfs");
+        let mounts = record
+            .mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.clone(), mount.read_only))
+            .collect::<Vec<_>>();
+        let tmpfs_mounts = record
+            .tmpfs_mounts
+            .iter()
+            .map(|mount| (mount.target.clone(), mount.size.clone()))
+            .collect::<Vec<_>>();
+        return exec_in_rootless_rootfs(
+            &rootfs,
+            &config.cmd,
+            &record.env,
+            record.workdir.as_deref(),
+            &mounts,
+            &tmpfs_mounts,
+            record.readonly_rootfs,
+            (config.timeout_secs > 0).then(|| Duration::from_secs(config.timeout_secs)),
+        );
+    }
+    if config.timeout_secs > 0 {
+        exec_in_container_with_timeout(
+            record.pid,
+            &config.cmd,
+            Duration::from_secs(config.timeout_secs),
+        )
+    } else {
+        exec_in_container(record.pid, &config.cmd)
+    }
+}
+
 fn run_health_checks(
     store: SqliteContainerStore,
     id: String,
@@ -15715,15 +15757,10 @@ fn run_health_checks(
         }
 
         let started_at = now_unix();
-        let result = if config.timeout_secs > 0 {
-            exec_in_container_with_timeout(
-                pid,
-                &config.cmd,
-                Duration::from_secs(config.timeout_secs),
-            )
-        } else {
-            exec_in_container(pid, &config.cmd)
+        let Some(record) = store.get(&id).ok().flatten() else {
+            return;
         };
+        let result = run_health_probe(&record, &config, &runtime_dir);
         let now = now_unix();
         let (exit_code, output) = match &result {
             Ok(exec) => (exec.exit_code, format!("{}{}", exec.stdout, exec.stderr)),
@@ -17643,6 +17680,35 @@ mod tests {
                 "replacement did not exit"
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn rootless_health_probe_requires_its_rootfs_instead_of_attempting_nsenter() {
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id": "health-probe", "pid": std::process::id(), "image": "alpine:latest",
+            "command": ["sleep", "60"], "created_at_unix": 1,
+            "stdout_path": "", "stderr_path": "", "status": "running"
+        }))
+        .expect("record");
+        for timeout_secs in [0, 1] {
+            let config = super::HealthConfig {
+                cmd: vec!["true".into()],
+                interval_secs: 1,
+                timeout_secs,
+                retries: 1,
+                start_period_secs: 0,
+            };
+            let error = super::run_health_probe(&record, &config, directory.path())
+                .expect_err("missing rootless filesystem must fail closed");
+            assert!(
+                error.to_string().contains("rootfs does not exist"),
+                "{error}"
+            );
         }
     }
 

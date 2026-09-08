@@ -551,6 +551,12 @@ fn execute_tty_process(
         .stderr(Stdio::from(slave));
     crate::pty::configure_command(command)?;
     let mut child = command.spawn()?;
+    // Command retains its configured stdio after spawn. Release the parent's
+    // slave descriptors so the master observes EOF/EIO when the child exits.
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let mut master = File::from(master);
     let mut writer = master.try_clone()?;
     writer.write_all(input)?;
@@ -771,6 +777,12 @@ fn execute_tty_process_streaming(
         .stderr(Stdio::from(slave));
     crate::pty::configure_command(command)?;
     let mut child = command.spawn()?;
+    // Command retains its configured stdio after spawn. Release the parent's
+    // slave descriptors so the master observes EOF/EIO when the child exits.
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     if let Err(error) = tty_ready(&tty_device) {
         let _ = child.kill();
         let _ = child.wait();
@@ -847,6 +859,49 @@ mod tests {
     use nix::unistd::Uid;
     use std::path::Path;
     use std::time::Duration;
+
+    #[test]
+    fn tty_streaming_finishes_after_child_exit_or_failed_shell() {
+        for (script, expected_exit) in [
+            ("printf completed; exit 7", 7),
+            ("exec /ferro-test-missing-shell", 127),
+        ] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut command = std::process::Command::new("/bin/sh");
+                command.args(["-c", script]);
+                let result = super::execute_tty_process_streaming(
+                    &mut command,
+                    None,
+                    &mut |_| Ok(()),
+                    &mut |_, _| Ok(()),
+                );
+                let _ = sender.send(result);
+            });
+            let result = receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("PTY EOF must follow child exit even while parent Command exists")
+                .expect("PTY execution completes");
+            assert_eq!(result.exit_code, expected_exit);
+            assert!(!result.stdout.is_empty());
+        }
+    }
+
+    #[test]
+    fn buffered_tty_finishes_after_child_exit() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "printf buffered-done"]);
+            let _ = sender.send(super::execute_tty_process(&mut command, &[]));
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("buffered PTY EOF must follow child exit")
+            .expect("PTY execution completes");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("buffered-done"));
+    }
 
     #[test]
     fn builds_nsenter_args_for_exec() {

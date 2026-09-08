@@ -16,9 +16,26 @@ for arg in "$@"; do
     --stop)
       if [[ -f logs/start.pid ]]; then
         pid="$(cat logs/start.pid)"
-        if [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$root/start.sh"; then
-          kill -TERM "$pid"
-        fi
+        python3 - "$pid" "$root/start.sh" <<'PY'
+import os
+from pathlib import Path
+import signal
+import sys
+
+pid_text, expected = sys.argv[1:]
+if pid_text.isdecimal():
+    process = Path('/proc') / pid_text
+    try:
+        arguments = process.joinpath('cmdline').read_bytes().split(b'\0')
+        cwd = process.joinpath('cwd').resolve(strict=True)
+        script = Path(expected).resolve(strict=True)
+        # Match an actual script argument, including `bash start.sh`, rather
+        # than a substring in an unrelated process's command text.
+        if any((cwd / os.fsdecode(arg)).resolve() == script for arg in arguments if arg):
+            os.kill(int(pid_text), signal.SIGTERM)
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        pass
+PY
       fi
       exit 0 ;;
     --reset-ports) sed -i 's/^FRONTEND_PORT="[0-9]*"/FRONTEND_PORT=""/' "$root/start.sh"; exit 0 ;;
@@ -51,7 +68,7 @@ if [[ "$mode" == prod || "$rebuild" == 1 ]]; then npm run --prefix "$ui" build; 
 child=""
 cleanup() {
   if [[ -n "$child" ]]; then kill -TERM -- "-$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
-  rm -f logs/start.pid
+  if [[ -f logs/start.pid && "$(cat logs/start.pid)" == "$$" ]]; then rm -f logs/start.pid; fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM

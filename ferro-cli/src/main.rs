@@ -15823,6 +15823,7 @@ fn prepare_compose_service(
     name: String,
     instance: String,
     service: &ComposeService,
+    planned_volumes: &mut HashSet<String>,
 ) -> Result<PreparedComposeService, String> {
     let image = service
         .image
@@ -15870,7 +15871,6 @@ fn prepare_compose_service(
                 .map_err(|error| error.to_string())?,
         ));
     }
-    let mut planned_volumes = HashSet::new();
     if let Some(volumes) = service.volumes.as_ref() {
         for entry in volumes {
             let source = entry.split(':').next().unwrap_or("");
@@ -16349,6 +16349,7 @@ fn handle_compose(
             let surface_authorization = runtime
                 .surface_authorization()
                 .map_err(|error| error.to_string())?;
+            let mut planned_volumes = HashSet::new();
             let prepared: Vec<_> = selected
                 .into_iter()
                 .map(|(name, instance)| {
@@ -16367,6 +16368,7 @@ fn handle_compose(
                         name,
                         instance,
                         service,
+                        &mut planned_volumes,
                     )
                 })
                 .collect::<Result<_, _>>()?;

@@ -813,6 +813,7 @@ enum ComposeAction {
 
 #[derive(Debug, Deserialize)]
 struct ComposeConfigProjection {
+    name: String,
     services: BTreeMap<String, serde_yaml::Value>,
 }
 
@@ -820,12 +821,6 @@ struct ComposeConfigProjection {
 struct ComposeContainerRecord {
     #[serde(alias = "Id")]
     id: String,
-    #[serde(
-        rename = "Names",
-        default,
-        deserialize_with = "deserialize_null_default"
-    )]
-    names: Vec<String>,
     #[serde(rename = "Labels", default)]
     labels: BTreeMap<String, String>,
     #[serde(alias = "State")]
@@ -917,6 +912,7 @@ fn compose_container_list_command() -> Vec<String> {
 }
 
 fn compose_service_rows(
+    project: &str,
     mut services: Vec<String>,
     containers: &[ComposeContainerRecord],
 ) -> Vec<ComposeServiceSummary> {
@@ -924,13 +920,13 @@ fn compose_service_rows(
     services
         .into_iter()
         .map(|name| {
-            let replica_prefix = format!("{name}-");
             let container = containers.iter().find(|container| {
-                container.labels.get("com.docker.compose.service") == Some(&name)
-                    || container.names.iter().any(|container_name| {
-                        let container_name = container_name.trim_start_matches('/');
-                        container_name == name || container_name.starts_with(&replica_prefix)
-                    })
+                container
+                    .labels
+                    .get("com.docker.compose.project")
+                    .map(String::as_str)
+                    == Some(project)
+                    && container.labels.get("com.docker.compose.service") == Some(&name)
             });
             ComposeServiceSummary {
                 name,
@@ -2647,6 +2643,9 @@ fn get_compose_snapshot(file: String) -> Result<ComposeSnapshot, String> {
     }
     let config = serde_yaml::from_str::<ComposeConfigProjection>(&config_result.stdout)
         .map_err(|error| format!("compose config returned invalid YAML: {error}"))?;
+    if config.name.trim().is_empty() {
+        return Err("compose config omitted resolved project identity".to_string());
+    }
     let containers_result = run_owned_command("ferro-desktop", &compose_container_list_command());
     if !containers_result.ok {
         return Err(command_failure("container status", &containers_result));
@@ -2655,7 +2654,11 @@ fn get_compose_snapshot(file: String) -> Result<ComposeSnapshot, String> {
         .map_err(|error| format!("container status returned invalid JSON: {error}"))?;
     Ok(ComposeSnapshot {
         config: config_result.stdout,
-        services: compose_service_rows(config.services.into_keys().collect(), &containers),
+        services: compose_service_rows(
+            &config.name,
+            config.services.into_keys().collect(),
+            &containers,
+        ),
     })
 }
 
@@ -3983,6 +3986,7 @@ mod tests {
         ))
         .expect("Docker container list records");
         let rows = compose_service_rows(
+            "shop",
             vec!["worker".to_string(), "db".to_string(), "api".to_string()],
             &containers,
         );
@@ -3991,7 +3995,7 @@ mod tests {
         assert_eq!(rows[1].name, "db");
         assert_eq!(rows[1].status, "not_created");
         assert_eq!(rows[2].name, "worker");
-        assert_eq!(rows[2].container_id.as_deref(), Some("worker-id"));
+        assert_eq!(rows[2].container_id, None);
     }
 
     #[test]
@@ -4347,7 +4351,7 @@ mod tests {
         let fixture = include_str!("../../src/fixtures/ferrocrate-containers.json");
         let compose = parse_nullable_json_list::<ComposeContainerRecord>(fixture)
             .expect("compose Docker list fixture");
-        let rows = compose_service_rows(vec!["web".to_string()], &compose);
+        let rows = compose_service_rows("storefront", vec!["web".to_string()], &compose);
         assert_eq!(rows[0].container_id.as_deref(), Some("abc123"));
         assert_eq!(rows[0].status, "running");
 

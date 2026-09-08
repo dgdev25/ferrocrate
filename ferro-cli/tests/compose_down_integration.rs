@@ -47,6 +47,7 @@ fn live_web_record(
     let mut record: ContainerRecord = serde_json::from_value(serde_json::json!({
             "id": "00112233445566778899aabbccddeeff",
             "name": "web",
+            "labels": {"com.docker.compose.project": "project", "com.docker.compose.service": "web"},
             "pid": pid,
             "image": "example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "command": ["sleep", "60"],
@@ -117,6 +118,7 @@ fn compose_down_treats_unverifiable_pid_as_exited_and_deletes() {
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
+            "labels": {"com.docker.compose.project": "project", "com.docker.compose.service": "web"},
         // PID 1 is live but owned by the host init process. An unprivileged
         // caller cannot signal it, so the stop phase fails before deletion;
         // unlike an absent PID, it is not converted to an exited record by
@@ -175,6 +177,7 @@ fn compose_down_stops_then_deletes_using_post_stop_record() {
     let record: ContainerRecord = serde_json::from_value(serde_json::json!({
         "id": "00112233445566778899aabbccddeeff",
         "name": "web",
+            "labels": {"com.docker.compose.project": "project", "com.docker.compose.service": "web"},
         "pid": pid,
         "image": "example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "command": ["sleep", "60"],
@@ -290,4 +293,71 @@ fn public_compose_down_preserves_disabled_shadow_and_enforce_contracts() {
         .args(["-TERM", &record.pid.to_string()])
         .status();
     reaper.join().unwrap();
+}
+
+#[test]
+fn compose_down_volumes_removes_only_unused_owned_nonexternal_volumes() {
+    use std::collections::BTreeMap;
+    let root = tempfile::tempdir().unwrap();
+    let project = compose_project(root.path());
+    std::fs::write(project.join("compose.yml"), "name: project\nservices:\n  web:\n    image: scratch\nvolumes:\n  external:\n    external: true\n").unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .current_dir(&project).env("FERROCRATE_HOME", root.path())
+            .env("FERROCRATE_RUNTIME_DIR", root.path()).env_remove("COMPOSE_PROJECT_NAME")
+            .args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    for name in ["project_owned", "external", "foreign", "unlabelled", "project_busy"] {
+        run(&["volume", "create", name]);
+    }
+    let volumes = ferro_core::volume_store::LocalVolumeStore::open(root.path().join("volumes")).unwrap();
+    for (name, owner) in [("project_owned","project"),("external","project"),("foreign","another"),("project_busy","project")] {
+        volumes.set_labels(name, BTreeMap::from([("com.docker.compose.project".into(),owner.into())])).unwrap();
+    }
+    let busy = volumes.get("project_busy").unwrap().unwrap();
+    let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+        "id":"unrelated", "name":"other", "pid":0, "image":"scratch", "command":[],
+        "created_at_unix":0, "stdout_path":"", "stderr_path":"", "status":"exited",
+        "mounts":[{"source":busy.path,"target":"/data","read_only":false}]
+    })).unwrap();
+    let containers = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
+    containers.put(&record).unwrap();
+    drop(containers);
+    run(&["compose","--file","compose.yml","down"]);
+    assert!(volumes.get("project_owned").unwrap().is_some());
+    run(&["compose","--file","compose.yml","down","--volumes"]);
+    assert!(volumes.get("project_owned").unwrap().is_none());
+    for preserved in ["external", "foreign", "unlabelled", "project_busy"] {
+        assert!(volumes.get(preserved).unwrap().is_some(), "removed {preserved}");
+    }
+}
+
+#[test]
+fn compose_down_named_service_preserves_prefix_neighbors_and_other_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let project = compose_project(root.path());
+    std::fs::write(project.join("compose.yml"), "name: project\nservices:\n  db:\n    image: scratch\n  db-admin:\n    image: scratch\n").unwrap();
+    let store = SqliteContainerStore::open(root.path().join("containers.db")).unwrap();
+    for (id, name, owner, service) in [
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "db", "project", "db"),
+        ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "db-admin", "project", "db-admin"),
+        ("cccccccccccccccccccccccccccccccc", "db-1", "another", "db"),
+        ("dddddddddddddddddddddddddddddddd", "db-2", "", ""),
+    ] {
+        let record: ContainerRecord = serde_json::from_value(serde_json::json!({
+            "id":id,"name":name,"pid":0,"image":"scratch","command":[],"created_at_unix":0,
+            "stdout_path":"","stderr_path":"","status":"exited",
+            "labels":{"com.docker.compose.project":owner,"com.docker.compose.service":service}
+        })).unwrap();
+        store.put(&record).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .current_dir(&project).env("FERROCRATE_HOME",root.path()).env("FERROCRATE_RUNTIME_DIR",root.path())
+        .env_remove("COMPOSE_PROJECT_NAME").args(["compose","--file","compose.yml","down","db"]).output().unwrap();
+    assert!(output.status.success(), "{}",String::from_utf8_lossy(&output.stderr));
+    assert!(store.get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap().is_none());
+    for id in ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccc", "dddddddddddddddddddddddddddddddd"] {
+        assert!(store.get(id).unwrap().is_some(), "unrelated {id} removed");
+    }
 }

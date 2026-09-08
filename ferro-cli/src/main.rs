@@ -16253,7 +16253,7 @@ fn handle_compose(
     command: ComposeCommands,
 ) -> Result<String, String> {
     let path = find_compose_file(file).map_err(|err| err.to_string())?;
-    let project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
+    let mut project = ComposeProject::load(&path).map_err(|err| err.to_string())?;
     let replay_store = FanoutReplayStore::open(runtime_dir()).map_err(|error| error.to_string())?;
     let project_dir = path
         .parent()
@@ -16263,6 +16263,14 @@ fn handle_compose(
         .map_err(|error| format!("compose: project directory cannot be resolved: {error}"))?;
     let default_network =
         compose_default_network_name_with_declared(&project_dir, project.compose.name.as_deref())?;
+    let project_name = default_network.strip_suffix("_default").unwrap().to_string();
+    project.compose.name = Some(project_name.clone());
+    for (name, service) in &mut project.compose.services {
+        let labels = service.labels.get_or_insert_with(HashMap::new);
+        labels.insert("com.docker.compose.project".into(), project_name.clone());
+        labels.insert("com.docker.compose.service".into(), name.clone());
+    }
+    let project_name = project_name.as_str();
     let mut output = String::new();
     match command {
         ComposeCommands::Up {
@@ -16522,7 +16530,7 @@ fn handle_compose(
                     continue;
                 }
                 if let Some(depends_on) = service.depends_on.as_ref() {
-                    wait_for_compose_dependencies(runtime, depends_on)
+                    wait_for_compose_dependencies(runtime, project_name, depends_on)
                         .map_err(|error| format!("compose partial result: {error}"))?;
                 }
                 let mut image_execution = image_execution.unwrap_or(resolve_compose_run_image_execution(
@@ -16762,17 +16770,17 @@ fn handle_compose(
         }
         ComposeCommands::Stop { timeout, services } => {
             let order = compose_down(&project).map_err(|err| err.to_string())?;
-            compose_lifecycle_records(runtime, &order, &services, |id| {
+            compose_lifecycle_records(runtime, project_name, &order, &services, |id| {
                 handle_stop(runtime, id, timeout)
             })?;
         }
         ComposeCommands::Start { services } => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
-            compose_lifecycle_records(runtime, &order, &services, |id| handle_start(runtime, id))?;
+            compose_lifecycle_records(runtime, project_name, &order, &services, |id| handle_start(runtime, id))?;
         }
         ComposeCommands::Restart { timeout, services } => {
             let order = compose_up(&project).map_err(|err| err.to_string())?;
-            compose_lifecycle_records(runtime, &order, &services, |id| {
+            compose_lifecycle_records(runtime, project_name, &order, &services, |id| {
                 handle_restart(runtime, id, timeout)
             })?;
         }
@@ -16802,10 +16810,7 @@ fn handle_compose(
                     containers
                         .iter()
                         .filter(move |rec| {
-                            rec.name
-                                .as_deref()
-                                .map(|val| val == name || val.starts_with(&format!("{name}-")))
-                                .unwrap_or(false)
+                            compose_record_owned(rec, project_name, &name)
                         })
                         .cloned()
                         .collect::<Vec<_>>()
@@ -16993,7 +16998,7 @@ fn handle_compose(
             let order = compose_logs(&project).map_err(|err| err.to_string())?;
             let requested = compose_explicit_service_selection(&project, &services)?;
             for service in order.into_iter().filter(|name| requested.contains(name)) {
-                for record in compose_lifecycle_records_for_service(runtime, &service)? {
+                for record in compose_lifecycle_records_for_service(runtime, project_name, &service)? {
                     let (stdout, stderr) = runtime.logs_split(&record.id).map_err(|error| error.to_string())?;
                     let combined = format!("{stdout}{stderr}");
                     let lines = match tail {
@@ -17124,8 +17129,15 @@ fn compose_explicit_service_selection(
 }
 
 #[cfg(target_os = "linux")]
+fn compose_record_owned(record: &ferro_core::container_store::ContainerRecord, project: &str, service: &str) -> bool {
+    record.labels.get("com.docker.compose.project").is_some_and(|value| value == project)
+        && record.labels.get("com.docker.compose.service").is_some_and(|value| value == service)
+}
+
+#[cfg(target_os = "linux")]
 fn compose_lifecycle_records(
     runtime: &ContainerRuntime,
+    project_name: &str,
     order: &[String],
     services: &[String],
     mut operation: impl FnMut(&str) -> Result<(), String>,
@@ -17138,9 +17150,7 @@ fn compose_lifecycle_records(
             continue;
         }
         for record in records.iter().filter(|record| {
-            record.name.as_deref().is_some_and(|name| {
-                name == service || name.starts_with(&format!("{service}-"))
-            })
+            compose_record_owned(record, project_name, service)
         }) {
             if let Err(error) = operation(&record.id) {
                 failures.push(format!("{}: {error}", record.id));
@@ -17157,17 +17167,15 @@ fn compose_lifecycle_records(
 #[cfg(target_os = "linux")]
 fn compose_lifecycle_records_for_service(
     runtime: &ContainerRuntime,
+    project_name: &str,
     service: &str,
 ) -> Result<Vec<ferro_core::container_store::ContainerRecord>, String> {
-    let replica_prefix = format!("{service}-");
     Ok(runtime
         .list()
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|record| {
-            record.name.as_deref().is_some_and(|name| {
-                name == service || name.starts_with(&replica_prefix)
-            })
+            compose_record_owned(record, project_name, service)
         })
         .collect())
 }
@@ -17175,6 +17183,7 @@ fn compose_lifecycle_records_for_service(
 #[cfg(target_os = "linux")]
 fn wait_for_compose_dependencies(
     runtime: &ContainerRuntime,
+    project_name: &str,
     depends_on: &ComposeDependsOn,
 ) -> Result<(), String> {
     match depends_on {
@@ -17200,8 +17209,8 @@ fn wait_for_compose_dependencies(
 }
 
 #[cfg(target_os = "linux")]
-fn wait_for_compose_completion(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
-    let ids = compose_dependency_container_ids(runtime, service)?;
+fn wait_for_compose_completion(runtime: &ContainerRuntime, project_name: &str, service: &str) -> Result<(), String> {
+    let ids = compose_dependency_container_ids(runtime, project_name, service)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut all_complete = true;
@@ -17236,8 +17245,8 @@ fn wait_for_compose_completion(runtime: &ContainerRuntime, service: &str) -> Res
 }
 
 #[cfg(target_os = "linux")]
-fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<(), String> {
-    let ids = compose_dependency_container_ids(runtime, service)?;
+fn wait_for_compose_health(runtime: &ContainerRuntime, project_name: &str, service: &str) -> Result<(), String> {
+    let ids = compose_dependency_container_ids(runtime, project_name, service)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut all_healthy = true;
@@ -17270,26 +17279,12 @@ fn wait_for_compose_health(runtime: &ContainerRuntime, service: &str) -> Result<
 #[cfg(target_os = "linux")]
 fn compose_dependency_container_ids(
     runtime: &ContainerRuntime,
+    project_name: &str,
     service: &str,
 ) -> Result<Vec<String>, String> {
-    let replica_prefix = format!("{service}-");
-    let mut ids = runtime
-        .list()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| {
-            record.name.as_deref().is_some_and(|name| {
-                name == service
-                    || name
-                        .strip_prefix(&replica_prefix)
-                        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-            })
-        })
-        .map(|record| record.id)
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        ids.push(resolve_container_id(runtime, service)?);
-    }
+    let mut ids: Vec<_> = compose_lifecycle_records_for_service(runtime, project_name, service)?
+        .into_iter().map(|record| record.id).collect();
+    if ids.is_empty() { return Err(format!("compose: dependency {service} has no containers in project {project_name}")); }
     ids.sort();
     Ok(ids)
 }
@@ -32282,6 +32277,8 @@ mod tests {
         assert!(!real.join("destination.txt").exists());
     }
 
+    mod compose_audit_tests { include!("compose_audit_tests.rs"); }
+
     #[test]
     fn compose_completed_successfully_wait_checks_persisted_exit_code() {
         let temp = configured_cli_runtime("disabled");
@@ -32293,6 +32290,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "id": "compose-job",
                 "name": "job",
+                    "labels": {"com.docker.compose.project": "test", "com.docker.compose.service": "job"},
                 "pid": 0,
                 "image": "example.invalid/job:latest",
                 "command": ["true"],
@@ -32306,7 +32304,7 @@ mod tests {
         store.put(&record).expect("store successful record");
         drop(store);
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        assert!(super::wait_for_compose_completion(&runtime, "job").is_ok());
+        assert!(super::wait_for_compose_completion(&runtime, "test", "job").is_ok());
 
         record.last_exit_code = Some(7);
         let store = ferro_core::sqlite_container_store::SqliteContainerStore::open(
@@ -32315,7 +32313,7 @@ mod tests {
         .expect("reopen container store");
         store.put(&record).expect("store failed record");
         drop(store);
-        let error = super::wait_for_compose_completion(&runtime, "job")
+        let error = super::wait_for_compose_completion(&runtime, "test", "job")
             .expect_err("non-zero completion must fail");
         assert!(error.contains("exited with status 7"));
     }
@@ -32336,6 +32334,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({
                     "id": id,
                     "name": name,
+                    "labels": {"com.docker.compose.project": "test", "com.docker.compose.service": if name == "no-health" { name } else { name.split('-').next().unwrap() }},
                     "pid": 0,
                     "image": "example.invalid/health:latest",
                     "command": ["true"],
@@ -32350,11 +32349,11 @@ mod tests {
         }
         drop(store);
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        assert!(super::wait_for_compose_health(&runtime, "healthy").is_ok());
-        let error = super::wait_for_compose_health(&runtime, "unhealthy")
+        assert!(super::wait_for_compose_health(&runtime, "test", "healthy").is_ok());
+        let error = super::wait_for_compose_health(&runtime, "test", "unhealthy")
             .expect_err("unhealthy dependency must fail");
         assert!(error.contains("is unhealthy"));
-        let error = super::wait_for_compose_health(&runtime, "no-health")
+        let error = super::wait_for_compose_health(&runtime, "test", "no-health")
             .expect_err("missing healthcheck must fail");
         assert!(error.contains("has no healthcheck"));
     }
@@ -32376,6 +32375,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({
                     "id": id,
                     "name": name,
+                    "labels": {"com.docker.compose.project": "test", "com.docker.compose.service": if name == "no-health" { name } else { name.split('-').next().unwrap() }},
                     "pid": 0,
                     "image": "example.invalid/dependency:latest",
                     "command": ["true"],
@@ -32391,8 +32391,8 @@ mod tests {
         }
         drop(store);
         let runtime = ContainerRuntime::new(temp.path()).expect("runtime");
-        assert!(super::wait_for_compose_health(&runtime, "db").is_ok());
-        assert!(super::wait_for_compose_completion(&runtime, "migrate").is_ok());
+        assert!(super::wait_for_compose_health(&runtime, "test", "db").is_ok());
+        assert!(super::wait_for_compose_completion(&runtime, "test", "migrate").is_ok());
     }
 
     use ferro_compose::ComposeFile;

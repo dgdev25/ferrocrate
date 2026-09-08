@@ -108,7 +108,14 @@ impl CertificateAuthority {
         {
             return Err(PkiError::MissingClientAuth);
         }
-        let mut params = request.params;
+        // Only the verified public key crosses the CSR trust boundary. Extensions,
+        // names, and validity come exclusively from the node client template.
+        let mut params = CertificateParams::default();
+        let now = SystemTime::now();
+        params.not_before = now.into();
+        params.not_after = (now + std::time::Duration::from_secs(24 * 60 * 60)).into();
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         params.distinguished_name = DistinguishedName::new();
         params.distinguished_name.push(
             DnType::CommonName,

@@ -27,6 +27,10 @@ pub const RVF_FORMAT_VERSION: u8 = 1;
 
 /// Maximum allowed segment payload (512 MiB). Prevents OOM on malformed input.
 pub const MAX_SEGMENT_PAYLOAD: usize = 512 * 1024 * 1024;
+/// Segment types are one byte and writers require them to be unique.
+pub const MAX_SEGMENT_COUNT: usize = 256;
+/// Bound resident payload data while retaining the existing 512 MiB layer limit.
+pub const MAX_TOTAL_PAYLOAD: usize = 1024 * 1024 * 1024;
 
 // ── Segment type constants ────────────────────────────────────────────────────
 
@@ -129,6 +133,12 @@ pub enum RvfError {
     DuplicateSegment(u8),
     #[error("segment payload too large: {0} bytes")]
     PayloadTooLarge(usize),
+    #[error("RVF segment count exceeds limit: {0}")]
+    SegmentCount(usize),
+    #[error("RVF aggregate payload exceeds limit")]
+    AggregatePayload,
+    #[error("RVF allocation failed: {0}")]
+    Allocation(#[from] std::collections::TryReserveError),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -137,8 +147,17 @@ pub enum RvfError {
 
 /// Serialise `segments` into the RVF binary format.
 pub fn write_rvf<W: Write>(writer: &mut W, segments: &[RvfSegment]) -> Result<(), RvfError> {
-    let mut seen = HashSet::with_capacity(segments.len());
+    if segments.len() > MAX_SEGMENT_COUNT {
+        return Err(RvfError::SegmentCount(segments.len()));
+    }
+    let mut total = 0usize;
+    let mut seen = HashSet::new();
+    seen.try_reserve(segments.len())?;
     for segment in segments {
+        total = total
+            .checked_add(segment.payload.len())
+            .filter(|total| *total <= MAX_TOTAL_PAYLOAD)
+            .ok_or(RvfError::AggregatePayload)?;
         if segment.payload.len() > MAX_SEGMENT_PAYLOAD {
             return Err(RvfError::PayloadTooLarge(segment.payload.len()));
         }
@@ -161,6 +180,13 @@ pub fn write_rvf<W: Write>(writer: &mut W, segments: &[RvfSegment]) -> Result<()
 ///
 /// Unknown segment types are preserved verbatim, allowing forward compatibility.
 pub fn read_rvf<R: Read>(reader: &mut R) -> Result<Vec<RvfSegment>, RvfError> {
+    read_rvf_bounded(reader, MAX_TOTAL_PAYLOAD)
+}
+
+fn read_rvf_bounded<R: Read>(
+    reader: &mut R,
+    max_total: usize,
+) -> Result<Vec<RvfSegment>, RvfError> {
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic)?;
     if &magic != RVF_MAGIC {
@@ -177,21 +203,46 @@ pub fn read_rvf<R: Read>(reader: &mut R) -> Result<Vec<RvfSegment>, RvfError> {
     reader.read_exact(&mut count_bytes)?;
     let count = u32::from_le_bytes(count_bytes) as usize;
 
-    let mut segments = Vec::with_capacity(count);
+    if count > MAX_SEGMENT_COUNT {
+        return Err(RvfError::SegmentCount(count));
+    }
+    let mut segments = Vec::new();
+    segments.try_reserve_exact(count)?;
+    let mut total = 0usize;
     for _ in 0..count {
         let mut type_byte = [0u8; 1];
         reader.read_exact(&mut type_byte)?;
 
         let mut len_bytes = [0u8; 8];
         reader.read_exact(&mut len_bytes)?;
-        let len = u64::from_le_bytes(len_bytes) as usize;
+        let len = usize::try_from(u64::from_le_bytes(len_bytes))
+            .map_err(|_| RvfError::PayloadTooLarge(usize::MAX))?;
 
         if len > MAX_SEGMENT_PAYLOAD {
             return Err(RvfError::PayloadTooLarge(len));
         }
 
-        let mut payload = vec![0u8; len];
-        reader.read_exact(&mut payload)?;
+        total = total
+            .checked_add(len)
+            .filter(|total| *total <= max_total)
+            .ok_or(RvfError::AggregatePayload)?;
+        // Allocate only as bytes arrive. Truncated declarations must not
+        // reserve hundreds of MiB before the stream supplies any payload.
+        let mut payload = Vec::new();
+        let mut buffer = [0u8; 64 * 1024];
+        while payload.len() < len {
+            let amount = (len - payload.len()).min(buffer.len());
+            reader.read_exact(&mut buffer[..amount])?;
+            if payload.capacity() - payload.len() < amount {
+                let capacity = payload
+                    .capacity()
+                    .max(buffer.len())
+                    .saturating_mul(2)
+                    .min(len);
+                payload.try_reserve_exact(capacity - payload.len())?;
+            }
+            payload.extend_from_slice(&buffer[..amount]);
+        }
 
         segments.push(RvfSegment {
             seg_type: type_byte[0],
@@ -399,6 +450,39 @@ mod tests {
             layer_size: 1024,
             overlay_model_type: None,
         }
+    }
+
+    #[test]
+    fn aggregate_limit_is_checked_before_next_payload_is_read() {
+        let mut bytes = Vec::new();
+        write_rvf(
+            &mut bytes,
+            &[
+                RvfSegment {
+                    seg_type: 1,
+                    payload: vec![0; 4],
+                },
+                RvfSegment {
+                    seg_type: 2,
+                    payload: vec![0; 5],
+                },
+            ],
+        )
+        .unwrap();
+        bytes.truncate(bytes.len() - 5);
+        assert!(matches!(
+            super::read_rvf_bounded(&mut Cursor::new(bytes), 8),
+            Err(RvfError::AggregatePayload)
+        ));
+    }
+
+    #[test]
+    fn rejects_untrusted_segment_count_before_reading_segments() {
+        let mut bytes = Vec::from(RVF_MAGIC.as_slice());
+        bytes.push(RVF_FORMAT_VERSION);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        let error = read_rvf(&mut Cursor::new(bytes)).unwrap_err();
+        assert!(error.to_string().contains("segment count"), "{error}");
     }
 
     #[test]

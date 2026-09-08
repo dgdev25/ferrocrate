@@ -152,3 +152,24 @@ test('Fleet tab keyboard handler ignores Tab and other unhandled keys', () => {
   handler({key:'Tab',preventDefault:()=>changes.push('prevented')});
   assert.deepEqual(changes,[]);
 });
+
+test('fleet refresh removes disconnected and revoked deployment targets without selecting replacements', async () => {
+  let selection = ['offline', 'revoked', 'online', 'removed'];
+  const context = {
+    session: { current: { active: true, generation: 0 } }, deploymentInitialized: { current: true },
+    invoke: async () => ({ hosts: [
+      { node_id: 'offline', connected: false },
+      { node_id: 'revoked', connected: true, enrollment_state: 'revoked' },
+      { node_id: 'online', connected: true },
+      { node_id: 'new', connected: true },
+    ] }),
+    normalizeFleetSnapshot: value => value, setSnapshot: noop, setError: noop, setRunHost: noop,
+    chooseRunHost: noop, setDeployHosts: value => { selection = typeof value === 'function' ? value(selection) : value; }, setLoading: noop,
+  };
+  const { refresh } = handlers('FleetApp.tsx', ['refresh'], context);
+  await refresh();
+  assert.deepEqual([...selection], ['online']);
+  context.invoke = async () => ({ hosts: [] });
+  await refresh();
+  assert.deepEqual([...selection], []);
+});

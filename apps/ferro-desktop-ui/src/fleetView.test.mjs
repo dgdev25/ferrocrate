@@ -80,3 +80,15 @@ test("unauthenticated automatic fleet refresh stays silent until sign-in", () =>
   assert.equal(shouldShowFleetRefreshError(null), false);
   assert.equal(shouldShowFleetRefreshError("operate"), true);
 });
+
+test("run host selection discards disconnected, removed, and revoked targets", () => {
+  const hosts = [
+    { node_id: "offline", connected: false },
+    { node_id: "revoked", connected: true, enrollment_state: "revoked" },
+    { node_id: "online", connected: true },
+  ];
+  for (const current of ["offline", "revoked", "removed", ""]) {
+    assert.equal(chooseRunHost(current, hosts), "online");
+  }
+  assert.equal(chooseRunHost("online", []), "");
+});

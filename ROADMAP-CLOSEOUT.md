@@ -41,7 +41,7 @@ Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-0
 - [ ] S5: Repair and verify logs and terminals — idle stdin timeout, early-exit attached-state race, unsupported-options errors before upgrade, streams/filter/copy/export, terminal commands/resizing/retargeting; LOCAL045–063.
 - [ ] S6: Finish images, volumes and networks — digest usage, visible removal controls, in-use behavior, creation/validation/removal/prune and attachment protection; LOCAL064–090 resource journeys.
 - [ ] S7: Finish Compose and build workflows — valid/invalid files, build success/failure/retry, lifecycle/resource retention, stale inspector fix and target-switching; LOCAL071–077 and091–100.
-- [ ] S8: Close Fleet regressions with live evidence — roles, run/inspect/logs, deploy/rollback/revoke, stale selections, TTL and responsive controls; commit verified fixes and evidence.
+- [x] S8: Close Fleet regressions with live evidence — roles, run/inspect/logs, deploy/rollback/revoke, stale selections, TTL and responsive controls; commit verified fixes and evidence.
 - [ ] S9: Finish shell, Doctor and responsive/accessibility checks — search/filter/navigation/focus/theme, offline/retry, Doctor toggles, daemon lifecycle, mobile controls and affected-route visual/performance gates; LOCAL001–015 and106–110.
 - [ ] S10: Qualify account, registry, licensing and platform-only features — exercise all reversible local cases, provision isolated real integrations where available, retain explicit evidence for any required external credentials/native platform; LOCAL101–105 and111–123.
 - [ ] S11: Run final verification and clean up owned fixtures — rebuild every affected candidate, run regression/type/lint checks and final UI retests; stop only owned processes and remove only owned test resources after evidence capture.
@@ -61,3 +61,5 @@ Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-0
 - Successful preset launch retains stale ports/volume and clears required generated credentials (fresh-draft fix underway).
 - Development binary misses installed AppArmor profile; isolated candidate now runs under the existing profile, without policy changes, for preset qualification.
 - In-use image removal and external-network attachment need disposition from actual backend semantics; no unsafe blanket prune before that check.
+
+Execution state: S2 is blocked pending the requested administrator AppArmor test/profile load; S4 is in progress. All other unchecked tasks remain open.

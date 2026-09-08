@@ -5,7 +5,10 @@ export function canOperateFleet(role) {
 }
 
 export function chooseRunHost(currentHost, hosts) {
-  return currentHost || hosts.find((host) => host?.connected)?.node_id || "";
+  const available = hosts.filter((host) => host?.connected && host.enrollment_state !== "revoked");
+  return available.some((host) => host.node_id === currentHost)
+    ? currentHost
+    : available[0]?.node_id || "";
 }
 
 export function shouldShowFleetRefreshError(role) {

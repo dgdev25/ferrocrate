@@ -209,7 +209,7 @@ struct FleetUiOptions {
     /// Lifetime of the browser login credential written to disk. The default of
     /// five minutes was too short to be usable: once it lapsed the operator was
     /// locked out, because refreshing one needs a live browser session and there
-    /// was none yet. Accepts 1 to 3600 seconds; it is the bootstrap credential,
+    /// was none yet. Accepts 1 to 900 seconds, matching SessionStore; it is the bootstrap credential,
     /// so it may outlive a browser session by design.
     login_ttl_seconds: i64,
     tls_cert: Option<PathBuf>,
@@ -262,8 +262,8 @@ impl FleetUiOptions {
                     login_ttl_seconds = raw
                         .parse()
                         .map_err(|_| format!("invalid --login-ttl-seconds: {raw}"))?;
-                    if login_ttl_seconds <= 0 || login_ttl_seconds > 3600 {
-                        return Err("--login-ttl-seconds must be between 1 and 3600".to_string());
+                    if login_ttl_seconds <= 0 || login_ttl_seconds > 900 {
+                        return Err("--login-ttl-seconds must be between 1 and 900".to_string());
                     }
                 }
                 "--tls-cert" => tls_cert = Some(value(&mut arguments, "--tls-cert")?.into()),

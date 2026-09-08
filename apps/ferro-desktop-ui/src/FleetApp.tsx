@@ -104,10 +104,14 @@ export function FleetApp(): JSX.Element {
       setSnapshot(next as FleetSnapshot);
       setError("");
       setRunHost((current) => chooseRunHost(current, next.hosts as FleetHost[]));
+      const available = (next.hosts as FleetHost[])
+        .filter((host) => host.connected && host.enrollment_state !== "revoked")
+        .map((host) => host.node_id);
       if (!deploymentInitialized.current) {
         deploymentInitialized.current = true;
-        const nextHosts = next.hosts as FleetHost[];
-        setDeployHosts(nextHosts.filter((host) => host.connected).map((host) => host.node_id));
+        setDeployHosts(available);
+      } else {
+        setDeployHosts((current) => current.filter((id) => available.includes(id)));
       }
     } catch (nextError) {
       if (!session.current.active || generation !== session.current.generation) return;
@@ -286,7 +290,7 @@ export function FleetApp(): JSX.Element {
           {section === "containers" ? <>
             {operate ? <section className="panel fleet-form" aria-labelledby="fleet-run-title">
               <div><p className="eyebrow">Direct host action</p><h2 id="fleet-run-title">Run a container</h2></div>
-              <label>Host<select value={runHost} onChange={(event) => setRunHost(event.target.value)}>{hosts.filter((host) => host.connected).map((host) => <option key={host.node_id}>{host.node_id}</option>)}</select></label>
+              <label>Host<select value={runHost} onChange={(event) => setRunHost(event.target.value)}>{hosts.filter((host) => host.connected && host.enrollment_state !== "revoked").map((host) => <option key={host.node_id}>{host.node_id}</option>)}</select></label>
               <label>Name<input value={runName} onChange={(event) => setRunName(event.target.value)} /></label>
               <label>Image<input value={runImage} onChange={(event) => setRunImage(event.target.value)} /></label>
               <label className="fleet-command-field">Command JSON<input value={runCommand} onChange={(event) => setRunCommand(event.target.value)} /></label>
@@ -313,7 +317,7 @@ export function FleetApp(): JSX.Element {
               <label>Name<input value={deployName} onChange={(event) => setDeployName(event.target.value)} /></label>
               <label>Image<input value={deployImage} onChange={(event) => setDeployImage(event.target.value)} /></label>
               <label className="fleet-command-field">Command JSON<input value={deployCommand} onChange={(event) => setDeployCommand(event.target.value)} /></label>
-              <fieldset><legend>Target hosts</legend>{hosts.filter((host) => host.connected).map((host) => <label key={host.node_id}><input type="checkbox" checked={deployHosts.includes(host.node_id)} onChange={(event) => setDeployHosts((current) => event.target.checked ? [...current, host.node_id] : current.filter((id) => id !== host.node_id))} />{host.node_id}</label>)}</fieldset>
+              <fieldset><legend>Target hosts</legend>{hosts.filter((host) => host.connected && host.enrollment_state !== "revoked").map((host) => <label key={host.node_id}><input type="checkbox" checked={deployHosts.includes(host.node_id)} onChange={(event) => setDeployHosts((current) => event.target.checked ? [...current, host.node_id] : current.filter((id) => id !== host.node_id))} />{host.node_id}</label>)}</fieldset>
               <button className="btn btn-primary" disabled={busy || !deployHosts.length} onClick={() => {
                 try { void runOperation("fleet_deploy", { name: deployName, image: deployImage, command: commandArray(deployCommand), node_ids: deployHosts }); }
                 catch (nextError) { setError(String(nextError)); }

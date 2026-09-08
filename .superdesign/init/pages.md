@@ -1,0 +1,56 @@
+# Page dependencies
+- apps/ferro-desktop-ui/src/main.tsx
+  - apps/ferro-desktop-ui/src/App.tsx
+    - apps/ferro-desktop-ui/src/desktopRuntime.ts
+      - apps/ferro-desktop-ui/src/webBridgeRuntime.mjs
+    - apps/ferro-desktop-ui/src/types.ts
+    - apps/ferro-desktop-ui/src/composeView.mjs
+      - apps/ferro-desktop-ui/src/resourcePages.mjs
+        - apps/ferro-desktop-ui/src/iconSystem.mjs
+    - apps/ferro-desktop-ui/src/containerDetail.mjs
+    - apps/ferro-desktop-ui/src/desktopChrome.mjs
+      - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+    - apps/ferro-desktop-ui/src/surfaceLabel.mjs
+    - apps/ferro-desktop-ui/src/desktopChrome.mjs (shared)
+    - apps/ferro-desktop-ui/src/dialogForms.mjs
+      - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+      - apps/ferro-desktop-ui/src/runContainer.mjs
+      - apps/ferro-desktop-ui/src/resourcePages.mjs (shared)
+    - apps/ferro-desktop-ui/src/dialogForms.mjs (shared)
+    - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+    - apps/ferro-desktop-ui/src/errorScopes.mjs
+    - apps/ferro-desktop-ui/src/imageBuild.mjs
+      - apps/ferro-desktop-ui/src/resourcePages.mjs (shared)
+    - apps/ferro-desktop-ui/src/imageView.mjs
+      - apps/ferro-desktop-ui/src/resourcePages.mjs (shared)
+    - apps/ferro-desktop-ui/src/networkView.mjs
+    - apps/ferro-desktop-ui/src/registryAuth.mjs
+    - apps/ferro-desktop-ui/src/systemPages.mjs
+      - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+    - apps/ferro-desktop-ui/src/resourcePages.mjs (shared)
+    - apps/ferro-desktop-ui/src/resourcePages.mjs (shared)
+    - apps/ferro-desktop-ui/src/runtimeActions.mjs
+    - apps/ferro-desktop-ui/src/runContainer.mjs (shared)
+    - apps/ferro-desktop-ui/src/terminalResize.mjs
+    - apps/ferro-desktop-ui/src/terminalLifecycle.mjs
+    - apps/ferro-desktop-ui/src/volumeView.mjs
+    - apps/ferro-desktop-ui/src/forgeShell.mjs
+    - apps/ferro-desktop-ui/src/forgeShell.mjs (shared)
+    - apps/ferro-desktop-ui/src/FleetApp.tsx
+      - apps/ferro-desktop-ui/src/desktopRuntime.ts (shared)
+      - apps/ferro-desktop-ui/src/desktopChrome.mjs (shared)
+      - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+      - apps/ferro-desktop-ui/src/fleetView.mjs
+      - apps/ferro-desktop-ui/src/fleetView.mjs (shared)
+      - apps/ferro-desktop-ui/src/forgeShell.mjs (shared)
+  - apps/ferro-desktop-ui/src/styles.css
+
+- apps/ferro-desktop-ui/src/FleetApp.tsx
+  - apps/ferro-desktop-ui/src/desktopRuntime.ts
+    - apps/ferro-desktop-ui/src/webBridgeRuntime.mjs
+  - apps/ferro-desktop-ui/src/desktopChrome.mjs
+    - apps/ferro-desktop-ui/src/iconSystem.mjs
+  - apps/ferro-desktop-ui/src/iconSystem.mjs (shared)
+  - apps/ferro-desktop-ui/src/fleetView.mjs
+  - apps/ferro-desktop-ui/src/fleetView.mjs (shared)
+  - apps/ferro-desktop-ui/src/forgeShell.mjs

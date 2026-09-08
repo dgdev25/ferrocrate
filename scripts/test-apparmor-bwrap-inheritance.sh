@@ -34,7 +34,6 @@ python3 - "$repo_root/packaging/apparmor/usr.local.bin.ferrocrate" "$tmp/profile
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).read_text()
-source = source.replace('usr.local.bin.ferrocrate-bwrap', f'{sys.argv[3]}-bwrap')
 source = source.replace('profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate ', f'profile {sys.argv[3]} ')
 # Test the shipped rules, not machine-local overrides.
 source = source.replace('  #include if exists <local/usr.local.bin.ferrocrate>', '')
@@ -58,5 +57,5 @@ runuser -u "$proof_user" -- aa-exec -p "$profile_name" -- \
     chown 1:1 "$2/probe"
     test "$(stat -c %u:%g "$2/probe")" = 1:1
     echo "mapped-volume.chown=pass"
-  ' proof "$profile_name-bwrap" "$tmp/work"
+  ' proof "$profile_name" "$tmp/work"
 echo 'AppArmor bwrap inheritance integration passed'

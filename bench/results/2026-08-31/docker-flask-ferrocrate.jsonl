@@ -1,0 +1,52 @@
+{"app":"docker-flask","engine":"ferrocrate","step":"version","status":"pass","exit":0,"ms":104,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"info","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"doctor","status":"pass","exit":0,"ms":103,"stderr_tail":"cli\u001b[0m\u001b[2m:\u001b[0m rootless daemon socket not found; probed /run/user/1000/ferrocrate.sock (missing), /run/user/1000/docker.sock (missing), /path/to/ferrocrate-lab/runtimes/goal/ferrocrate.sock (missing), /path/to/ferrocrate-lab/runtimes/goal/docker.sock (missing); set FERROCRATE_ROOTLESS_SOCKET=/path/to/ferrocrate.sock or export XDG_RUNTIME_DIR=/run/user/$(id -u) with the rootless daemon running\n","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"pull-base","status":"pass","exit":0,"ms":6208,"stderr_tail":"ccad97f420b1f83cce457be: registry (verified)\nlayer sha256:64c7e6efa7cdf2e4ca8b184acdeb2ac8a50054774b24e677384daa6adec3908d: registry (verified)\nlayer sha256:357a462820893bc488292501d0bc24d92ed7e0cb9db576a5ca32bc7f4bbbaabd: registry (verified)\nlayer sha256:d64904dff413e1ae0509813d7950992bd6e57a752d6607f7f5a3f5ea67492c98: registry (verified)\npull: image=registry-1.docker.io/library/python:3.13-slim\n","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"build","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"images","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"image-inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"history","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"save","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rmi-tag","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"load","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"run-detached","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"health","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"ps","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"logs","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"inspect","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"top","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"stats","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"exec","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"cp-out","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"cp-in","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"diff","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"pause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"unpause","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"restart","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"stop","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"start","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rename","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"commit","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"export","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"kill","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"wait","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rm","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"rmi-committed","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-ls","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-create","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-run","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"network-rm","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-up","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-health","status":"fail","exit":1,"ms":121024,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-ps","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-logs","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"compose-down","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-bad-image","status":"pass","exit":125,"ms":0,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-no-container","status":"pass","exit":1,"ms":0,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"err-port-in-use","status":"skip","exit":0,"ms":0,"stderr_tail":"manifest skip","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"events","status":"pass","exit":0,"ms":203,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"system-df","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"container-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"image-prune","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}
+{"app":"docker-flask","engine":"ferrocrate","step":"search","status":"pass","exit":0,"ms":103,"stderr_tail":"","run":"2026-08-31T07:12Z","head":"2a3e83a7"}

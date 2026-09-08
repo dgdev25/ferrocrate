@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "workspace-redesign-concept": {
+      "targetKind": "new-target",
+      "projectId": "4ec6a5d8-ad84-431d-b8dc-ea56621846f9",
+      "activeDraftId": "3374b418-cad3-4ee7-bab0-6fe1df99f90a",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        "apps/ferro-desktop-ui/src/App.tsx",
+        "apps/ferro-desktop-ui/src/desktopChrome.mjs",
+        "apps/ferro-desktop-ui/src/iconSystem.mjs",
+        "apps/ferro-desktop-ui/src/styles.css"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "f0ca16c23bebe5e458e34f779fa6384a97e9cd4bccb6b757604ae4d67ec5b29b",
+        "apps/ferro-desktop-ui/src/App.tsx": "d90b9cae9eaf6f784122b23832e08171f80c8f874fb332e965bb06cd1f48d33b",
+        "apps/ferro-desktop-ui/src/desktopChrome.mjs": "5bdcf2eea61618af0029fcf5ab65cc9932d28a81730a54e9c5874abe0e59086b",
+        "apps/ferro-desktop-ui/src/iconSystem.mjs": "0750a4a9d5de0e549ad94f0332872355fdc27bf66190fe11fab95ec42b53aa8e",
+        "apps/ferro-desktop-ui/src/styles.css": "12b953973b2e088f299652386a5eff8af0fc53275024928dac58cab8f7d8b0d6"
+      },
+      "referenceIds": [
+        "docs-design-brand-ferrocrate-2026-09-05-01-folded-forge.png"
+      ],
+      "brandAssets": {
+        "logo": {
+          "assetKey": "docs-design-brand-ferrocrate-2026-09-05-01-folded-forge.png",
+          "sourcePath": "docs/design/brand/ferrocrate-2026-09-05/01-folded-forge.png",
+          "url": "https://vgbujcuwptvheqijyjbe.supabase.co/storage/v1/object/public/hmac-uploads/projects/4ec6a5d8-ad84-431d-b8dc-ea56621846f9/brand-assets/docs-design-brand-ferrocrate-2026-09-05-01-folded-forge.png/01-folded-forge.png",
+          "selectionStatus": "provisional preview; user choosing among five"
+        }
+      },
+      "drafts": {
+        "3374b418-cad3-4ee7-bab0-6fe1df99f90a": {
+          "title": "Workspace \u2014 Simplified Desktop",
+          "visualDirection": "Rust / patinated steel: oxide actions, charcoal steel navigation, weathered ivory canvas; five selectable logo concepts",
+          "currentVersion": 2
+        }
+      },
+      "updatedAt": "2026-09-05",
+      "localArtifact": "docs/design/mockups/ferrocrate-workspaces-2026-09-05.html",
+      "note": "Canvas is a static review snapshot; the local HTML includes all simulated interactions."
+    }
+  }
+}

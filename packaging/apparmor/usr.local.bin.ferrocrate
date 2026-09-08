@@ -6,18 +6,11 @@
 profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(default_allow) {
   userns,
 
-  # Explicitly enter FerroCrate's bwrap profile.  An inherited execution lets
-  # Ubuntu's attached bwrap policy stack unpriv_bwrap and strip CAP_CHOWN
-  # inside the mapped user namespace.
-  /usr/bin/bwrap px -> usr.local.bin.ferrocrate-bwrap,
+  # Keep Bubblewrap in this profile. Ubuntu's attached Bubblewrap policy still
+  # stacks unpriv_bwrap for its child process; that host-policy limitation is
+  # detected by the administrative inheritance proof.
+  /usr/bin/bwrap ix,
 
   # This profile does not grant Linux capabilities or change UID/GID mappings.
   #include if exists <local/usr.local.bin.ferrocrate>
-}
-
-# This discrete profile is selected only by the trusted FerroCrate launcher.
-# It grants user-namespace creation but does not change UID/GID maps or host
-# capabilities; capabilities are evaluated inside Bubblewrap's mapped userns.
-profile usr.local.bin.ferrocrate-bwrap flags=(default_allow) {
-  userns,
 }

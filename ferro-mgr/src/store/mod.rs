@@ -290,6 +290,42 @@ impl ManagerStore {
         }
     }
 
+    /// Read only the acknowledged node's authorized history, never another node's revision.
+    pub fn authorized_revision(
+        &self,
+        node_id: &str,
+        revision: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        use rusqlite::OptionalExtension;
+        Ok(connection.query_row(
+            "SELECT r.payload FROM desired_revisions r JOIN desired_authorizations a ON a.revision = r.revision WHERE a.node_id = ?1 AND r.revision = ?2",
+            params![node_id, revision], |row| row.get(0),
+        ).optional()?)
+    }
+
+    /// Append a renewal only while its source revision remains current and its node active.
+    pub fn append_renewed_revision_at(
+        &self,
+        revision: u64,
+        prior_revision: u64,
+        node_id: &str,
+        payload: &[u8],
+        bundle: &[u8],
+    ) -> Result<(), StoreError> {
+        self.transact(|tx| {
+            let next: u64 = tx.query_row("SELECT COALESCE(MAX(revision), 0) + 1 FROM desired_revisions", [], |row| row.get(0))?;
+            let latest: u64 = tx.query_row("SELECT MAX(revision) FROM desired_authorizations WHERE node_id = ?1", [node_id], |row| row.get(0))?;
+            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL)", [node_id], |row| row.get(0))?;
+            if next != revision || latest != prior_revision || !active {
+                return Err(StoreError::InvalidNetwork("renewal state changed or node revoked".into()));
+            }
+            tx.execute("INSERT INTO desired_revisions (revision, overlay_id, payload) SELECT ?1, overlay_id, ?2 FROM desired_revisions WHERE revision = ?3", params![revision, payload, prior_revision])?;
+            tx.execute("INSERT INTO desired_authorizations (revision, node_id, bundle) VALUES (?1, ?2, ?3)", params![revision, node_id, bundle])?;
+            Ok(())
+        })
+    }
+
     pub fn latest_revision(&self) -> Result<Option<(u64, Vec<u8>)>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let result = connection.query_row(
@@ -322,10 +358,7 @@ impl ManagerStore {
         })
     }
 
-    pub fn record_host_observation(
-        &self,
-        observation: HostObservation,
-    ) -> Result<(), StoreError> {
+    pub fn record_host_observation(&self, observation: HostObservation) -> Result<(), StoreError> {
         if observation.node_id.trim().is_empty()
             || observation.version.len() > 128
             || observation.health.len() > 64

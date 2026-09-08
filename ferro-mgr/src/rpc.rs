@@ -84,6 +84,7 @@ pub struct ControlServiceImpl {
     active_nodes: Arc<Mutex<HashSet<String>>>,
     controller: Option<Arc<ControllerGrantIssuer>>,
     fleet_hub: Arc<ControlHub>,
+    publication_lock: Arc<Mutex<()>>,
 }
 impl ControlServiceImpl {
     pub fn new(
@@ -100,6 +101,7 @@ impl ControlServiceImpl {
             active_nodes: Arc::new(Mutex::new(HashSet::new())),
             controller: None,
             fleet_hub,
+            publication_lock: Arc::new(Mutex::new(())),
         }
     }
     pub fn new_authorized(
@@ -121,6 +123,10 @@ impl ControlServiceImpl {
         now_unix: i64,
         now_monotonic_millis: u64,
     ) -> Result<u64, String> {
+        let _guard = self
+            .publication_lock
+            .lock()
+            .map_err(|_| "publication lock unavailable")?;
         let controller = self
             .controller
             .as_ref()
@@ -177,6 +183,112 @@ impl ControlServiceImpl {
         Ok(revision)
     }
 
+    /// Produce a signed reply using authoritative per-node history and explicit clocks.
+    pub fn desired_reply(
+        &self,
+        node_id: &str,
+        acknowledged_revision: u64,
+        now_unix: i64,
+        now_monotonic_millis: u64,
+    ) -> Result<(DesiredState, Vec<u8>), String> {
+        let _guard = self
+            .publication_lock
+            .lock()
+            .map_err(|_| "publication lock unavailable")?;
+        if !self
+            .store
+            .node_is_active(node_id)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("target node is not enrolled or has been revoked".into());
+        }
+        let persisted = self
+            .store
+            .latest_authorized_revision(node_id)
+            .map_err(|e| e.to_string())?;
+        let latest_revision = persisted.as_ref().map_or(1, |(revision, _, _)| *revision);
+        if acknowledged_revision > latest_revision {
+            return Err("acknowledged revision is ahead of manager".into());
+        }
+        let Some((revision, payload, bundle)) = persisted else {
+            let state = self.builder.snapshot(1, Vec::new(), now_unix);
+            let bundle = self
+                .builder
+                .authorization_bundle(&state, node_id, Vec::new())
+                .map_err(|e| e.to_string())?;
+            return Ok((state, bundle));
+        };
+        let desired = DesiredState::decode(payload.as_slice())
+            .map_err(|_| "persisted desired state is invalid")?;
+        if desired.revision != revision
+            || desired.cluster_id != self.builder.cluster_id()
+            || desired.cluster_epoch != self.builder.cluster_epoch()
+        {
+            return Err("persisted desired state identity is invalid".into());
+        }
+        // Applied leases renew at half life. Pending grants refresh before their
+        // 60-second consumption deadline, including after reconnect. Each renewal
+        // uses a new revision so the agent reserves fresh helper sequence numbers.
+        let issued_at = desired
+            .lease_expires_unix
+            .saturating_sub(crate::desired_state::MAX_LEASE_SECONDS);
+        let refresh_after = if acknowledged_revision == revision {
+            crate::desired_state::MAX_LEASE_SECONDS / 2
+        } else {
+            30
+        };
+        if now_unix.saturating_sub(issued_at) < refresh_after {
+            return Ok((desired, bundle));
+        }
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or("controller grant issuer is required for renewal")?;
+        let prior_payload = self
+            .store
+            .authorized_revision(node_id, acknowledged_revision)
+            .map_err(|e| e.to_string())?;
+        let prior = prior_payload
+            .map(|payload| {
+                DesiredState::decode(payload.as_slice())
+                    .map_err(|_| "acknowledged desired state is invalid")
+            })
+            .transpose()?;
+        if prior.as_ref().is_some_and(|state| {
+            state.revision != acknowledged_revision
+                || state.cluster_id != desired.cluster_id
+                || state.cluster_epoch != desired.cluster_epoch
+        }) {
+            return Err("acknowledged desired state identity is invalid".into());
+        }
+        // Revision one is also the protocol's empty bootstrap snapshot. Every
+        // later acknowledgement must refer to this node's persisted history.
+        if prior.is_none() && acknowledged_revision > 1 {
+            return Err("acknowledged desired state is unavailable".into());
+        }
+        let next_revision = self.store.next_revision().map_err(|e| e.to_string())?;
+        let renewed = self
+            .builder
+            .lease(next_revision, desired.overlays, now_unix);
+        let operations = controller
+            .issue_exact_diff_from_state(&renewed, node_id, prior.as_ref(), now_monotonic_millis)
+            .map_err(|e| e.to_string())?;
+        let bundle = self
+            .builder
+            .authorization_bundle(&renewed, node_id, operations)
+            .map_err(|e| e.to_string())?;
+        self.store
+            .append_renewed_revision_at(
+                next_revision,
+                revision,
+                node_id,
+                &renewed.encode_to_vec(),
+                &bundle,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok((renewed, bundle))
+    }
+
     pub fn fleet_hub(&self) -> Arc<ControlHub> {
         self.fleet_hub.clone()
     }
@@ -210,8 +322,7 @@ impl ControlService for ControlServiceImpl {
         };
         let mut inbound = request.into_inner();
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        let builder = self.builder.clone();
-        let revision = self.revision;
+        let service = self.clone();
         let store = self.store.clone();
         let active_nodes = self.active_nodes.clone();
         let fleet_hub = self.fleet_hub.clone();
@@ -318,59 +429,25 @@ impl ControlService for ControlServiceImpl {
                     }));
                 }
                 handle_fleet_payload(&fleet_hub, &message);
-                if message.acknowledged_revision > revision {
-                    let _ = sender
-                        .send(Ok(ManagerMessage {
-                            desired_state: None,
-                            error: "acknowledged revision is ahead of manager".into(),
-                            desired_authorization_bundle: Vec::new(),
-                            command_json: Vec::new(),
-                        }))
-                        .await;
-                    continue;
-                }
-                let (desired_state, desired_authorization_bundle) =
-                    match store.latest_authorized_revision(&message.node_id) {
-                        Ok(Some((_, payload, bundle))) => {
-                            match DesiredState::decode(payload.as_slice()) {
-                                Ok(state) => (state, bundle),
-                                Err(_) => {
-                                    let _ = sender
-                                        .send(Ok(ManagerMessage {
-                                            desired_state: None,
-                                            error: "persisted desired state is invalid".into(),
-                                            desired_authorization_bundle: Vec::new(),
-                                            command_json: Vec::new(),
-                                        }))
-                                        .await;
-                                    continue;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            let state = builder.snapshot(revision, Vec::new(), chrono_like_now());
-                            let bundle = match builder.authorization_bundle(
-                                &state,
-                                &message.node_id,
-                                Vec::new(),
-                            ) {
-                                Ok(bundle) => bundle,
-                                Err(_) => continue,
-                            };
-                            (state, bundle)
-                        }
-                        Err(_) => {
-                            let _ = sender
-                                .send(Ok(ManagerMessage {
-                                    desired_state: None,
-                                    error: "manager state unavailable".into(),
-                                    desired_authorization_bundle: Vec::new(),
-                                    command_json: Vec::new(),
-                                }))
-                                .await;
-                            continue;
-                        }
-                    };
+                let (desired_state, desired_authorization_bundle) = match service.desired_reply(
+                    &message.node_id,
+                    message.acknowledged_revision,
+                    chrono_like_now(),
+                    monotonic_like_now(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Ok(ManagerMessage {
+                                desired_state: None,
+                                error,
+                                desired_authorization_bundle: Vec::new(),
+                                command_json: Vec::new(),
+                            }))
+                            .await;
+                        continue;
+                    }
+                };
                 let _ = sender
                     .send(Ok(ManagerMessage {
                         desired_state: Some(desired_state),

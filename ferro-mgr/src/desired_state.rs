@@ -31,6 +31,10 @@ impl DesiredStateBuilder {
         &self.cluster_id
     }
 
+    pub fn cluster_epoch(&self) -> u64 {
+        self.cluster_epoch
+    }
+
     pub fn snapshot(
         &self,
         revision: u64,

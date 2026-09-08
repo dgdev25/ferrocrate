@@ -103,6 +103,10 @@ pub struct ImageBuildPlan {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DockerfileExecutionOptions {
+    /// Explicit primary build context; defaults to the Dockerfile directory.
+    pub context_dir: Option<PathBuf>,
+    /// Named Dockerfile stage to export; defaults to the last stage.
+    pub target_stage: Option<String>,
     /// BuildKit frontend target platform. This remains separate from automatic
     /// build arguments because users may override `TARGET*` arguments without
     /// changing the output image's platform.
@@ -439,10 +443,21 @@ fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
         ));
     }
     let dockerfile = fs::read_to_string(dockerfile_path)?;
-    let stages = parse_stages_with_build_args(&dockerfile, build_args)?;
-    let context_dir = dockerfile_path
-        .parent()
+    let stages = select_build_target(
+        parse_stages_with_build_args(&dockerfile, build_args)?,
+        execution_options.target_stage.as_deref(),
+    )?;
+    let context_dir = execution_options
+        .context_dir
+        .as_deref()
+        .or_else(|| dockerfile_path.parent())
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
+    if !context_dir.is_dir() {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "build context is not a directory: {}",
+            context_dir.display()
+        )));
+    }
     let context_digest = build_context_binding_digest(
         &hash_context_dir_excluding(context_dir, dockerfile_path, Some(runtime_dir))?,
         named_contexts,
@@ -1200,10 +1215,21 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     let control = BuildControl::load()?;
 
     let dockerfile = fs::read_to_string(dockerfile_path)?;
-    let stages = parse_stages_with_build_args(&dockerfile, build_args)?;
-    let context_dir = dockerfile_path
-        .parent()
+    let stages = select_build_target(
+        parse_stages_with_build_args(&dockerfile, build_args)?,
+        execution_options.target_stage.as_deref(),
+    )?;
+    let context_dir = execution_options
+        .context_dir
+        .as_deref()
+        .or_else(|| dockerfile_path.parent())
         .ok_or_else(|| DockerfileBuildError::Invalid("invalid dockerfile path".to_string()))?;
+    if !context_dir.is_dir() {
+        return Err(DockerfileBuildError::Invalid(format!(
+            "build context is not a directory: {}",
+            context_dir.display()
+        )));
+    }
     let context_hash = build_context_binding_digest(
         &hash_context_dir_excluding(context_dir, dockerfile_path, Some(runtime_dir))?,
         named_contexts,
@@ -3368,6 +3394,31 @@ fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, Doc
 
 fn parse_stages(contents: &str) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     parse_stages_with_build_args(contents, &HashMap::new())
+}
+
+fn select_build_target(
+    mut stages: Vec<StageSpec>,
+    target: Option<&str>,
+) -> Result<Vec<StageSpec>, DockerfileBuildError> {
+    if let Some(target) = target {
+        let index = stages
+            .iter()
+            .position(|stage| {
+                stage
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(target))
+            })
+            .ok_or_else(|| {
+                DockerfileBuildError::Invalid(format!(
+                    "Dockerfile target stage not found: {target}"
+                ))
+            })?;
+        // Retain earlier stages and their numeric COPY --from indices; all
+        // later stages are excluded from preparation, execution and export.
+        stages.truncate(index + 1);
+    }
+    Ok(stages)
 }
 
 fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, String>) -> Result<Vec<StageSpec>, DockerfileBuildError> {

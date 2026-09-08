@@ -181,6 +181,8 @@ pub struct Service {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(from = "BuildRepr")]
 pub struct Build {
+    /// Optional multi-stage build target.
+    pub target: Option<String>,
     /// Build context path (relative to compose file).
     pub context: Option<String>,
 
@@ -196,6 +198,7 @@ pub struct Build {
 enum BuildRepr {
     Short(String),
     Long {
+        target: Option<String>,
         context: Option<String>,
         dockerfile: Option<String>,
         args: Option<BuildArgs>,
@@ -213,15 +216,18 @@ impl From<BuildRepr> for Build {
     fn from(value: BuildRepr) -> Self {
         match value {
             BuildRepr::Short(context) => Self {
+                target: None,
                 context: Some(context),
                 dockerfile: None,
                 args: None,
             },
             BuildRepr::Long {
+                target,
                 context,
                 dockerfile,
                 args,
             } => Self {
+                target,
                 context,
                 dockerfile,
                 args: args.map(|args| match args {

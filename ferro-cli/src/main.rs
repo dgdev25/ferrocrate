@@ -15841,7 +15841,7 @@ fn prepare_compose_service(
             None,
             build.args.as_ref().unwrap_or(&HashMap::new()),
         )?;
-        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args(
+        let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
             &dockerfile_path,
             Some(&image),
             &runtime_dir(),
@@ -15849,6 +15849,11 @@ fn prepare_compose_service(
             store,
             &HashMap::new(),
             build.args.as_ref().unwrap_or(&HashMap::new()),
+            &ferro_core::dockerfile_build::DockerfileExecutionOptions {
+                context_dir: None,
+                target_stage: build.target.clone(),
+                ..Default::default()
+            },
         )
         .map_err(|error| error.to_string())?;
         prerequisites.push(ComposePrerequisite::ImageBuild(Box::new(plan)));
@@ -27969,6 +27974,8 @@ fn buildkit_frontend_execution_options(
         .filter(|value| *value > 0)
         .map(|value| value as u64);
     Ok(DockerfileExecutionOptions {
+        context_dir: None,
+        target_stage: get("target").filter(|value| !value.is_empty()).cloned(),
         target_platform: get("platform")
             .and_then(|platforms| platforms.split(',').next())
             .filter(|platform| !platform.is_empty())

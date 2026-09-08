@@ -1,0 +1,225 @@
+# Exact standalone-desktop exceptions; consumed by check-advisory-exceptions.py.
+# This is not cargo-audit suppression configuration.
+schema = 1
+lockfile = "apps/ferro-desktop-ui/src-tauri/Cargo.lock"
+
+[[exceptions]]
+id = "RUSTSEC-2024-0413"
+name = "atk"
+version = "0.18.2"
+checksum = "241b621213072e993be4f6f3a9e4b45f65b7e6faad43001be957184b7bb1824b"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2", "atk@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0416"
+name = "atk-sys"
+version = "0.18.2"
+checksum = "c5e48b684b0ca77d2bbadeef17424c2ea3c897d44d566a1617e7e8f30614d086"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-plugin-dialog@2.7.3", "rfd@0.16.0", "gtk-sys@0.18.2", "atk-sys@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0412"
+name = "gdk"
+version = "0.18.2"
+checksum = "d9f245958c627ac99d8e529166f9823fb3b838d1d41fd2b297af3075093c2691"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2", "gdk@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0418"
+name = "gdk-sys"
+version = "0.18.2"
+checksum = "5c2d13f38594ac1e66619e188c6d5a1adb98d11b2fcf7894fc416ad76aa2f3f7"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "webkit2gtk@2.0.2", "gdk-sys@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0411"
+name = "gdkwayland-sys"
+version = "0.18.2"
+checksum = "140071d506d223f7572b9f09b5e155afbd77428cd5cc7af8f2694c41d98dfe69"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "tauri-runtime-wry@2.11.4", "tao@0.35.3", "gdkwayland-sys@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0417"
+name = "gdkx11"
+version = "0.18.2"
+checksum = "3caa00e14351bebbc8183b3c36690327eb77c49abc2268dd4bd36b856db3fbfe"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "tauri-runtime-wry@2.11.4", "wry@0.55.1", "gdkx11@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0414"
+name = "gdkx11-sys"
+version = "0.18.2"
+checksum = "6e2e7445fe01ac26f11601db260dd8608fe172514eb63b3b5e261ea6b0f4428d"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "tauri-runtime-wry@2.11.4", "tao@0.35.3", "gdkx11-sys@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0415"
+name = "gtk"
+version = "0.18.2"
+checksum = "fd56fb197bfc42bd5d2751f4f017d44ff59fbb58140c6b49f9b3b2bdab08506a"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0420"
+name = "gtk-sys"
+version = "0.18.2"
+checksum = "8f29a1c21c59553eb7dd40e918be54dccd60c52b049b75119d5d96ce6b624414"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-plugin-dialog@2.7.3", "rfd@0.16.0", "gtk-sys@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0419"
+name = "gtk3-macros"
+version = "0.18.2"
+checksum = "52ff3c5b21f14f0736fed6dcfc0bfb4225ebf5725f3c0209edeec181e4d73e9d"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2", "gtk3-macros@0.18.2"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0370"
+name = "proc-macro-error"
+version = "1.0.4"
+checksum = "da25490ff9892aab3fcf7c36f08cfb902dd3e71ca0f9f9517bea02a73a5ce38c"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2", "gtk3-macros@0.18.2", "proc-macro-error@1.0.4"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."
+
+[[exceptions]]
+id = "RUSTSEC-2025-0081"
+name = "unic-char-property"
+version = "0.9.0"
+checksum = "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-build@2.6.3", "tauri-utils@2.9.3", "urlpattern@0.3.0", "unic-ucd-ident@0.9.0", "unic-char-property@0.9.0"]
+reason = "Tauri URL-pattern parsing still uses the UNIC 0.9 family through urlpattern; replacement requires upstream parser migration."
+action = "Upgrade the Tauri URL-pattern parser dependency and remove these UNIC packages."
+
+[[exceptions]]
+id = "RUSTSEC-2025-0075"
+name = "unic-char-range"
+version = "0.9.0"
+checksum = "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-build@2.6.3", "tauri-utils@2.9.3", "urlpattern@0.3.0", "unic-ucd-ident@0.9.0", "unic-char-range@0.9.0"]
+reason = "Tauri URL-pattern parsing still uses the UNIC 0.9 family through urlpattern; replacement requires upstream parser migration."
+action = "Upgrade the Tauri URL-pattern parser dependency and remove these UNIC packages."
+
+[[exceptions]]
+id = "RUSTSEC-2025-0080"
+name = "unic-common"
+version = "0.9.0"
+checksum = "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-build@2.6.3", "tauri-utils@2.9.3", "urlpattern@0.3.0", "unic-ucd-ident@0.9.0", "unic-ucd-version@0.9.0", "unic-common@0.9.0"]
+reason = "Tauri URL-pattern parsing still uses the UNIC 0.9 family through urlpattern; replacement requires upstream parser migration."
+action = "Upgrade the Tauri URL-pattern parser dependency and remove these UNIC packages."
+
+[[exceptions]]
+id = "RUSTSEC-2025-0100"
+name = "unic-ucd-ident"
+version = "0.9.0"
+checksum = "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-build@2.6.3", "tauri-utils@2.9.3", "urlpattern@0.3.0", "unic-ucd-ident@0.9.0"]
+reason = "Tauri URL-pattern parsing still uses the UNIC 0.9 family through urlpattern; replacement requires upstream parser migration."
+action = "Upgrade the Tauri URL-pattern parser dependency and remove these UNIC packages."
+
+[[exceptions]]
+id = "RUSTSEC-2025-0098"
+name = "unic-ucd-version"
+version = "0.9.0"
+checksum = "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4"
+kind = "unmaintained"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri-build@2.6.3", "tauri-utils@2.9.3", "urlpattern@0.3.0", "unic-ucd-ident@0.9.0", "unic-ucd-version@0.9.0"]
+reason = "Tauri URL-pattern parsing still uses the UNIC 0.9 family through urlpattern; replacement requires upstream parser migration."
+action = "Upgrade the Tauri URL-pattern parser dependency and remove these UNIC packages."
+
+[[exceptions]]
+id = "RUSTSEC-2024-0429"
+name = "glib"
+version = "0.18.5"
+checksum = "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5"
+kind = "unsound"
+owner = "Platform Runtime Team"
+reviewed = 2026-09-08
+expires = 2026-09-30
+dependency_path = ["ferro-desktop-ui@0.1.0", "tauri@2.11.5", "gtk@0.18.2", "glib@0.18.5"]
+reason = "Tauri Linux uses GTK3 and its 0.18 bindings; switching to GTK4/glib 0.20 requires an upstream webview/backend migration. VariantStrIter can crash or invoke undefined behavior; application source has no direct use, but transitive reachability is not proven absent."
+action = "Track the Tauri Linux backend migration or qualify a compatible maintained/backported binding set; remove this exception."

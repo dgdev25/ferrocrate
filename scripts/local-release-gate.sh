@@ -89,6 +89,8 @@ export FERROCRATE_CARGO="$cargo_bin"
 export PATH="$(dirname "$cargo_bin"):$PATH"
 echo "[gate] current Rust and frontend dependency policy"
 "$cargo_bin" audit --deny warnings
+python3 scripts/test_advisory_exceptions.py
+python3 scripts/check-advisory-exceptions.py --audit-tauri --cargo "$cargo_bin"
 npm audit --prefix apps/ferro-desktop-ui --audit-level=low
 echo "[gate] frontend tests, types, lint and production build"
 npm run --prefix apps/ferro-desktop-ui test

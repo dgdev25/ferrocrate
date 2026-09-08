@@ -1,4 +1,5 @@
-use ferro_compose::{ComposeFile, ServiceGraph};
+use ferro_compose::ComposeFile;
+use ferro_compose::service_graph::ServiceGraph;
 use std::collections::HashMap;
 
 #[test]

@@ -63,13 +63,22 @@ def validate(workflows):
             if step.get("uses", "").startswith("actions/checkout@"):
                 require(step.get("with", {}).get("ref") == "${{ github.sha }}", name + ": reusable CI checkout must pin github.sha")
     gate_steps = [step for step in qualification.get("steps", []) if "local-release-gate.sh" in step.get("run", "")]
+    require(qualification.get("if") in (None, "success()", "${{ success() }}"), "qualification job cannot be conditionally skipped")
     require(len(gate_steps) == 1, "qualification must run exactly one full local release gate")
     for step in gate_steps:
         script = step["run"]
+        require(step.get("if") in (None, "success()", "${{ success() }}"), "qualification gate cannot be conditionally skipped")
         require(step.get("shell") == "bash", "qualification gate must use fail-fast Bash")
         require(re.search(r'^\s*bash scripts/local-release-gate\.sh --version "\$GITHUB_REF_NAME"\s*$', script, re.M), "local gate must be unconditional, full and failure-propagating")
         require("set +e" not in script and "|| true" not in script, "local gate failure must not be masked")
         require('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in script, "qualification must assert the candidate SHA")
+    runtime_steps = [step for step in ci.get("build-unit-warnings", {}).get("steps", [])
+                     if re.search(r'^\s*cargo test --workspace --all-features --locked(?: -- --test-threads=1)?\s*$', step.get("run", ""), re.M)]
+    require(bool(runtime_steps), "CI must execute the supported workspace tests")
+    for step in runtime_steps:
+        require(step.get("if") in (None, "success()", "${{ success() }}"), "runtime tests cannot be conditionally skipped")
+        require(step.get("shell") == "bash", "runtime tests require fail-fast Bash")
+        require("set +e" not in step["run"] and "|| true" not in step["run"], "runtime test failures must propagate")
     return errors
 
 

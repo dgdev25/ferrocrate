@@ -900,7 +900,10 @@ async fn execute_checked(
         } else if !result.stdout.trim().is_empty() {
             result.stdout
         } else {
-            format!("{action} on {node_id} exited {} with no output", result.exit_code)
+            format!(
+                "{action} on {node_id} exited {} with no output",
+                result.exit_code
+            )
         };
         return Err(detail);
     }

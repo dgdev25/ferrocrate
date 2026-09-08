@@ -5176,6 +5176,12 @@ fn dispatch(command: Commands) -> Result<(), String> {
             None
         };
 
+        // Emergency execution owns the engine, but must remain available while
+        // its receipts block normal operations pending reconciliation.
+        if let Commands::Emergency { command: command @ EmergencyCommands::Execute { .. } } = &command {
+            return dispatch_emergency(command, &runtime_dir);
+        }
+
         authorization_admin::ensure_reconciled(&runtime_dir.join("authorization"))?;
         match &command {
             Commands::Policy { command } => return dispatch_policy(command, &runtime_dir),

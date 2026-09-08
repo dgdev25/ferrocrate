@@ -5,9 +5,20 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Child, Command, Output},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    process::{Child, Command, ExitStatus, Output, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+fn process_start_time(child: &TestChild) -> u64 {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+    // Field 22 follows the final ')' of the possibly-space-containing comm.
+    stat[stat.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
 
 fn protected(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
@@ -18,14 +29,64 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Every test-owned process is reaped even when an assertion unwinds.
+struct TestChild(Child);
+impl TestChild {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = self.0.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "test subprocess did not exit within 30 seconds",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+impl Drop for TestChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn run(runtime: &Path, args: &[String]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
-        .args(args)
-        .env("FERROCRATE_HOME", runtime)
-        .env("FERROCRATE_RUNTIME_DIR", runtime)
-        .env("FERROCRATE_TEST_CONSOLE", "1")
-        .output()
-        .unwrap()
+    let stdout = tempfile::NamedTempFile::new().unwrap();
+    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let mut child = TestChild(
+        Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .args(args)
+            .env("FERROCRATE_HOME", runtime)
+            .env("FERROCRATE_RUNTIME_DIR", runtime)
+            .env("FERROCRATE_TEST_CONSOLE", "1")
+            .stdout(Stdio::from(stdout.reopen().unwrap()))
+            .stderr(Stdio::from(stderr.reopen().unwrap()))
+            .spawn()
+            .unwrap(),
+    );
+    let status = child.wait().unwrap_or_else(|error| {
+        panic!(
+            "{args:?}: {error}; stderr={}",
+            String::from_utf8_lossy(&fs::read(stderr.path()).unwrap())
+        )
+    });
+    Output {
+        status,
+        stdout: fs::read(stdout.path()).unwrap(),
+        stderr: fs::read(stderr.path()).unwrap(),
+    }
 }
 
 fn provision_admission(auth: &Path, id: [u8; 16]) {
@@ -88,28 +149,30 @@ fn start_sink(
     key: &Path,
     journal: &str,
     requests: u64,
-) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
-        .args([
-            "emergency",
-            "sink-serve",
-            "--socket",
-            socket.to_str().unwrap(),
-            "--store",
-            store.to_str().unwrap(),
-            "--signing-key",
-            key.to_str().unwrap(),
-            "--journal-id",
-            journal,
-            "--expected-uid",
-            &nix::unistd::geteuid().as_raw().to_string(),
-            "--requests",
-            &requests.to_string(),
-        ])
-        .env("FERROCRATE_HOME", runtime)
-        .env("FERROCRATE_RUNTIME_DIR", runtime)
-        .spawn()
-        .unwrap()
+) -> TestChild {
+    TestChild(
+        Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+            .args([
+                "emergency",
+                "sink-serve",
+                "--socket",
+                socket.to_str().unwrap(),
+                "--store",
+                store.to_str().unwrap(),
+                "--signing-key",
+                key.to_str().unwrap(),
+                "--journal-id",
+                journal,
+                "--expected-uid",
+                &nix::unistd::geteuid().as_raw().to_string(),
+                "--requests",
+                &requests.to_string(),
+            ])
+            .env("FERROCRATE_HOME", runtime)
+            .env("FERROCRATE_RUNTIME_DIR", runtime)
+            .spawn()
+            .unwrap(),
+    )
 }
 
 fn wait_socket(path: &Path) {
@@ -156,10 +219,10 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
     ))
     .unwrap();
 
-    let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut sleeper = TestChild(Command::new("sleep").arg("60").spawn().unwrap());
     let record: ferro_core::container_store::ContainerRecord =
         serde_json::from_value(serde_json::json!({
-            "id": "e2e", "pid": sleeper.id(), "image": "fixture:latest", "command": ["sleep", "60"],
+            "id": "e2e", "pid": sleeper.id(), "process_start_time": process_start_time(&sleeper), "image": "fixture:latest", "command": ["sleep", "60"],
             "created_at_unix": 1, "stdout_path": temp.path().join("stdout").display().to_string(),
             "stderr_path": temp.path().join("stderr").display().to_string(), "status": "running",
             "mutation_generation": 1
@@ -264,7 +327,11 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
     wait_socket(&socket);
     let forged = run(&runtime, &activate_args);
     assert!(!forged.status.success());
-    assert!(String::from_utf8_lossy(&forged.stderr).contains("invalid sink receipt signature"));
+    assert!(
+        String::from_utf8_lossy(&forged.stderr).contains("invalid sink receipt signature"),
+        "{}",
+        String::from_utf8_lossy(&forged.stderr)
+    );
     assert!(forged_server.wait().unwrap().success());
     assert!(!auth.join("emergency-active.json").exists());
     let restored_gate = run(&runtime, &["stop".into(), "e2e".into()]);
@@ -312,7 +379,14 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
     );
     assert!(
         !execute.status.success(),
-        "outcome sink outage must leave a recoverable unknown state"
+        "outcome sink outage must leave a recoverable unknown state: {}",
+        output_text(&execute)
+    );
+    assert!(
+        String::from_utf8_lossy(&execute.stderr)
+            .contains("emergency outcome is unknown because the sink failed"),
+        "execution must reach the runtime effect before the injected outcome-sink outage: {}",
+        output_text(&execute)
     );
     assert!(server.wait().unwrap().success());
     assert!(
@@ -354,10 +428,10 @@ fn production_cli_unix_sink_lifecycle_survives_every_process_restart() {
 
     // A second production lifecycle reuses the authenticated durable sink
     // head instead of incorrectly restarting the chain at sequence zero.
-    let mut second_sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut second_sleeper = TestChild(Command::new("sleep").arg("60").spawn().unwrap());
     let second_record: ferro_core::container_store::ContainerRecord =
         serde_json::from_value(serde_json::json!({
-            "id": "e2e-second", "pid": second_sleeper.id(), "image": "fixture:latest",
+            "id": "e2e-second", "pid": second_sleeper.id(), "process_start_time": process_start_time(&second_sleeper), "image": "fixture:latest",
             "command": ["sleep", "60"], "created_at_unix": 2,
             "stdout_path": temp.path().join("stdout-second").display().to_string(),
             "stderr_path": temp.path().join("stderr-second").display().to_string(),

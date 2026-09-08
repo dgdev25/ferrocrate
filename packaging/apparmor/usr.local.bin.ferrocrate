@@ -1,14 +1,15 @@
 #include <tunables/global>
 
 # Ubuntu restricts unprivileged user namespaces to explicitly profiled tasks.
-# Keep FerroCrate's existing host permissions while granting that one LSM rule.
-profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(unconfined) {
+# Preserve existing host permissions while honoring the explicit exec rule.
+# Unlike unconfined mode, default_allow mediates domain transitions.
+profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(default_allow) {
   userns,
 
   # Keep bubblewrap in this profile.  Ubuntu's bwrap-userns-restrict profile
   # otherwise stacks unpriv_bwrap and denies CAP_CHOWN to image entrypoints.
   /usr/bin/bwrap ix,
 
-  # Existing Linux capability access remains unchanged by the unconfined attachment.
+  # This profile does not grant Linux capabilities or change UID/GID mappings.
   #include if exists <local/usr.local.bin.ferrocrate>
 }

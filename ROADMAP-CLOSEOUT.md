@@ -70,3 +70,5 @@ Execution state: S1 and S8 are committed. S2 is blocked pending the requested ad
 - S4/S9: Rootless health checks use failing nsenter path and Docker list omits health state; runtime/projection fixes await rebuilt runtime UI retest.
 - S7: Compose file-load error appears behind chooser; in-dialog error and direct service Logs controls now pass rebuilt browser retests.
 - S10: Desktop keyring dependency selects mock backend, losing credentials across entries; real platform backends and isolated persistence tests are in progress.
+
+- S11: `start.sh --stop` ignored relative script invocation; exact resolved script-argument matching and PID-file ownership cleanup are fixed. Actual owned-launcher shutdown verification is pending final cleanup.

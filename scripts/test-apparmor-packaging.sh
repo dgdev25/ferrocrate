@@ -9,10 +9,10 @@ tmp="$(mktemp -d /tmp/ferrocrate-apparmor-package.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 
 test -f "$profile"
-grep -Fqx 'profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(unconfined) {' "$profile"
+grep -Fqx 'profile usr.local.bin.ferrocrate /usr/local/bin/ferrocrate flags=(default_allow) {' "$profile"
 grep -Eq '^[[:space:]]+userns,$' "$profile"
 grep -Eq '^[[:space:]]+/usr/bin/bwrap ix,$' "$profile"
-grep -Fq '# Existing Linux capability access remains unchanged by the unconfined attachment.' "$profile"
+grep -Fq '# This profile does not grant Linux capabilities or change UID/GID mappings.' "$profile"
 
 if command -v apparmor_parser >/dev/null 2>&1; then
   apparmor_parser -QK "$profile"
@@ -35,6 +35,9 @@ dpkg-deb --contents "$deb" >"$tmp/contents"
 grep -Eq '\./usr/local/bin/ferrocrate$' "$tmp/contents"
 grep -Eq '\./etc/systemd/system/ferrocrate.service$' "$tmp/contents"
 grep -Eq '\./etc/apparmor.d/usr.local.bin.ferrocrate$' "$tmp/contents"
+mkdir "$tmp/package-root"
+dpkg-deb --extract "$deb" "$tmp/package-root"
+cmp "$profile" "$tmp/package-root/etc/apparmor.d/usr.local.bin.ferrocrate"
 
 mkdir "$tmp/control"
 dpkg-deb --control "$deb" "$tmp/control"

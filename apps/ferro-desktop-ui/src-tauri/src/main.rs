@@ -966,6 +966,8 @@ struct VolumeMountUsage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all(deserialize = "PascalCase", serialize = "snake_case"))]
 struct VolumeSummary {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    labels: BTreeMap<String, String>,
     name: String,
     driver: String,
     mountpoint: String,
@@ -1001,6 +1003,8 @@ struct NetworkIpam {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct NetworkListRecord {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    labels: BTreeMap<String, String>,
     name: String,
     driver: String,
     #[serde(rename = "IPAM", default)]
@@ -1071,6 +1075,7 @@ struct NetworkContainerSummary {
 
 #[derive(Debug, Serialize)]
 struct NetworkSummary {
+    labels: BTreeMap<String, String>,
     name: String,
     driver: String,
     subnets: Vec<String>,
@@ -1648,6 +1653,7 @@ fn network_summaries(
                 .collect::<Vec<_>>();
             attachments.sort_by(|left, right| left.name.cmp(&right.name));
             NetworkSummary {
+                labels: network.labels,
                 name: network.name,
                 driver: network.driver,
                 subnets: ipam
@@ -4375,6 +4381,7 @@ mod tests {
     #[test]
     fn network_projection_includes_addresses_and_container_ports() {
         let list = vec![NetworkListRecord {
+            labels: BTreeMap::new(),
             name: "frontend".to_string(),
             driver: "bridge".to_string(),
             ipam: NetworkIpam {

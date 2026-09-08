@@ -38,3 +38,26 @@ test('workspace search matches project and service labels', async () => {
   assert.equal(filterContainers([service], 'customer-portal').length, 1);
   assert.equal(filterContainers([service], 'database').length, 1);
 });
+test('detached owned resources retain workspace cards and shared attachments', () => {
+  const volume = { name: 'opaque', labels: { 'com.docker.compose.project': 'retained' }, mounts: [{ container_id: 'one' }] };
+  const network = { name: 'opaque-network', labels: { 'com.docker.compose.project': 'empty' }, containers: [] };
+  const groups = cards.workspaceGroups(rows, [volume], [network]);
+  assert.equal(groups.find(group => group.name === 'retained')?.volumes[0], volume);
+  assert.equal(groups.find(group => group.name === 'retained')?.rows.length, 0);
+  assert.equal(groups.find(group => group.name === 'shop')?.volumes[0], volume);
+  assert.equal(groups.find(group => group.name === 'empty')?.networks[0], network);
+});
+test('resource-only cards respect search/status and never impersonate filtered populated projects', () => {
+  const volumes = [{name:'opaque',labels:{'com.docker.compose.project':'alpha'},mounts:[]},{name:'backup',labels:{'com.docker.compose.project':'retained'},mounts:[]}];
+  const all = [{...rows[0],composeProject:'alpha'}];
+  assert.deepEqual(cards.workspaceGroups([], volumes, [], all, {search:'missing',status:'all'}), []);
+  assert.deepEqual(cards.workspaceGroups([], volumes, [], all, {search:'',status:'running'}), []);
+  const groups = cards.workspaceGroups([], volumes, [], all, {search:'',status:'all'});
+  assert.deepEqual(groups.map(group=>group.name), ['retained']);
+  assert.deepEqual(cards.workspaceGroups([], volumes, [], all, {search:'backup',status:'all'}).map(group=>group.name), ['retained']);
+});
+test('malformed or blank ownership never creates a workspace', () => {
+  for (const project of ['', '   ', true, {}]) {
+    assert.deepEqual(cards.workspaceGroups([], [{name:'data',labels:{'com.docker.compose.project':project},mounts:[]}], []), []);
+  }
+});

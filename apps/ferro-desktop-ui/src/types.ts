@@ -55,6 +55,7 @@ export type VolumeMountUsage = {
 };
 
 export type VolumeSummary = {
+  labels?: Record<string, string>;
   name: string;
   driver: string;
   mountpoint: string;
@@ -73,6 +74,7 @@ export type NetworkContainerAttachment = {
 };
 
 export type NetworkSummary = {
+  labels?: Record<string, string>;
   name: string;
   driver: string;
   subnets: string[];

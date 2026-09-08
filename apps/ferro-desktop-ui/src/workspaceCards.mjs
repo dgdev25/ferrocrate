@@ -3,15 +3,29 @@ import { formatImageCreated } from './imageView.mjs';
 import { Icon } from './iconSystem.mjs';
 import { groupContainers, containerRemoveAvailability, statusLabel, statusTone } from './forgeShell.mjs';
 
-// The runtime reports attachments, not project ownership labels for volumes/networks.
-// Associate only exact container IDs; shared resources appear in each attached workspace.
-export function workspaceGroups(rows, volumes, networks, allRows = rows) {
-  return groupContainers(rows).map(group => {
+// Ownership persists independently of current attachments; shared resources remain visible
+// in every attached workspace as well as the owning workspace.
+export function workspaceGroups(rows, volumes, networks, allRows = rows, { search = "", status = "all" } = {}) {
+  const groups = groupContainers(rows);
+  const owner = resource => {
+    const value = resource.labels?.['com.docker.compose.project'];
+    return typeof value === 'string' && value.trim() ? value : undefined;
+  };
+  for (const resource of [...volumes, ...networks]) {
+    const name = owner(resource);
+    const populated = allRows.some(row => row.composeProject === name);
+    const query = search.trim().toLowerCase();
+    const matches = !query || name?.toLowerCase().includes(query) || resource.name.toLowerCase().includes(query);
+    if (name && !populated && matches && status === "all" && !groups.some(group => group.compose && group.name === name)) {
+      groups.push({ name, compose: true, rows: [], running: 0 });
+    }
+  }
+  return groups.map(group => {
     const ids = new Set(allRows.filter(row => group.compose ? row.composeProject === group.name : !row.composeProject).map(row => row.id));
     return {
       ...group,
-      volumes: volumes.filter(volume => volume.mounts.some(mount => ids.has(mount.container_id))),
-      networks: networks.filter(network => network.containers.some(container => ids.has(container.container_id))),
+      volumes: volumes.filter(volume => (group.compose && owner(volume) === group.name) || volume.mounts.some(mount => ids.has(mount.container_id))),
+      networks: networks.filter(network => (group.compose && owner(network) === group.name) || network.containers.some(container => ids.has(container.container_id))),
     };
   });
 }
@@ -45,7 +59,7 @@ export function WorkspaceCard({ group, selectedId, busy, onAction, onInspect }) 
           h('div', { className: 'overflow-menu' }, h('button', { className: 'danger-action', disabled: busy || !remove.allowed, title: remove.reason || undefined, onClick: () => onAction('remove_container', 'Container Remove', row.id) }, 'Remove container'))));
     })),
     h('footer', { className: 'workspace-resources' },
-      h('span', { className: 'resource-label' }, 'Attached resources'),
+      h('span', { className: 'resource-label' }, 'Workspace resources'),
       ...group.volumes.map(volume => h('span', { className: 'resource-token', key: `volume:${volume.name}`, title: `Volume: ${volume.name}` }, h(Icon, { name: 'disk', size: 14 }), volume.name)),
       ...group.networks.map(network => h('span', { className: 'resource-token', key: `network:${network.name}`, title: `Network: ${network.name}` }, h(Icon, { name: 'globe', size: 14 }), network.name)),
       !group.volumes.length && !group.networks.length ? h('span', { className: 'muted' }, 'No attached volumes or networks reported') : null),

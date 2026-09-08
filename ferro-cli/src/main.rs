@@ -14218,6 +14218,7 @@ fn handle_volume_authorized(
                             "Status": serde_json::Value::Null,
                             "UsageData": {"RefCount": mounts.len(), "Size": 0},
                             "FerrocrateMounts": mounts,
+                            "Labels": record.labels,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -14810,6 +14811,7 @@ fn handle_network_authorized(
                         "Driver": record.driver,
                         "Scope": "local",
                         "IPAM": {"Config": ipam_config},
+                        "Labels": record.labels,
                     })
                 }));
                 println!(
@@ -15981,7 +15983,8 @@ fn ensure_compose_networks(
         if rootless_compose {
             continue;
         }
-        let record = create_network_record(&name, None, None, None, None)?;
+        let mut record = create_network_record(&name, None, None, None, None)?;
+        record.labels.insert("com.docker.compose.project".into(), project.compose.name.clone().unwrap_or_else(|| default_network.strip_suffix("_default").unwrap_or(default_network).to_string()));
         if records.iter().any(|existing| {
             existing.bridge_name == record.bridge_name && existing.name != record.name
         }) {
@@ -16534,6 +16537,7 @@ fn handle_compose(
                         &surface_authorization,
                         store,
                         volume_store,
+                        project_name,
                     ) {
                         failures.push(format!(
                             "{} prerequisite failed: {error}",
@@ -17348,6 +17352,7 @@ fn execute_compose_prerequisite(
     authorization: &SurfaceAuthorization,
     store: &LocalImageStore,
     volume_store: &LocalVolumeStore,
+    project_name: &str,
 ) -> Result<(), String> {
     let (action, resource) = match &prerequisite {
         ComposePrerequisite::ImageBuild(plan) => {
@@ -17399,10 +17404,12 @@ fn execute_compose_prerequisite(
             let permit = authorization
                 .authorize_volume_create_plan(&origin, &plan)
                 .map_err(|error| error.to_string())?;
-            volume_store
-                .create_with_driver_authorized(plan, permit)
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            let record = volume_store.create_with_driver_authorized(plan, permit)
+                .map_err(|error| error.to_string())?;
+            volume_store.set_labels(&record.name, BTreeMap::from([
+                ("com.docker.compose.project".into(), project_name.into()),
+            ])).map_err(|error| error.to_string())?;
+            Ok(())
         }
     }
 }

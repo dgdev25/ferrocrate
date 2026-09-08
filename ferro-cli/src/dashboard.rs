@@ -391,9 +391,13 @@ fn volume_summaries(value: &Value) -> Vec<Value> {
             json!({
                 "name": volume["Name"],
                 "driver": volume["Driver"],
+                "labels": volume.get("Labels").filter(|labels| labels.is_object()).cloned().unwrap_or_else(|| json!({})),
                 "mountpoint": volume["Mountpoint"],
                 "created_at": volume["CreatedAt"],
-                "mounts": volume.get("FerrocrateMounts").and_then(Value::as_array).cloned().unwrap_or_default(),
+                "mounts": volume.get("FerrocrateMounts").and_then(Value::as_array).into_iter().flatten().map(|mount| json!({
+                    "container_id": mount["ContainerId"], "container_name": mount["ContainerName"],
+                    "destination": mount["Destination"], "read_write": mount["RW"]
+                })).collect::<Vec<_>>(),
             })
         })
         .collect()
@@ -415,8 +419,12 @@ fn network_summaries(value: &Value) -> Vec<Value> {
             json!({
                 "name": network["Name"],
                 "driver": network["Driver"],
+                "labels": network.get("Labels").filter(|labels| labels.is_object()).cloned().unwrap_or_else(|| json!({})),
                 "subnets": subnets,
-                "containers": [],
+                "containers": network.get("Containers").and_then(Value::as_object).into_iter().flatten().map(|(id, attachment)| json!({
+                    "container_id": id, "name": attachment["Name"], "ipv4_address": attachment["IPv4Address"],
+                    "ipv6_address": attachment["IPv6Address"], "ports": []
+                })).collect::<Vec<_>>(),
             })
         })
         .collect()
@@ -686,7 +694,14 @@ fn published_tcp_ports(records: &Value) -> Result<Vec<u16>, String> {
                 .into_iter()
                 .flatten()
         })
-        .filter(|mapping| mapping.get("Type").or_else(|| mapping.get("protocol")).and_then(Value::as_str).unwrap_or("tcp") == "tcp")
+        .filter(|mapping| {
+            mapping
+                .get("Type")
+                .or_else(|| mapping.get("protocol"))
+                .and_then(Value::as_str)
+                .unwrap_or("tcp")
+                == "tcp"
+        })
         .filter_map(|mapping| {
             mapping
                 .get("PublicPort")
@@ -809,9 +824,18 @@ impl CommandDispatcher for ProcessDispatcher {
             CommandRequest::GetVolumes => Ok(Value::Array(volume_summaries(&run_json(&[
                 "volume", "ls", "--format", "json",
             ])?))),
-            CommandRequest::GetNetworks => Ok(Value::Array(network_summaries(&run_json(&[
-                "network", "ls", "--format", "json",
-            ])?))),
+            CommandRequest::GetNetworks => {
+                let mut networks = run_json(&["network", "ls", "--format", "json"])?;
+                if let Some(rows) = networks.as_array_mut() {
+                    for network in rows {
+                        if let Some(name) = network["Name"].as_str() {
+                            let inspection = run_json(&["network", "inspect", name])?;
+                            network["Containers"] = inspection["Containers"].clone();
+                        }
+                    }
+                }
+                Ok(Value::Array(network_summaries(&networks)))
+            }
             CommandRequest::GetContainerDetail(args) => Ok(container_detail(&run_json(&[
                 "inspect",
                 &args.target,
@@ -1189,9 +1213,14 @@ mod tests {
     fn docker_resource_payloads_are_normalized_for_the_shared_frontend() {
         let volumes = volume_summaries(&json!({ "Volumes": [{
             "Name": "data", "Driver": "local", "Mountpoint": "/data",
-            "CreatedAt": "1", "FerrocrateMounts": []
+            "CreatedAt": "1", "Labels": {"com.docker.compose.project":"retained"}, "FerrocrateMounts": [{"ContainerId":"shared", "ContainerName":"service", "Destination":"/data", "RW":true}]
         }] }));
         assert_eq!(volumes[0]["name"], "data");
+        assert_eq!(
+            volumes[0]["labels"]["com.docker.compose.project"],
+            "retained"
+        );
+        assert_eq!(volumes[0]["mounts"][0]["container_id"], "shared");
         let networks = network_summaries(&json!([{ "Name": "bridge", "Driver": "bridge" }]));
         assert_eq!(networks[0]["containers"], json!([]));
         let detail = container_detail(&json!({

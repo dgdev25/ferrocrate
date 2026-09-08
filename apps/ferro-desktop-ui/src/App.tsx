@@ -1131,7 +1131,7 @@ function LocalApp(): JSX.Element {
         setError(commandMessage(result, `${label} failed with status ${result.code}`));
         return;
       }
-      await Promise.all([readComposeSnapshot(composeFile), refresh(), refreshVolumes()]);
+      await Promise.all([readComposeSnapshot(composeFile), refresh(), refreshVolumes(), refreshNetworks()]);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1360,7 +1360,7 @@ function LocalApp(): JSX.Element {
     filterContainers(containerRows, globalSearch),
     containerStatusFilter,
   ), [containerRows, containerStatusFilter, globalSearch]);
-  const containerGroups = useMemo(() => workspaceGroups(visibleContainers, volumes, networks, containerRows), [visibleContainers, volumes, networks, containerRows]);
+  const containerGroups = useMemo(() => workspaceGroups(visibleContainers, volumes, networks, containerRows, { search: globalSearch, status: containerStatusFilter }), [visibleContainers, volumes, networks, containerRows, globalSearch, containerStatusFilter]);
   const imageRows = useMemo(() => parseImageRows(snapshot?.images.stdout ?? ""), [snapshot?.images.stdout]);
   const visibleImages = useMemo(() => filterNamedResources(imageRows, globalSearch, (image) => image.reference), [imageRows, globalSearch]);
   const visibleVolumes = useMemo(() => filterNamedResources(volumes, globalSearch), [volumes, globalSearch]);
@@ -1525,11 +1525,11 @@ function LocalApp(): JSX.Element {
 
           <div className={`page-content ${activeSection === "containers" && containerViewState === "table" ? "container-layout" : ""}`}>
             {activeSection === "containers" ? (
-              containerViewState === "empty" ? (
+              containerViewState === "empty" && !containerGroups.length ? (
                 <section className="panel empty-page-panel" aria-label="Containers">
                   <ResourceEmptyState section="containers" disabled={runtimeBusy} onAction={() => setRunDialogOpen(true)} />
                 </section>
-              ) : containerViewState === "filtered-empty" ? (
+              ) : containerViewState === "filtered-empty" && !containerGroups.length ? (
                 <section className="panel empty-page-panel" aria-label="No matching containers">
                   <div className="empty-state resource-empty-state">
                     <span className="empty-state-icon" aria-hidden="true"><Icon name="search" size={20} /></span>
@@ -1552,8 +1552,8 @@ function LocalApp(): JSX.Element {
                   </div>
                   {liveStatsUnavailable ? <p className="muted" role="status">{containerStatsUnavailableMessage()}</p> : null}
                   {volumesLoading || networksLoading ? <p className="muted" role="status">Loading workspace resources…</p> : null}
-                  {containerGroups.map(group => <WorkspaceCard key={group.name} group={group} selectedId={selectedRow?.id} busy={runtimeBusy} onAction={(action, label, target) => void runAction(action, label, target)} onInspect={(target, tab) => void openServiceInspector(target, tab)} />)}
-                  <p className="workspace-library-note">Resources are associated through service attachments. Unattached resources remain available in Volumes and Networks.</p>
+                  {containerGroups.map(group => <WorkspaceCard key={`${group.compose ? "compose" : "standalone"}:${group.name}`} group={group} selectedId={selectedRow?.id} busy={runtimeBusy} onAction={(action, label, target) => void runAction(action, label, target)} onInspect={(target, tab) => void openServiceInspector(target, tab)} />)}
+                  <p className="workspace-library-note">Workspace resources include project-owned resources and shared service attachments. Other resources remain available in Volumes and Networks.</p>
                 </section>
 
 

@@ -471,3 +471,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-muted); }
 .forge-shell.fleet-shell { display: flex; flex-direction: column; }
 .fleet-shell .titlebar { flex-shrink: 0; }
 .fleet-shell .titlebar .logo { display: block; }
+
+/* The Fleet sidebar shares the workspace shell rather than a compressed tab row. */
+.forge-shell.fleet-shell:has(.desktop-tabs) { display: grid; grid-template-rows: 66px 44px minmax(0, 1fr) 28px; }
+.fleet-shell .desktop-tabs { grid-row: 1 / 4; }
+.fleet-shell .fleet-subnav { grid-column: 2; grid-row: 2; min-width: 0; }
+.fleet-shell .fleet-main { grid-column: 2; grid-row: 3; min-height: 0; }
+.fleet-shell:has(.desktop-tabs) .statusbar { grid-row: 4; }
+.fleet-form { flex: 0 0 auto; }
+
+@media (max-width: 860px) {
+  .sidebar-resources summary { font-size: 0; justify-content: center; padding: 10px; }
+  .sidebar-resources summary::after { display: none; }
+  .sidebar-resources .desktop-tab { padding: 10px; }
+}

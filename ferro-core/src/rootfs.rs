@@ -25,6 +25,21 @@ pub enum RootfsError {
     DirNonDirConflict(String),
 }
 
+/// Validate the name *after* stripping the whiteout prefix, which can expose
+/// `.` or `..` even when the original archive path was lexically safe.
+pub(crate) fn whiteout_target_name(file_name: &str) -> Result<Option<&str>, RootfsError> {
+    let Some(target) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) else {
+        return Ok(None);
+    };
+    let mut components = Path::new(target).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(RootfsError::UnsafePath(format!(
+            "invalid whiteout target: {file_name}"
+        )));
+    }
+    Ok(Some(target))
+}
+
 /// Construct a root filesystem by applying OCI layers in order.
 pub fn construct_rootfs(rootfs_dir: &Path, layers: &[PathBuf]) -> Result<(), RootfsError> {
     fs::create_dir_all(rootfs_dir)?;
@@ -156,7 +171,7 @@ pub fn apply_layer_tar(rootfs_dir: &Path, layer_tar_path: &Path) -> Result<(), R
             continue;
         }
 
-        if let Some(target_name) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+        if let Some(target_name) = whiteout_target_name(file_name)? {
             ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             let target = rootfs_dir.join(parent).join(target_name);
@@ -222,7 +237,7 @@ fn apply_layer_tar_with_dedup(
             continue;
         }
 
-        if let Some(target_name) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+        if let Some(target_name) = whiteout_target_name(file_name)? {
             ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             let target = rootfs_dir.join(parent).join(target_name);
@@ -380,6 +395,39 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use tar::{Builder, Header};
+
+    #[test]
+    fn rejects_derived_whiteout_traversal_in_all_extraction_paths() {
+        for marker in [".wh.", ".wh..", ".wh..."] {
+            for mode in 0..3 {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("root");
+                fs::create_dir_all(root.join("dir")).unwrap();
+                fs::write(root.join("sentinel"), b"keep").unwrap();
+                let layer = temp.path().join("layer.tar");
+                create_tar(&layer, &[(&format!("dir/{marker}"), b"".as_slice())]);
+                let result = match mode {
+                    0 => super::apply_layer_tar(&root, &layer),
+                    1 => super::construct_rootfs_with_dedup(
+                        &root,
+                        &[layer],
+                        &temp.path().join("cas"),
+                    ),
+                    _ => crate::layer_cache::construct_rootfs_cached(
+                        &root,
+                        &[layer],
+                        &temp.path().join("cas"),
+                        &temp.path().join("cache"),
+                    ),
+                };
+                assert!(
+                    matches!(result, Err(super::RootfsError::UnsafePath(_))),
+                    "{marker} mode {mode}: {result:?}"
+                );
+                assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"keep");
+            }
+        }
+    }
 
     #[test]
     fn applies_layers_and_respects_whiteouts() {

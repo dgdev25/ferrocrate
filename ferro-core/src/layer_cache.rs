@@ -10,8 +10,8 @@
 //! cold path, so a cached rootfs is never less correct than an extracted one.
 
 use crate::rootfs::{
-    ensure_no_symlink_components, sanitize_archive_path, RootfsError, OCI_OPAQUE_WHITEOUT,
-    OCI_WHITEOUT_PREFIX,
+    ensure_no_symlink_components, sanitize_archive_path, whiteout_target_name, RootfsError,
+    OCI_OPAQUE_WHITEOUT,
 };
 use nix::fcntl::AT_FDCWD;
 use nix::sys::stat::{utimensat, UtimensatFlags};
@@ -160,9 +160,8 @@ fn materialize_layer(
             CachedEntryKind::Whiteout => {
                 ensure_no_symlink_components(rootfs_dir, &normalized)?;
                 let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
-                let target_name = file_name
-                    .strip_prefix(OCI_WHITEOUT_PREFIX)
-                    .unwrap_or(&file_name);
+                let target_name = whiteout_target_name(&file_name)?
+                    .ok_or_else(|| RootfsError::UnsafePath(file_name.clone()))?;
                 let target = rootfs_dir.join(parent).join(target_name);
                 remove_path_shim(&target)?;
             }
@@ -274,7 +273,7 @@ fn extract_layer_recording(
             continue;
         }
 
-        if let Some(whiteout_target) = file_name.strip_prefix(OCI_WHITEOUT_PREFIX) {
+        if let Some(whiteout_target) = whiteout_target_name(&file_name)? {
             ensure_no_symlink_components(rootfs_dir, &normalized)?;
             let parent = normalized.parent().unwrap_or_else(|| Path::new(""));
             let target = rootfs_dir.join(parent).join(whiteout_target);
@@ -487,6 +486,32 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn cached_whiteout_rejects_derived_parent_before_removal() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("sentinel"), b"keep").unwrap();
+        for marker in [".wh.", ".wh..", ".wh...", "plain"] {
+            let manifest = CachedLayerManifest {
+                schema: MANIFEST_SCHEMA,
+                key: String::new(),
+                entries: vec![CachedLayerEntry {
+                    path: PathBuf::from(format!("dir/{marker}")),
+                    mode: 0,
+                    mtime_sec: 0,
+                    kind: CachedEntryKind::Whiteout,
+                }],
+            };
+            assert!(matches!(
+                materialize_layer(&root, &manifest, temp.path()),
+                Err(RootfsError::UnsafePath(_))
+            ));
+            assert_eq!(fs::read(root.join("sentinel")).unwrap(), b"keep");
+        }
     }
 
     #[test]

@@ -153,6 +153,59 @@ test('Fleet tab keyboard handler ignores Tab and other unhandled keys', () => {
   assert.deepEqual(changes,[]);
 });
 
+for (const payload of [null, undefined, {}, {ok: 'true'}, {ok: true, code: 0}]) {
+  test(`pull handler reports invalid response without claiming completion: ${JSON.stringify(payload)}`, async () => {
+    let failure = null;
+    let completed = false;
+    let finished = false;
+    let refreshed = false;
+    const context = {
+      beginRuntimeAction: () => true, finishRuntimeAction: () => { finished = true; },
+      setLastAction: value => { if (value) completed = true; },
+      setActionLabel: noop, setPullProgress: noop, setPullFailure: value => { failure = value; },
+      imageTarget: 'alpine:latest', invoke: async () => payload,
+      refresh: async () => { refreshed = true; },
+      pullCompletionState: () => { completed = true; return { open: false, progress: '', failure: null }; },
+      setPullImageDialogOpen: noop, pullFailurePresentation: error => String(error),
+    };
+    const { pullImage } = handlers('App.tsx', ['pullImage'], context);
+    await pullImage();
+    assert.match(failure?.detail ?? String(failure), /invalid image pull response/i);
+    assert.match(failure.message, /Image pull could not be confirmed/);
+    assert.doesNotMatch(failure.detail, /TypeError/);
+    assert.equal(completed, false);
+    assert.equal(refreshed, false);
+    assert.equal(finished, true);
+  });
+}
+
+for (const ok of [true, false]) {
+  test(`pull handler preserves a valid ${ok ? 'successful' : 'failed'} command result`, async () => {
+    const result = { ok, code: ok ? 0 : 1, stdout: '', stderr: ok ? '' : 'registry unavailable' };
+    let action = null;
+    let failure = null;
+    let open = true;
+    let finished = false;
+    let refreshed = false;
+    const context = {
+      beginRuntimeAction: () => true, finishRuntimeAction: () => { finished = true; },
+      setLastAction: value => { action = value; }, setActionLabel: noop, setPullProgress: noop,
+      setPullFailure: value => { failure = value; }, setPullImageDialogOpen: value => { open = value; },
+      imageTarget: 'alpine:latest', invoke: async () => result,
+      refresh: async () => { refreshed = true; },
+      pullCompletionState: value => ({ open: !value.ok, progress: '', failure: value.ok ? null : value.stderr }),
+      pullFailurePresentation: error => String(error),
+    };
+    const { pullImage } = handlers('App.tsx', ['pullImage'], context);
+    await pullImage();
+    assert.equal(action, ok ? result : null);
+    assert.equal(failure, ok ? null : result.stderr);
+    assert.equal(open, !ok);
+    assert.equal(finished, true);
+    assert.equal(refreshed, true);
+  });
+}
+
 test('fleet refresh removes disconnected and revoked deployment targets without selecting replacements', async () => {
   let selection = ['offline', 'revoked', 'online', 'removed'];
   const context = {

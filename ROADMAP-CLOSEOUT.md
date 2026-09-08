@@ -36,7 +36,7 @@ Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-0
 
 - [x] S1: Save the complete remaining scope and visible tracker — consolidate existing findings, pending journeys and acceptance gates in this dated section.
 - [ ] S2: Finish the simpler launcher — preset-first setup, automatic ports/storage, Custom image, Advanced, clear labels, fresh defaults after success; verify all three presets and custom validation through the UI.
-- [ ] S3: Verify image-pull recovery — real pull/repeat/failure, malformed-response regression, honest unconfirmed result, original native failure qualification.
+- [x] S3: Verify image-pull recovery — real pull/repeat/failure, malformed-response regression, honest unconfirmed result, original native failure qualification.
 - [ ] S4: Exercise container lifecycle and port conflicts — start/stop/remove/prune, mappings/env/limits, named and bind storage, known/unknown conflicts, automatic alternatives and confirmed replacement; LOCAL016–044 and061–063.
 - [ ] S5: Repair and verify logs and terminals — idle stdin timeout, early-exit attached-state race, unsupported-options errors before upgrade, streams/filter/copy/export, terminal commands/resizing/retargeting; LOCAL045–063.
 - [ ] S6: Finish images, volumes and networks — digest usage, visible removal controls, in-use behavior, creation/validation/removal/prune and attachment protection; LOCAL064–090 resource journeys.
@@ -56,10 +56,17 @@ Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-0
 - Fleet retains revoked host selections and accepts unsupported login TTL (fixed; live Fleet evidence exists).
 - Interactive terminal inherits five-second HTTP timeout (fixed CLI; final idle browser test remains).
 - Terminal-ended can arrive before start reply and leave attached state (fixed handler; final UI retest remains).
-- Unsupported terminal overrides are rejected after protocol upgrade (fix underway).
+- Unsupported terminal overrides now reject before protocol upgrade; actual browser error/detached-state check passed.
 - Container launch uses ordinary 60-second browser timeout despite image downloads (fixed helper; real retest remains).
 - Successful preset launch retains stale ports/volume and clears required generated credentials (fresh-draft fix underway).
-- Development binary misses installed AppArmor profile; isolated candidate now runs under the existing profile, without policy changes, for preset qualification.
+- Installed AppArmor unconfined mode does not preserve the intended bwrap inheritance; corrected default_allow profile and privileged regression script are ready, pending administrator test/load.
 - In-use image removal and external-network attachment need disposition from actual backend semantics; no unsafe blanket prune before that check.
 
-Execution state: S2 is blocked pending the requested administrator AppArmor test/profile load; S4 is in progress. All other unchecked tasks remain open.
+Execution state: S1 and S8 are committed. S2 is blocked pending the requested administrator AppArmor test/profile load. S4–S7/S9–S10 are progressing with actual UI evidence. New terminal input ordering, terminal EOF, rootless health execution/list projection, Compose chooser error and credential persistence findings were added during full UI testing; they remain open until final live retests and commits.
+
+### Additional live findings under active tasks
+
+- S5: Terminal input requests race and reorder typed characters; FIFO fix passed a real long-command browser retest. Normal/invalid shell exit retains PTY/socket handles; regression fixes await rebuilt runtime UI retest.
+- S4/S9: Rootless health checks use failing nsenter path and Docker list omits health state; runtime/projection fixes await rebuilt runtime UI retest.
+- S7: Compose file-load error appears behind chooser; in-dialog error and direct service Logs controls now pass rebuilt browser retests.
+- S10: Desktop keyring dependency selects mock backend, losing credentials across entries; real platform backends and isolated persistence tests are in progress.

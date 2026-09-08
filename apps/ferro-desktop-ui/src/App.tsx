@@ -647,6 +647,16 @@ function LocalApp(): JSX.Element {
         { action: "pull_image", target: imageTarget },
         { timeoutMs: 10 * 60_000 },
       );
+      if (!result || typeof result !== "object" || typeof result.ok !== "boolean"
+        || !Number.isInteger(result.code) || typeof result.stdout !== "string" || typeof result.stderr !== "string") {
+        setPullProgress("");
+        setPullFailure({
+          kind: "generic",
+          message: "Image pull could not be confirmed. Refresh Images to check whether the image is available.",
+          detail: "The runtime returned an invalid image pull response.",
+        });
+        return;
+      }
       if (result.ok) {
         setLastAction(result);
       }

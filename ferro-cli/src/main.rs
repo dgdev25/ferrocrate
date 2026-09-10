@@ -18254,6 +18254,8 @@ struct DockerCreateRequest {
     healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "Tty", default)]
     tty: bool,
+    #[serde(rename = "OpenStdin", default)]
+    open_stdin: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
     #[serde(rename = "NetworkingConfig")]
@@ -18523,6 +18525,9 @@ struct DockerCreateSpec {
     network_aliases: Vec<String>,
     #[serde(default)]
     tty: bool,
+    /// Docker keeps this creation-time setting for later `attach` clients.
+    #[serde(default)]
+    open_stdin: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
     #[serde(default = "default_log_driver")]
@@ -18597,6 +18602,9 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if spec.open_stdin {
+        annotations.push("io.ferrocrate.open-stdin=true".to_string());
+    }
     if spec.ipc_mode_host {
         annotations.push("io.ferrocrate.ipc.mode=host".to_string());
     }
@@ -25042,6 +25050,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         ipc_mode_host: host_config.ipc_mode.as_deref() == Some("host"),
         network_aliases,
         tty: request.tty,
+        open_stdin: request.open_stdin,
         log_options,
         log_driver,
         auto_remove: host_config.auto_remove,
@@ -25534,10 +25543,10 @@ fn docker_inspect_payload(
             "Env": record.env,
             "Cmd": record.command,
             "Tty": record.tty,
-            "AttachStdin": false,
+            "AttachStdin": record.annotations.get("io.ferrocrate.open-stdin").is_some_and(|value| value == "true"),
             "AttachStdout": true,
             "AttachStderr": true,
-            "OpenStdin": false,
+            "OpenStdin": record.annotations.get("io.ferrocrate.open-stdin").is_some_and(|value| value == "true"),
             "StdinOnce": false,
             "WorkingDir": record.workdir,
             "User": record.user,
@@ -25789,10 +25798,10 @@ fn docker_pending_inspect_payload(
             "Cmd": spec.cmd,
             "Volumes": spec.image_volumes.iter().map(|target| (target.clone(), serde_json::json!({}))).collect::<serde_json::Map<_, _>>(),
             "Tty": spec.tty,
-            "AttachStdin": false,
+            "AttachStdin": spec.open_stdin,
             "AttachStdout": true,
             "AttachStderr": true,
-            "OpenStdin": false,
+            "OpenStdin": spec.open_stdin,
             "StdinOnce": false,
             "WorkingDir": spec.workdir,
             "User": spec.user,
@@ -38656,6 +38665,19 @@ FROM --platform=linux/${MYARCH} busybox\n";
     }
 
     #[test]
+    fn docker_create_spec_preserves_open_stdin_for_later_attach() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","Cmd":["sh"],"OpenStdin":true}"#,
+            None,
+        )
+        .expect("OpenStdin preference should be retained until start");
+        assert!(spec.open_stdin);
+        assert!(docker_start_run_inputs(&spec)
+            .annotations
+            .contains(&"io.ferrocrate.open-stdin=true".to_string()));
+    }
+
+    #[test]
     fn docker_create_spec_preserves_named_network_for_start() {
         let spec = parse_docker_create_spec(
             br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-backend"}}"#,
@@ -38913,6 +38935,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,
@@ -39171,6 +39194,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 ipc_mode_host: false,
                 network_aliases: Vec::new(),
                 tty: false,
+                open_stdin: false,
                 log_options: HashMap::new(),
                 log_driver: "json-file".to_string(),
                 auto_remove: false,
@@ -39347,6 +39371,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,
@@ -39489,6 +39514,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,

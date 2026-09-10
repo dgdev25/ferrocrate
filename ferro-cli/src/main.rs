@@ -10739,11 +10739,13 @@ fn parse_volume_mounts(
     let mut out = Vec::new();
     for entry in volumes {
         let parts = entry.split(':').collect::<Vec<_>>();
-        let (source, target, read_only, anonymous) = match parts.as_slice() {
-            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true),
-            [source, target] => ((*source).to_string(), *target, false, false),
-            [source, target, "ro"] => ((*source).to_string(), *target, true, false),
-            [source, target, "rw"] => ((*source).to_string(), *target, false, false),
+        let (source, target, read_only, anonymous, subpath) = match parts.as_slice() {
+            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true, None),
+            [source, target] => ((*source).to_string(), *target, false, false, None),
+            [source, target, "ro"] => ((*source).to_string(), *target, true, false, None),
+            [source, target, "rw"] => ((*source).to_string(), *target, false, false, None),
+            [source, target, "ro", subpath] => ((*source).to_string(), *target, true, false, Some(*subpath)),
+            [source, target, "rw", subpath] => ((*source).to_string(), *target, false, false, Some(*subpath)),
             _ => return Err("run: volume must be source:target[:ro]".to_string()),
         };
 
@@ -10769,6 +10771,20 @@ fn parse_volume_mounts(
                 }
             };
             record.path
+        };
+
+        let source_path = if let Some(subpath) = subpath {
+            let subpath = std::path::Path::new(subpath);
+            if subpath.is_absolute() || subpath.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+                return Err("docker: volume subpath must be a relative path within the volume".to_string());
+            }
+            let path = std::path::Path::new(&source_path).join(subpath);
+            if !path.exists() {
+                return Err(format!("docker: cannot access path {}", path.display()));
+            }
+            path.to_string_lossy().into_owned()
+        } else {
+            source_path
         };
 
         out.push(ferro_core::mounts::BindMount {
@@ -18406,6 +18422,8 @@ struct DockerMount {
     read_only: bool,
     #[serde(rename = "BindOptions")]
     bind_options: Option<DockerBindOptions>,
+    #[serde(rename = "VolumeOptions")]
+    volume_options: Option<DockerVolumeOptions>,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -18415,6 +18433,17 @@ struct DockerMount {
 struct DockerBindOptions {
     #[serde(rename = "CreateMountpoint", default)]
     create_mountpoint: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerVolumeOptions {
+    #[serde(rename = "NoCopy", default)]
+    _no_copy: bool,
+    #[serde(rename = "Subpath", default)]
+    subpath: String,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -26072,6 +26101,13 @@ fn docker_mounts_to_binds(
         {
             return Err("docker: BindOptions contains options this runtime does not implement".to_string());
         }
+        if mount
+            .volume_options
+            .as_ref()
+            .is_some_and(|options| options.extra.values().any(|value| !docker_value_is_default_shaped(value)))
+        {
+            return Err("docker: VolumeOptions contains options this runtime does not implement".to_string());
+        }
         let source = mount.source.as_deref().filter(|source| !source.is_empty());
         let target = mount.target.as_deref().filter(|target| target.starts_with('/'));
         let target = target.ok_or_else(|| "docker: Mount.Target must be an absolute path".to_string())?;
@@ -26097,7 +26133,17 @@ fn docker_mounts_to_binds(
             "volume" => {
                 let source = source
                     .ok_or_else(|| "docker: volume Mount.Source is required".to_string())?;
-                volumes.push(format!("{source}:{target}{mode}"));
+                let subpath = mount
+                    .volume_options
+                    .as_ref()
+                    .filter(|options| !options.subpath.is_empty())
+                    .map(|options| options.subpath.as_str());
+                let mode = if mount.read_only { "ro" } else { "rw" };
+                if let Some(subpath) = subpath {
+                    volumes.push(format!("{source}:{target}:{mode}:{subpath}"));
+                } else {
+                    volumes.push(format!("{source}:{target}{mode}"));
+                }
             }
             kind => return Err(format!("docker: unsupported Mount.Type {kind}")),
         }
@@ -37761,6 +37807,38 @@ volumes:
     }
 
     #[test]
+    fn volume_mount_accepts_a_relative_subpath() {
+        let runtime = configured_cli_runtime("disabled");
+        let volume_store = LocalVolumeStore::open(runtime.path().join("volumes"))
+            .expect("volume store");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current()
+            .expect("CLI request origin");
+        let authorization = test_surface_authorization(runtime.path());
+        let plan = volume_store
+            .prepare_create("subpath-data", "local", BTreeMap::new())
+            .expect("prepare volume");
+        let permit = authorization
+            .authorize_volume_create_plan(&origin, &plan)
+            .expect("authorize volume");
+        let record = volume_store
+            .create_with_driver_authorized(plan, permit)
+            .expect("create volume");
+        let subpath = std::path::Path::new(&record.path).join("logs");
+        std::fs::create_dir_all(&subpath).expect("create subpath");
+
+        let mounts = parse_volume_mounts(
+            &volume_store,
+            &["subpath-data:/data:rw:logs".to_string()],
+            &origin,
+            &authorization,
+        )
+        .expect("relative subpath");
+
+        assert_eq!(mounts[0].source, subpath);
+        assert_eq!(mounts[0].target, std::path::Path::new("data"));
+    }
+
+    #[test]
     fn image_config_volume_targets_are_sorted_and_deduplicated() {
         let config = serde_json::json!({
             "config": {
@@ -38902,6 +38980,16 @@ FROM --platform=linux/${MYARCH} busybox\n";
             docker_start_run_inputs(&spec).path_binds,
             vec!["/dev/shm:/dev/shm"]
         );
+    }
+
+    #[test]
+    fn docker_create_preserves_volume_subpath_for_start() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Mounts":[{"Type":"volume","Source":"data","Target":"/work","VolumeOptions":{"Subpath":"logs"}}]}}"#,
+            None,
+        )
+        .expect("volume subpath create spec");
+        assert_eq!(spec.image_volumes, vec!["data:/work:rw:logs"]);
     }
 
     #[test]

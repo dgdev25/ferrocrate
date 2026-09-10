@@ -52,3 +52,8 @@ bench/fuzz/__pycache__/
 /lab/
 /COORDINATOR-NOTE.md
 .superdesign/tmp/
+
+# Built binaries: sidecars are staged by scripts/bundle-sidecars.sh; release
+# artifacts are produced by release.yml and published as GitHub Releases.
+/apps/ferro-desktop-ui/src-tauri/binaries/
+/release-artifacts/

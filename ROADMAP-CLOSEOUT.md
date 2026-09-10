@@ -35,7 +35,7 @@ Test commands: `npm --prefix apps/ferro-desktop-ui test`, `npm --prefix apps/fer
 Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-08-full-ui/local-journeys.md), machine-readable `local-journeys.json`, area result files, and [Fleet checklist](docs/evidence/verification/2026-09-08-full-ui/fleet-checklist.md). `coverage-current.json` is the merged execution view. Every pending/partial/failed journey remains in scope; platform-specific checks must be explicitly qualified.
 
 - [x] S1: Save the complete remaining scope and visible tracker — consolidate existing findings, pending journeys and acceptance gates in this dated section.
-- [ ] S2: Finish the simpler launcher — preset-first setup, automatic ports/storage, Custom image, Advanced, clear labels, fresh defaults after success; verify all three presets and custom validation through the UI.
+- [x] S2: Finish the simpler launcher — preset-first setup, automatic ports/storage, Custom image, Advanced, clear labels, fresh defaults after success; verify all three presets and custom validation through the UI.
 - [x] S3: Verify image-pull recovery — real pull/repeat/failure, malformed-response regression, honest unconfirmed result, original native failure qualification.
 - [ ] S4: Exercise container lifecycle and port conflicts — start/stop/remove/prune, mappings/env/limits, named and bind storage, known/unknown conflicts, automatic alternatives and confirmed replacement; LOCAL016–044 and061–063.
 - [x] S5: Repair and verify logs and terminals — idle stdin timeout, early-exit attached-state race, unsupported-options errors before upgrade, streams/filter/copy/export, terminal commands/resizing/retargeting; LOCAL045–063.
@@ -70,7 +70,7 @@ Done when: every box below is ticked and the test command below passes.
 Test command: `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets && cargo test --workspace --lib && cargo deny check licenses advisories && bash scripts/export-public-snapshot.sh --verify`
 
 - [x] S1: Untrack local-only agent files — `memory/`, `prd2build.config.json`, `COORDINATOR-NOTE.md`, `lab/`, `.superdesign/tmp/` leave git but stay on disk; `.gitignore` covers them.
-- [ ] S2: Remove tracked binaries — Tauri sidecars under `apps/ferro-desktop-ui/src-tauri/binaries/` and `release-artifacts/` leave git; `scripts/bundle-sidecars.sh` and `release.yml` already regenerate them.
+- [x] S2: Remove tracked binaries — Tauri sidecars under `apps/ferro-desktop-ui/src-tauri/binaries/` and `release-artifacts/` leave git; `scripts/bundle-sidecars.sh` and `release.yml` already regenerate them.
 - [ ] S3: Fix policy and metadata — `SECURITY.md` names GitHub private vulnerability reporting, `CHANGELOG.md` drops the "license not yet approved" note, `Cargo.toml` gains `repository`/`description`, README anchor link repaired.
 - [ ] S4: Rewrite the CLAUDE.md build section for Cargo — replace the npm build/test/lint block with the real Cargo and script commands.
 - [ ] S5: Add a dependency license gate — `deny.toml` with an explicit allowlist and the bincode unmaintained advisory ignored with a reason; `cargo deny check licenses advisories` passes; CI dependency-policy step runs it.

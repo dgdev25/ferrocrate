@@ -47,3 +47,8 @@ bench/fuzz/__pycache__/
 
 # Local launcher state and session-bearing bridge logs
 /logs/
+
+# Lab orchestration snapshot and one-off coordinator notes (local only; the live copies are in the lab clone)
+/lab/
+/COORDINATOR-NOTE.md
+.superdesign/tmp/

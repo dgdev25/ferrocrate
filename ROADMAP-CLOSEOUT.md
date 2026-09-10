@@ -69,7 +69,7 @@ Source: public-repo readiness analysis in the 2026-09-10 session (git history le
 Done when: every box below is ticked and the test command below passes.
 Test command: `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets && cargo test --workspace --lib && cargo deny check licenses advisories && bash scripts/export-public-snapshot.sh --verify`
 
-- [ ] S1: Untrack local-only agent files — `memory/`, `prd2build.config.json`, `COORDINATOR-NOTE.md`, `lab/`, `.superdesign/tmp/` leave git but stay on disk; `.gitignore` covers them.
+- [x] S1: Untrack local-only agent files — `memory/`, `prd2build.config.json`, `COORDINATOR-NOTE.md`, `lab/`, `.superdesign/tmp/` leave git but stay on disk; `.gitignore` covers them.
 - [ ] S2: Remove tracked binaries — Tauri sidecars under `apps/ferro-desktop-ui/src-tauri/binaries/` and `release-artifacts/` leave git; `scripts/bundle-sidecars.sh` and `release.yml` already regenerate them.
 - [ ] S3: Fix policy and metadata — `SECURITY.md` names GitHub private vulnerability reporting, `CHANGELOG.md` drops the "license not yet approved" note, `Cargo.toml` gains `repository`/`description`, README anchor link repaired.
 - [ ] S4: Rewrite the CLAUDE.md build section for Cargo — replace the npm build/test/lint block with the real Cargo and script commands.

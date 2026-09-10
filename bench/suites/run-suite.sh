@@ -213,11 +213,20 @@ ensure_registry_bin() {
   fi
 }
 
+# The upstream CLI E2E suite names its two fixture images as registry:5000
+# references. Its normal CI setup pushes those tags to a test registry. The
+# local suite wrapper does not start that registry, so cache the exact tags in
+# the selected engine before Go starts. Docker and Ferrocrate then resolve the
+# references locally instead of making an unavailable registry request.
+ensure_cli_e2e_fixtures() {
+  "$DIR/scripts/test/e2e/load-image" fetch-only
+}
+
 # --- run and convert ---
 case "$SUITE" in
   cli-e2e|compose-e2e|moby-integration|buildkit-dockerfile)
     case "$SUITE" in
-      cli-e2e)             PKG=./e2e/...;;
+      cli-e2e)             ensure_cli_e2e_fixtures; PKG=./e2e/...;;
       compose-e2e)         PKG=./pkg/e2e/...;;
       # Moby's integration suite is large and restarts the daemon in places; those
       # cases go in skip.txt rather than being worked around. Nightly only.

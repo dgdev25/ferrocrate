@@ -46,7 +46,9 @@ impl ServiceGraph {
             if let Some(depends_on) = &service.depends_on {
                 for dep in depends_on.iter() {
                     if !compose.services.contains_key(dep) {
-                        if !depends_on.is_required(dep) { continue; }
+                        if !depends_on.is_required(dep) {
+                            continue;
+                        }
                         return Err(ComposeError::Validation(format!(
                             "service '{name}' depends on unknown service '{dep}'"
                         )));

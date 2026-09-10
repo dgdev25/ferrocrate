@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
-use serde::{Deserialize, Serialize};
 use rustls::pki_types::{pem::PemObject, CertificateDer};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +70,9 @@ impl SessionStore {
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let mut sessions = self.sessions.lock().ok()?;
         sessions.retain(|_, session| session.expires_at > now_unix);
-        sessions.get(&digest).map(|session| session.identity.clone())
+        sessions
+            .get(&digest)
+            .map(|session| session.identity.clone())
     }
 }
 

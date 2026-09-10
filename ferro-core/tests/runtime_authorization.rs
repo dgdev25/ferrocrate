@@ -279,11 +279,14 @@ fn assert_abort_reopen_matrix(action: &str) {
             "pre-reopen journal state for {action} {phase:?}"
         );
         let records_before_reopen = runtime.list().unwrap();
-        let expected_store_pending = action != "exec" && match phase {
-            LifecyclePhasePoint::ReservationDurable | LifecyclePhasePoint::EffectObserved => true,
-            LifecyclePhasePoint::TerminalDurable => action != "remove",
-            _ => false,
-        };
+        let expected_store_pending = action != "exec"
+            && match phase {
+                LifecyclePhasePoint::ReservationDurable | LifecyclePhasePoint::EffectObserved => {
+                    true
+                }
+                LifecyclePhasePoint::TerminalDurable => action != "remove",
+                _ => false,
+            };
         assert_eq!(
             records_before_reopen
                 .iter()

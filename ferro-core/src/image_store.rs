@@ -812,7 +812,10 @@ mod tests {
         let store = LocalImageStore::open(temp.path()).unwrap();
         let authority = crate::authorization::surface::SurfaceMutationAuthority::for_test();
         let digest = format!("sha256:{}", "d".repeat(64));
-        for reference in ["registry.example/acme/app:one", "registry.example/acme/app:two"] {
+        for reference in [
+            "registry.example/acme/app:one",
+            "registry.example/acme/app:two",
+        ] {
             store
                 .put_reference(&authority, reference, &digest, "test", "{}")
                 .unwrap();
@@ -840,7 +843,11 @@ mod tests {
                 auth.authorize_image_binding(
                     &origin,
                     crate::authorization::Action::ImageDelete,
-                    if index == 1 { "registry.example/acme/not-authorized:latest" } else { reference },
+                    if index == 1 {
+                        "registry.example/acme/not-authorized:latest"
+                    } else {
+                        reference
+                    },
                     &digest,
                     1,
                 )
@@ -923,7 +930,10 @@ mod tests {
                 Err(ImageStoreError::DeleteNotFound(found)) if found == digest
             ));
         }
-        let empty_plan = ImageDeletePlan { digest: digest.clone(), references: Vec::new() };
+        let empty_plan = ImageDeletePlan {
+            digest: digest.clone(),
+            references: Vec::new(),
+        };
         assert!(matches!(
             store.execute_digest_delete_authorized(empty_plan, Vec::new()),
             Err(ImageStoreError::DeleteNotFound(found)) if found == digest
@@ -940,27 +950,67 @@ mod tests {
             let digest = format!("sha256:{}", "d".repeat(64));
             let other = format!("sha256:{}", "f".repeat(64));
             let original = "registry.example/acme/app:original";
-            store.put_reference(&authority, original, &digest, "test", "{}").unwrap();
+            store
+                .put_reference(&authority, original, &digest, "test", "{}")
+                .unwrap();
             let plan = store.prepare_digest_delete(&digest, true).unwrap();
             let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
             let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
-            let permits = plan.references().iter().map(|reference| {
-                auth.authorize_image_binding(&origin, crate::authorization::Action::ImageDelete, reference, &digest, 1).unwrap()
-            }).collect();
+            let permits = plan
+                .references()
+                .iter()
+                .map(|reference| {
+                    auth.authorize_image_binding(
+                        &origin,
+                        crate::authorization::Action::ImageDelete,
+                        reference,
+                        &digest,
+                        1,
+                    )
+                    .unwrap()
+                })
+                .collect();
 
             match drift {
                 "removed" => assert!(store.remove_reference_if_digest(original, &digest).unwrap()),
-                "retargeted" => store.put_reference(&authority, original, &other, "test", "{}").unwrap(),
+                "retargeted" => store
+                    .put_reference(&authority, original, &other, "test", "{}")
+                    .unwrap(),
                 "substituted" => {
                     assert!(store.remove_reference_if_digest(original, &digest).unwrap());
-                    store.put_reference(&authority, "registry.example/acme/app:replacement", &digest, "test", "{}").unwrap();
+                    store
+                        .put_reference(
+                            &authority,
+                            "registry.example/acme/app:replacement",
+                            &digest,
+                            "test",
+                            "{}",
+                        )
+                        .unwrap();
                 }
-                "added" => store.put_reference(&authority, "registry.example/acme/app:added", &digest, "test", "{}").unwrap(),
+                "added" => store
+                    .put_reference(
+                        &authority,
+                        "registry.example/acme/app:added",
+                        &digest,
+                        "test",
+                        "{}",
+                    )
+                    .unwrap(),
                 _ => unreachable!(),
             }
 
-            assert!(matches!(store.execute_digest_delete_authorized(plan, permits), Err(ImageStoreError::DeleteInventoryChanged)), "drift={drift}");
-            assert!(store.resolve_reference(&digest).unwrap().is_some(), "digest metadata removed for drift={drift}");
+            assert!(
+                matches!(
+                    store.execute_digest_delete_authorized(plan, permits),
+                    Err(ImageStoreError::DeleteInventoryChanged)
+                ),
+                "drift={drift}"
+            );
+            assert!(
+                store.resolve_reference(&digest).unwrap().is_some(),
+                "digest metadata removed for drift={drift}"
+            );
         }
     }
 

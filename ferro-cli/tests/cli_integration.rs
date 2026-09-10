@@ -522,12 +522,10 @@ fn public_cli_volume_mutation_preserves_disabled_shadow_and_enforce_contracts() 
         let store =
             ferro_core::volume_store::LocalVolumeStore::open(runtime.path().join("volumes"))
                 .expect("open production volume store");
-        assert!(
-            store
-                .get(&format!("{mode}-volume"))
-                .expect("read volume")
-                .is_some()
-        );
+        assert!(store
+            .get(&format!("{mode}-volume"))
+            .expect("read volume")
+            .is_some());
     }
 
     let runtime = configured_runtime("enforce");

@@ -301,12 +301,24 @@ pub fn prepare_dockerfile_build(
     compression: CompressionFormat,
     store: &LocalImageStore,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
-    prepare_dockerfile_build_with_contexts(dockerfile_path, tag, runtime_dir, compression, store, &HashMap::new())
+    prepare_dockerfile_build_with_contexts(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        &HashMap::new(),
+    )
 }
 
 pub fn prepare_dockerfile_build_with_contexts_and_build_args(
-    dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
-    store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    named_contexts: &HashMap<String, PathBuf>,
+    build_args: &HashMap<String, String>,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
     prepare_dockerfile_build_with_contexts_and_build_args_and_options(
         dockerfile_path,
@@ -399,7 +411,11 @@ pub fn dockerfile_external_copy_images_with_build_args(
     let mut seen = HashSet::new();
     let mut images = Vec::new();
     for stage in stages {
-        for copy in stage.copy_from.iter().chain(stage.copy_from_after_run.iter()) {
+        for copy in stage
+            .copy_from
+            .iter()
+            .chain(stage.copy_from_after_run.iter())
+        {
             if copy.from.parse::<usize>().is_err()
                 && !stage_names.contains(&copy.from.to_ascii_lowercase())
                 && seen.insert(copy.from.clone())
@@ -433,8 +449,13 @@ pub fn prepare_dockerfile_build_with_contexts(
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
-    dockerfile_path: &Path, tag: Option<&str>, runtime_dir: &Path, compression: CompressionFormat,
-    store: &LocalImageStore, named_contexts: &HashMap<String, PathBuf>, build_args: &HashMap<String, String>,
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    named_contexts: &HashMap<String, PathBuf>,
+    build_args: &HashMap<String, String>,
     execution_options: &DockerfileExecutionOptions,
 ) -> Result<ImageBuildPlan, DockerfileBuildError> {
     if !dockerfile_path.exists() {
@@ -487,7 +508,10 @@ fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
         hash.update(value.as_bytes());
     }
     hash.update(dockerfile_digest);
-    for (key, value) in BTreeMap::from_iter(build_args.iter()) { hash.update(key.as_bytes()); hash.update(value.as_bytes()); }
+    for (key, value) in BTreeMap::from_iter(build_args.iter()) {
+        hash.update(key.as_bytes());
+        hash.update(value.as_bytes());
+    }
     append_execution_options_identity(&mut hash, execution_options);
     hash.update([match compression {
         CompressionFormat::None => 0,
@@ -543,10 +567,7 @@ fn prepare_dockerfile_build_with_contexts_and_build_args_inner(
     })
 }
 
-fn append_execution_options_identity(
-    hash: &mut Sha256,
-    options: &DockerfileExecutionOptions,
-) {
+fn append_execution_options_identity(hash: &mut Sha256, options: &DockerfileExecutionOptions) {
     let encoded = format!("{options:?}");
     hash.update((encoded.len() as u64).to_be_bytes());
     hash.update(encoded.as_bytes());
@@ -1057,9 +1078,7 @@ fn build_one_stage(
         // repeat the base filesystem).
         let stage_baseline = snapshot_stage_root(&stage_root)?;
         apply_stage_workdir(&stage_root, workdir)?;
-        let copy_from_after_run_index = stage
-            .copy_from_after_run_index
-            .unwrap_or(stage.run.len());
+        let copy_from_after_run_index = stage.copy_from_after_run_index.unwrap_or(stage.run.len());
         run_stage_commands(
             &stage_root,
             &stage.run[..copy_from_after_run_index],
@@ -1079,10 +1098,14 @@ fn build_one_stage(
         // particular, `npm ci` removes sqlite3's build directory, so its
         // native binding must be copied only after that command completes.
         for copy in &stage.copy_from_after_run {
-            let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
-                .ok_or_else(|| {
-                    DockerfileBuildError::Invalid(format!("unknown COPY --from stage: {}", copy.from))
-                })?;
+            let source_root =
+                resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
+                    .ok_or_else(|| {
+                        DockerfileBuildError::Invalid(format!(
+                            "unknown COPY --from stage: {}",
+                            copy.from
+                        ))
+                    })?;
             let destination = resolve_copy_destination(workdir, &copy.dest);
             let destination_root = safe_context_destination(&stage_root, &destination)?;
             if copy.srcs.len() > 1 {
@@ -1761,10 +1784,8 @@ fn execute_stages_and_publish(
     );
     let exposed_ports = merge_unique(&final_base.exposed_ports, &final_stage.exposed_ports);
     let volumes = merge_unique(&final_base.volumes, &final_stage.volumes);
-    let output_platform = output_platform_for_config(
-        execution_options.target_platform.as_deref(),
-        final_base,
-    )?;
+    let output_platform =
+        output_platform_for_config(execution_options.target_platform.as_deref(), final_base)?;
     let config_json = build_config_json(
         &output_platform,
         execution_options.source_date_epoch,
@@ -3375,7 +3396,11 @@ fn join_continuation_lines(lines: &[String], escape: char) -> Result<String, Doc
         let trailing = line.chars().rev().take_while(|&c| c == escape).count();
         let continuing = pending.is_some();
         let mut current = pending.take().unwrap_or_default();
-        let line = if continuing { line.trim_start() } else { line.as_str() };
+        let line = if continuing {
+            line.trim_start()
+        } else {
+            line.as_str()
+        };
         if trailing % 2 == 1 {
             current.push_str(&line[..line.len() - escape.len_utf8()]);
             pending = Some(current);
@@ -3421,7 +3446,10 @@ fn select_build_target(
     Ok(stages)
 }
 
-fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, String>) -> Result<Vec<StageSpec>, DockerfileBuildError> {
+fn parse_stages_with_build_args(
+    contents: &str,
+    build_args: &HashMap<String, String>,
+) -> Result<Vec<StageSpec>, DockerfileBuildError> {
     let mut stages = Vec::new();
     let mut current: Option<StageSpec> = None;
     let mut global_args = automatic_platform_args();
@@ -3478,7 +3506,9 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
 
         if current.is_none() && keyword == "ARG" {
             let (name, mut value) = parse_arg(&value)?;
-            if let Some(provided) = build_args.get(&name) { value = provided.clone(); }
+            if let Some(provided) = build_args.get(&name) {
+                value = provided.clone();
+            }
             global_args.insert(name, value);
             continue;
         }
@@ -3494,7 +3524,9 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
                     if stage.run.is_empty() {
                         stage.copy_from.push(copy);
                     } else {
-                        stage.copy_from_after_run_index.get_or_insert(stage.run.len());
+                        stage
+                            .copy_from_after_run_index
+                            .get_or_insert(stage.run.len());
                         stage.copy_from_after_run.push(copy);
                     }
                 } else if let Some(copy) = parse_copy_spec(&interpolated)? {
@@ -3522,7 +3554,9 @@ fn parse_stages_with_build_args(contents: &str, build_args: &HashMap<String, Str
             }
             "ARG" => {
                 let (name, mut value) = parse_arg(&interpolated)?;
-                if let Some(provided) = build_args.get(&name) { value = provided.clone(); }
+                if let Some(provided) = build_args.get(&name) {
+                    value = provided.clone();
+                }
                 stage.args.insert(name.clone(), value);
             }
             "ENV" => {
@@ -3693,9 +3727,7 @@ fn parse_buildkit_platform(value: &str) -> Result<BuildkitPlatform, DockerfileBu
         )));
     }
     let (raw_os, raw_options) = match parts[0].split_once('(') {
-        Some((os, options)) if options.ends_with(')') => {
-            (os, Some(&options[..options.len() - 1]))
-        }
+        Some((os, options)) if options.ends_with(')') => (os, Some(&options[..options.len() - 1])),
         Some(_) => {
             return Err(DockerfileBuildError::Invalid(format!(
                 "invalid target platform OS component: {}",
@@ -3796,23 +3828,42 @@ fn percent_decode_platform_option(value: &str) -> Result<String, DockerfileBuild
         decoded.push((high << 4) | low);
         index += 3;
     }
-    String::from_utf8(decoded).map_err(|_| {
-        DockerfileBuildError::Invalid("target OS version is not UTF-8".to_string())
-    })
+    String::from_utf8(decoded)
+        .map_err(|_| DockerfileBuildError::Invalid("target OS version is not UTF-8".to_string()))
 }
 
-fn validate_from_expression(value: &str, args: &HashMap<String, String>) -> Result<(), DockerfileBuildError> {
+fn validate_from_expression(
+    value: &str,
+    args: &HashMap<String, String>,
+) -> Result<(), DockerfileBuildError> {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] != b'$' { index += 1; continue; }
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
         index += 1;
-        let start = if bytes.get(index) == Some(&b'{') { index += 1; index } else { index };
-        while bytes.get(index).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') { index += 1; }
+        let start = if bytes.get(index) == Some(&b'{') {
+            index += 1;
+            index
+        } else {
+            index
+        };
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            index += 1;
+        }
         let name = &value[start..index];
-        if bytes.get(start - 1) == Some(&b'{') && bytes.get(index) == Some(&b'}') { index += 1; }
+        if bytes.get(start - 1) == Some(&b'{') && bytes.get(index) == Some(&b'}') {
+            index += 1;
+        }
         if !name.is_empty() && !args.contains_key(name) {
-            return Err(DockerfileBuildError::Invalid(format!("FROM --platform expression references undeclared build argument: {name}")));
+            return Err(DockerfileBuildError::Invalid(format!(
+                "FROM --platform expression references undeclared build argument: {name}"
+            )));
         }
     }
     Ok(())
@@ -3828,16 +3879,31 @@ fn dockerfile_instructions(contents: &str) -> Result<Vec<String>, DockerfileBuil
     let mut index = 0;
     while index < lines.len() {
         let raw = lines[index];
-        let keyword = raw.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+        let keyword = raw
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
         if !matches!(keyword.as_str(), "RUN" | "COPY" | "ADD" | "ONBUILD") {
             result.push(raw.to_string());
             index += 1;
             continue;
         }
-        let markers = raw.split_whitespace().filter_map(|word| word.strip_prefix("<<")).map(|word| {
-            let (strip_tabs, word) = word.strip_prefix('-').map(|word| (true, word)).unwrap_or((false, word));
-            (word.trim_matches(|c| c == '\'' || c == '"').to_string(), strip_tabs)
-        }).filter(|(delimiter, _)| !delimiter.is_empty()).collect::<Vec<_>>();
+        let markers = raw
+            .split_whitespace()
+            .filter_map(|word| word.strip_prefix("<<"))
+            .map(|word| {
+                let (strip_tabs, word) = word
+                    .strip_prefix('-')
+                    .map(|word| (true, word))
+                    .unwrap_or((false, word));
+                (
+                    word.trim_matches(|c| c == '\'' || c == '"').to_string(),
+                    strip_tabs,
+                )
+            })
+            .filter(|(delimiter, _)| !delimiter.is_empty())
+            .collect::<Vec<_>>();
         if markers.is_empty() {
             result.push(raw.to_string());
             index += 1;
@@ -3849,18 +3915,26 @@ fn dockerfile_instructions(contents: &str) -> Result<Vec<String>, DockerfileBuil
             let mut body = String::new();
             let mut terminated = false;
             while index < lines.len() {
-                let candidate = if strip_tabs { lines[index].trim_start_matches('\t') } else { lines[index] };
+                let candidate = if strip_tabs {
+                    lines[index].trim_start_matches('\t')
+                } else {
+                    lines[index]
+                };
                 if candidate == delimiter {
                     index += 1;
                     terminated = true;
                     break;
                 }
-                if !body.is_empty() { body.push('\n'); }
+                if !body.is_empty() {
+                    body.push('\n');
+                }
                 body.push_str(candidate);
                 index += 1;
             }
             if !terminated {
-                return Err(DockerfileBuildError::Invalid(format!("unterminated heredoc delimiter: {delimiter}")));
+                return Err(DockerfileBuildError::Invalid(format!(
+                    "unterminated heredoc delimiter: {delimiter}"
+                )));
             }
             logical.push('\n');
             logical.push_str(&body);
@@ -3869,7 +3943,6 @@ fn dockerfile_instructions(contents: &str) -> Result<Vec<String>, DockerfileBuil
     }
     Ok(result)
 }
-
 
 fn build_stage_dependency_graph(
     stages: &[StageSpec],
@@ -4447,17 +4520,40 @@ fn parse_copy_from(value: &str) -> Result<Option<CopyFromSpec>, DockerfileBuildE
 fn parse_copy_spec(value: &str) -> Result<Option<CopySpec>, DockerfileBuildError> {
     if let Some((header, body)) = value.split_once('\n') {
         let header = header.trim();
-        if let Some(marker) = header.split_whitespace().find(|word| word.starts_with("<<")) {
-            let delimiter = marker.trim_start_matches("<<").trim_start_matches('-').trim_matches(|c| c == '\'' || c == '"');
-            let mut tokens = header.split_whitespace().filter(|word| *word != marker).collect::<Vec<_>>();
+        if let Some(marker) = header
+            .split_whitespace()
+            .find(|word| word.starts_with("<<"))
+        {
+            let delimiter = marker
+                .trim_start_matches("<<")
+                .trim_start_matches('-')
+                .trim_matches(|c| c == '\'' || c == '"');
+            let mut tokens = header
+                .split_whitespace()
+                .filter(|word| *word != marker)
+                .collect::<Vec<_>>();
             if delimiter.is_empty() || tokens.is_empty() {
-                return Err(DockerfileBuildError::Invalid("COPY heredoc requires a destination".to_string()));
+                return Err(DockerfileBuildError::Invalid(
+                    "COPY heredoc requires a destination".to_string(),
+                ));
             }
             let dest = tokens.pop().unwrap().to_string();
             if tokens.iter().any(|token| token.starts_with("--")) {
-                return Err(DockerfileBuildError::Unsupported("COPY heredoc flags are not supported".to_string()));
+                return Err(DockerfileBuildError::Unsupported(
+                    "COPY heredoc flags are not supported".to_string(),
+                ));
             }
-            return Ok(Some(CopySpec { srcs: Vec::new(), dest, chmod: None, owner: None, checksum: None, parents: false, excludes: Vec::new(), extract_archives: false, inline_content: Some(body.to_string()) }));
+            return Ok(Some(CopySpec {
+                srcs: Vec::new(),
+                dest,
+                chmod: None,
+                owner: None,
+                checksum: None,
+                parents: false,
+                excludes: Vec::new(),
+                extract_archives: false,
+                inline_content: Some(body.to_string()),
+            }));
         }
     }
     let tokens = value.split_whitespace().collect::<Vec<_>>();
@@ -4704,12 +4800,7 @@ fn apply_secret_mount_metadata(
                 "rootless secret uid/gid require subordinate user-ID mappings".to_string(),
             ));
         }
-        chown(
-            target,
-            Some(Uid::from_raw(uid)),
-            Some(Gid::from_raw(gid)),
-        )
-        .map_err(|error| {
+        chown(target, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))).map_err(|error| {
             DockerfileBuildError::Invalid(format!(
                 "secret mount cannot set owner {uid}:{gid}: {error}"
             ))
@@ -5151,9 +5242,25 @@ fn parse_run_with_workdir(
                         message,
                         key,
                         &[
-                            "type", "from", "source", "target", "readonly", "id",
-                            "sharing", "required", "size", "mode", "uid", "gid", "src",
-                            "dst", "destination", "ro", "rw", "readwrite", "env",
+                            "type",
+                            "from",
+                            "source",
+                            "target",
+                            "readonly",
+                            "id",
+                            "sharing",
+                            "required",
+                            "size",
+                            "mode",
+                            "uid",
+                            "gid",
+                            "src",
+                            "dst",
+                            "destination",
+                            "ro",
+                            "rw",
+                            "readwrite",
+                            "env",
                         ],
                     )));
                 }
@@ -5234,10 +5341,13 @@ fn parse_run_with_workdir(
                         )));
                     }
                 };
-                let id = id.or_else(|| target.and_then(|target| Path::new(target).file_name()?.to_str()))
-                    .ok_or_else(|| DockerfileBuildError::Invalid(
-                        "invalid secret mount: one of id or target is required".to_string(),
-                    ))?;
+                let id = id
+                    .or_else(|| target.and_then(|target| Path::new(target).file_name()?.to_str()))
+                    .ok_or_else(|| {
+                        DockerfileBuildError::Invalid(
+                            "invalid secret mount: one of id or target is required".to_string(),
+                        )
+                    })?;
                 let id = validate_secret_id(id)?;
                 let target = target
                     .map(str::to_string)
@@ -5249,8 +5359,14 @@ fn parse_run_with_workdir(
                         .filter(|value| !value.is_empty())
                         .map(str::to_string),
                     required,
-                    uid: uid.map(|value| parse_cache_owner_id("uid", value)).transpose()?.unwrap_or(0),
-                    gid: gid.map(|value| parse_cache_owner_id("gid", value)).transpose()?.unwrap_or(0),
+                    uid: uid
+                        .map(|value| parse_cache_owner_id("uid", value))
+                        .transpose()?
+                        .unwrap_or(0),
+                    gid: gid
+                        .map(|value| parse_cache_owner_id("gid", value))
+                        .transpose()?
+                        .unwrap_or(0),
                     mode: mode.map(parse_copy_mode).transpose()?.unwrap_or(0o400),
                 });
             }
@@ -5286,16 +5402,24 @@ fn parse_run_with_workdir(
                 let required = match required {
                     None | Some("false") => false,
                     Some("true") => true,
-                    Some(value) => return Err(DockerfileBuildError::Invalid(format!(
-                        "RUN ssh mount required must be true or false, got {value}"
-                    ))),
+                    Some(value) => {
+                        return Err(DockerfileBuildError::Invalid(format!(
+                            "RUN ssh mount required must be true or false, got {value}"
+                        )))
+                    }
                 };
                 ssh_mounts.push(SshMount {
                     target,
                     id,
                     required,
-                    uid: uid.map(|value| parse_cache_owner_id("uid", value)).transpose()?.unwrap_or(0),
-                    gid: gid.map(|value| parse_cache_owner_id("gid", value)).transpose()?.unwrap_or(0),
+                    uid: uid
+                        .map(|value| parse_cache_owner_id("uid", value))
+                        .transpose()?
+                        .unwrap_or(0),
+                    gid: gid
+                        .map(|value| parse_cache_owner_id("gid", value))
+                        .transpose()?
+                        .unwrap_or(0),
                     mode: mode.map(parse_copy_mode).transpose()?.unwrap_or(0o600),
                 });
             }
@@ -5371,7 +5495,10 @@ fn parse_run_with_workdir(
         if *token == "--" {
             tokens.remove(0);
         } else {
-            let flag = token[2..].split_once('=').map(|(name, _)| name).unwrap_or(&token[2..]);
+            let flag = token[2..]
+                .split_once('=')
+                .map(|(name, _)| name)
+                .unwrap_or(&token[2..]);
             if matches!(flag, "mount" | "network" | "security") {
                 return Err(DockerfileBuildError::Invalid(format!(
                     "missing a value on flag: --{flag}"
@@ -5839,9 +5966,7 @@ fn run_stage_commands(
             })?)
         };
         let network_mode = run.network.unwrap_or(execution_options.network_mode);
-        if network_mode == DockerfileNetworkMode::Host
-            && !execution_options.allow_network_host
-        {
+        if network_mode == DockerfileNetworkMode::Host && !execution_options.allow_network_host {
             return Err(DockerfileBuildError::Invalid(
                 "entitlement network.host is not allowed".to_string(),
             ));
@@ -5862,12 +5987,16 @@ fn run_stage_commands(
         provision_build_network_files(rootfs)?;
         let cgroup_namespace = child_requires_cgroup_namespace(execution_options);
         let cgroup_mount_target = cgroup_namespace.then(|| rootfs.join("sys/fs/cgroup"));
-        let cgroup_mount_existed = cgroup_mount_target.as_ref().is_some_and(|target| target.exists());
+        let cgroup_mount_existed = cgroup_mount_target
+            .as_ref()
+            .is_some_and(|target| target.exists());
         if let Some(target) = &cgroup_mount_target {
             fs::create_dir_all(target)?;
         }
         let proc_mount_target = running_as_root.then(|| rootfs.join("proc"));
-        let proc_mount_existed = proc_mount_target.as_ref().is_some_and(|target| target.exists());
+        let proc_mount_existed = proc_mount_target
+            .as_ref()
+            .is_some_and(|target| target.exists());
         if let Some(target) = &proc_mount_target {
             fs::create_dir_all(target)?;
         }
@@ -5914,9 +6043,7 @@ fn run_stage_commands(
             if !security_insecure {
                 command.arg("--cap-drop").arg("ALL");
                 for capability in dockerfile_default_capabilities() {
-                    command
-                        .arg("--cap-add")
-                        .arg(format!("{capability:?}"));
+                    command.arg("--cap-add").arg(format!("{capability:?}"));
                 }
             } else {
                 for device in [
@@ -6853,9 +6980,9 @@ fn parse_buildkit_byte_size(name: &str, value: &str) -> Result<u64, DockerfileBu
         .position(|byte| !byte.is_ascii_digit())
         .unwrap_or(value.len());
     let (number, suffix) = value.split_at(split);
-    let base = number.parse::<u64>().map_err(|_| {
-        DockerfileBuildError::Invalid(format!("{name} must be a valid byte size"))
-    })?;
+    let base = number
+        .parse::<u64>()
+        .map_err(|_| DockerfileBuildError::Invalid(format!("{name} must be a valid byte size")))?;
     if base == 0 {
         return Err(DockerfileBuildError::Invalid(format!(
             "{name} must be greater than zero"
@@ -6873,9 +7000,8 @@ fn parse_buildkit_byte_size(name: &str, value: &str) -> Result<u64, DockerfileBu
             )))
         }
     };
-    base.checked_mul(multiplier).ok_or_else(|| {
-        DockerfileBuildError::Invalid(format!("{name} byte size overflows u64"))
-    })
+    base.checked_mul(multiplier)
+        .ok_or_else(|| DockerfileBuildError::Invalid(format!("{name} byte size overflows u64")))
 }
 
 fn apply_build_limits(limits: &BuildLimits) -> io::Result<()> {
@@ -6994,10 +7120,7 @@ fn load_build_seccomp_profile() -> Result<Option<SeccompProfile>, DockerfileBuil
         .map_err(|err| DockerfileBuildError::Invalid(format!("build seccomp profile: {err}")))
 }
 
-fn setup_build_namespace_root(
-    isolate_network: bool,
-    isolate_cgroup: bool,
-) -> io::Result<()> {
+fn setup_build_namespace_root(isolate_network: bool, isolate_cgroup: bool) -> io::Result<()> {
     use nix::sched::{unshare, CloneFlags};
     let mut flags = CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
     if isolate_network {
@@ -7006,8 +7129,7 @@ fn setup_build_namespace_root(
     if isolate_cgroup {
         flags |= CloneFlags::CLONE_NEWCGROUP;
     }
-    unshare(flags)
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    unshare(flags).map_err(|err| io::Error::other(err.to_string()))?;
     make_mount_namespace_private()
 }
 
@@ -7102,7 +7224,9 @@ fn prepare_build_run_cgroup(
             .unwrap_or("ferrocrate-build")
             .trim_start_matches('/');
         if parent.is_empty()
-            || parent.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+            || parent
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
             || parent.contains('\\')
             || parent.contains('\0')
         {
@@ -7110,10 +7234,7 @@ fn prepare_build_run_cgroup(
                 "invalid cgroup-parent {parent:?}"
             )));
         }
-        let name = format!(
-            "{parent}/run-{}-{run_index}",
-            std::process::id()
-        );
+        let name = format!("{parent}/run-{}-{run_index}", std::process::id());
         let manager = CgroupV2Manager::new(&root);
         let path = manager.create_group(&name).map_err(|err| {
             DockerfileBuildError::Invalid(format!("create RUN cgroup {name}: {err}"))
@@ -8620,24 +8741,22 @@ mod tests {
 
     use super::{
         apply_onbuild_triggers, build_cache_key, build_cache_path,
-        build_from_dockerfile_with_store_and_compression,
-        build_journal_path,
+        build_from_dockerfile_with_store_and_compression, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerfile_external_base_images, dockerignore_matches, export_build_cache,
         export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
         import_build_cache_from_registry, layer_blob_path, load_build_cache, load_build_journal,
         load_stage_checkpoints, parse_env, parse_exposed_ports, parse_healthcheck, parse_labels,
-        parse_limit_value, parse_maintainer, parse_onbuild, parse_run,
-        parse_stages, parse_stages_with_build_args, parse_stop_signal, prepare_dockerfile_build,
+        parse_limit_value, parse_maintainer, parse_onbuild, parse_run, parse_stages,
+        parse_stages_with_build_args, parse_stop_signal, prepare_dockerfile_build,
         prepare_dockerfile_build_with_contexts,
-        prepare_dockerfile_build_with_contexts_and_build_args, prune_build_cache, registry_cache_descriptor,
-        registry_cache_reference, reject_cache_path_symlinks, resolve_base_image,
-        resolve_copy_owner,
-        run_stage_worker_pool, save_build_cache, save_build_journal, sha256_digest_bytes,
-        stage_checkpoint_path, stage_content_identities, validate_mount_target, BaseImageInfo,
-        BuildCacheEntry, BuildControl, BuildJournalState, BuildLimits, CacheSharing, CopyOwner,
-        DockerfileBuildError, BUILD_CACHE_PLATFORM, OCI_IMAGE_LAYER_MEDIA_TYPE,
-        REGISTRY_CACHE_KIND_ANNOTATION,
+        prepare_dockerfile_build_with_contexts_and_build_args, prune_build_cache,
+        registry_cache_descriptor, registry_cache_reference, reject_cache_path_symlinks,
+        resolve_base_image, resolve_copy_owner, run_stage_worker_pool, save_build_cache,
+        save_build_journal, sha256_digest_bytes, stage_checkpoint_path, stage_content_identities,
+        validate_mount_target, BaseImageInfo, BuildCacheEntry, BuildControl, BuildJournalState,
+        BuildLimits, CacheSharing, CopyOwner, DockerfileBuildError, BUILD_CACHE_PLATFORM,
+        OCI_IMAGE_LAYER_MEDIA_TYPE, REGISTRY_CACHE_KIND_ANNOTATION,
     };
     use sha2::Digest;
     use std::collections::HashMap;
@@ -8674,11 +8793,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            super::dockerfile_external_copy_images_with_build_args(
-                &dockerfile,
-                &HashMap::new()
-            )
-            .unwrap(),
+            super::dockerfile_external_copy_images_with_build_args(&dockerfile, &HashMap::new())
+                .unwrap(),
             vec!["tonistiigi/hellofs"]
         );
     }
@@ -8688,7 +8804,9 @@ mod tests {
         let valid = parse_stages("FROM --platform=$BUILDPLATFORM scratch\n").unwrap();
         assert_eq!(valid[0].base, "scratch");
         let error = parse_stages("FROM --platform=$BUILPLATFORM scratch\n").unwrap_err();
-        assert!(error.to_string().contains("undeclared build argument: BUILPLATFORM"));
+        assert!(error
+            .to_string()
+            .contains("undeclared build argument: BUILPLATFORM"));
     }
 
     #[test]
@@ -8706,7 +8824,10 @@ mod tests {
             "TARGETARCH",
             "TARGETVARIANT",
         ] {
-            assert!(args.contains_key(name), "missing BuildKit automatic arg {name}");
+            assert!(
+                args.contains_key(name),
+                "missing BuildKit automatic arg {name}"
+            );
         }
         assert_eq!(args["BUILDVARIANT"], "");
         assert_eq!(args["TARGETVARIANT"], "");
@@ -8716,10 +8837,9 @@ mod tests {
 
     #[test]
     fn requested_platform_binds_target_args_with_os_version_and_variant() {
-        let args = super::automatic_platform_args_for_target(
-            Some("windows(10.0.20348.1006)/arm64/v8"),
-        )
-        .expect("BuildKit platform syntax parses");
+        let args =
+            super::automatic_platform_args_for_target(Some("windows(10.0.20348.1006)/arm64/v8"))
+                .expect("BuildKit platform syntax parses");
 
         assert_eq!(args["TARGETPLATFORM"], "windows(10.0.20348.1006)/arm64/v8");
         assert_eq!(args["TARGETOS"], "windows");
@@ -8773,7 +8893,10 @@ mod tests {
         )
         .expect("heredoc Dockerfile parses");
         assert_eq!(stages[0].run[0].args.last().unwrap(), "#!/bin/sh\necho ok");
-        assert_eq!(stages[0].copy_paths[0].inline_content.as_deref(), Some("hello  \"quotes\""));
+        assert_eq!(
+            stages[0].copy_paths[0].inline_content.as_deref(),
+            Some("hello  \"quotes\"")
+        );
         assert_eq!(stages[0].onbuild[0], "RUN <<EOF\necho later");
     }
 
@@ -8781,15 +8904,26 @@ mod tests {
     fn copy_heredoc_build_materializes_its_body() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dockerfile = temp.path().join("Dockerfile");
-        fs::write(&dockerfile, "FROM scratch\nCOPY <<EOF /message\nhello\nEOF\n").unwrap();
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY <<EOF /message\nhello\nEOF\n",
+        )
+        .unwrap();
         let runtime = temp.path().join("runtime");
         let store = LocalImageStore::open(runtime.join("images")).unwrap();
         build_from_dockerfile_with_store_and_compression(
-            &dockerfile, Some("local/copy-heredoc:latest"), &runtime,
-            CompressionFormat::Gzip, &store,
+            &dockerfile,
+            Some("local/copy-heredoc:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
-        ).expect("COPY heredoc build");
-        assert_eq!(fs::read_to_string(stage_root(&runtime, 0).join("message")).unwrap(), "hello");
+        )
+        .expect("COPY heredoc build");
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 0).join("message")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -9137,11 +9271,9 @@ mod tests {
         let file = fs::File::create(&payload).expect("payload");
         file.set_len(1).expect("payload size");
         file.set_times(
-            std::fs::FileTimes::new()
-                .set_modified(
-                    std::time::UNIX_EPOCH
-                        + std::time::Duration::from_secs(1_700_001_000),
-                ),
+            std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_001_000),
+            ),
         )
         .expect("payload mtime");
         let runtime = temp.path().join("runtime");
@@ -9167,8 +9299,8 @@ mod tests {
                 &plan,
             )
             .expect("permit");
-        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
-            .expect("build");
+        let result =
+            super::execute_dockerfile_build_authorized(plan, &store, permit).expect("build");
         let config: serde_json::Value = serde_json::from_slice(
             &fs::read(
                 runtime
@@ -9179,8 +9311,8 @@ mod tests {
         )
         .expect("config JSON");
         assert_eq!(config["created"], "2023-11-14T22:13:20Z");
-        let layers = resolve_layer_paths_with_store(&runtime, &result.reference, &store)
-            .expect("layers");
+        let layers =
+            resolve_layer_paths_with_store(&runtime, &result.reference, &store).expect("layers");
         let decoder = flate2::read::GzDecoder::new(fs::File::open(&layers[0]).expect("layer"));
         let mut archive = tar::Archive::new(decoder);
         let mtime = archive
@@ -9227,8 +9359,8 @@ mod tests {
                 &plan,
             )
             .expect("authorize build plan");
-        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
-            .expect("build image");
+        let result =
+            super::execute_dockerfile_build_authorized(plan, &store, permit).expect("build image");
         let config = fs::read_to_string(
             runtime
                 .join("images")
@@ -9237,7 +9369,10 @@ mod tests {
         )
         .expect("read image config");
         let config: serde_json::Value = serde_json::from_str(&config).expect("parse image config");
-        assert_eq!(config["config"]["Env"], serde_json::json!(["FIRST=one", "SECOND=two"]));
+        assert_eq!(
+            config["config"]["Env"],
+            serde_json::json!(["FIRST=one", "SECOND=two"])
+        );
         assert_eq!(config["config"]["Labels"]["org.ferrocrate.first"], "one");
         assert_eq!(config["config"]["Labels"]["org.ferrocrate.second"], "two");
     }
@@ -9253,10 +9388,9 @@ mod tests {
         .expect("write Dockerfile");
         let runtime = temp.path().join("runtime");
         let store = LocalImageStore::open(runtime.join("images")).expect("open store");
-        let build_args = super::automatic_platform_args_for_target(Some(
-            "windows(10.0.20348.1006)/amd64",
-        ))
-        .expect("target platform");
+        let build_args =
+            super::automatic_platform_args_for_target(Some("windows(10.0.20348.1006)/amd64"))
+                .expect("target platform");
 
         let options = super::DockerfileExecutionOptions {
             target_platform: Some("windows(10.0.20348.1006)/amd64".to_string()),
@@ -9279,8 +9413,8 @@ mod tests {
                 &plan,
             )
             .expect("authorize build plan");
-        let result = super::execute_dockerfile_build_authorized(plan, &store, permit)
-            .expect("build image");
+        let result =
+            super::execute_dockerfile_build_authorized(plan, &store, permit).expect("build image");
         assert_eq!(
             fs::read_to_string(stage_root(&runtime, 0).join("osversion"))
                 .expect("TARGETOSVERSION output"),
@@ -9585,8 +9719,14 @@ mod tests {
         )
         .expect("COPY --from multiple sources build");
 
-        assert_eq!(fs::read_to_string(stage_root(&runtime, 1).join("out/one")).unwrap(), "one");
-        assert_eq!(fs::read_to_string(stage_root(&runtime, 1).join("out/two")).unwrap(), "two");
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 1).join("out/one")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 1).join("out/two")).unwrap(),
+            "two"
+        );
     }
 
     #[test]
@@ -12020,11 +12160,8 @@ mod tests {
         assert_eq!(none.network, Some(super::DockerfileNetworkMode::None));
         assert_eq!(none.args.last().map(String::as_str), Some("echo isolated"));
 
-        let invalid = parse_run(
-            "--network=invalid true",
-            &["/bin/sh".into(), "-c".into()],
-        )
-        .expect_err("unknown network mode fails before execution");
+        let invalid = parse_run("--network=invalid true", &["/bin/sh".into(), "-c".into()])
+            .expect_err("unknown network mode fails before execution");
         assert!(invalid.to_string().contains("invalid network mode"));
     }
 
@@ -12115,7 +12252,9 @@ mod tests {
         }
         let mut child = command.spawn().expect("spawn process-group probe");
         let mut output = child.stdout.take().expect("captured stdout");
-        child.wait().expect("shell exits without waiting for background job");
+        child
+            .wait()
+            .expect("shell exits without waiting for background job");
         super::terminate_build_process_group(child.id());
         let mut captured = Vec::new();
         std::io::Read::read_to_end(&mut output, &mut captured)
@@ -12242,8 +12381,8 @@ mod tests {
 
     #[test]
     fn no_cache_filters_apply_to_all_or_named_stages() {
-        let stages = parse_stages("FROM scratch AS build\nFROM scratch AS package\n")
-            .expect("stages parse");
+        let stages =
+            parse_stages("FROM scratch AS build\nFROM scratch AS package\n").expect("stages parse");
         let all = super::DockerfileExecutionOptions {
             no_cache: Some(Vec::new()),
             ..Default::default()
@@ -12279,19 +12418,13 @@ mod tests {
 
     #[test]
     fn run_mount_diagnostics_suggest_buildkit_keys_and_types() {
-        let key = parse_run(
-            "--mount=typ=tmpfs true",
-            &["/bin/sh".into(), "-c".into()],
-        )
-        .expect_err("misspelled key");
+        let key = parse_run("--mount=typ=tmpfs true", &["/bin/sh".into(), "-c".into()])
+            .expect_err("misspelled key");
         assert!(key.to_string().contains("unexpected key 'typ'"));
         assert!(key.to_string().contains("did you mean type?"));
 
-        let kind = parse_run(
-            "--mount=type=tmp true",
-            &["/bin/sh".into(), "-c".into()],
-        )
-        .expect_err("misspelled type");
+        let kind = parse_run("--mount=type=tmp true", &["/bin/sh".into(), "-c".into()])
+            .expect_err("misspelled type");
         assert!(kind.to_string().contains("unsupported mount type \"tmp\""));
         assert!(kind.to_string().contains("did you mean tmpfs?"));
 
@@ -12301,11 +12434,7 @@ mod tests {
                 "unknown flag: --mout",
                 Some("did you mean mount?"),
             ),
-            (
-                "--banana=value true",
-                "unknown flag: --banana",
-                None,
-            ),
+            ("--banana=value true", "unknown flag: --banana", None),
             (
                 "--mount=type=tmpfs,targe=/tmp true",
                 "unexpected key 'targe' in 'targe=/tmp'",

@@ -155,7 +155,10 @@ fn decode_f32_le(bytes: &[u8]) -> Result<Vec<f32>, String> {
         ));
     }
     let (chunks, _) = bytes.as_chunks::<4>();
-    Ok(chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect())
+    Ok(chunks
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
 }
 
 fn encode_f32_le(values: &[f32]) -> Vec<u8> {

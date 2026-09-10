@@ -271,10 +271,7 @@ where
 {
     let value = Option::<Entrypoint>::deserialize(deserializer)?;
     Ok(value.map(|value| match value {
-        Entrypoint::Shell(command) => command
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
+        Entrypoint::Shell(command) => command.split_whitespace().map(str::to_owned).collect(),
         Entrypoint::List(command) => command,
     }))
 }
@@ -329,7 +326,9 @@ pub struct DependsCondition {
     pub condition: String,
 }
 
-fn dependency_required_default() -> bool { true }
+fn dependency_required_default() -> bool {
+    true
+}
 
 /// Health check configuration for determining container readiness.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -503,8 +502,8 @@ impl ComposeFile {
         let mut value: serde_yaml::Value = serde_yaml::from_str(&interpolated)
             .map_err(|err| ComposeError::Parse(err.to_string()))?;
         expand_yaml_merges(&mut value).map_err(ComposeError::Parse)?;
-        let compose: ComposeFile = serde_yaml::from_value(value)
-            .map_err(|err| ComposeError::Parse(err.to_string()))?;
+        let compose: ComposeFile =
+            serde_yaml::from_value(value).map_err(|err| ComposeError::Parse(err.to_string()))?;
         compose.validate()?;
         Ok(compose)
     }

@@ -2091,7 +2091,9 @@ fn runtime_dir_from_environment(
     ferrocrate_home
         .or(legacy_runtime_dir)
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ferrocrate")))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ferrocrate"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from(".ferrocrate"))
 }
 

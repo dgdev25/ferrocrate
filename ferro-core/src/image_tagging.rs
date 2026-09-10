@@ -295,7 +295,10 @@ mod tests {
             digest.strip_prefix("sha256:").unwrap(),
             &digest.strip_prefix("sha256:").unwrap().to_ascii_uppercase(),
             digest.as_str(),
-            &format!("sha256:{}", digest.strip_prefix("sha256:").unwrap().to_ascii_uppercase()),
+            &format!(
+                "sha256:{}",
+                digest.strip_prefix("sha256:").unwrap().to_ascii_uppercase()
+            ),
         ] {
             assert_eq!(
                 resolve_reference(&store, selector).unwrap().unwrap().digest,
@@ -338,13 +341,20 @@ mod tests {
         let target = "registry.example/team/target:latest";
         let digest_a = format!("sha256:{}", "a".repeat(64));
         let digest_b = format!("sha256:{}", "b".repeat(64));
-        store.put_reference(&authority, source, &digest_a, "test", "{\"version\":1}").unwrap();
+        store
+            .put_reference(&authority, source, &digest_a, "test", "{\"version\":1}")
+            .unwrap();
         let plan = prepare_image_tag(&store, source, target).unwrap();
         let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
         let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
         let permit = auth.authorize_image_tag_plan(&origin, &plan).unwrap();
-        store.put_reference(&authority, source, &digest_b, "test", "{\"version\":2}").unwrap();
-        assert!(execute_image_tag_authorized(&store, plan, permit).unwrap_err().to_string().contains("source changed after authorization"));
+        store
+            .put_reference(&authority, source, &digest_b, "test", "{\"version\":2}")
+            .unwrap();
+        assert!(execute_image_tag_authorized(&store, plan, permit)
+            .unwrap_err()
+            .to_string()
+            .contains("source changed after authorization"));
         assert!(store.resolve_reference(target).unwrap().is_none());
     }
 
@@ -379,13 +389,32 @@ mod tests {
         let digest_a = format!("sha256:abcde{}", "1".repeat(59));
         let digest_b = format!("sha256:abcde{}", "2".repeat(59));
         let target = "registry.example/team/target:latest";
-        store.put_reference(&authority, "registry.example/team/a:latest", &digest_a, "test", "{\"version\":1}").unwrap();
+        store
+            .put_reference(
+                &authority,
+                "registry.example/team/a:latest",
+                &digest_a,
+                "test",
+                "{\"version\":1}",
+            )
+            .unwrap();
         let plan = prepare_image_tag(&store, "ABCDE", target).unwrap();
         let auth = crate::authorization::surface::SurfaceAuthorization::compatibility();
         let origin = crate::authorization::RequestOrigin::cli_current().unwrap();
         let permit = auth.authorize_image_tag_plan(&origin, &plan).unwrap();
-        store.put_reference(&authority, "registry.example/team/b:latest", &digest_b, "test", "{\"version\":2}").unwrap();
+        store
+            .put_reference(
+                &authority,
+                "registry.example/team/b:latest",
+                &digest_b,
+                "test",
+                "{\"version\":2}",
+            )
+            .unwrap();
         execute_image_tag_authorized(&store, plan, permit).unwrap();
-        assert_eq!(store.resolve_reference(target).unwrap().unwrap().digest, digest_a);
+        assert_eq!(
+            store.resolve_reference(target).unwrap().unwrap().digest,
+            digest_a
+        );
     }
 }

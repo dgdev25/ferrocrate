@@ -194,10 +194,7 @@ impl MacosVmBackend {
     }
 }
 
-fn guest_provisioner_command(
-    config: &MacosVmConfig,
-    known_hosts: &Path,
-) -> CommandSpec {
+fn guest_provisioner_command(config: &MacosVmConfig, known_hosts: &Path) -> CommandSpec {
     let identity = config.ssh_key.display().to_string();
     let port = config.ssh_port.to_string();
     let known_hosts = format!("UserKnownHostsFile={}", known_hosts.display());

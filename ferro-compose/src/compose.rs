@@ -355,7 +355,8 @@ services:
         fs::write(
             dir.path().join(".env"),
             "export COMPOSE_PROFILES=postgres,redis,assets,web,worker\n",
-        ).unwrap();
+        )
+        .unwrap();
         let env = super::load_env_file(dir.path()).unwrap();
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
@@ -390,7 +391,8 @@ services:
         fs::write(
             dir.path().join(".env"),
             "export\tCOMPOSE_PROFILES='web, worker'\nexported=value\nIMAGE=nginx:latest\n",
-        ).unwrap();
+        )
+        .unwrap();
         let env = super::load_env_file(dir.path()).unwrap();
         assert_eq!(
             super::select_profiles(&[], None, env.get("COMPOSE_PROFILES").map(String::as_str)),

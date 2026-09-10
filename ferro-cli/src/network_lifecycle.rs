@@ -1170,7 +1170,10 @@ pub(crate) fn run_network_create(
         None
     };
     let adopted = match orphan_observation {
-        Some(observed) if bridge_name.starts_with("fc-") && is_intended_create_observation(&intended, &observed) => {
+        Some(observed)
+            if bridge_name.starts_with("fc-")
+                && is_intended_create_observation(&intended, &observed) =>
+        {
             tracing::warn!(bridge = %bridge_name, "adopting orphan deterministic network bridge");
             Some(observed)
         }
@@ -1687,15 +1690,12 @@ pub(crate) fn delete_authorized(
         generation,
     )?;
 
-    if associations
-        .iter()
-        .any(|record| {
-            record
-                .effective_network_endpoints()
-                .iter()
-                .any(|endpoint| endpoint.network_name == logical_name)
-        })
-    {
+    if associations.iter().any(|record| {
+        record
+            .effective_network_endpoints()
+            .iter()
+            .any(|endpoint| endpoint.network_name == logical_name)
+    }) {
         finish_permit(permit, false)?;
         return Err(NetworkLifecycleError::InUse(logical_name.to_string()));
     }
@@ -2583,9 +2583,16 @@ mod tests {
         .unwrap();
         let mut orphan = record.intended_identity();
         orphan.ifindex = Some(77);
-        kernel.state.lock().unwrap().insert(orphan.name.clone(), orphan.clone());
+        kernel
+            .state
+            .lock()
+            .unwrap()
+            .insert(orphan.name.clone(), orphan.clone());
 
-        assert_eq!(run_network_create(dir.path(), &record, &kernel).unwrap(), orphan);
+        assert_eq!(
+            run_network_create(dir.path(), &record, &kernel).unwrap(),
+            orphan
+        );
         assert_eq!(kernel.create_call_count(), 0);
         assert_eq!(kernel.destroy_call_count(), 0);
     }
@@ -2604,7 +2611,11 @@ mod tests {
         let mut orphan = record.intended_identity();
         orphan.ifindex = Some(78);
         orphan.cidr = Some("10.99.0.1/24".into());
-        kernel.state.lock().unwrap().insert(orphan.name.clone(), orphan);
+        kernel
+            .state
+            .lock()
+            .unwrap()
+            .insert(orphan.name.clone(), orphan);
 
         let created = run_network_create(dir.path(), &record, &kernel).unwrap();
         assert_eq!(created.cidr.as_deref(), Some("10.45.0.1/24"));

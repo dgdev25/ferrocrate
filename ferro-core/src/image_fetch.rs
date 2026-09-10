@@ -533,19 +533,27 @@ fn resolve_manifest_json(
 }
 
 fn lan_mirror_enabled() -> bool {
-    std::env::var("FERROCRATE_LAN_MIRROR").is_ok_and(|value| {
-        matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
-    })
+    std::env::var("FERROCRATE_LAN_MIRROR")
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-fn peer_get(image: &str, kind: &str, value: &str, wanted: Option<&str>) -> Option<(Vec<u8>, String)> {
+fn peer_get(
+    image: &str,
+    kind: &str,
+    value: &str,
+    wanted: Option<&str>,
+) -> Option<(Vec<u8>, String)> {
     if !lan_mirror_enabled() {
         return None;
     }
     let reference = parse_image_reference(image).ok()?;
     let timeout_ms = std::env::var("FERROCRATE_LAN_MIRROR_TIMEOUT_MS")
-        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1200).clamp(100, 5000);
-    let report = match crate::lan_mirror::discover_report(Duration::from_millis(timeout_ms), wanted) {
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1200)
+        .clamp(100, 5000);
+    let report = match crate::lan_mirror::discover_report(Duration::from_millis(timeout_ms), wanted)
+    {
         Ok(report) => report,
         Err(error) => {
             eprintln!("lan mirror: browse failed after {timeout_ms} ms, 0 peers: {error}");
@@ -559,24 +567,55 @@ fn peer_get(image: &str, kind: &str, value: &str, wanted: Option<&str>) -> Optio
     let http = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_millis(500))
         .timeout(Duration::from_secs(5))
-        .build().ok()?;
+        .build()
+        .ok()?;
     for peer in report.peers {
-        let url = format!("{}/v2/{}/{kind}/{value}", peer.base_url(), reference.repository);
+        let url = format!(
+            "{}/v2/{}/{kind}/{value}",
+            peer.base_url(),
+            reference.repository
+        );
         let mut request = http.get(url);
         if let Ok(secret) = std::env::var("FERROCRATE_LAN_MIRROR_SECRET") {
-            let Ok(challenge) = http.get(format!("{}/lan/v1/challenge", peer.base_url())).send() else { continue };
-            if !challenge.status().is_success() { continue; }
-            let nonce = challenge.headers().get("x-ferrocrate-mirror-nonce").and_then(|value| value.to_str().ok());
-            let proof = challenge.headers().get("x-ferrocrate-mirror-proof").and_then(|value| value.to_str().ok());
-            let Some(nonce) = nonce.filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())) else { continue };
-            if !crate::lan_mirror::verify_peer_proof(&secret, nonce, proof) { continue; }
-            request = request
-                .header("X-Ferrocrate-Mirror-Nonce", nonce)
-                .header("X-Ferrocrate-Mirror-Auth", crate::lan_mirror::mirror_request_auth(&secret, nonce, value));
+            let Ok(challenge) = http
+                .get(format!("{}/lan/v1/challenge", peer.base_url()))
+                .send()
+            else {
+                continue;
+            };
+            if !challenge.status().is_success() {
+                continue;
+            }
+            let nonce = challenge
+                .headers()
+                .get("x-ferrocrate-mirror-nonce")
+                .and_then(|value| value.to_str().ok());
+            let proof = challenge
+                .headers()
+                .get("x-ferrocrate-mirror-proof")
+                .and_then(|value| value.to_str().ok());
+            let Some(nonce) = nonce.filter(|value| {
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) else {
+                continue;
+            };
+            if !crate::lan_mirror::verify_peer_proof(&secret, nonce, proof) {
+                continue;
+            }
+            request = request.header("X-Ferrocrate-Mirror-Nonce", nonce).header(
+                "X-Ferrocrate-Mirror-Auth",
+                crate::lan_mirror::mirror_request_auth(&secret, nonce, value),
+            );
         }
-        let Ok(response) = request.send() else { continue };
-        if !response.status().is_success() { continue; }
-        let Ok(bytes) = response.bytes() else { continue };
+        let Ok(response) = request.send() else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(bytes) = response.bytes() else {
+            continue;
+        };
         return Some((bytes.to_vec(), peer.instance_id));
     }
     None
@@ -611,7 +650,9 @@ fn pull_blob_with_peer_fallback(
 ) -> Result<(), ImageFetchError> {
     if let Some((bytes, peer)) = peer_get(image, "blobs", digest, Some(digest)) {
         if crate::lan_mirror::verify_bytes(&bytes, digest) {
-            if let Some(parent) = dest.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
             let temporary = dest.with_extension(format!("lan-tmp-{}", uuid::Uuid::new_v4()));
             fs::write(&temporary, bytes)?;
             fs::File::open(&temporary)?.sync_all()?;

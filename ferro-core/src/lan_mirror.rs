@@ -19,7 +19,8 @@ impl MirrorNonceStore {
     }
 
     fn issue_at(&mut self, now: Instant) -> String {
-        self.issued.retain(|_, issued| now.duration_since(*issued) <= MIRROR_NONCE_TTL);
+        self.issued
+            .retain(|_, issued| now.duration_since(*issued) <= MIRROR_NONCE_TTL);
         let nonce = hex::encode(rand::random::<[u8; 32]>());
         self.issued.insert(nonce.clone(), now);
         nonce
@@ -43,8 +44,12 @@ impl MirrorNonceStore {
         supplied_auth: &str,
         now: Instant,
     ) -> bool {
-        let Some(issued) = self.issued.remove(nonce) else { return false };
-        if now.duration_since(issued) > MIRROR_NONCE_TTL { return false; }
+        let Some(issued) = self.issued.remove(nonce) else {
+            return false;
+        };
+        if now.duration_since(issued) > MIRROR_NONCE_TTL {
+            return false;
+        }
         constant_time_eq(
             mirror_request_auth(secret, nonce, digest).as_bytes(),
             supplied_auth.as_bytes(),
@@ -68,7 +73,10 @@ pub fn mirror_peer_proof(secret: &str, nonce: &str) -> String {
 
 pub fn verify_peer_proof(secret: &str, nonce: &str, supplied: Option<&str>) -> bool {
     supplied.is_some_and(|proof| {
-        constant_time_eq(mirror_peer_proof(secret, nonce).as_bytes(), proof.as_bytes())
+        constant_time_eq(
+            mirror_peer_proof(secret, nonce).as_bytes(),
+            proof.as_bytes(),
+        )
     })
 }
 
@@ -99,7 +107,9 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut difference = left.len() ^ right.len();
     for index in 0..left.len().max(right.len()) {
-        difference |= usize::from(left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0));
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0),
+        );
     }
     difference == 0
 }
@@ -146,7 +156,9 @@ pub fn discover_report(
     use mdns_sd::{ServiceDaemon, ServiceEvent};
     let started = Instant::now();
     let daemon = ServiceDaemon::new().map_err(|error| error.to_string())?;
-    let receiver = daemon.browse(SERVICE_TYPE).map_err(|error| error.to_string())?;
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
+        .map_err(|error| error.to_string())?;
     let deadline = Instant::now() + timeout;
     let mut peers = std::env::var("FERROCRATE_LAN_MIRROR_PEERS")
         .ok()
@@ -166,9 +178,14 @@ pub fn discover_report(
         };
         if let ServiceEvent::ServiceResolved(info) = event {
             let properties = info.get_properties().iter().map(|property| {
-                (property.key().to_ascii_lowercase(), property.val_str().to_string())
+                (
+                    property.key().to_ascii_lowercase(),
+                    property.val_str().to_string(),
+                )
             });
-            let Some(advertisement) = parse_txt(properties) else { continue };
+            let Some(advertisement) = parse_txt(properties) else {
+                continue;
+            };
             for address in info.get_addresses() {
                 peers.push(MirrorPeer {
                     instance_id: advertisement.instance_id.clone(),
@@ -219,7 +236,11 @@ pub fn discovery_summary(elapsed: Duration, peers: usize, probed: bool) -> Strin
     format!(
         "lan mirror: browsed {} ms, {peers} peers{}",
         elapsed.as_millis(),
-        if probed { "; unicast /24 probe attempted" } else { "" }
+        if probed {
+            "; unicast /24 probe attempted"
+        } else {
+            ""
+        }
     )
 }
 
@@ -250,10 +271,22 @@ fn probe_local_slash24(port: u16) -> Vec<MirrorPeer> {
             let sender = sender.clone();
             let client = client.clone();
             scope.spawn(move || {
-                let Ok(response) = client.get(format!("http://{address}:{port}/v2/")).send() else { return };
-                if !response.status().is_success() { return; }
-                let instance = response.headers().get("x-ferrocrate-instance").and_then(|value| value.to_str().ok()).unwrap_or("");
-                let digests = response.headers().get("x-ferrocrate-digests").and_then(|value| value.to_str().ok()).unwrap_or("");
+                let Ok(response) = client.get(format!("http://{address}:{port}/v2/")).send() else {
+                    return;
+                };
+                if !response.status().is_success() {
+                    return;
+                }
+                let instance = response
+                    .headers()
+                    .get("x-ferrocrate-instance")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("");
+                let digests = response
+                    .headers()
+                    .get("x-ferrocrate-digests")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("");
                 if let Some(advertisement) = parse_probe_headers(instance, digests) {
                     let _ = sender.send(MirrorPeer {
                         instance_id: advertisement.instance_id,
@@ -277,7 +310,12 @@ pub fn register(
 ) -> Result<mdns_sd::ServiceDaemon, String> {
     use mdns_sd::{ServiceDaemon, ServiceInfo};
     let daemon = ServiceDaemon::new().map_err(|error| error.to_string())?;
-    let digest_list = digests.iter().take(6).cloned().collect::<Vec<_>>().join(",");
+    let digest_list = digests
+        .iter()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
     let properties = [("instance", instance_id), ("digests", digest_list.as_str())];
     let hostname = format!("{instance_id}.local.");
     let service = ServiceInfo::new(
@@ -289,12 +327,18 @@ pub fn register(
         &properties[..],
     )
     .map_err(|error| error.to_string())?;
-    daemon.register(service).map_err(|error| error.to_string())?;
+    daemon
+        .register(service)
+        .map_err(|error| error.to_string())?;
     Ok(daemon)
 }
 
-pub fn parse_txt(properties: impl IntoIterator<Item = (String, String)>) -> Option<PeerAdvertisement> {
-    let values = properties.into_iter().collect::<std::collections::BTreeMap<_, _>>();
+pub fn parse_txt(
+    properties: impl IntoIterator<Item = (String, String)>,
+) -> Option<PeerAdvertisement> {
+    let values = properties
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
     let instance_id = values.get("instance")?.trim().to_string();
     if instance_id.is_empty() {
         return None;
@@ -306,7 +350,10 @@ pub fn parse_txt(properties: impl IntoIterator<Item = (String, String)>) -> Opti
         .filter(|value| valid_sha256_digest(value))
         .map(str::to_string)
         .collect();
-    Some(PeerAdvertisement { instance_id, digests })
+    Some(PeerAdvertisement {
+        instance_id,
+        digests,
+    })
 }
 
 pub fn valid_sha256_digest(value: &str) -> bool {
@@ -361,11 +408,11 @@ mod tests {
     #[test]
     fn mismatch_falls_back_to_registry_bytes() {
         let expected = format!("sha256:{:x}", Sha256::digest(b"registry"));
-        let (bytes, from_peer) = verified_peer_or_fallback(
-            Some(b"corrupt".to_vec()),
-            &expected,
-            || Ok::<_, ()>(b"registry".to_vec()),
-        ).expect("fallback succeeds");
+        let (bytes, from_peer) =
+            verified_peer_or_fallback(Some(b"corrupt".to_vec()), &expected, || {
+                Ok::<_, ()>(b"registry".to_vec())
+            })
+            .expect("fallback succeeds");
         assert_eq!(bytes, b"registry");
         assert!(!from_peer);
     }

@@ -511,9 +511,9 @@ mod tests {
         store_registry_auth, trusted_helper_path, DockerAuthError, ScopedEnvVar,
     };
     use crate::registry::RegistryAuth;
+    use crate::test_support::ENV_LOCK as DOCKER_ENV_LOCK;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use crate::test_support::ENV_LOCK as DOCKER_ENV_LOCK;
 
     #[test]
     fn normalizes_registry_keys() {

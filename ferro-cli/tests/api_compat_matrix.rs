@@ -1089,8 +1089,7 @@ fn network_attachment_mutations_validate_real_docker_payloads() {
     let harness = DaemonHarness::spawn();
     for operation in ["connect", "disconnect"] {
         let path = format!("/networks/matrix-network/{operation}");
-        let (status, body) =
-            harness.request("POST", &path, r#"{"Container":"missing-container"}"#);
+        let (status, body) = harness.request("POST", &path, r#"{"Container":"missing-container"}"#);
         assert_eq!(status, 404, "{operation} status: {body}");
         assert!(
             body.contains("container not found") && !body.contains("unsupported"),
@@ -1118,8 +1117,11 @@ fn docker_events_are_durable_and_filterable_over_the_socket() {
 #[test]
 fn docker_events_until_replays_history_and_closes_the_stream() {
     let harness = DaemonHarness::spawn();
-    let (status, _) =
-        harness.request("POST", "/volumes/create", r#"{"Name":"events-until-volume"}"#);
+    let (status, _) = harness.request(
+        "POST",
+        "/volumes/create",
+        r#"{"Name":"events-until-volume"}"#,
+    );
     assert_eq!(status, 201);
     // The `until` bound carries second precision, so the bound must land in a
     // later second than the event's nanosecond timestamp or the event reads as
@@ -1141,8 +1143,7 @@ fn docker_events_until_replays_history_and_closes_the_stream() {
         .expect("read timeout");
     stream
         .write_all(
-            format!("GET /events?until={now}&follow=1 HTTP/1.1\r\nHost: docker\r\n\r\n")
-                .as_bytes(),
+            format!("GET /events?until={now}&follow=1 HTTP/1.1\r\nHost: docker\r\n\r\n").as_bytes(),
         )
         .expect("write events request");
     let mut response = Vec::new();
@@ -1348,8 +1349,7 @@ fn parse_first_chunk(buffered: &[u8]) -> Option<String> {
 #[test]
 fn docker_events_stream_does_not_replay_journal_events_appended_outside_the_api() {
     let harness = DaemonHarness::spawn();
-    let (status, _) =
-        harness.request("POST", "/volumes/create", r#"{"Name":"tail-seed-volume"}"#);
+    let (status, _) = harness.request("POST", "/volumes/create", r#"{"Name":"tail-seed-volume"}"#);
     assert_eq!(status, 201);
 
     // The runtime's write path: journal-direct append, no API call.
@@ -1403,8 +1403,7 @@ fn docker_events_stream_does_not_replay_journal_events_appended_outside_the_api(
     let payload: serde_json::Value = serde_json::from_str(&frame)
         .unwrap_or_else(|error| panic!("chunk payload must be one JSON object: {error}: {frame}"));
     assert_eq!(
-        payload["Actor"]["ID"],
-        "tail-live-volume",
+        payload["Actor"]["ID"], "tail-live-volume",
         "first streamed event must be the one after the subscriber connected, got: {frame}"
     );
 }
@@ -1503,8 +1502,14 @@ fn docker_create_identity_is_inspectable_before_start() {
         .as_array()
         .is_some_and(|names| names.is_empty()));
 
-    assert_eq!(id.len(), 64, "Docker container ids must have 64 hexadecimal characters");
-    assert!(id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert_eq!(
+        id.len(),
+        64,
+        "Docker container ids must have 64 hexadecimal characters"
+    );
+    assert!(id
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     let (status, body) = harness.request("GET", &format!("/containers/{}/json", &id[..12]), "");
     assert_eq!(status, 200, "short-id inspect response: {body}");
     assert_eq!(

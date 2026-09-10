@@ -1761,12 +1761,7 @@ struct RootlessLaunchMapping {
 }
 
 impl RootlessLaunchMapping {
-    fn apply(
-        &self,
-        pid: u32,
-        container_id: &str,
-        generation: u64,
-    ) -> Result<(), RuntimeError> {
+    fn apply(&self, pid: u32, container_id: &str, generation: u64) -> Result<(), RuntimeError> {
         let permit = self
             .authorization
             .authorize_named(
@@ -1786,9 +1781,7 @@ impl RootlessLaunchMapping {
             permit,
         )
         .map_err(|error| {
-            RuntimeError::InvalidState(format!(
-                "install rootless user namespace mappings: {error}"
-            ))
+            RuntimeError::InvalidState(format!("install rootless user namespace mappings: {error}"))
         })
     }
 }
@@ -1910,9 +1903,7 @@ impl ContainerRuntime {
         self.authorization.request_origin()
     }
 
-    fn prepare_rootless_mapping(
-        &self,
-    ) -> Result<RootlessLaunchMapping, RuntimeError> {
+    fn prepare_rootless_mapping(&self) -> Result<RootlessLaunchMapping, RuntimeError> {
         let origin = self
             .request_origin()
             .unwrap_or(RequestOrigin::cli_current().map_err(|error| {
@@ -3406,15 +3397,12 @@ impl ContainerRuntime {
         // and can fail on hosts that deny nested user namespaces.
         let unshare_netns = rootless && network_mode == "bridge" && rootless_netns_enabled();
         let use_slirp = unshare_netns && network_mode == "bridge";
-        let rootless_mapping = if rootless_launch_needs_mapping(
-            !rootless,
-            true,
-            netns_name.as_deref(),
-        ) {
-            Some(self.prepare_rootless_mapping()?)
-        } else {
-            None
-        };
+        let rootless_mapping =
+            if rootless_launch_needs_mapping(!rootless, true, netns_name.as_deref()) {
+                Some(self.prepare_rootless_mapping()?)
+            } else {
+                None
+            };
 
         // Load seccomp profile for container isolation.
         // Guest authority uses the restricted guest profile; others use the default.
@@ -5698,11 +5686,7 @@ impl ContainerRuntime {
         if let Some(mapping) = rootless_mapping.as_ref() {
             wait_until_launch_stopped(child_id)?;
             mapping
-                .apply(
-                    child_id,
-                    &record.id,
-                    record.mutation_generation.max(1),
-                )
+                .apply(child_id, &record.id, record.mutation_generation.max(1))
                 .inspect_err(|_error| {
                     let _ = kill_pid(child_id);
                 })?;
@@ -7590,9 +7574,7 @@ fn spawn_process_with_logs(
     Ok(child_id)
 }
 
-fn prepare_bwrap_seccomp_filter(
-    profile: &SeccompProfile,
-) -> Result<std::fs::File, RuntimeError> {
+fn prepare_bwrap_seccomp_filter(profile: &SeccompProfile) -> Result<std::fs::File, RuntimeError> {
     let name = c"ferrocrate-seccomp";
     let raw_fd = unsafe {
         nix::libc::syscall(
@@ -7635,7 +7617,11 @@ fn build_bwrap_command(
     let mut bwrap = Command::new(bwrap_path);
     let root_cmd = resolve_rootfs_command(rootfs, &cmd[0]);
     bwrap
-        .arg(if readonly_rootfs { "--ro-bind" } else { "--bind" })
+        .arg(if readonly_rootfs {
+            "--ro-bind"
+        } else {
+            "--bind"
+        })
         .arg(rootfs)
         .arg("/")
         .arg("--proc")
@@ -7727,11 +7713,8 @@ fn build_command(
 ) -> Result<Command, RuntimeError> {
     let running_as_root = nix::unistd::Uid::effective().is_root();
     let rootless_shared_netns = netns_name.is_some_and(|value| value.starts_with("pid:"));
-    let mapped_rootless_launch = rootless_launch_needs_mapping(
-        running_as_root,
-        rootfs_dir.is_some(),
-        netns_name,
-    );
+    let mapped_rootless_launch =
+        rootless_launch_needs_mapping(running_as_root, rootfs_dir.is_some(), netns_name);
     let direct_container_setup = running_as_root && netns_name.is_some();
     const BWRAP_SECCOMP_FD: i32 = 9;
     let bwrap_seccomp = if !running_as_root
@@ -8184,8 +8167,8 @@ pub fn run_mapped_bwrap_launcher(args: &[String]) -> Result<i32, String> {
     if !bwrap.is_absolute() || bwrap.file_name() != Some(OsStr::new("bwrap")) {
         return Err("mapped bwrap launcher requires an absolute bubblewrap path".to_string());
     }
-    let shell = crate::rootless::trusted_executable_path("sh")
-        .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+    let shell =
+        crate::rootless::trusted_executable_path("sh").unwrap_or_else(|| PathBuf::from("/bin/sh"));
     let mut namespace_child = Command::new(unshare)
         .args(["--user", "--"])
         .arg(shell)
@@ -8196,10 +8179,8 @@ pub fn run_mapped_bwrap_launcher(args: &[String]) -> Result<i32, String> {
         wait_until_launch_stopped(namespace_child.id())
             .map_err(|error| format!("wait for mapped bwrap user namespace: {error}"))?;
         let namespace_proc = PathBuf::from(format!("/proc/{}", namespace_child.id()));
-        let uid_map =
-            identity_map_for_nested_user_namespace(Path::new("/proc/self/uid_map"))?;
-        let gid_map =
-            identity_map_for_nested_user_namespace(Path::new("/proc/self/gid_map"))?;
+        let uid_map = identity_map_for_nested_user_namespace(Path::new("/proc/self/uid_map"))?;
+        let gid_map = identity_map_for_nested_user_namespace(Path::new("/proc/self/gid_map"))?;
         fs::write(namespace_proc.join("setgroups"), "deny\n")
             .map_err(|error| format!("deny mapped bwrap setgroups: {error}"))?;
         fs::write(namespace_proc.join("uid_map"), uid_map)
@@ -12864,12 +12845,13 @@ fn load_rootless_network_lease_registry(
         }
         Err(error) => return Err(error.into()),
     };
-    let registry: RootlessNetworkLeaseRegistry = serde_json::from_slice(&bytes).map_err(|error| {
-        RuntimeError::InvalidState(format!(
-            "parse rootless network lease registry {}: {error}",
-            path.display()
-        ))
-    })?;
+    let registry: RootlessNetworkLeaseRegistry =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            RuntimeError::InvalidState(format!(
+                "parse rootless network lease registry {}: {error}",
+                path.display()
+            ))
+        })?;
     if registry.schema_version != rootless_network_lease_registry_version() {
         return Err(RuntimeError::InvalidState(format!(
             "unsupported rootless network lease registry schema {}",
@@ -12930,7 +12912,9 @@ fn rootless_network_lease_identity_matches(lease: &RootlessNetworkLease) -> bool
 fn rootless_network_lease_key_is_valid(key: &str) -> bool {
     !key.trim().is_empty()
         && key.len() <= 256
-        && key.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
 }
 
 #[cfg(target_os = "linux")]
@@ -13123,7 +13107,9 @@ pub fn acquire_rootless_network_lease(
     let (mut child, owner_pid, owner_start_time) = match start_rootless_network_lease_owner() {
         Ok(owner) => owner,
         Err(error) => {
-            registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+            registry
+                .leases
+                .retain(|candidate| candidate.id != id || candidate.generation != generation);
             let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
             return Err(error);
         }
@@ -13188,7 +13174,9 @@ pub fn acquire_rootless_network_lease(
         return Err(error);
     }
     if process_start_time_for_pid(owner_pid) != Some(owner_start_time) {
-        registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+        registry
+            .leases
+            .retain(|candidate| candidate.id != id || candidate.generation != generation);
         let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
         return Err(RuntimeError::InvalidState(
             "rootless network lease owner changed before slirp attachment".into(),
@@ -13205,7 +13193,9 @@ pub fn acquire_rootless_network_lease(
                 true,
             );
             let _ = child.wait();
-            registry.leases.retain(|candidate| candidate.id != id || candidate.generation != generation);
+            registry
+                .leases
+                .retain(|candidate| candidate.id != id || candidate.generation != generation);
             let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
             return Err(error);
         }
@@ -13235,9 +13225,9 @@ pub fn acquire_rootless_network_lease(
     if !rootless_network_lease_identity_matches(&lease) {
         let _ = stop_rootless_network_lease_processes(&entry);
         let _ = child.wait();
-        registry
-            .leases
-            .retain(|candidate| candidate.id != lease.id || candidate.generation != lease.generation);
+        registry.leases.retain(|candidate| {
+            candidate.id != lease.id || candidate.generation != lease.generation
+        });
         let _ = save_rootless_network_lease_registry(runtime_dir, &registry);
         return Err(RuntimeError::InvalidState(
             "rootless network lease process changed before stable publication".into(),
@@ -13256,7 +13246,9 @@ pub fn acquire_rootless_network_lease(
             registry
                 .leases
                 .iter()
-                .find(|candidate| candidate.id == lease.id && candidate.generation == lease.generation)
+                .find(|candidate| {
+                    candidate.id == lease.id && candidate.generation == lease.generation
+                })
                 .expect("lease remains in locked registry"),
         );
         let _ = child.wait();
@@ -13371,7 +13363,9 @@ pub fn stop_rootless_network_lease(
         .leases
         .iter()
         .position(|entry| rootless_network_lease_entry_identity_matches(entry, lease))
-        .ok_or_else(|| RuntimeError::InvalidState("rootless network lease identity is stale".into()))?;
+        .ok_or_else(|| {
+            RuntimeError::InvalidState("rootless network lease identity is stale".into())
+        })?;
     let mut entry = registry.leases[index].clone();
     let socket = slirp_api_socket_path(runtime_dir, &lease.id)?;
     // Persist the teardown reservation before the helper can become orphaned.
@@ -13670,12 +13664,9 @@ fn configure_slirp_host_forwards_with_ids(
     let mut ids = Vec::with_capacity(mappings.len());
     for mapping in mappings {
         let result = (|| {
-            let request = build_hostfwd_request(
-                mapping.host_port,
-                mapping.container_port,
-                &mapping.protocol,
-            )
-            .map_err(RuntimeError::Network)?;
+            let request =
+                build_hostfwd_request(mapping.host_port, mapping.container_port, &mapping.protocol)
+                    .map_err(RuntimeError::Network)?;
             let value = slirp_api_request(api_socket, &request)?;
             if let Some(error) = value.get("error") {
                 let holder = host_port_holder(mapping.host_port)
@@ -18692,7 +18683,9 @@ mod tests {
         assert!(!super::rootless_network_lease_entry_identity_matches(
             &successor, &lease
         ));
-        assert!(!super::rootless_network_lease_entry_matches(&successor, &lease));
+        assert!(!super::rootless_network_lease_entry_matches(
+            &successor, &lease
+        ));
     }
 
     /// S193 failure injection: a lease whose recorded process identity no
@@ -18743,12 +18736,9 @@ mod tests {
             protocol: "tcp".to_string(),
         }];
 
-        let recycled = super::add_rootless_network_lease_forwards(
-            runtime.path(),
-            &lease,
-            &mappings,
-        )
-        .expect_err("a recycled process identity must be rejected");
+        let recycled =
+            super::add_rootless_network_lease_forwards(runtime.path(), &lease, &mappings)
+                .expect_err("a recycled process identity must be rejected");
         assert!(
             recycled.to_string().contains("no longer alive"),
             "unexpected error for recycled identity: {recycled}"
@@ -18758,12 +18748,9 @@ mod tests {
         successor.generation = "00000000-0000-4000-8000-00000000000c".to_string();
         successor.owner_start_time = Some(start_time);
         save(vec![successor]);
-        let replaced = super::add_rootless_network_lease_forwards(
-            runtime.path(),
-            &lease,
-            &mappings,
-        )
-        .expect_err("a replaced lease generation must be rejected");
+        let replaced =
+            super::add_rootless_network_lease_forwards(runtime.path(), &lease, &mappings)
+                .expect_err("a replaced lease generation must be rejected");
         assert!(
             replaced.to_string().contains("identity is stale"),
             "unexpected error for replaced lease: {replaced}"
@@ -20487,7 +20474,9 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .collect::<Vec<_>>();
         assert!(args.len() >= 9);
         assert!(args.iter().any(|arg| arg.ends_with("/unshare")));
-        assert!(args.windows(3).any(|window| window == ["--user", "--net", "--"]));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--user", "--net", "--"]));
         assert!(!args.iter().any(|arg| arg == "--map-root-user"));
         assert!(args.iter().any(|arg| arg.ends_with("/sh")));
         assert!(args.iter().any(|arg| arg == "kill -STOP $$; exec \"$@\""));
@@ -20519,14 +20508,18 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
             .collect::<Vec<_>>();
         assert!(args.len() >= 12);
         assert!(args.iter().any(|arg| arg.ends_with("/unshare")));
-        assert!(args.windows(3).any(|window| window == ["--user", "--net", "--"]));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--user", "--net", "--"]));
         assert!(!args.iter().any(|arg| arg == "--map-root-user"));
         assert!(args.iter().any(|arg| arg.ends_with("/sh")));
         assert!(args.windows(3).any(|window| {
             window == ["-c", "kill -STOP $$; exec \"$@\"", "ferrocrate-rootless"]
         }));
         assert!(args.iter().any(|arg| arg.ends_with("/setpriv")));
-        assert!(args.windows(2).any(|window| window == ["--no-new-privs", "--"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--no-new-privs", "--"]));
         assert_eq!(args[args.len() - 1], "/bin/true");
     }
 
@@ -20872,7 +20865,10 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         runtime
             .stop(&record.id, Duration::ZERO)
             .expect("stop rootless workload");
-        assert_eq!(runtime.inspect(&record.id).expect("inspect stop").status, "exited");
+        assert_eq!(
+            runtime.inspect(&record.id).expect("inspect stop").status,
+            "exited"
+        );
         runtime
             .disconnect_network(&record.id, "app")
             .expect("detach stopped logical endpoint");
@@ -21032,8 +21028,8 @@ counter packets 99 bytes 1234 comment \"ferrocrate:fc_owned\" # handle 55"#;
         let host = format!("s183h{suffix}");
         let peer = format!("s183p{suffix}");
         let run_ip = |args: &[&str]| std::process::Command::new("ip").args(args).status();
-        let namespace_created = run_ip(&["netns", "add", &namespace])
-            .is_ok_and(|status| status.success());
+        let namespace_created =
+            run_ip(&["netns", "add", &namespace]).is_ok_and(|status| status.success());
         if !namespace_created {
             eprintln!("SKIP: host cannot create a network namespace");
             return;

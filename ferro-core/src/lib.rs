@@ -20,10 +20,7 @@
 //! ```
 
 #![cfg(any(not(test), target_os = "linux"))]
-#![cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, unused_imports, unused_mut)
-)]
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports, unused_mut))]
 
 pub mod ai_runtime;
 pub mod authorization;
@@ -68,13 +65,13 @@ pub mod image_store;
 pub mod image_tagging;
 #[cfg(target_os = "linux")]
 pub mod installer;
+pub mod lan_mirror;
 #[cfg(target_os = "linux")]
 pub mod layer_cache;
 pub mod layer_compression;
-pub mod log_driver;
 #[cfg(target_os = "linux")]
 pub mod layer_mount;
-pub mod lan_mirror;
+pub mod log_driver;
 pub mod mac_profiles;
 pub mod managed_overlay;
 #[cfg(target_os = "linux")]

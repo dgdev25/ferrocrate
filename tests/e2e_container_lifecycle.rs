@@ -402,7 +402,11 @@ CMD ["cat", "/hello.txt"]
             .args(["pull", "alpine:3.19"])
             .output()
             .expect("pull alpine");
-        assert!(pull.status.success(), "{}", String::from_utf8_lossy(&pull.stderr));
+        assert!(
+            pull.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pull.stderr)
+        );
         let (reservation, port) = reserve_dynamic_host_port().expect("reserve host port");
         drop(reservation);
 
@@ -415,7 +419,11 @@ CMD ["cat", "/hello.txt"]
             ])
             .output()
             .expect("run listener");
-        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while !http_probe(port) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
@@ -427,7 +435,11 @@ CMD ["cat", "/hello.txt"]
             .args(["stop", "stop-reaps-listener"])
             .output()
             .expect("stop listener");
-        assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+        assert!(
+            stop.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
         assert!(!http_probe(port), "listener survived stop on port {port}");
 
         let start = ferro_cli()
@@ -435,7 +447,11 @@ CMD ["cat", "/hello.txt"]
             .args(["start", "stop-reaps-listener"])
             .output()
             .expect("restart listener");
-        assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+        assert!(
+            start.status.success(),
+            "{}",
+            String::from_utf8_lossy(&start.stderr)
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while !http_probe(port) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
@@ -472,7 +488,11 @@ CMD ["cat", "/hello.txt"]
             .args(["pull", "alpine:3.19"])
             .output()
             .expect("pull alpine");
-        assert!(pull.status.success(), "{}", String::from_utf8_lossy(&pull.stderr));
+        assert!(
+            pull.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pull.stderr)
+        );
 
         let run = ferro_cli()
             .env("FERROCRATE_HOME", runtime_dir.path())
@@ -500,24 +520,26 @@ CMD ["cat", "/hello.txt"]
             .args(["inspect", "--format", "json", "ephemeral-publish"])
             .output()
             .expect("inspect ephemeral publish");
-        assert!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
+        assert!(
+            inspect.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspect.stderr)
+        );
         let inspect_json = String::from_utf8_lossy(&inspect.stdout);
         // The daemon-compatible inspect renders Docker's `"HostPort"` shape;
         // the daemonless local record renders `"host_port"`. Either way the
         // sentinel must be replaced by an assigned non-zero host port.
-        let assigned = ["\"HostPort\":\"", "\"host_port\": "]
-            .iter()
-            .any(|marker| {
-                inspect_json.match_indices(marker).any(|(offset, _)| {
-                    let rest = &inspect_json[offset + marker.len()..];
-                    rest.chars()
-                        .take_while(|character| character.is_ascii_digit())
-                        .collect::<String>()
-                        .parse::<u16>()
-                        .map(|port| port != 0)
-                        .unwrap_or(false)
-                })
-            });
+        let assigned = ["\"HostPort\":\"", "\"host_port\": "].iter().any(|marker| {
+            inspect_json.match_indices(marker).any(|(offset, _)| {
+                let rest = &inspect_json[offset + marker.len()..];
+                rest.chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u16>()
+                    .map(|port| port != 0)
+                    .unwrap_or(false)
+            })
+        });
         assert!(
             assigned,
             "host port stayed at the ephemeral sentinel: {inspect_json}"

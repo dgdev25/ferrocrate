@@ -178,7 +178,7 @@ mod tests {
                 .expect("resolver directory entry")
                 .file_name()
                 .to_string_lossy()
-            .ends_with(".tmp")));
+                .ends_with(".tmp")));
     }
 
     #[test]
@@ -196,7 +196,10 @@ mod tests {
         )
         .expect_err("file parent must fail");
         let message = error.to_string();
-        assert!(message.contains("create resolver parent directory"), "{message}");
+        assert!(
+            message.contains("create resolver parent directory"),
+            "{message}"
+        );
         assert!(message.contains("not-a-directory"), "{message}");
     }
 }

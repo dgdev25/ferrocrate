@@ -225,9 +225,10 @@ fn bpf_toolchain_has_rust_src_on_disk() -> bool {
         Err(_) => match fs::read_dir(&toolchains) {
             Ok(entries) => {
                 let prefix = format!("{BPF_TOOLCHAIN}-");
-                match entries.filter_map(Result::ok).find(|entry| {
-                    entry.file_name().to_string_lossy().starts_with(&prefix)
-                }) {
+                match entries
+                    .filter_map(Result::ok)
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                {
                     Some(entry) => entry.path(),
                     None => return false,
                 }

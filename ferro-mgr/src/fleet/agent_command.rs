@@ -321,7 +321,11 @@ mod tests {
     async fn failed_agent_commands_preserve_cli_stderr_verbatim() {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("runtime");
-        std::fs::write(&executable, "#!/bin/sh\nprintf 'registry denied\\n' >&2\nexit 125\n").unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'registry denied\\n' >&2\nexit 125\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let result = execute_agent_command(
             &executable,

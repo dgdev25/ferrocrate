@@ -712,12 +712,9 @@ fn wsl_exec_uses_the_configured_guest_engine_path() {
 
     assert_eq!(
         host.execs.lock().unwrap().as_slice(),
-        &[ (
+        &[(
             CommandSpec::new("wsl.exe").args(["-d", "FerrocrateDesktop", "--exec"]),
-            ExecRequest::new("env").args([
-                "/home/ferro/.local/bin/ferrocrate",
-                "doctor",
-            ]),
+            ExecRequest::new("env").args(["/home/ferro/.local/bin/ferrocrate", "doctor",]),
         )]
     );
 }

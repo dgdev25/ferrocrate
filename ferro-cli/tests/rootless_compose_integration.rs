@@ -363,9 +363,9 @@ fn rootless_run_stop_disconnect_and_inspect_removes_attachment() {
     assert!(
         payload["network_endpoints"]
             .as_array()
-            .is_none_or(|endpoints| endpoints.iter().all(|endpoint| {
-                endpoint["network_name"] != "s183-rootless-net"
-            })),
+            .is_none_or(|endpoints| endpoints
+                .iter()
+                .all(|endpoint| { endpoint["network_name"] != "s183-rootless-net" })),
         "detached endpoint remains in inspect: {payload}"
     );
 }

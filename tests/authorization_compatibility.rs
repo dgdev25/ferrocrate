@@ -155,14 +155,16 @@ fn representative_channel_fixtures_use_real_compatibility_boundaries() {
 
     let rootless = ferro_core::rootless::RootlessConfig::from_system()
         .expect("current user has a rootless mapping or 1:1 fallback");
-    assert!(rootless
-        .uid_mapping
-        .iter()
-        .all(|mapping| mapping.as_uid_map_entry().split_whitespace().count() == 3));
-    assert!(rootless
-        .gid_mapping
-        .iter()
-        .all(|mapping| mapping.as_gid_map_entry().split_whitespace().count() == 3));
+    assert!(rootless.uid_mapping.iter().all(|mapping| mapping
+        .as_uid_map_entry()
+        .split_whitespace()
+        .count()
+        == 3));
+    assert!(rootless.gid_mapping.iter().all(|mapping| mapping
+        .as_gid_map_entry()
+        .split_whitespace()
+        .count()
+        == 3));
 
     let compose = FanoutPlan::derive(
         [1; 16],

@@ -354,7 +354,11 @@ mod macos_tests {
     #[test]
     fn qemu_hvf_backend_is_macos_only() {
         // qemu-hvf requires hypervisor framework on macOS; this test file only compiles there.
-        assert_eq!(std::env::consts::OS, "macos", "qemu-hvf backend only on macOS");
+        assert_eq!(
+            std::env::consts::OS,
+            "macos",
+            "qemu-hvf backend only on macOS"
+        );
     }
 
     #[test]
@@ -445,7 +449,11 @@ mod macos_tests {
     #[test]
     fn unix_signal_constants_available() {
         // Should have signal support on macOS
-        assert_eq!(std::env::consts::FAMILY, "unix", "macOS should have Unix signal support");
+        assert_eq!(
+            std::env::consts::FAMILY,
+            "unix",
+            "macOS should have Unix signal support"
+        );
     }
 
     #[test]

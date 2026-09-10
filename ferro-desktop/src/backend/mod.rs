@@ -432,7 +432,11 @@ fn open_terminal_via_host<H: BackendHost + ?Sized>(
     .body(create_body);
     let response = host.request(transport, &create)?;
     if !(200..300).contains(&response.status) {
-        return Err(terminal_response_error("create", response.status, &response.body));
+        return Err(terminal_response_error(
+            "create",
+            response.status,
+            &response.body,
+        ));
     }
     let exec_id = serde_json::from_slice::<serde_json::Value>(&response.body)
         .ok()
@@ -726,7 +730,9 @@ impl BackendHost for SystemBackendHost {
 
     fn health(&self, transport: &Transport) -> Result<bool, BackendError> {
         let response = self.request(transport, &TransportRequest::new("GET", "/_ping"));
-        Ok(matches!(response, Ok(response) if response.status == 200 && daemon_ping_response_is_healthy(&response.body)))
+        Ok(
+            matches!(response, Ok(response) if response.status == 200 && daemon_ping_response_is_healthy(&response.body)),
+        )
     }
 
     fn request(
@@ -1181,8 +1187,7 @@ fn percent_encode_path(value: &str) -> String {
 }
 
 fn daemon_ping_response_is_healthy(body: &[u8]) -> bool {
-    std::str::from_utf8(body)
-        .is_ok_and(|value| value.trim() == "OK")
+    std::str::from_utf8(body).is_ok_and(|value| value.trim() == "OK")
 }
 
 fn serialize_request(request: &TransportRequest, token: Option<&str>) -> Vec<u8> {

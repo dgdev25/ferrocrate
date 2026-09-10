@@ -2,9 +2,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use ferro_mgr::fleet::{
-    AuditJournal, BrowserIdentity, FleetRole, FleetUi, FleetUiBackend,
-};
+use ferro_mgr::fleet::{AuditJournal, BrowserIdentity, FleetRole, FleetUi, FleetUiBackend};
 use ferro_web::StaticAssets;
 use serde_json::{json, Value};
 

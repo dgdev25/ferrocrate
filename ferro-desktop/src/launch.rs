@@ -26,7 +26,12 @@ pub fn published_owners(records: &JsonValue, port: u16) -> Result<Vec<PortOwner>
                     .and_then(JsonValue::as_array)
                     .is_some_and(|ports| {
                         ports.iter().any(|mapping| {
-                            let tcp = mapping.get("Type").or_else(|| mapping.get("protocol")).and_then(JsonValue::as_str).unwrap_or("tcp") == "tcp";
+                            let tcp = mapping
+                                .get("Type")
+                                .or_else(|| mapping.get("protocol"))
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("tcp")
+                                == "tcp";
                             tcp && mapping
                                 .get("PublicPort")
                                 .or_else(|| mapping.get("host_port"))

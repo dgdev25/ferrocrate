@@ -516,12 +516,7 @@ impl RuntimeAuthorization {
         } else {
             super::ResourceKind::Container
         };
-        let resource = Resource::canonical(
-            resource_kind,
-            resource_uuid.clone(),
-            None,
-            generation,
-        );
+        let resource = Resource::canonical(resource_kind, resource_uuid.clone(), None, generation);
         let mut context = RequestContext::resolved(
             request_id,
             origin.map(|origin| origin.principal().clone()),

@@ -194,7 +194,10 @@ impl DaemonHarness {
                 socket_path.to_str().expect("socket path utf8"),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::from(fs::File::create(runtime_dir.path().join("daemon.stderr")).expect("create daemon stderr capture")))
+            .stderr(Stdio::from(
+                fs::File::create(runtime_dir.path().join("daemon.stderr"))
+                    .expect("create daemon stderr capture"),
+            ))
             .spawn()
             .expect("spawn daemon")
     }
@@ -239,7 +242,8 @@ impl DaemonHarness {
     }
 
     fn daemon_stderr(&self) -> String {
-        fs::read_to_string(self.runtime_dir().join("daemon.stderr")).expect("read daemon stderr capture")
+        fs::read_to_string(self.runtime_dir().join("daemon.stderr"))
+            .expect("read daemon stderr capture")
     }
 
     fn socket_dir(&self) -> &Path {
@@ -376,16 +380,16 @@ fn docker_compat_ipc_mode_host_shares_dev_shm() {
     );
     let (status, response) = harness.request_raw(&raw);
     assert_eq!(status, 201, "create response={response}");
-    let id = serde_json::from_str::<serde_json::Value>(&response)
-        .expect("create response JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create response JSON")
+        ["Id"]
         .as_str()
         .expect("created ID")
         .to_string();
     let (status, response) = harness.request("GET", &format!("/v1.45/containers/{id}/json"));
     assert_eq!(status, 200, "inspect response={response}");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON")
-            ["HostConfig"]["IpcMode"],
+        serde_json::from_str::<serde_json::Value>(&response).expect("inspect JSON")["HostConfig"]
+            ["IpcMode"],
         "host"
     );
     let (status, response) = harness.request("POST", &format!("/v1.45/containers/{id}/start"));
@@ -438,7 +442,10 @@ fn docker_compat_routes_support_version_prefix() {
     let (head_headers, head_body) = head_ping
         .split_once("\r\n\r\n")
         .expect("HEAD ping response headers");
-    assert!(head_headers.starts_with("HTTP/1.1 200"), "HEAD ping={head_headers}");
+    assert!(
+        head_headers.starts_with("HTTP/1.1 200"),
+        "HEAD ping={head_headers}"
+    );
     assert!(head_body.is_empty(), "HEAD ping must not include a body");
     for header in ["API-Version: 1.45", "Ostype: linux", "Builder-Version: 2"] {
         assert!(
@@ -472,8 +479,7 @@ fn docker_compat_routes_support_version_prefix() {
             let info: serde_json::Value =
                 serde_json::from_str(&body).expect("info response is JSON");
             assert_eq!(
-                info["OSType"],
-                "linux",
+                info["OSType"], "linux",
                 "Docker info must identify the daemon OS type: {info}"
             );
             let is_root = nix::unistd::Uid::effective().is_root();
@@ -485,8 +491,7 @@ fn docker_compat_routes_support_version_prefix() {
                 "SecurityOptions must report daemon privilege: {info}"
             );
             assert_eq!(
-                info["FerrocrateCapabilities"]["CustomNetworks"],
-                true,
+                info["FerrocrateCapabilities"]["CustomNetworks"], true,
                 "custom network capability must be available in rootless and rootful modes: {info}"
             );
         }
@@ -519,7 +524,10 @@ fn docker_api_concurrent_multi_network_create_keeps_every_network_record() {
 
     for request in requests {
         let response = request.join().expect("network create thread");
-        assert!(response.starts_with("HTTP/1.1 201"), "network create response={response}");
+        assert!(
+            response.starts_with("HTTP/1.1 201"),
+            "network create response={response}"
+        );
     }
 
     for name in ["compose-frontend", "compose-backend"] {
@@ -566,16 +574,15 @@ fn docker_api_create_then_list_keeps_the_fresh_container_record() {
         br#"{"Image":"busybox","Cmd":["true"]}"#,
     );
     assert_eq!(status, 201, "create response={body}");
-    let id = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("create response JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&body).expect("create response JSON")["Id"]
         .as_str()
         .expect("created container ID")
         .to_string();
 
     let (status, body) = harness.request("GET", "/containers/json?all=1");
     assert_eq!(status, 200, "list response={body}");
-    let containers = serde_json::from_str::<Vec<serde_json::Value>>(&body)
-        .expect("container list JSON");
+    let containers =
+        serde_json::from_str::<Vec<serde_json::Value>>(&body).expect("container list JSON");
     assert!(
         containers.iter().any(|container| container["Id"] == id),
         "freshly created container was hidden from list: {body}"
@@ -670,7 +677,11 @@ fn daemon_republishes_unlinked_socket_before_next_cli_deadline() {
         .arg("ps")
         .output()
         .expect("run ps after unlink");
-    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
@@ -689,7 +700,11 @@ fn killed_daemon_owner_is_recovered_by_next_cli() {
         .arg("ps")
         .output()
         .expect("run ps after kill -9");
-    assert!(output.status.success(), "ps failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
@@ -977,51 +992,105 @@ fn s177_image_ids_work_over_http_and_execute_in_run_and_compose() {
     build_local_busybox_image(&harness, "compat/s177:latest");
     let (_, images) = harness.request("GET", "/v1.45/images/json");
     let images: serde_json::Value = serde_json::from_str(&images).unwrap();
-    let digest = images.as_array().unwrap().iter()
-        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177:latest")))
-        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let digest = images
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|image| {
+            image["RepoTags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|tag| tag == "registry-1.docker.io/compat/s177:latest")
+            })
+        })
+        .and_then(|image| image["Id"].as_str())
+        .unwrap()
+        .to_string();
     let bare = digest.strip_prefix("sha256:").unwrap();
     let short = &bare[..12];
     let upper_bare = bare.to_ascii_uppercase();
     let upper_short = short.to_ascii_uppercase();
     let upper_sha = format!("sha256:{upper_bare}");
 
-    for selector in [bare, digest.as_str(), short, &upper_bare, &upper_short, &upper_sha] {
+    for selector in [
+        bare,
+        digest.as_str(),
+        short,
+        &upper_bare,
+        &upper_short,
+        &upper_sha,
+    ] {
         let selector = selector.replace(':', "%3A");
-        assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/json")).0, 200);
-        assert_eq!(harness.request("GET", &format!("/v1.45/images/{selector}/history")).0, 200);
+        assert_eq!(
+            harness
+                .request("GET", &format!("/v1.45/images/{selector}/json"))
+                .0,
+            200
+        );
+        assert_eq!(
+            harness
+                .request("GET", &format!("/v1.45/images/{selector}/history"))
+                .0,
+            200
+        );
     }
     for selector in [&upper_bare, &upper_short] {
         let create = format!(r#"{{"Image":"{selector}","Cmd":["/bin/busybox","true"]}}"#);
         let request = format!("POST /v1.45/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create}", create.len());
         let (status, body) = harness.request_raw(&request);
         assert_eq!(status, 201, "create by uppercase ID: {body}");
-        let container = serde_json::from_str::<serde_json::Value>(&body).unwrap()["Id"].as_str().unwrap().to_string();
-        assert_eq!(harness.request("POST", &format!("/v1.45/containers/{container}/start")).0, 204);
+        let container = serde_json::from_str::<serde_json::Value>(&body).unwrap()["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            harness
+                .request("POST", &format!("/v1.45/containers/{container}/start"))
+                .0,
+            204
+        );
     }
     let remote = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
         .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remote")
         .args(["image", "inspect", &upper_short])
-        .output().unwrap();
-    assert!(remote.status.success(), "remote inspect: {}", String::from_utf8_lossy(&remote.stderr));
-    assert_eq!(harness.request("GET", "/v1.45/images/DEADBEEFDEAD/json").0, 404);
+        .output()
+        .unwrap();
+    assert!(
+        remote.status.success(),
+        "remote inspect: {}",
+        String::from_utf8_lossy(&remote.stderr)
+    );
+    assert_eq!(
+        harness.request("GET", "/v1.45/images/DEADBEEFDEAD/json").0,
+        404
+    );
     harness.stop_daemon();
     for selector in [&upper_bare, &upper_short] {
         let direct = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
             .env("FERROCRATE_HOME", harness.runtime_dir())
             .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-direct")
-            .args(["run", selector, "/bin/busybox", "true"]).output().unwrap();
-        assert!(direct.status.success(), "direct run: {}", String::from_utf8_lossy(&direct.stderr));
+            .args(["run", selector, "/bin/busybox", "true"])
+            .output()
+            .unwrap();
+        assert!(
+            direct.status.success(),
+            "direct run: {}",
+            String::from_utf8_lossy(&direct.stderr)
+        );
         assert!(!String::from_utf8_lossy(&direct.stderr).contains("pull image"));
     }
     let missing = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
         .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-missing")
-        .args(["run", "DEADBEEFDEAD", "/bin/busybox", "true"]).output().unwrap();
+        .args(["run", "DEADBEEFDEAD", "/bin/busybox", "true"])
+        .output()
+        .unwrap();
     let missing_error = String::from_utf8_lossy(&missing.stderr);
     assert!(!missing.status.success());
-    assert!(missing_error.contains("was not found locally"), "{missing_error}");
+    assert!(
+        missing_error.contains("was not found locally"),
+        "{missing_error}"
+    );
     assert!(!missing_error.contains("registry name"), "{missing_error}");
 
     let compose_file = harness.runtime_dir().join("s177-compose.yml");
@@ -1030,24 +1099,56 @@ fn s177_image_ids_work_over_http_and_execute_in_run_and_compose() {
         .env("FERROCRATE_HOME", harness.runtime_dir())
         .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-compose")
         .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
-        .output().unwrap();
-    assert!(compose.status.success(), "compose up: {}", String::from_utf8_lossy(&compose.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        compose.status.success(),
+        "compose up: {}",
+        String::from_utf8_lossy(&compose.stderr)
+    );
     assert!(!String::from_utf8_lossy(&compose.stderr).contains("pull image"));
 
-    fs::write(&compose_file, "services:\n  missing:\n    image: DEADBEEFDEAD\n").unwrap();
+    fs::write(
+        &compose_file,
+        "services:\n  missing:\n    image: DEADBEEFDEAD\n",
+    )
+    .unwrap();
     let missing_compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-compose-missing")
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-compose-missing",
+        )
         .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     let missing_compose_error = String::from_utf8_lossy(&missing_compose.stderr);
     assert!(!missing_compose.status.success());
-    assert!(missing_compose_error.contains("not found locally"), "{missing_compose_error}");
-    assert!(!missing_compose_error.contains("registry name"), "{missing_compose_error}");
+    assert!(
+        missing_compose_error.contains("not found locally"),
+        "{missing_compose_error}"
+    );
+    assert!(
+        !missing_compose_error.contains("registry name"),
+        "{missing_compose_error}"
+    );
 
     harness.start_daemon();
-    assert_eq!(harness.request("POST", &format!("/v1.45/images/{short}/tag?repo=compat%2Fs177-copy&tag=stable")).0, 201);
-    assert_eq!(harness.request("DELETE", "/v1.45/images/compat%2Fs177-copy%3Astable").0, 200);
+    assert_eq!(
+        harness
+            .request(
+                "POST",
+                &format!("/v1.45/images/{short}/tag?repo=compat%2Fs177-copy&tag=stable")
+            )
+            .0,
+        201
+    );
+    assert_eq!(
+        harness
+            .request("DELETE", "/v1.45/images/compat%2Fs177-copy%3Astable")
+            .0,
+        200
+    );
 }
 
 #[test]
@@ -1056,50 +1157,138 @@ fn s177_id_removal_honors_force_locally_remotely_and_over_http() {
     build_local_busybox_image(&harness, "compat/s177-remove:latest");
     let (_, images) = harness.request("GET", "/v1.45/images/json");
     let images: serde_json::Value = serde_json::from_str(&images).unwrap();
-    let digest = images.as_array().unwrap().iter()
-        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177-remove:latest")))
-        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let digest = images
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|image| {
+            image["RepoTags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|tag| tag == "registry-1.docker.io/compat/s177-remove:latest")
+            })
+        })
+        .and_then(|image| image["Id"].as_str())
+        .unwrap()
+        .to_string();
     let upper_prefix = digest.strip_prefix("sha256:").unwrap()[..12].to_ascii_uppercase();
 
     harness.stop_daemon();
     let local = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remove-local")
-        .args(["rmi", &upper_prefix]).output().unwrap();
-    assert!(local.status.success(), "local ID rmi: {}", String::from_utf8_lossy(&local.stderr));
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-remove-local",
+        )
+        .args(["rmi", &upper_prefix])
+        .output()
+        .unwrap();
+    assert!(
+        local.status.success(),
+        "local ID rmi: {}",
+        String::from_utf8_lossy(&local.stderr)
+    );
 
     harness.start_daemon();
     build_local_busybox_image(&harness, "compat/s177-remove:latest");
-    assert_eq!(harness.request("POST", &format!("/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest")).0, 201);
+    assert_eq!(
+        harness
+            .request(
+                "POST",
+                &format!(
+                    "/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest"
+                )
+            )
+            .0,
+        201
+    );
     let (status, body) = harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}"));
     assert_eq!(status, 409, "non-force conflict response: {body}");
     assert!(body.contains("multiple references; use force"), "{body}");
-    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 200);
+    assert_eq!(
+        harness
+            .request("GET", &format!("/v1.45/images/{upper_prefix}/json"))
+            .0,
+        200
+    );
     for value in ["maybe", "2", "true%00"] {
-        let (status, body) = harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}?force={value}"));
+        let (status, body) = harness.request(
+            "DELETE",
+            &format!("/v1.45/images/{upper_prefix}?force={value}"),
+        );
         assert_eq!(status, 400, "invalid force value {value}: {body}");
         assert!(body.contains("force must be a boolean"), "{body}");
-        assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 200);
+        assert_eq!(
+            harness
+                .request("GET", &format!("/v1.45/images/{upper_prefix}/json"))
+                .0,
+            200
+        );
     }
-    assert_eq!(harness.request("DELETE", &format!("/v1.45/images/{upper_prefix}?force=true")).0, 200);
-    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
+    assert_eq!(
+        harness
+            .request(
+                "DELETE",
+                &format!("/v1.45/images/{upper_prefix}?force=true")
+            )
+            .0,
+        200
+    );
+    assert_eq!(
+        harness
+            .request("GET", &format!("/v1.45/images/{upper_prefix}/json"))
+            .0,
+        404
+    );
 
     build_local_busybox_image(&harness, "compat/s177-remove:latest");
-    assert_eq!(harness.request("POST", &format!("/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest")).0, 201);
+    assert_eq!(
+        harness
+            .request(
+                "POST",
+                &format!(
+                    "/v1.45/images/{upper_prefix}/tag?repo=compat%2Fs177-remove-copy&tag=latest"
+                )
+            )
+            .0,
+        201
+    );
     let remote = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-remove-remote")
-        .args(["rmi", "--force", &upper_prefix]).output().unwrap();
-    assert!(remote.status.success(), "remote forced ID rmi: {}", String::from_utf8_lossy(&remote.stderr));
-    assert_eq!(harness.request("GET", &format!("/v1.45/images/{upper_prefix}/json")).0, 404);
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-remove-remote",
+        )
+        .args(["rmi", "--force", &upper_prefix])
+        .output()
+        .unwrap();
+    assert!(
+        remote.status.success(),
+        "remote forced ID rmi: {}",
+        String::from_utf8_lossy(&remote.stderr)
+    );
+    assert_eq!(
+        harness
+            .request("GET", &format!("/v1.45/images/{upper_prefix}/json"))
+            .0,
+        404
+    );
 
     build_local_busybox_image(&harness, "compat/s177-remove:latest");
     harness.stop_daemon();
     let local_force = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-image-rm-force")
-        .args(["image", "rm", "--force", &upper_prefix]).output().unwrap();
-    assert!(local_force.status.success(), "local image rm --force: {}", String::from_utf8_lossy(&local_force.stderr));
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-image-rm-force",
+        )
+        .args(["image", "rm", "--force", &upper_prefix])
+        .output()
+        .unwrap();
+    assert!(
+        local_force.status.success(),
+        "local image rm --force: {}",
+        String::from_utf8_lossy(&local_force.stderr)
+    );
 }
 
 #[test]
@@ -1108,15 +1297,29 @@ fn s177_ambiguous_prefix_fails_through_cli_compose_and_http() {
     build_local_busybox_image(&harness, "compat/s177-ambiguous:latest");
     let (_, images) = harness.request("GET", "/v1.45/images/json");
     let images: serde_json::Value = serde_json::from_str(&images).unwrap();
-    let digest = images.as_array().unwrap().iter()
-        .find(|image| image["RepoTags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "registry-1.docker.io/compat/s177-ambiguous:latest")))
-        .and_then(|image| image["Id"].as_str()).unwrap().to_string();
+    let digest = images
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|image| {
+            image["RepoTags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|tag| tag == "registry-1.docker.io/compat/s177-ambiguous:latest")
+            })
+        })
+        .and_then(|image| image["Id"].as_str())
+        .unwrap()
+        .to_string();
     let bare = digest.strip_prefix("sha256:").unwrap();
     let prefix = bare[..12].to_ascii_uppercase();
     let replacement = if bare.ends_with('0') { '1' } else { '0' };
     let competing = format!("sha256:{}{replacement}", &bare[..63]);
     harness.stop_daemon();
-    let db = rusqlite::Connection::open(format!("{}.sqlite", harness.runtime_dir().join("images").display())).unwrap();
+    let db = rusqlite::Connection::open(format!(
+        "{}.sqlite",
+        harness.runtime_dir().join("images").display()
+    ))
+    .unwrap();
     db.execute(
         "INSERT INTO image_digests (digest, reference, manifest_media_type, manifest_json, created_at_unix) SELECT ?1, ?2, manifest_media_type, manifest_json, created_at_unix FROM image_digests WHERE digest = ?3",
         rusqlite::params![competing, "registry-1.docker.io/compat/s177-competing:latest", digest],
@@ -1129,26 +1332,48 @@ fn s177_ambiguous_prefix_fails_through_cli_compose_and_http() {
 
     let direct = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-ambiguous-run")
-        .args(["run", &prefix, "/bin/busybox", "true"]).output().unwrap();
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-ambiguous-run",
+        )
+        .args(["run", &prefix, "/bin/busybox", "true"])
+        .output()
+        .unwrap();
     let direct_error = String::from_utf8_lossy(&direct.stderr);
     assert!(!direct.status.success());
-    assert!(direct_error.contains("multiple images match prefix"), "{direct_error}");
+    assert!(
+        direct_error.contains("multiple images match prefix"),
+        "{direct_error}"
+    );
 
     let compose_file = harness.runtime_dir().join("s177-ambiguous.yml");
-    fs::write(&compose_file, format!("services:\n  app:\n    image: {prefix}\n    command: [/bin/busybox, \"true\"]\n")).unwrap();
+    fs::write(
+        &compose_file,
+        format!("services:\n  app:\n    image: {prefix}\n    command: [/bin/busybox, \"true\"]\n"),
+    )
+    .unwrap();
     let compose = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-ambiguous-compose")
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-ambiguous-compose",
+        )
         .args(["compose", "--file", compose_file.to_str().unwrap(), "up"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     let compose_error = String::from_utf8_lossy(&compose.stderr);
     assert!(!compose.status.success());
-    assert!(compose_error.contains("multiple images match prefix"), "{compose_error}");
+    assert!(
+        compose_error.contains("multiple images match prefix"),
+        "{compose_error}"
+    );
 
     harness.start_daemon();
     let (status, body) = harness.request("GET", &format!("/v1.45/images/{prefix}/json"));
-    assert_ne!(status, 200, "ambiguous HTTP selector unexpectedly resolved: {body}");
+    assert_ne!(
+        status, 200,
+        "ambiguous HTTP selector unexpectedly resolved: {body}"
+    );
     assert!(body.contains("multiple images match prefix"), "{body}");
 }
 
@@ -1192,22 +1417,36 @@ fn docker_compat_build_accepts_secure_tar_context() {
 
 #[test]
 fn s177_classic_cli_and_daemon_missing_uppercase_id_from_stay_local() {
-    const MISSING: &str =
-        "sha256:DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF";
+    const MISSING: &str = "sha256:DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF";
     let mut harness = DaemonHarness::spawn();
     let context = harness.runtime_dir().join("s177-missing-base");
     fs::create_dir_all(&context).unwrap();
-    fs::write(context.join("Dockerfile"), format!("FROM {MISSING}\nRUN true\n")).unwrap();
+    fs::write(
+        context.join("Dockerfile"),
+        format!("FROM {MISSING}\nRUN true\n"),
+    )
+    .unwrap();
 
     let cli = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
         .env("FERROCRATE_HOME", harness.runtime_dir())
-        .env("FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE", "s177-classic-missing-from")
-        .args(["build", "-t", "compat/s177-missing:cli", context.to_str().unwrap()])
+        .env(
+            "FERRO_AUTHORIZATION_QUALIFICATION_FIXTURE",
+            "s177-classic-missing-from",
+        )
+        .args([
+            "build",
+            "-t",
+            "compat/s177-missing:cli",
+            context.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     let cli_error = String::from_utf8_lossy(&cli.stderr);
     assert!(!cli.status.success());
-    assert!(cli_error.contains("base image not found locally"), "{cli_error}");
+    assert!(
+        cli_error.contains("base image not found locally"),
+        "{cli_error}"
+    );
     assert!(!cli_error.contains("pull image"), "{cli_error}");
     assert!(!cli_error.contains("registry"), "{cli_error}");
 
@@ -1353,7 +1592,13 @@ fn docker_api_maintenance_and_event_routes_return_docker_json_shapes() {
     let (status, body) = harness.request("GET", "/v1.45/system/df");
     assert_eq!(status, 200, "system df body={body}");
     let df: serde_json::Value = serde_json::from_str(&body).expect("system df JSON");
-    for key in ["LayersSize", "Images", "Containers", "Volumes", "BuildCache"] {
+    for key in [
+        "LayersSize",
+        "Images",
+        "Containers",
+        "Volumes",
+        "BuildCache",
+    ] {
         assert!(df.get(key).is_some(), "system df missing {key}: {df}");
     }
 
@@ -1379,7 +1624,10 @@ fn docker_api_maintenance_and_event_routes_return_docker_json_shapes() {
     for line in body.lines().filter(|line| !line.is_empty()) {
         let event: serde_json::Value = serde_json::from_str(line).expect("event JSON line");
         assert!(event.get("Type").is_some(), "event missing Type: {event}");
-        assert!(event.get("Action").is_some(), "event missing Action: {event}");
+        assert!(
+            event.get("Action").is_some(),
+            "event missing Action: {event}"
+        );
     }
 }
 
@@ -1977,11 +2225,17 @@ fn docker_compat_restarts_stopped_container_by_name() {
 
     let (status, response) = harness.request("POST", "/v1.45/containers/restart-by-name/stop?t=0");
     assert_eq!(status, 204, "stop response={response}");
-    assert_ne!(inspect_container(&harness, &id)["State"]["Status"], "running");
+    assert_ne!(
+        inspect_container(&harness, &id)["State"]["Status"],
+        "running"
+    );
 
     let (status, response) = harness.request("POST", "/v1.45/containers/restart-by-name/start");
     assert_eq!(status, 204, "restart response={response}");
-    assert_eq!(inspect_container(&harness, &id)["State"]["Status"], "running");
+    assert_eq!(
+        inspect_container(&harness, &id)["State"]["Status"],
+        "running"
+    );
 
     let (status, response) =
         harness.request("DELETE", "/v1.45/containers/restart-by-name?force=true");
@@ -2141,17 +2395,25 @@ fn docker_compat_archive_reads_a_created_container_without_starting_it() {
     );
     assert_eq!(status, 201, "create response={body}");
     let id = serde_json::from_str::<serde_json::Value>(&body).expect("create JSON")["Id"]
-        .as_str().expect("container id").to_string();
+        .as_str()
+        .expect("container id")
+        .to_string();
     let raw = harness.request_bytes_raw(
         "GET",
         &format!("/v1.45/containers/{id}/archive?path=%2Fbin%2Fbusybox"),
         "application/x-tar",
         &[],
     );
-    let header_end = raw.windows(4).position(|window| window == b"\r\n\r\n").expect("response headers");
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("response headers");
     assert!(String::from_utf8_lossy(&raw[..header_end]).starts_with("HTTP/1.1 200 OK"));
     let mut tar = tar::Archive::new(std::io::Cursor::new(&raw[header_end + 4..]));
-    assert!(tar.entries().expect("tar stream").next().is_some(), "tar must contain the requested image path");
+    assert!(
+        tar.entries().expect("tar stream").next().is_some(),
+        "tar must contain the requested image path"
+    );
 }
 
 #[test]
@@ -2741,8 +3003,7 @@ fn docker_compat_exec_resize_updates_live_tty() {
         received.extend_from_slice(&buffer[..read]);
     }
 
-    let (status, body) =
-        harness.request("DELETE", "/v1.45/containers/exec-resize?force=true");
+    let (status, body) = harness.request("DELETE", "/v1.45/containers/exec-resize?force=true");
     assert_eq!(status, 204, "exec resize cleanup response={body}");
 }
 
@@ -3633,7 +3894,9 @@ fn docker_compat_websocket_attach_upgrades_and_frames_logs() {
     let message = websocket.read().expect("websocket attach frame");
     let bytes = message.into_data();
     assert!(
-        bytes.windows(b"websocket-attached".len()).any(|window| window == b"websocket-attached"),
+        bytes
+            .windows(b"websocket-attached".len())
+            .any(|window| window == b"websocket-attached"),
         "frame={bytes:?}"
     );
 }
@@ -3705,7 +3968,10 @@ fn docker_compat_buildkit_session_hijacks_into_a_real_h2_client() {
         response.push(byte[0]);
     }
     let response = String::from_utf8(response).expect("hijack response is utf8");
-    assert!(response.starts_with("HTTP/1.1 101 UPGRADED\r\n"), "{response}");
+    assert!(
+        response.starts_with("HTTP/1.1 101 UPGRADED\r\n"),
+        "{response}"
+    );
     assert!(response.contains("Upgrade: h2c\r\n"), "{response}");
 
     stream.set_nonblocking(true).expect("nonblocking session");
@@ -3726,7 +3992,10 @@ fn docker_compat_create_normalizes_nullable_nested_objects() {
     let harness = DaemonHarness::spawn();
     for (name, networking_config) in [
         ("nullable-root", serde_json::Value::Null),
-        ("nullable-endpoints", serde_json::json!({"EndpointsConfig": null})),
+        (
+            "nullable-endpoints",
+            serde_json::json!({"EndpointsConfig": null}),
+        ),
     ] {
         let body = serde_json::json!({
             "Image": "busybox",
@@ -3752,7 +4021,10 @@ fn docker_compat_create_normalizes_nullable_nested_objects() {
         assert_eq!(inspect["Config"]["Labels"], serde_json::json!({}));
         assert_eq!(inspect["Config"]["Healthcheck"], serde_json::Value::Null);
         assert_eq!(inspect["HostConfig"]["Memory"], 0);
-        assert_eq!(inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"], "bridge");
+        assert_eq!(
+            inspect["NetworkSettings"]["Networks"]["bridge"]["NetworkID"],
+            "bridge"
+        );
     }
 }
 
@@ -3817,7 +4089,8 @@ fn docker_compat_create_accepts_common_host_config_fields() {
 
     let (status, containers) = harness.request("GET", "/v1.45/containers/json?all=true");
     assert_eq!(status, 200, "container list response={containers}");
-    let containers: serde_json::Value = serde_json::from_str(&containers).expect("container list JSON");
+    let containers: serde_json::Value =
+        serde_json::from_str(&containers).expect("container list JSON");
     let published = containers
         .as_array()
         .expect("container list array")
@@ -3876,7 +4149,10 @@ fn docker_compat_buildkit_control_preserves_a_preface_coalesced_with_upgrade() {
     stream
         .read_exact(&mut settings)
         .expect("server emits SETTINGS after the coalesced client preface");
-    assert_eq!(settings[3], 0x4, "expected HTTP/2 SETTINGS frame: {settings:?}");
+    assert_eq!(
+        settings[3], 0x4,
+        "expected HTTP/2 SETTINGS frame: {settings:?}"
+    );
     assert_eq!(&settings[5..], &[0, 0, 0, 0], "SETTINGS must use stream 0");
 }
 
@@ -3956,8 +4232,14 @@ fn docker_compat_buildkit_control_lists_a_running_worker() {
         assert_eq!(workers.records.len(), 1);
         let worker = &workers.records[0];
         assert!(!worker.id.is_empty());
-        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.executor"], "oci");
-        assert_eq!(worker.labels["org.mobyproject.buildkit.worker.snapshotter"], "overlayfs");
+        assert_eq!(
+            worker.labels["org.mobyproject.buildkit.worker.executor"],
+            "oci"
+        );
+        assert_eq!(
+            worker.labels["org.mobyproject.buildkit.worker.snapshotter"],
+            "overlayfs"
+        );
         assert!(worker
             .labels
             .contains_key("org.mobyproject.buildkit.worker.moby.host-gateway-ip"));
@@ -3976,45 +4258,147 @@ fn docker_compat_buildkit_control_lists_a_running_worker() {
 fn docker_compat_buildkit_control_keeps_a_solve_stream_alive_through_status() {
     use bytes::Bytes;
     use prost::Message;
-    #[derive(Clone, PartialEq, Message)] struct SolveRequest { #[prost(string, tag = "1")] r#ref: String, #[prost(bool, tag = "11")] internal: bool }
-    #[derive(Clone, PartialEq, Message)] struct StatusRequest { #[prost(string, tag = "1")] r#ref: String }
-    #[derive(Clone, PartialEq, Message)] struct ReturnRequest {}
+    #[derive(Clone, PartialEq, Message)]
+    struct SolveRequest {
+        #[prost(string, tag = "1")]
+        r#ref: String,
+        #[prost(bool, tag = "11")]
+        internal: bool,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct StatusRequest {
+        #[prost(string, tag = "1")]
+        r#ref: String,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct ReturnRequest {}
     fn grpc_message<M: Message>(message: &M) -> Bytes {
-        let mut payload = Vec::new(); message.encode(&mut payload).expect("encode gRPC request");
-        let mut framed = Vec::with_capacity(payload.len() + 5); framed.push(0);
-        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes()); framed.extend_from_slice(&payload); Bytes::from(framed)
+        let mut payload = Vec::new();
+        message.encode(&mut payload).expect("encode gRPC request");
+        let mut framed = Vec::with_capacity(payload.len() + 5);
+        framed.push(0);
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&payload);
+        Bytes::from(framed)
     }
     let harness = DaemonHarness::spawn();
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect daemon");
     stream.write_all(b"POST /grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n").expect("write control request");
     let mut upgrade = Vec::new();
-    while !upgrade.ends_with(b"\r\n\r\n") { let mut byte = [0_u8; 1]; stream.read_exact(&mut byte).expect("read control upgrade"); upgrade.push(byte[0]); }
+    while !upgrade.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read control upgrade");
+        upgrade.push(byte[0]);
+    }
     assert!(String::from_utf8_lossy(&upgrade).starts_with("HTTP/1.1 101"));
     stream.set_nonblocking(true).expect("nonblocking control");
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().expect("control runtime");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("control runtime");
     runtime.block_on(async move {
         let stream = tokio::net::UnixStream::from_std(stream).expect("tokio control stream");
-        let (mut sender, connection) = h2::client::handshake(stream).await.expect("server must emit SETTINGS after the client preface");
+        let (mut sender, connection) = h2::client::handshake(stream)
+            .await
+            .expect("server must emit SETTINGS after the client preface");
         tokio::spawn(async move { connection.await.expect("h2 control connection") });
-        let solve_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.Control/Solve").header("content-type", "application/grpc").header("te", "trailers").body(()).expect("solve request");
-        let (solve_response, mut solve_body) = sender.send_request(solve_request, false).expect("start solve stream");
-        solve_body.send_data(grpc_message(&SolveRequest { r#ref: "lifecycle-solve".to_string(), internal: true }), true).expect("send solve request");
-        let return_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.frontend.LLBBridge/Return").header("content-type", "application/grpc").header("te", "trailers").header("buildkit-controlapi-buildid", "lifecycle-solve").body(()).expect("gateway return request");
-        let (return_response, mut return_body) = sender.send_request(return_request, false).expect("start gateway return stream");
-        return_body.send_data(grpc_message(&ReturnRequest {}), true).expect("send gateway return");
-        let mut return_body = return_response.await.expect("gateway return response").into_body(); while let Some(chunk) = return_body.data().await { chunk.expect("gateway return response data"); }
-        assert_eq!(return_body.trailers().await.expect("gateway return trailers").expect("gateway return status")["grpc-status"], "0");
-        let mut solve_body = solve_response.await.expect("solve response").into_body(); while let Some(chunk) = solve_body.data().await { chunk.expect("solve response data"); }
-        assert_eq!(solve_body.trailers().await.expect("solve trailers").expect("solve status")["grpc-status"], "0");
-        let status_request = http::Request::builder().method("POST").uri("/moby.buildkit.v1.Control/Status").header("content-type", "application/grpc").header("te", "trailers").body(()).expect("status request");
-        let (status_response, mut status_body) = sender.send_request(status_request, false).expect("start status stream");
-        status_body.send_data(grpc_message(&StatusRequest { r#ref: "lifecycle-solve".to_string() }), true).expect("send status request");
-        let mut status_body = status_response.await.expect("status response").into_body(); while let Some(chunk) = status_body.data().await { chunk.expect("status response data"); }
-        assert_eq!(status_body.trailers().await.expect("status trailers").expect("status completion")["grpc-status"], "0");
+        let solve_request = http::Request::builder()
+            .method("POST")
+            .uri("/moby.buildkit.v1.Control/Solve")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .expect("solve request");
+        let (solve_response, mut solve_body) = sender
+            .send_request(solve_request, false)
+            .expect("start solve stream");
+        solve_body
+            .send_data(
+                grpc_message(&SolveRequest {
+                    r#ref: "lifecycle-solve".to_string(),
+                    internal: true,
+                }),
+                true,
+            )
+            .expect("send solve request");
+        let return_request = http::Request::builder()
+            .method("POST")
+            .uri("/moby.buildkit.v1.frontend.LLBBridge/Return")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("buildkit-controlapi-buildid", "lifecycle-solve")
+            .body(())
+            .expect("gateway return request");
+        let (return_response, mut return_body) = sender
+            .send_request(return_request, false)
+            .expect("start gateway return stream");
+        return_body
+            .send_data(grpc_message(&ReturnRequest {}), true)
+            .expect("send gateway return");
+        let mut return_body = return_response
+            .await
+            .expect("gateway return response")
+            .into_body();
+        while let Some(chunk) = return_body.data().await {
+            chunk.expect("gateway return response data");
+        }
+        assert_eq!(
+            return_body
+                .trailers()
+                .await
+                .expect("gateway return trailers")
+                .expect("gateway return status")["grpc-status"],
+            "0"
+        );
+        let mut solve_body = solve_response.await.expect("solve response").into_body();
+        while let Some(chunk) = solve_body.data().await {
+            chunk.expect("solve response data");
+        }
+        assert_eq!(
+            solve_body
+                .trailers()
+                .await
+                .expect("solve trailers")
+                .expect("solve status")["grpc-status"],
+            "0"
+        );
+        let status_request = http::Request::builder()
+            .method("POST")
+            .uri("/moby.buildkit.v1.Control/Status")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .expect("status request");
+        let (status_response, mut status_body) = sender
+            .send_request(status_request, false)
+            .expect("start status stream");
+        status_body
+            .send_data(
+                grpc_message(&StatusRequest {
+                    r#ref: "lifecycle-solve".to_string(),
+                }),
+                true,
+            )
+            .expect("send status request");
+        let mut status_body = status_response.await.expect("status response").into_body();
+        while let Some(chunk) = status_body.data().await {
+            chunk.expect("status response data");
+        }
+        assert_eq!(
+            status_body
+                .trailers()
+                .await
+                .expect("status trailers")
+                .expect("status completion")["grpc-status"],
+            "0"
+        );
     });
     std::thread::sleep(Duration::from_millis(50));
     let stderr = harness.daemon_stderr();
-    assert!(!stderr.contains("buildkit control: h2 handshake failed"), "{stderr}");
+    assert!(
+        !stderr.contains("buildkit control: h2 handshake failed"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("Cannot drop a runtime"), "{stderr}");
 }
 
@@ -4295,8 +4679,7 @@ fn docker_compat_pre_start_hijack_streams_foreground_output_after_start() {
     );
     let (status, response) = harness.request_raw(&create);
     assert_eq!(status, 201, "create response: {response}");
-    let id = serde_json::from_str::<serde_json::Value>(&response)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
         .as_str()
         .expect("container id")
         .to_string();
@@ -4353,8 +4736,7 @@ fn docker_compat_pre_start_hijack_does_not_block_start_on_the_store_queue() {
     );
     let (status, response) = harness.request_raw(&create);
     assert_eq!(status, 201, "create response: {response}");
-    let id = serde_json::from_str::<serde_json::Value>(&response)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
         .as_str()
         .expect("container id")
         .to_string();
@@ -4375,9 +4757,8 @@ fn docker_compat_pre_start_hijack_does_not_block_start_on_the_store_queue() {
     let starter = std::thread::scope(|scope| {
         let harness_ref = &harness;
         let id = id.clone();
-        let start = scope.spawn(move || {
-            harness_ref.request("POST", &format!("/v1.45/containers/{id}/start"))
-        });
+        let start = scope
+            .spawn(move || harness_ref.request("POST", &format!("/v1.45/containers/{id}/start")));
         attach
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set attach timeout");
@@ -4413,8 +4794,7 @@ fn docker_compat_post_start_hijack_upgrades_before_log_files_exist() {
     );
     let (status, response) = harness.request_raw(&create);
     assert_eq!(status, 201, "create response: {response}");
-    let id = serde_json::from_str::<serde_json::Value>(&response)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
         .as_str()
         .expect("container id")
         .to_string();
@@ -4462,8 +4842,7 @@ fn docker_compat_auto_remove_preserves_wait_exit_result() {
     );
     let (status, response) = harness.request_raw(&create);
     assert_eq!(status, 201, "create response: {response}");
-    let id = serde_json::from_str::<serde_json::Value>(&response)
-        .expect("create JSON")["Id"]
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
         .as_str()
         .expect("container id")
         .to_string();
@@ -4633,24 +5012,57 @@ fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
 
 #[test]
 fn docker_compat_attach_delivers_eof_after_client_close() {
-    if nix::unistd::geteuid().is_root() { return; }
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "compat/attach-eof:latest");
     let (status, body) = harness.request_bytes("POST", "/v1.45/containers/create?name=attach-eof", "application/json", br#"{"Image":"compat/attach-eof:latest","Cmd":["/bin/busybox","sh","-c","cat -"],"HostConfig":{"NetworkMode":"none"}}"#);
     assert_eq!(status, 201, "create response={body}");
-    assert_eq!(harness.request("POST", "/v1.45/containers/attach-eof/start").0, 204);
+    assert_eq!(
+        harness
+            .request("POST", "/v1.45/containers/attach-eof/start")
+            .0,
+        204
+    );
     let mut stream = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
     stream.write_all(b"POST /v1.45/containers/attach-eof/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n").expect("write attach handshake");
-    stream.set_read_timeout(Some(Duration::from_secs(20))).expect("set attach timeout");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("set attach timeout");
     let mut headers = Vec::new();
-    while !headers.ends_with(b"\r\n\r\n") { let mut byte = [0_u8; 1]; stream.read_exact(&mut byte).expect("read attach headers"); headers.push(byte[0]); }
+    while !headers.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read attach headers");
+        headers.push(byte[0]);
+    }
     assert!(String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"));
     let input = vec![0xa5; 1024 * 1024];
-    let writer_input = input.clone(); let mut writer = stream.try_clone().expect("clone attach socket");
-    let writer = thread::spawn(move || -> std::io::Result<()> { writer.write_all(&writer_input)?; writer.shutdown(std::net::Shutdown::Write) });
-    let mut output = Vec::new(); stream.set_read_timeout(None).expect("clear attach read timeout"); stream.read_to_end(&mut output).expect("drain attach output"); writer.join().expect("writer").expect("write stdin");
-    let stdout: Vec<u8> = decode_raw_frames(&output).expect("complete frames").into_iter().filter(|(stream, _)| *stream == 1).flat_map(|(_, payload)| payload).copied().collect();
-    assert_eq!(stdout, input, "cat output must drain completely after stdin EOF");
+    let writer_input = input.clone();
+    let mut writer = stream.try_clone().expect("clone attach socket");
+    let writer = thread::spawn(move || -> std::io::Result<()> {
+        writer.write_all(&writer_input)?;
+        writer.shutdown(std::net::Shutdown::Write)
+    });
+    let mut output = Vec::new();
+    stream
+        .set_read_timeout(None)
+        .expect("clear attach read timeout");
+    stream
+        .read_to_end(&mut output)
+        .expect("drain attach output");
+    writer.join().expect("writer").expect("write stdin");
+    let stdout: Vec<u8> = decode_raw_frames(&output)
+        .expect("complete frames")
+        .into_iter()
+        .filter(|(stream, _)| *stream == 1)
+        .flat_map(|(_, payload)| payload)
+        .copied()
+        .collect();
+    assert_eq!(
+        stdout, input,
+        "cat output must drain completely after stdin EOF"
+    );
 }
 
 #[test]
@@ -4753,11 +5165,10 @@ fn docker_compat_pending_disconnect_is_authorized_atomic_and_inspectable() {
     assert_eq!(status, 201, "container create response={body}");
 
     let inspect_networks = |harness: &DaemonHarness| {
-        let (status, body) =
-            harness.request("GET", "/v1.45/containers/pending-disconnect/json");
+        let (status, body) = harness.request("GET", "/v1.45/containers/pending-disconnect/json");
         assert_eq!(status, 200, "inspect response={body}");
-        serde_json::from_str::<serde_json::Value>(&body)
-            .expect("inspect JSON")["NetworkSettings"]["Networks"]
+        serde_json::from_str::<serde_json::Value>(&body).expect("inspect JSON")["NetworkSettings"]
+            ["Networks"]
             .clone()
     };
     assert!(inspect_networks(&harness).get("pending-net").is_some());
@@ -4803,7 +5214,10 @@ fn docker_compat_pending_disconnect_is_authorized_atomic_and_inspectable() {
         "application/json",
         forced,
     );
-    assert_ne!(status, 200, "force must not invent a missing network: {body}");
+    assert_ne!(
+        status, 200,
+        "force must not invent a missing network: {body}"
+    );
     assert!(body.contains("not found absent-net"), "response={body}");
 }
 
@@ -4829,13 +5243,20 @@ fn docker_compat_network_labels_persist_and_filter() {
     assert_eq!(status, 200, "inspect body={body}");
     let inspect: serde_json::Value = serde_json::from_str(&body).expect("inspect JSON");
     assert_eq!(inspect["Labels"]["com.docker.compose.network"], "default");
-    assert_eq!(inspect["Labels"]["com.docker.compose.project"], "labels-test");
+    assert_eq!(
+        inspect["Labels"]["com.docker.compose.project"],
+        "labels-test"
+    );
 
     let filters = "%7B%22label%22%3A%5B%22com.docker.compose.network%3Ddefault%22%2C%22com.docker.compose.project%22%5D%7D";
     let (status, body) = harness.request("GET", &format!("/v1.45/networks?filters={filters}"));
     assert_eq!(status, 200, "list body={body}");
     let listed: serde_json::Value = serde_json::from_str(&body).expect("list JSON");
-    assert_eq!(listed.as_array().expect("network list").len(), 1, "{listed}");
+    assert_eq!(
+        listed.as_array().expect("network list").len(),
+        1,
+        "{listed}"
+    );
     assert_eq!(listed[0]["Labels"]["com.docker.compose.network"], "default");
 }
 
@@ -4932,9 +5353,10 @@ fn docker_compat_two_compose_services_publish_on_the_same_named_bridge() {
     );
     assert_eq!(status, 201, "network create response={response}");
 
-    for (service, host_port, container_port) in
-        [("alpha", "18094", "8091/tcp"), ("beta", "18095", "8092/tcp")]
-    {
+    for (service, host_port, container_port) in [
+        ("alpha", "18094", "8091/tcp"),
+        ("beta", "18095", "8092/tcp"),
+    ] {
         let name = format!("s209-{service}-1");
         let create = serde_json::json!({
             "Image": "compat/s209-publish:latest",
@@ -4973,8 +5395,7 @@ fn docker_compat_two_compose_services_publish_on_the_same_named_bridge() {
 
     for service in ["alpha", "beta"] {
         let name = format!("s209-{service}-1");
-        let (status, response) =
-            harness.request("GET", &format!("/v1.45/containers/{name}/json"));
+        let (status, response) = harness.request("GET", &format!("/v1.45/containers/{name}/json"));
         assert_eq!(status, 200, "inspect {service} response={response}");
         let inspect: serde_json::Value =
             serde_json::from_str(&response).expect("container inspect JSON");
@@ -5190,8 +5611,15 @@ fn docker_compat_volume_labels_persist_and_filter() {
     let (status, response) = harness.request("GET", &format!("/v1.45/volumes?filters={filters}"));
     assert_eq!(status, 200, "list body={response}");
     let listed: serde_json::Value = serde_json::from_str(&response).expect("list JSON");
-    assert_eq!(listed["Volumes"].as_array().expect("volumes").len(), 1, "{listed}");
-    assert_eq!(listed["Volumes"][0]["Labels"]["com.docker.compose.volume"], "data");
+    assert_eq!(
+        listed["Volumes"].as_array().expect("volumes").len(),
+        1,
+        "{listed}"
+    );
+    assert_eq!(
+        listed["Volumes"][0]["Labels"]["com.docker.compose.volume"],
+        "data"
+    );
 }
 
 #[test]
@@ -5488,13 +5916,10 @@ fn docker_compat_tag_resolves_docker_hub_aliases_and_digest_sources() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "tag-source:latest");
 
-    let (status, body) = harness.request(
-        "GET",
-        "/v1.45/images/tag-source%3Alatest/json",
-    );
+    let (status, body) = harness.request("GET", "/v1.45/images/tag-source%3Alatest/json");
     assert_eq!(status, 200, "source inspect response={body}");
-    let digest = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("source inspect JSON")["Id"]
+    let digest = serde_json::from_str::<serde_json::Value>(&body).expect("source inspect JSON")
+        ["Id"]
         .as_str()
         .expect("source image digest")
         .to_string();
@@ -5508,9 +5933,7 @@ fn docker_compat_tag_resolves_docker_hub_aliases_and_digest_sources() {
     let encoded_digest_source = format!("tag-source%40{digest}");
     let (status, body) = harness.request(
         "POST",
-        &format!(
-            "/v1.45/images/{encoded_digest_source}/tag?repo=tag/digest&tag=latest"
-        ),
+        &format!("/v1.45/images/{encoded_digest_source}/tag?repo=tag/digest&tag=latest"),
     );
     assert_eq!(status, 201, "digest source tag response={body}");
 
@@ -5525,13 +5948,10 @@ fn docker_compat_image_inspect_created_is_an_rfc3339_string() {
     let harness = DaemonHarness::spawn();
     build_local_busybox_image(&harness, "created-format:latest");
 
-    let (status, body) = harness.request(
-        "GET",
-        "/v1.45/images/created-format%3Alatest/json",
-    );
+    let (status, body) = harness.request("GET", "/v1.45/images/created-format%3Alatest/json");
     assert_eq!(status, 200, "image inspect response={body}");
-    let created = serde_json::from_str::<serde_json::Value>(&body)
-        .expect("image inspect JSON")["Created"]
+    let created = serde_json::from_str::<serde_json::Value>(&body).expect("image inspect JSON")
+        ["Created"]
         .as_str()
         .expect("Docker image inspect Created must be a string")
         .to_string();

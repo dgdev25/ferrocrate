@@ -196,7 +196,11 @@ impl SqliteContainerStore {
         Ok(())
     }
 
-    pub fn reserve_name(&self, name: &str, container_id: &str) -> Result<bool, ContainerStoreError> {
+    pub fn reserve_name(
+        &self,
+        name: &str,
+        container_id: &str,
+    ) -> Result<bool, ContainerStoreError> {
         self.transaction(|transaction| Self::claim_name_tx(transaction, name, container_id))
     }
 
@@ -254,8 +258,8 @@ impl SqliteContainerStore {
     ) -> Result<(), ContainerStoreError> {
         let payload = Self::encode(record)?;
         self.transaction(|transaction| {
-            let current =
-                Self::get_tx(transaction, &record.id)?.ok_or(ContainerStoreError::MutationConflict)?;
+            let current = Self::get_tx(transaction, &record.id)?
+                .ok_or(ContainerStoreError::MutationConflict)?;
             if current.mutation_generation != expected_generation
                 || current.pending_mutation.is_some()
                 || record.pending_mutation.is_some()
@@ -415,7 +419,8 @@ impl SqliteContainerStore {
 
     pub fn remove(&self, id: &str) -> Result<bool, ContainerStoreError> {
         self.transaction(|transaction| {
-            let removed = transaction.execute("DELETE FROM containers WHERE id=?1", params![id])? > 0;
+            let removed =
+                transaction.execute("DELETE FROM containers WHERE id=?1", params![id])? > 0;
             transaction.execute(
                 "DELETE FROM container_name_claims WHERE container_id=?1",
                 params![id],
@@ -1253,7 +1258,11 @@ mod tests {
                  CREATE TABLE lifecycle_operations (operation_id BLOB PRIMARY KEY NOT NULL, payload BLOB NOT NULL);",
             )
             .expect("legacy schema");
-        for (id, created_at) in [("bbbbbbbb2222", 20), ("aaaaaaaa1111", 10), ("cccccccc3333", 20)] {
+        for (id, created_at) in [
+            ("bbbbbbbb2222", 20),
+            ("aaaaaaaa1111", 10),
+            ("cccccccc3333", 20),
+        ] {
             let mut value = record(id);
             value.name = Some("duplicate".to_string());
             value.created_at_unix = created_at;

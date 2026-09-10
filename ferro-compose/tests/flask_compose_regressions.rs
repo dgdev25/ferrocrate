@@ -1,5 +1,5 @@
-use ferro_compose::ComposeFile;
 use ferro_compose::service_graph::ServiceGraph;
+use ferro_compose::ComposeFile;
 use std::collections::HashMap;
 
 #[test]
@@ -7,9 +7,13 @@ fn flask_build_target_survives_compose_roundtrip() {
     let config = ComposeFile::parse(
         "services:\n  assets:\n    build:\n      context: .\n      target: assets\n",
         &HashMap::new(),
-    ).unwrap();
+    )
+    .unwrap();
     let serialized = serde_yaml::to_value(&config).unwrap();
-    assert_eq!(serialized["services"]["assets"]["build"]["target"].as_str(), Some("assets"));
+    assert_eq!(
+        serialized["services"]["assets"]["build"]["target"].as_str(),
+        Some("assets")
+    );
 }
 
 #[test]
@@ -18,7 +22,10 @@ fn flask_optional_missing_dependency_does_not_block_graph() {
         "services:\n  web:\n    image: busybox\n    depends_on:\n      database:\n        condition: service_started\n        required: false\n",
         &HashMap::new(),
     ).expect("an unavailable optional dependency must not prevent web startup");
-    assert_eq!(ServiceGraph::from_compose(&config).unwrap().start_batches(), vec![vec!["web"]]);
+    assert_eq!(
+        ServiceGraph::from_compose(&config).unwrap().start_batches(),
+        vec![vec!["web"]]
+    );
 }
 
 #[test]
@@ -28,7 +35,10 @@ fn flask_optional_dependency_flag_survives_compose_roundtrip() {
         &HashMap::new(),
     ).unwrap();
     let serialized = serde_yaml::to_value(&config).unwrap();
-    assert_eq!(serialized["services"]["web"]["depends_on"]["database"]["required"].as_bool(), Some(false));
+    assert_eq!(
+        serialized["services"]["web"]["depends_on"]["database"]["required"].as_bool(),
+        Some(false)
+    );
 }
 
 #[test]

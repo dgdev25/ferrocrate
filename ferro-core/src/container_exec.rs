@@ -1022,7 +1022,10 @@ mod tests {
     #[test]
     fn rootless_mount_target_validation_rejects_traversal_before_bwrap() {
         if !crate::rootless::bubblewrap_available() {
-            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            eprintln!(
+                "skipping: {}",
+                crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE
+            );
             return;
         }
         let root = tempfile::tempdir().expect("rootfs tempdir");
@@ -1043,7 +1046,10 @@ mod tests {
     #[test]
     fn rootless_tty_mount_target_validation_rejects_traversal_before_bwrap() {
         if !crate::rootless::bubblewrap_available() {
-            eprintln!("skipping: {}", crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE);
+            eprintln!(
+                "skipping: {}",
+                crate::rootless::BUBBLEWRAP_UNAVAILABLE_MESSAGE
+            );
             return;
         }
         let root = tempfile::tempdir().expect("rootfs tempdir");

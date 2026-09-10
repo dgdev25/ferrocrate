@@ -72,13 +72,7 @@ impl ControlHub {
         if nodes.contains_key(node_id) {
             return Err("node already has an active control stream".into());
         }
-        nodes.insert(
-            node_id.into(),
-            ConnectedNode {
-                generation,
-                sender,
-            },
-        );
+        nodes.insert(node_id.into(), ConnectedNode { generation, sender });
         Ok(ControlConnection {
             receiver,
             node_id: node_id.into(),
@@ -145,9 +139,11 @@ impl ControlHub {
     }
 
     pub fn complete(&self, node_id: &str, result: FleetCommandResult) {
-        let sender = self.pending.lock().ok().and_then(|mut pending| {
-            pending.remove(&(node_id.to_string(), result.request_id))
-        });
+        let sender = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&(node_id.to_string(), result.request_id)));
         if let Some(sender) = sender {
             let _ = sender.send(result);
         }

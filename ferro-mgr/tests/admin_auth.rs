@@ -49,7 +49,10 @@ fn issued_node_principal_round_trips_from_der() {
         .issue_node_certificate("cluster-a", "node-a")
         .unwrap();
     let mut reader = std::io::Cursor::new(issued.certificate_pem.as_bytes());
-    let der = CertificateDer::pem_reader_iter(&mut reader).next().unwrap().unwrap();
+    let der = CertificateDer::pem_reader_iter(&mut reader)
+        .next()
+        .unwrap()
+        .unwrap();
     let identity = certificate_identity_from_der(der.as_ref()).unwrap();
     assert_eq!(identity.cluster_id, "cluster-a");
     assert_eq!(

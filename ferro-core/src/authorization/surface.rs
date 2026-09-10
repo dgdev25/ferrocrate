@@ -1133,7 +1133,10 @@ mod tests {
             (Action::NetworkAttach, WitnessAction::NetworkAttach),
             (Action::NetworkDetach, WitnessAction::NetworkDetach),
         ] {
-            assert_eq!(witness_action(action).expect("endpoint witness action"), expected);
+            assert_eq!(
+                witness_action(action).expect("endpoint witness action"),
+                expected
+            );
             let permit = SurfaceAuthorization::compatibility()
                 .authorize_named(&origin(), action, ResourceKind::Network, "backend", 2)
                 .expect("endpoint surface authorization");

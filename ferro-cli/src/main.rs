@@ -23599,8 +23599,29 @@ fn handle_docker_compat_connection(
     if let Some((id, condition, timeout, pending_auto_remove)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
         let auto_remove_result = || -> Result<Option<i32>, String> {
+            // `docker attach` opens `wait?condition=next-exit` after the
+            // hijacked stream closes. For `docker run --rm`, auto-removal
+            // waits for that attach to finish before it records its result.
+            // Prefer the already-published terminal record here, or attach
+            // and auto-removal wait on each other forever.
+            if let Ok(record) = follow_runtime.inspect(&id) {
+                if !matches!(
+                    record.status.as_str(),
+                    "created" | "running" | "restarting" | "paused"
+                ) {
+                    return Ok(Some(record.last_exit_code.unwrap_or(0)));
+                }
+            }
             let started = Instant::now();
             loop {
+                if let Ok(record) = follow_runtime.inspect(&id) {
+                    if !matches!(
+                        record.status.as_str(),
+                        "created" | "running" | "restarting" | "paused"
+                    ) {
+                        return Ok(Some(record.last_exit_code.unwrap_or(0)));
+                    }
+                }
                 let result = state
                     .auto_remove_results
                     .lock()

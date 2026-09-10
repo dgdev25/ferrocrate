@@ -95,15 +95,27 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## Build & Test
 
+This is a Rust workspace. There is no npm build at the root; the only npm
+project is the desktop UI under `apps/ferro-desktop-ui/`.
+
 ```bash
 # Build
-npm run build
+cargo build --release
 
-# Test
-npm test
+# Test (unit + integration; integration suites need a Linux host)
+cargo test --workspace
+bash scripts/run-tests.sh          # tests + warning gate
 
-# Lint
-npm run lint
+# Lint (warnings are errors)
+cargo clippy --workspace --all-targets -- -D warnings
+bash scripts/verify-no-warnings.sh
+
+# Dependency policy
+cargo audit --deny warnings
+cargo deny check licenses advisories
+
+# Before merging to main
+bash scripts/merge-gate.sh         # --quick skips conformance
 ```
 
 - ALWAYS run tests after making code changes

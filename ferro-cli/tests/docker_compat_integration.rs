@@ -5005,6 +5005,14 @@ fn docker_compat_attach_forwards_stdin_over_hijacked_socket() {
         String::from_utf8_lossy(&output)
     );
 
+    // `docker attach` keeps its stdin write side open after sending a line.
+    // The daemon must still close the hijacked socket when that line makes the
+    // workload exit; otherwise the Docker CLI blocks forever waiting for EOF.
+    let mut terminal = Vec::new();
+    stream
+        .read_to_end(&mut terminal)
+        .expect("attach must close when the workload exits");
+
     let (status, body) =
         harness.request("DELETE", "/v1.45/containers/attach-stdin-wire?force=true");
     assert_eq!(status, 204, "remove response: {body}");

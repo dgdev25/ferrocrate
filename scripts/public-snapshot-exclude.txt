@@ -13,3 +13,5 @@ docs/product-strategy.md
 docs/monetization-implementation-plan.md
 docs/paid-artifact-gateway.md
 docs/docker-vs-ferrocrate-monetization-comparison.md
+# The export script embeds the private path table it scrubs; ADR-018 describes it.
+scripts/export-public-snapshot.sh

@@ -62,3 +62,17 @@ Journey inventory: [all 123 local journeys](docs/evidence/verification/2026-09-0
 Final reconciled 123 rows: 106 passed, 6 passed with explicit contract qualifications, 7 current-platform N/A, 4 blocked (035–037 presets and115 issuer). No failed or not-run rows remain in this scoped tracker, but N/A and blocked work do not count as universal full-feature acceptance. S5/S6/S7/S9 are checked with those scope qualifications. S2/S4/S10 remain open for their listed acceptance. Source fixes are committed through `b4f4b71b`; this roadmap/evidence commit closes S11/S12 without marking the blocked acceptance complete.
 
 All remaining recommendations, including privileged AppArmor test/load, preset retests, genuine issuer, native macOS/Windows chooser/keyring/installer/licensing and positive rootful network validation, are saved in [the standalone remaining qualification roadmap](docs/ROADMAP-FULL-UI-REMAINING-2026-09-08.md). Exact current rows are in remaining-journeys.md; no 100% claim is made.
+
+## Closeout 2026-09-10 — Public repository readiness
+
+Source: public-repo readiness analysis in the 2026-09-10 session (git history leaks, tracked internal files, tracked binaries, placeholder policy docs, dependency license gate, self-hosted runner exposure).
+Done when: every box below is ticked and the test command below passes.
+Test command: `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets && cargo test --workspace --lib && cargo deny check licenses advisories && bash scripts/export-public-snapshot.sh --verify`
+
+- [ ] S1: Untrack local-only agent files — `memory/`, `prd2build.config.json`, `COORDINATOR-NOTE.md`, `lab/`, `.superdesign/tmp/` leave git but stay on disk; `.gitignore` covers them.
+- [ ] S2: Remove tracked binaries — Tauri sidecars under `apps/ferro-desktop-ui/src-tauri/binaries/` and `release-artifacts/` leave git; `scripts/bundle-sidecars.sh` and `release.yml` already regenerate them.
+- [ ] S3: Fix policy and metadata — `SECURITY.md` names GitHub private vulnerability reporting, `CHANGELOG.md` drops the "license not yet approved" note, `Cargo.toml` gains `repository`/`description`, README anchor link repaired.
+- [ ] S4: Rewrite the CLAUDE.md build section for Cargo — replace the npm build/test/lint block with the real Cargo and script commands.
+- [ ] S5: Add a dependency license gate — `deny.toml` with an explicit allowlist and the bincode unmaintained advisory ignored with a reason; `cargo deny check licenses advisories` passes; CI dependency-policy step runs it.
+- [ ] S6: Write `scripts/export-public-snapshot.sh` — builds a single-commit orphan `public` branch from `main`, excludes agent-only docs (handoffs, closeout roadmap), scrubs `/data/dev`, `/home/USER` and lab host addresses from evidence and bench results, and `--verify` fails on any leak or agent-state blob; ADR-018 records the snapshot-not-history-rewrite decision.
+- [ ] S7: Publish — create the public repository from the `public` branch, enable private vulnerability reporting, require approval for all outside-collaborator workflow runs. Needs the user's go-ahead: outward-facing.

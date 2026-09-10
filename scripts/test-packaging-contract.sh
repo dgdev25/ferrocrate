@@ -3,8 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
-grep -Fq '"targets": ["appimage", "deb", "dmg", "nsis", "msi"]' "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json"
-grep -Fq '"externalBin": ["binaries/ferrocrate", "binaries/ferro-desktop-sidecar"]' "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json"
+# Parse the JSON instead of grepping a fixed layout; formatters reflow arrays.
+python3 - "$repo_root/apps/ferro-desktop-ui/src-tauri/tauri.conf.json" <<'PY'
+import json, sys
+bundle = json.load(open(sys.argv[1]))["bundle"]
+assert bundle["targets"] == ["appimage", "deb", "dmg", "nsis", "msi"], bundle["targets"]
+assert bundle["externalBin"] == ["binaries/ferrocrate", "binaries/ferro-desktop-sidecar"], bundle["externalBin"]
+PY
 grep -Fq 'tauri-plugin-updater' "$repo_root/apps/ferro-desktop-ui/src-tauri/Cargo.toml"
 grep -Fq 'build-deb-package.sh' "$repo_root/scripts/build-release-artifacts.sh"
 grep -Fq 'archive="ferrocrate-${version}-linux-${arch}${archive_suffix}.tar.gz"' "$repo_root/scripts/install.sh"

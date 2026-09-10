@@ -71,7 +71,7 @@ Test command: `cargo check --workspace --all-targets && cargo clippy --workspace
 
 - [x] S1: Untrack local-only agent files — `memory/`, `prd2build.config.json`, `COORDINATOR-NOTE.md`, `lab/`, `.superdesign/tmp/` leave git but stay on disk; `.gitignore` covers them.
 - [x] S2: Remove tracked binaries — Tauri sidecars under `apps/ferro-desktop-ui/src-tauri/binaries/` and `release-artifacts/` leave git; `scripts/bundle-sidecars.sh` and `release.yml` already regenerate them.
-- [ ] S3: Fix policy and metadata — `SECURITY.md` names GitHub private vulnerability reporting, `CHANGELOG.md` drops the "license not yet approved" note, `Cargo.toml` gains `repository`/`description`, README anchor link repaired.
+- [x] S3: Fix policy and metadata — `SECURITY.md` names GitHub private vulnerability reporting, `CHANGELOG.md` drops the "license not yet approved" note, every crate carries `license`/`repository`/`homepage` (five crates had no license field), README anchor verified valid (GitHub renders `--` as `----`; no change needed).
 - [ ] S4: Rewrite the CLAUDE.md build section for Cargo — replace the npm build/test/lint block with the real Cargo and script commands.
 - [ ] S5: Add a dependency license gate — `deny.toml` with an explicit allowlist and the bincode unmaintained advisory ignored with a reason; `cargo deny check licenses advisories` passes; CI dependency-policy step runs it.
 - [ ] S6: Write `scripts/export-public-snapshot.sh` — builds a single-commit orphan `public` branch from `main`, excludes agent-only docs (handoffs, closeout roadmap), scrubs `/data/dev`, `/home/USER` and lab host addresses from evidence and bench results, and `--verify` fails on any leak or agent-state blob; ADR-018 records the snapshot-not-history-rewrite decision.

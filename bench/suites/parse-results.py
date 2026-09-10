@@ -12,6 +12,7 @@ def fault(message, step="harness"):
 
 def parse_go(output, skip_pattern):
     tests, logs, packages = {}, {}, {}
+    no_test_packages = set()
     faults = []
     pattern = re.compile(skip_pattern) if skip_pattern else None
     for line in output.splitlines():
@@ -24,6 +25,8 @@ def parse_go(output, skip_pattern):
             continue
         package, name, action = event.get("Package", ""), event.get("Test"), event.get("Action")
         if not name:
+            if action == "output" and "[no test files]" in event.get("Output", ""):
+                no_test_packages.add(package)
             if action in ("pass", "fail", "skip"):
                 packages[package] = action
             continue
@@ -45,9 +48,11 @@ def parse_go(output, skip_pattern):
                      "stderr_tail": tail if status in ("fail", "error") else ""})
     for package, status in sorted(packages.items()):
         has_tests = any(p == package for p, _ in tests)
-        rows.append({"package": package, "step": "package-summary", "status": status if has_tests else "error",
-                     "record_type": "aggregate" if has_tests else "leaf",
-                     "stderr_tail": "" if has_tests else "package completed without test records"})
+        explicit_helper = package in no_test_packages
+        rows.append({"package": package, "step": "package-summary",
+                     "status": status if has_tests or explicit_helper else "error",
+                     "record_type": "aggregate" if has_tests or explicit_helper else "leaf",
+                     "stderr_tail": "" if has_tests or explicit_helper else "package completed without test records"})
     rows.extend(faults)
     return rows or [fault("go test collected no records")]
 

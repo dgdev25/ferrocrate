@@ -11273,7 +11273,7 @@ fn execute_build(
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
-    let named_contexts = parse_build_contexts(build_context)?;
+    let mut named_contexts = parse_build_contexts(build_context)?;
     let secrets = parse_build_secrets(secrets)?;
     let retry_limit = build_retry_limit()?;
     if ferrofile.is_some() && !secrets.is_empty() {
@@ -11340,6 +11340,14 @@ fn execute_build(
             } else {
                 context_dir.join(dockerfile)
             };
+            named_contexts.extend(prepare_external_copy_contexts(
+                store,
+                origin,
+                authorization,
+                &dockerfile_path,
+                build_args,
+                &named_contexts,
+            )?);
             prefetch_dockerfile_bases(
                 store,
                 origin,
@@ -11495,6 +11503,77 @@ fn prefetch_dockerfile_bases(
     )
     .map_err(|error| error.to_string())?;
     prefetch_image_references(store, origin, authorization, bases, session_auth)
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_external_copy_contexts(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    references: &[String],
+) -> Result<HashMap<String, PathBuf>, String> {
+    let destination = runtime_dir.join("build").join("external-image-contexts");
+    std::fs::create_dir_all(&destination)
+        .map_err(|error| format!("build: create external COPY contexts: {error}"))?;
+    let mut contexts = HashMap::with_capacity(references.len());
+    for reference in references {
+        let record = resolve_reference(store, reference)
+            .map_err(|error| format!("build: inspect COPY source {reference}: {error}"))?
+            .ok_or_else(|| format!("build: COPY source image was not found: {reference}"))?;
+        let key = format!(
+            "{:x}",
+            Sha256::digest(format!("{reference}\0{}", record.digest).as_bytes())
+        );
+        let rootfs = destination.join(key);
+        if !rootfs.is_dir() {
+            let temporary = destination.join(format!(
+                ".copy-context-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let layers = ferro_core::image_fetch::resolve_layer_paths_with_store(
+                runtime_dir,
+                reference,
+                store,
+            )
+            .map_err(|error| format!("build: resolve COPY source {reference}: {error}"))?;
+            let images = runtime_dir.join("images");
+            ferro_core::layer_cache::construct_rootfs_cached(
+                &temporary,
+                &layers,
+                &images.join("file-cas").join("shake256"),
+                &images.join("layer-cache"),
+            )
+            .map_err(|error| format!("build: materialize COPY source {reference}: {error}"))?;
+            if let Err(error) = std::fs::rename(&temporary, &rootfs) {
+                let _ = std::fs::remove_dir_all(&temporary);
+                if !rootfs.is_dir() {
+                    return Err(format!("build: publish COPY source {reference}: {error}"));
+                }
+            }
+        }
+        contexts.insert(reference.clone(), rootfs);
+    }
+    Ok(contexts)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_external_copy_contexts(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    dockerfile: &Path,
+    build_args: &HashMap<String, String>,
+    named_contexts: &HashMap<String, PathBuf>,
+) -> Result<HashMap<String, PathBuf>, String> {
+    let references = ferro_core::dockerfile_build::dockerfile_external_copy_images_with_build_args(
+        dockerfile, build_args,
+    )
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .filter(|reference| !named_contexts.contains_key(reference))
+    .collect::<Vec<_>>();
+    prefetch_image_references(store, origin, authorization, references.clone(), None)?;
+    materialize_external_copy_contexts(&runtime_dir(), store, &references)
 }
 
 #[cfg(target_os = "linux")]
@@ -15836,13 +15915,23 @@ fn prepare_compose_service(
         let context = build.context.as_deref().unwrap_or(".");
         let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
         let dockerfile_path = project_dir.join(context).join(dockerfile);
+        let empty_build_args = HashMap::new();
+        let build_args = build.args.as_ref().unwrap_or(&empty_build_args);
+        let named_contexts = prepare_external_copy_contexts(
+            store,
+            origin,
+            authorization,
+            &dockerfile_path,
+            build_args,
+            &HashMap::new(),
+        )?;
         prefetch_dockerfile_bases(
             store,
             origin,
             authorization,
             &dockerfile_path,
             None,
-            build.args.as_ref().unwrap_or(&HashMap::new()),
+            build_args,
         )?;
         let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
             &dockerfile_path,
@@ -15850,8 +15939,8 @@ fn prepare_compose_service(
             &runtime_dir(),
             CompressionFormat::Gzip,
             store,
-            &HashMap::new(),
-            build.args.as_ref().unwrap_or(&HashMap::new()),
+            &named_contexts,
+            build_args,
             &ferro_core::dockerfile_build::DockerfileExecutionOptions {
                 context_dir: Some(project_dir.join(context)),
                 target_stage: build.target.clone(),

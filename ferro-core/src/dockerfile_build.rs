@@ -993,18 +993,9 @@ fn build_one_stage(
         .or(inherited_workdir)
         .or(base_info.config.workdir.as_deref());
     let context_root = create_build_dir(runtime_dir, &format!("context-{idx}"))?;
-    if stage.copy_paths.is_empty() {
-        copy_context_dir(
-            context_dir,
-            context_dir,
-            &context_root,
-            dockerfile_path,
-            ignore_patterns,
-        )?;
+    let filtered_context = if stage.copy_paths.is_empty() && stage.copy_paths_after_run.is_empty() {
+        None
     } else {
-        // Docker applies .dockerignore before evaluating every COPY source,
-        // including the common `COPY . .` spelling.  Keep an isolated,
-        // filtered source tree so explicit COPYs cannot bypass that contract.
         let filtered_context = create_build_dir(runtime_dir, &format!("filtered-context-{idx}"))?;
         copy_context_dir(
             context_dir,
@@ -1013,6 +1004,20 @@ fn build_one_stage(
             dockerfile_path,
             ignore_patterns,
         )?;
+        Some(filtered_context)
+    };
+    if stage.copy_paths.is_empty() && stage.copy_paths_after_run.is_empty() {
+        copy_context_dir(
+            context_dir,
+            context_dir,
+            &context_root,
+            dockerfile_path,
+            ignore_patterns,
+        )?;
+    } else if !stage.copy_paths.is_empty() {
+        // Docker applies .dockerignore before evaluating every COPY source,
+        // including the common `COPY . .` spelling.  Keep an isolated,
+        // filtered source tree so explicit COPYs cannot bypass that contract.
         let mut copy_paths = stage.copy_paths.clone();
         for spec in &mut copy_paths {
             spec.dest = resolve_copy_destination(workdir, &spec.dest);
@@ -1021,7 +1026,11 @@ fn build_one_stage(
                 spec.owner = Some(CopyOwner::Numeric(uid, gid));
             }
         }
-        copy_from_context(&filtered_context, &context_root, &copy_paths)?;
+        copy_from_context(
+            filtered_context.as_deref().expect("filtered context"),
+            &context_root,
+            &copy_paths,
+        )?;
     }
     for copy in &stage.copy_from {
         let source_root = resolve_stage_root(stage_roots, stage_names, named_contexts, &copy.from)
@@ -1078,10 +1087,15 @@ fn build_one_stage(
         // repeat the base filesystem).
         let stage_baseline = snapshot_stage_root(&stage_root)?;
         apply_stage_workdir(&stage_root, workdir)?;
-        let copy_from_after_run_index = stage.copy_from_after_run_index.unwrap_or(stage.run.len());
+        let copy_after_run_index = stage
+            .copy_from_after_run_index
+            .into_iter()
+            .chain(stage.copy_paths_after_run_index)
+            .min()
+            .unwrap_or(stage.run.len());
         run_stage_commands(
             &stage_root,
-            &stage.run[..copy_from_after_run_index],
+            &stage.run[..copy_after_run_index],
             &stage_environment(base_info, &stage.env),
             workdir,
             stage.user.as_deref(),
@@ -1125,9 +1139,24 @@ fn build_one_stage(
                 }
             }
         }
+        if !stage.copy_paths_after_run.is_empty() {
+            let mut copy_paths = stage.copy_paths_after_run.clone();
+            for spec in &mut copy_paths {
+                spec.dest = resolve_copy_destination(workdir, &spec.dest);
+                if let Some(owner) = spec.owner.as_ref() {
+                    let (uid, gid) = resolve_copy_owner(&stage_root, owner)?;
+                    spec.owner = Some(CopyOwner::Numeric(uid, gid));
+                }
+            }
+            copy_from_context(
+                filtered_context.as_deref().expect("filtered context"),
+                &stage_root,
+                &copy_paths,
+            )?;
+        }
         run_stage_commands(
             &stage_root,
-            &stage.run[copy_from_after_run_index..],
+            &stage.run[copy_after_run_index..],
             &stage_environment(base_info, &stage.env),
             workdir,
             stage.user.as_deref(),
@@ -3314,6 +3343,8 @@ struct StageSpec {
     copy_from_after_run: Vec<CopyFromSpec>,
     copy_from_after_run_index: Option<usize>,
     copy_paths: Vec<CopySpec>,
+    copy_paths_after_run: Vec<CopySpec>,
+    copy_paths_after_run_index: Option<usize>,
     healthcheck: Option<HealthcheckSpec>,
     env: Vec<String>,
     args: HashMap<String, String>,
@@ -3485,6 +3516,8 @@ fn parse_stages_with_build_args(
                 copy_from_after_run: Vec::new(),
                 copy_from_after_run_index: None,
                 copy_paths: Vec::new(),
+                copy_paths_after_run: Vec::new(),
+                copy_paths_after_run_index: None,
                 healthcheck: None,
                 env: Vec::new(),
                 args: global_args.clone(),
@@ -3535,13 +3568,27 @@ fn parse_stages_with_build_args(
                             "COPY --checksum is only valid for remote ADD".to_string(),
                         ));
                     }
-                    stage.copy_paths.push(copy);
+                    if stage.run.is_empty() {
+                        stage.copy_paths.push(copy);
+                    } else {
+                        stage
+                            .copy_paths_after_run_index
+                            .get_or_insert(stage.run.len());
+                        stage.copy_paths_after_run.push(copy);
+                    }
                 }
             }
             "ADD" => {
                 if let Some(mut copy) = parse_copy_spec(&interpolated)? {
                     copy.extract_archives = true;
-                    stage.copy_paths.push(copy);
+                    if stage.run.is_empty() {
+                        stage.copy_paths.push(copy);
+                    } else {
+                        stage
+                            .copy_paths_after_run_index
+                            .get_or_insert(stage.run.len());
+                        stage.copy_paths_after_run.push(copy);
+                    }
                 }
             }
             "RUN" => {
@@ -4119,7 +4166,11 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
         append_stage_identity_str(buffer, "cf.dest", &copy.dest);
         append_stage_identity_owner(buffer, "cf.owner", &copy.owner);
     }
-    for copy in &stage.copy_paths {
+    for copy in stage
+        .copy_paths
+        .iter()
+        .chain(stage.copy_paths_after_run.iter())
+    {
         for source in &copy.srcs {
             append_stage_identity_str(buffer, "cp.src", source);
         }
@@ -4293,6 +4344,7 @@ fn append_stage_spec_identity(buffer: &mut Vec<u8>, stage: &StageSpec) {
 /// a named context; RUN-only stages never see context bytes.
 fn stage_consumes_context(stage: &StageSpec) -> bool {
     !stage.copy_paths.is_empty()
+        || !stage.copy_paths_after_run.is_empty()
         || !stage.copy_from.is_empty()
         || !stage.copy_from_after_run.is_empty()
 }
@@ -8741,7 +8793,8 @@ mod tests {
 
     use super::{
         apply_onbuild_triggers, build_cache_key, build_cache_path,
-        build_from_dockerfile_with_store_and_compression, build_journal_path,
+        build_from_dockerfile_with_store_and_compression,
+        build_from_dockerfile_with_store_and_compression_with_contexts, build_journal_path,
         build_stage_dependency_graph, build_stage_execution_batches, create_build_dir,
         dockerfile_external_base_images, dockerignore_matches, export_build_cache,
         export_build_cache_to_registry, file_matches_digest, hash_context_dir, import_build_cache,
@@ -8797,6 +8850,16 @@ mod tests {
                 .unwrap(),
             vec!["tonistiigi/hellofs"]
         );
+    }
+
+    #[test]
+    fn local_copy_after_run_stays_after_its_preceding_run() {
+        let stages =
+            parse_stages("FROM scratch\nRUN echo prepare\nCOPY input /input\nRUN test -f /input\n")
+                .expect("parse Dockerfile");
+        assert_eq!(stages[0].copy_paths.len(), 0);
+        assert_eq!(stages[0].copy_paths_after_run.len(), 1);
+        assert_eq!(stages[0].copy_paths_after_run_index, Some(1));
     }
 
     #[test]
@@ -8894,7 +8957,7 @@ mod tests {
         .expect("heredoc Dockerfile parses");
         assert_eq!(stages[0].run[0].args.last().unwrap(), "#!/bin/sh\necho ok");
         assert_eq!(
-            stages[0].copy_paths[0].inline_content.as_deref(),
+            stages[0].copy_paths_after_run[0].inline_content.as_deref(),
             Some("hello  \"quotes\"")
         );
         assert_eq!(stages[0].onbuild[0], "RUN <<EOF\necho later");
@@ -9692,6 +9755,39 @@ mod tests {
         assert_eq!(
             fs::read_to_string(stage_root(&runtime, 2).join("artifact")).unwrap(),
             "compiled"
+        );
+    }
+
+    #[test]
+    fn copy_from_external_image_context_uses_materialized_rootfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dockerfile = temp.path().join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM scratch\nCOPY --from=ghcr.io/example/tool:1 /tool /usr/local/bin/tool\n",
+        )
+        .expect("dockerfile");
+        let external = temp.path().join("external-image");
+        fs::create_dir_all(&external).expect("external context");
+        fs::write(external.join("tool"), "tool").expect("tool");
+        let runtime = temp.path().join("runtime");
+        let store = LocalImageStore::open(runtime.join("images")).expect("store");
+        let contexts = HashMap::from([("ghcr.io/example/tool:1".to_string(), external)]);
+
+        build_from_dockerfile_with_store_and_compression_with_contexts(
+            &dockerfile,
+            Some("local/external-copy:latest"),
+            &runtime,
+            CompressionFormat::Gzip,
+            &store,
+            &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &contexts,
+        )
+        .expect("COPY --from external image context build");
+
+        assert_eq!(
+            fs::read_to_string(stage_root(&runtime, 0).join("usr/local/bin/tool")).unwrap(),
+            "tool"
         );
     }
 

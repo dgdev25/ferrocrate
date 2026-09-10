@@ -22423,6 +22423,15 @@ fn handle_docker_compat_connection(
                         if let Ok(mut results) = state.auto_remove_results.lock() {
                             results.remove(&id);
                         }
+                        // `docker run --rm` expects a failed start to leave
+                        // no created reservation. Keeping it makes the CLI
+                        // open `/wait` against a container that can never
+                        // exit, which blocks the caller indefinitely.
+                        if let Ok(mut pending) = state.pending.lock() {
+                            pending.remove(&id);
+                        }
+                        let _ = state.name_store.release_reserved_name(&id);
+                        let _ = state.persist_pending();
                     }
                     return Err(error);
                 }

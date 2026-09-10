@@ -21,6 +21,7 @@ behavior:
 ```bash
 cargo test --workspace --all-features --offline
 cargo clippy --workspace --all-features --all-targets --offline -- -D warnings
+cargo deny check licenses advisories
 bash scripts/verify-release-readiness.sh
 ```
 

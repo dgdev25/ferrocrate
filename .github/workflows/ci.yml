@@ -91,6 +91,8 @@ jobs:
         run: |
           python3 scripts/check-advisory-exceptions.py
           cargo audit --deny warnings
+          cargo deny --version >/dev/null 2>&1 || cargo install cargo-deny --locked
+          cargo deny check licenses advisories
           python3 scripts/test_advisory_exceptions.py
           python3 scripts/check-advisory-exceptions.py --audit-tauri
           npm audit --prefix apps/ferro-desktop-ui --audit-level=low

@@ -57,3 +57,7 @@ bench/fuzz/__pycache__/
 # artifacts are produced by release.yml and published as GitHub Releases.
 /apps/ferro-desktop-ui/src-tauri/binaries/
 /release-artifacts/
+
+# Internal process history, task lists, handoffs, design scratch, business
+# plans and unreferenced raw evidence dumps. Local only (ADR-018).
+/docs/internal/

@@ -243,7 +243,7 @@ features for containers).
 Images are built and run only for the host's architecture. There is no
 emulation of foreign architectures, no `--platform` builds, and no
 multi-architecture manifests; that work is parked in
-[Round 11](docs/remediation/ROUND-11-PLAN.md).
+[Round 11](docs/ROADMAP.md).
 
 The authoritative support contract is
 [`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md). Every row links dated
@@ -282,7 +282,7 @@ self-hosted Linux, macOS, and Windows runners; scheduled canaries build the
 platform bundles. Contribution and release notes:
 [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/RELEASE.md`](docs/RELEASE.md),
 [`docs/operations/external-ci.md`](docs/operations/external-ci.md).
-Open follow-ups live in [`docs/remediation/FOLLOW-UPS.md`](docs/remediation/FOLLOW-UPS.md).
+Open follow-ups live in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## 📄 License
 

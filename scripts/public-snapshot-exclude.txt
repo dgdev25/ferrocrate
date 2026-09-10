@@ -1,17 +1,8 @@
 # Paths removed from the public snapshot (one per line, relative to repo root,
 # directories end with /). Read by scripts/export-public-snapshot.sh.
-# Agent-to-agent process notes and orchestration history.
+# Internal docs live in the gitignored docs/internal/ (ADR-018) and never
+# enter the archive; this list covers what is still tracked on main.
 ROADMAP-CLOSEOUT.md
-docs/CODEX-COORDINATOR-HANDOVER.md
-docs/HANDOFF-GLM-ROADMAP.md
-docs/HANDOFF-GROK-REMAINING-ROADMAP.md
-docs/CLAUDE-USER-DOCUMENTATION-BRIEF.md
-docs/superpowers/
 .superdesign/
-# Business plans: not for publication.
-docs/product-strategy.md
-docs/monetization-implementation-plan.md
-docs/paid-artifact-gateway.md
-docs/docker-vs-ferrocrate-monetization-comparison.md
 # The export script embeds the private path table it scrubs; ADR-018 describes it.
 scripts/export-public-snapshot.sh

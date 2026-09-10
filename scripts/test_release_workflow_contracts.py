@@ -111,6 +111,16 @@ class WorkflowContracts(unittest.TestCase):
         errors = self.validator().validate(workflows, self.workspace_members())
         self.assertTrue(any("desktop gate failure must propagate" in error for error in errors))
 
+    def test_desktop_gate_cannot_run_in_a_false_shell_branch(self):
+        workflows = self.workflows()
+        unit = next(step for step in workflows["ci.yml"]["jobs"]["build-unit-warnings"]["steps"] if step.get("name") == "Unit gates")
+        unit["run"] = unit["run"].replace(
+            "npm run --prefix apps/ferro-desktop-ui test",
+            "if false; then\n  npm run --prefix apps/ferro-desktop-ui test\nfi",
+        )
+        errors = self.validator().validate(workflows, self.workspace_members())
+        self.assertTrue(any("desktop gate failure must propagate" in error for error in errors))
+
     def test_load_workflows_includes_yaml_suffix(self):
         validator = self.validator()
         with tempfile.TemporaryDirectory() as temporary:

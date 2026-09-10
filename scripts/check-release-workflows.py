@@ -30,6 +30,20 @@ def load_workflows(root: Path) -> dict[str, dict]:
     }
 
 
+def has_unconditional_command(script: str, command: str) -> bool:
+    conditional_depth = 0
+    command_line = re.compile(r"^\s*" + re.escape(command) + r"\s*$")
+    for line in script.splitlines():
+        stripped = line.strip()
+        if re.match(r"if\b", stripped):
+            conditional_depth += 1
+        if conditional_depth == 0 and command_line.match(line):
+            return True
+        if stripped == "fi":
+            conditional_depth = max(conditional_depth - 1, 0)
+    return False
+
+
 def validate(workflows, workspace_members=None):
     errors = []
     def require(condition, message):
@@ -119,16 +133,15 @@ def validate(workflows, workspace_members=None):
         ]
         exact_steps = [
             step for step in candidate_steps
-            if re.search(r"^\s*" + re.escape(command) + r"\s*$", step["run"], re.M)
+            if has_unconditional_command(step["run"], command)
         ]
         require(bool(exact_steps), "CI must execute desktop gate: " + command)
-        steps_to_validate = exact_steps or candidate_steps
         require(
             any(
                 step.get("if") in (None, "success()", "${{ success() }}")
                 and "set +e" not in step["run"]
                 and "|| true" not in step["run"]
-                for step in steps_to_validate
+                for step in exact_steps
             ),
             "desktop gate failure must propagate: " + command,
         )

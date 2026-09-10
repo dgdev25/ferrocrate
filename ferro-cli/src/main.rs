@@ -22421,7 +22421,12 @@ fn handle_docker_compat_connection(
                     }
                     if spec.auto_remove {
                         if let Ok(mut results) = state.auto_remove_results.lock() {
-                            results.remove(&id);
+                            // Docker's CLI follows a failed `run --rm` start
+                            // with `/wait`. Keep the conventional daemon
+                            // failure status long enough for that request;
+                            // otherwise it blocks against a record we just
+                            // removed.
+                            results.insert(id.clone(), Some(125));
                         }
                         // `docker run --rm` expects a failed start to leave
                         // no created reservation. Keeping it makes the CLI

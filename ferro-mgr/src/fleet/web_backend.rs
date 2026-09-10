@@ -13,7 +13,7 @@ use crate::proto::{
 use super::FleetUiBackend;
 
 #[derive(RustEmbed)]
-#[folder = "../apps/ferro-desktop-ui/dist"]
+#[folder = "$OUT_DIR/ferrocrate-fleet-dist"]
 pub struct FleetAssets;
 
 impl StaticAssets for FleetAssets {

@@ -87,10 +87,13 @@ for required in LICENSE README.md SECURITY.md CONTRIBUTING.md Cargo.toml deny.to
 done
 (( fail == 0 )) || { echo "export: verification FAILED" >&2; exit 1; }
 
-echo "export: cargo check in snapshot"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}" cargo check --workspace --quiet --manifest-path "$tree/Cargo.toml"
-
 file_count="$(cd "$tree" && find . -path ./.git -prune -o -type f -print | wc -l)"
+echo "export: cargo check in snapshot"
+# Skip the npm frontend build: it would install node_modules into the tree.
+# Both embeds fall back to a placeholder page when dist/ is absent.
+FERROCRATE_SKIP_FRONTEND_BUILD=1 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}" \
+  cargo check --workspace --quiet --manifest-path "$tree/Cargo.toml"
+
 echo "export: snapshot ok ($file_count files)"
 (( verify_only == 0 )) || exit 0
 

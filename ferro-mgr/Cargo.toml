@@ -37,7 +37,7 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 nix = { workspace = true, features = ["user", "socket", "fs"] }
 rustix = { version = "1", features = ["process"] }
 x509-parser = "0.18"
-rust-embed = "8"
+rust-embed = { version = "8.7", features = ["interpolate-folder-path"] }
 mime_guess = "2"
 
 [dev-dependencies]

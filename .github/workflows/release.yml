@@ -6,9 +6,11 @@ permissions:
   contents: read
 jobs:
   candidate-validation:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/ci.yml
 
   candidate-qualification:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: candidate-validation
     # An isolated, privileged qualification host is required. Ordinary build
     # runners must never silently stand in for host/fault qualification.
@@ -40,6 +42,7 @@ jobs:
           bash scripts/local-release-gate.sh --version "$GITHUB_REF_NAME"
 
   cli:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: CLI ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -75,6 +78,7 @@ jobs:
           if-no-files-found: error
 
   linux-desktop:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, ferro-lab]
     environment: release
     timeout-minutes: 75
@@ -117,6 +121,7 @@ jobs:
           if-no-files-found: error
 
   macos-desktop:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -188,6 +193,7 @@ jobs:
           if-no-files-found: error
 
   windows-desktop:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, ferro-lab]
     environment: release
     timeout-minutes: 75
@@ -247,6 +253,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: [candidate-validation, candidate-qualification, cli, linux-desktop, macos-desktop, windows-desktop]
     environment: release
     runs-on: [self-hosted, linux, x64, ferro-lab]

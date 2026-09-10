@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 import yaml
 import tomllib
@@ -24,7 +25,7 @@ class WorkflowContracts(unittest.TestCase):
             return {Path(member).name for member in tomllib.load(handle)["workspace"]["members"]}
 
     def test_current_workflows_satisfy_contract(self):
-        self.assertEqual(self.validator().validate(self.workflows()), [])
+        self.assertEqual(self.validator().validate(self.workflows(), self.workspace_members()), [])
 
     def test_hosted_runner_in_matrix_is_rejected(self):
         workflows = self.workflows()
@@ -91,6 +92,33 @@ class WorkflowContracts(unittest.TestCase):
         unit = next(step for step in workflows["ci.yml"]["jobs"]["build-unit-warnings"]["steps"] if step.get("name") == "Unit gates")
         unit["run"] = unit["run"].replace("npm run --prefix apps/ferro-desktop-ui typecheck\n", "")
         self.assertTrue(self.validator().validate(workflows, self.workspace_members()))
+
+    def test_pull_request_target_and_missing_fork_guard_are_rejected(self):
+        workflows = self.workflows()
+        workflows["ci.yml"][True]["pull_request_target"] = {}
+        workflows["ci.yml"]["jobs"]["build-unit-warnings"].pop("if")
+        errors = self.validator().validate(workflows, self.workspace_members())
+        self.assertTrue(any("pull_request_target" in error for error in errors))
+        self.assertTrue(any("same-repository guard" in error for error in errors))
+
+    def test_desktop_gate_cannot_be_masked_or_skipped(self):
+        workflows = self.workflows()
+        unit = next(step for step in workflows["ci.yml"]["jobs"]["build-unit-warnings"]["steps"] if step.get("name") == "Unit gates")
+        unit["run"] = unit["run"].replace(
+            "npm run --prefix apps/ferro-desktop-ui test",
+            "npm run --prefix apps/ferro-desktop-ui test || true",
+        )
+        errors = self.validator().validate(workflows, self.workspace_members())
+        self.assertTrue(any("desktop gate failure must propagate" in error for error in errors))
+
+    def test_load_workflows_includes_yaml_suffix(self):
+        validator = self.validator()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow_dir = root / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "visible.yaml").write_text("name: Visible\njobs: {}\n")
+            self.assertIn("visible.yaml", validator.load_workflows(root))
 
 
 if __name__ == "__main__":

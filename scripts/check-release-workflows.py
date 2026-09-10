@@ -20,6 +20,14 @@ REQUIRED_DESKTOP_COMMANDS = {
     "npm run --prefix apps/ferro-desktop-ui lint",
     "npm run --prefix apps/ferro-desktop-ui build",
 }
+SAME_REPOSITORY_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+
+
+def load_workflows(root: Path) -> dict[str, dict]:
+    return {
+        path.name: yaml.safe_load(path.read_text()) or {}
+        for path in (root / ".github/workflows").glob("*.y*ml")
+    }
 
 
 def validate(workflows, workspace_members=None):
@@ -40,6 +48,8 @@ def validate(workflows, workspace_members=None):
         return "ferro-lab" in value or allow_qualified and "ferro-release-qualified" in value
 
     for filename, workflow in workflows.items():
+        events = workflow.get("on", workflow.get(True, {}))
+        require("pull_request_target" not in events, filename + ": pull_request_target is not allowed")
         for name, job in workflow.get("jobs", {}).items():
             label = f"{filename}/{name}"
             if "uses" in job:
@@ -47,6 +57,7 @@ def validate(workflows, workspace_members=None):
                 require(job["uses"].startswith("./.github/workflows/") and local in workflows,
                         label + ": reusable workflow must be a validated local file")
                 continue
+            require(job.get("if") == SAME_REPOSITORY_GUARD, label + ": self-hosted job requires the same-repository guard")
             runner = job.get("runs-on")
             if runner == "${{ matrix.runner }}":
                 matrix = job.get("strategy", {}).get("matrix", {})
@@ -54,7 +65,7 @@ def validate(workflows, workspace_members=None):
                 values += matrix.get("runner", [])
                 require(bool(values) and all(self_hosted(value) for value in values), label + ": matrix runner must always be self-hosted ferro-lab")
             else:
-                require(self_hosted(runner, name == "candidate-qualification"), label + ": runner must explicitly be self-hosted ferro-lab")
+                require(self_hosted(runner, filename == "release.yml" and name == "candidate-qualification"), label + ": runner must explicitly be self-hosted ferro-lab")
     release = workflows.get("release.yml", {}).get("jobs", {})
     ci = workflows.get("ci.yml", {}).get("jobs", {})
     if workspace_members is not None:
@@ -66,7 +77,7 @@ def validate(workflows, workspace_members=None):
     require(validation.get("uses") == "./.github/workflows/ci.yml", "candidate-validation must invoke local CI")
     needs = publish.get("needs", [])
     require(isinstance(needs, list) and {"candidate-validation", "candidate-qualification", "cli", "linux-desktop", "macos-desktop", "windows-desktop"} <= set(needs), "publication must depend on all candidate and packaging jobs")
-    require(publish.get("if") in (None, "success()", "${{ success() }}"), "publication may not bypass dependency success")
+    require(publish.get("if") in (None, "success()", "${{ success() }}", SAME_REPOSITORY_GUARD), "publication may not bypass dependency success")
     require(qualification.get("needs") == "candidate-validation", "qualification must follow candidate validation")
     require("ferro-release-qualified" in qualification.get("runs-on", []), "privileged qualification requires its dedicated runner label")
     require(qualification.get("env", {}).get("FERROCRATE_READINESS_REQUIRED") == "rootful,apparmor,rootless", "qualification must retain all required host modes")
@@ -83,7 +94,7 @@ def validate(workflows, workspace_members=None):
             if step.get("uses", "").startswith("actions/checkout@"):
                 require(step.get("with", {}).get("ref") == "${{ github.sha }}", name + ": reusable CI checkout must pin github.sha")
     gate_steps = [step for step in qualification.get("steps", []) if "local-release-gate.sh" in step.get("run", "")]
-    require(qualification.get("if") in (None, "success()", "${{ success() }}"), "qualification job cannot be conditionally skipped")
+    require(qualification.get("if") in (None, "success()", "${{ success() }}", SAME_REPOSITORY_GUARD), "qualification job cannot be conditionally skipped")
     require(len(gate_steps) == 1, "qualification must run exactly one full local release gate")
     for step in gate_steps:
         script = step["run"]
@@ -99,15 +110,34 @@ def validate(workflows, workspace_members=None):
         require(step.get("if") in (None, "success()", "${{ success() }}"), "runtime tests cannot be conditionally skipped")
         require(step.get("shell") == "bash", "runtime tests require fail-fast Bash")
         require("set +e" not in step["run"] and "|| true" not in step["run"], "runtime test failures must propagate")
-    ci_commands = "\n".join(step.get("run", "") for job in ci.values() for step in job.get("steps", []))
     for command in sorted(REQUIRED_DESKTOP_COMMANDS):
-        require(command in ci_commands, "CI must execute desktop gate: " + command)
+        candidate_steps = [
+            step
+            for job in ci.values()
+            for step in job.get("steps", [])
+            if re.search(r"^\s*(?!#).*" + re.escape(command), step.get("run", ""), re.M)
+        ]
+        exact_steps = [
+            step for step in candidate_steps
+            if re.search(r"^\s*" + re.escape(command) + r"\s*$", step["run"], re.M)
+        ]
+        require(bool(exact_steps), "CI must execute desktop gate: " + command)
+        steps_to_validate = exact_steps or candidate_steps
+        require(
+            any(
+                step.get("if") in (None, "success()", "${{ success() }}")
+                and "set +e" not in step["run"]
+                and "|| true" not in step["run"]
+                for step in steps_to_validate
+            ),
+            "desktop gate failure must propagate: " + command,
+        )
     return errors
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    workflows = {path.name: yaml.safe_load(path.read_text()) for path in (root / ".github/workflows").glob("*.yml")}
+    workflows = load_workflows(root)
     with (root / "Cargo.toml").open("rb") as handle:
         workspace_members = {Path(member).name for member in tomllib.load(handle)["workspace"]["members"]}
     errors = validate(workflows, workspace_members)

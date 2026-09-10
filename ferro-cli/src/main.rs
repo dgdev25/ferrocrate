@@ -18671,6 +18671,19 @@ fn docker_resolve_id(
 }
 
 #[cfg(target_os = "linux")]
+/// Docker inspect treats an invalid image selector as an absent object. This
+/// lets the Docker CLI finish its container-or-image lookup and print its
+/// standard `no such object` error.
+fn docker_image_lookup<T, E: std::fmt::Display>(
+    name: &str,
+    result: Result<Option<T>, E>,
+) -> Result<T, String> {
+    result
+        .map_err(|_| format!("docker: unknown image {name}"))?
+        .ok_or_else(|| format!("docker: unknown image {name}"))
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DockerHealthSpec {
     cmd: Vec<String>,
@@ -23077,9 +23090,10 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/images/")
                     .trim_end_matches("/json");
                 let name = percent_decode_path_segment(encoded_name)?;
-                let reference = resolve_reference(&store, &name)
-                    .map_err(|err| err.to_string())?
-                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let reference = docker_image_lookup(
+                    &name,
+                    resolve_reference(&store, &name).map_err(|err| err.to_string()),
+                )?;
                 let body = docker_image_inspect_payload(runtime_dir.as_ref(), &store, &reference)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -23088,9 +23102,10 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/images/")
                     .trim_end_matches("/history");
                 let name = percent_decode_path_segment(encoded_name)?;
-                let reference = resolve_reference(&store, &name)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let reference = docker_image_lookup(
+                    &name,
+                    resolve_reference(&store, &name).map_err(|error| error.to_string()),
+                )?;
                 let manifest = parse_image_manifest(&reference.manifest_json)
                     .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
                 let history = manifest
@@ -42654,6 +42669,16 @@ FROM --platform=linux/${MYARCH} busybox\n";
         let authorization = test_surface_authorization(temp.path());
         let err = handle_pull(&store, "", false, &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn docker_image_lookup_maps_invalid_names_to_not_found() {
+        let error = super::docker_image_lookup(
+            "FooBar",
+            Result::<Option<()>, String>::Err("invalid image reference: FooBar".to_string()),
+        )
+        .expect_err("invalid Docker image names must appear absent to inspect");
+        assert_eq!(error, "docker: unknown image FooBar");
     }
 
     #[test]

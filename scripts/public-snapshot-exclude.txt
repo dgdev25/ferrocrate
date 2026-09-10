@@ -1,0 +1,15 @@
+# Paths removed from the public snapshot (one per line, relative to repo root,
+# directories end with /). Read by scripts/export-public-snapshot.sh.
+# Agent-to-agent process notes and orchestration history.
+ROADMAP-CLOSEOUT.md
+docs/CODEX-COORDINATOR-HANDOVER.md
+docs/HANDOFF-GLM-ROADMAP.md
+docs/HANDOFF-GROK-REMAINING-ROADMAP.md
+docs/CLAUDE-USER-DOCUMENTATION-BRIEF.md
+docs/superpowers/
+.superdesign/
+# Business plans: not for publication.
+docs/product-strategy.md
+docs/monetization-implementation-plan.md
+docs/paid-artifact-gateway.md
+docs/docker-vs-ferrocrate-monetization-comparison.md

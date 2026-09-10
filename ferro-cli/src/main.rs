@@ -18404,6 +18404,17 @@ struct DockerMount {
     target: Option<String>,
     #[serde(rename = "ReadOnly", default)]
     read_only: bool,
+    #[serde(rename = "BindOptions")]
+    bind_options: Option<DockerBindOptions>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerBindOptions {
+    #[serde(rename = "CreateMountpoint", default)]
+    create_mountpoint: bool,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -26039,6 +26050,13 @@ fn docker_mounts_to_binds(
         if mount.extra.values().any(|value| !docker_value_is_default_shaped(value)) {
             return Err("docker: Mount contains options this runtime does not implement".to_string());
         }
+        if mount
+            .bind_options
+            .as_ref()
+            .is_some_and(|options| options.extra.values().any(|value| !docker_value_is_default_shaped(value)))
+        {
+            return Err("docker: BindOptions contains options this runtime does not implement".to_string());
+        }
         let source = mount.source.as_deref().filter(|source| !source.is_empty());
         let target = mount.target.as_deref().filter(|target| target.starts_with('/'));
         let target = target.ok_or_else(|| "docker: Mount.Target must be an absolute path".to_string())?;
@@ -26048,6 +26066,17 @@ fn docker_mounts_to_binds(
                 let source = source
                     .filter(|source| source.starts_with('/'))
                     .ok_or_else(|| "docker: bind Mount.Source must be an absolute path".to_string())?;
+                if mount
+                    .bind_options
+                    .as_ref()
+                    .is_some_and(|options| options.create_mountpoint)
+                {
+                    std::fs::create_dir_all(source).map_err(|error| {
+                        format!("docker: create bind mount source {source}: {error}")
+                    })?;
+                } else if !std::path::Path::new(source).exists() {
+                    return Err(format!("docker: bind mount source does not exist: {source}"));
+                }
                 binds.push(format!("{source}:{target}{mode}"));
             }
             "volume" => {

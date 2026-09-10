@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import yaml
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check-release-workflows.py"
@@ -18,12 +19,21 @@ class WorkflowContracts(unittest.TestCase):
     def workflows(self):
         return {path.name: yaml.safe_load(path.read_text()) for path in (ROOT / ".github/workflows").glob("*.y*ml")}
 
+    def workspace_members(self):
+        with (ROOT / "Cargo.toml").open("rb") as handle:
+            return {Path(member).name for member in tomllib.load(handle)["workspace"]["members"]}
+
     def test_current_workflows_satisfy_contract(self):
         self.assertEqual(self.validator().validate(self.workflows()), [])
 
     def test_hosted_runner_in_matrix_is_rejected(self):
         workflows = self.workflows()
         workflows["ci.yml"]["jobs"]["build-unit-warnings"]["strategy"]["matrix"]["include"][0]["runner"] = "ubuntu-latest"
+        self.assertTrue(self.validator().validate(workflows))
+
+    def test_matrix_runner_requires_ferro_lab_label(self):
+        workflows = self.workflows()
+        workflows["ci.yml"]["jobs"]["build-unit-warnings"]["strategy"]["matrix"]["include"][0]["runner"] = ["self-hosted", "linux", "x64"]
         self.assertTrue(self.validator().validate(workflows))
 
     def test_hosted_canary_and_external_reusable_are_rejected(self):
@@ -70,6 +80,17 @@ class WorkflowContracts(unittest.TestCase):
             if "cargo test --workspace" in step.get("run", ""):
                 step["run"] = "cargo build --workspace --all-features --locked"
         self.assertTrue(self.validator().validate(workflows))
+
+    def test_required_workspace_member_cannot_disappear(self):
+        members = self.workspace_members()
+        members.remove("ferro-cri")
+        self.assertTrue(self.validator().validate(self.workflows(), members))
+
+    def test_ci_requires_desktop_gate_commands(self):
+        workflows = self.workflows()
+        unit = next(step for step in workflows["ci.yml"]["jobs"]["build-unit-warnings"]["steps"] if step.get("name") == "Unit gates")
+        unit["run"] = unit["run"].replace("npm run --prefix apps/ferro-desktop-ui typecheck\n", "")
+        self.assertTrue(self.validator().validate(workflows, self.workspace_members()))
 
 
 if __name__ == "__main__":

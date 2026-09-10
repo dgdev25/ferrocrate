@@ -5,22 +5,39 @@ Requires PyYAML supplied by the self-hosted runner's managed toolchain.
 """
 from pathlib import Path
 import re
+import tomllib
 try:
     import yaml
 except ImportError:
     raise SystemExit("workflow validation requires PyYAML on the self-hosted runner")
 
 
-def validate(workflows):
+REQUIRED_WORKSPACE_MEMBERS = {"ferro-core", "ferro-cri", "ferro-compose", "ferro-net", "ferro-desktop"}
+REQUIRED_DESKTOP_COMMANDS = {
+    "cargo test --manifest-path apps/ferro-desktop-ui/src-tauri/Cargo.toml",
+    "npm run --prefix apps/ferro-desktop-ui test",
+    "npm run --prefix apps/ferro-desktop-ui typecheck",
+    "npm run --prefix apps/ferro-desktop-ui lint",
+    "npm run --prefix apps/ferro-desktop-ui build",
+}
+
+
+def validate(workflows, workspace_members=None):
     errors = []
     def require(condition, message):
         if not condition:
             errors.append(message)
 
-    def self_hosted(value):
+    def self_hosted(value, allow_qualified=False):
         if isinstance(value, dict):
             value = value.get("labels")
-        return value == "self-hosted" or isinstance(value, list) and "self-hosted" in value and all(isinstance(v, str) and "${{" not in v for v in value)
+        if value == "self-hosted":
+            return False
+        if not isinstance(value, list) or "self-hosted" not in value:
+            return False
+        if not all(isinstance(v, str) and "${{" not in v for v in value):
+            return False
+        return "ferro-lab" in value or allow_qualified and "ferro-release-qualified" in value
 
     for filename, workflow in workflows.items():
         for name, job in workflow.get("jobs", {}).items():
@@ -35,11 +52,14 @@ def validate(workflows):
                 matrix = job.get("strategy", {}).get("matrix", {})
                 values = [entry.get("runner") for entry in matrix.get("include", [])]
                 values += matrix.get("runner", [])
-                require(bool(values) and all(self_hosted(value) for value in values), label + ": matrix runner must always be self-hosted")
+                require(bool(values) and all(self_hosted(value) for value in values), label + ": matrix runner must always be self-hosted ferro-lab")
             else:
-                require(self_hosted(runner), label + ": runner must explicitly be self-hosted")
+                require(self_hosted(runner, name == "candidate-qualification"), label + ": runner must explicitly be self-hosted ferro-lab")
     release = workflows.get("release.yml", {}).get("jobs", {})
     ci = workflows.get("ci.yml", {}).get("jobs", {})
+    if workspace_members is not None:
+        for member in sorted(REQUIRED_WORKSPACE_MEMBERS):
+            require(member in workspace_members, "workspace must include " + member)
     validation = release.get("candidate-validation", {})
     qualification = release.get("candidate-qualification", {})
     publish = release.get("publish", {})
@@ -79,13 +99,18 @@ def validate(workflows):
         require(step.get("if") in (None, "success()", "${{ success() }}"), "runtime tests cannot be conditionally skipped")
         require(step.get("shell") == "bash", "runtime tests require fail-fast Bash")
         require("set +e" not in step["run"] and "|| true" not in step["run"], "runtime test failures must propagate")
+    ci_commands = "\n".join(step.get("run", "") for job in ci.values() for step in job.get("steps", []))
+    for command in sorted(REQUIRED_DESKTOP_COMMANDS):
+        require(command in ci_commands, "CI must execute desktop gate: " + command)
     return errors
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
     workflows = {path.name: yaml.safe_load(path.read_text()) for path in (root / ".github/workflows").glob("*.yml")}
-    errors = validate(workflows)
+    with (root / "Cargo.toml").open("rb") as handle:
+        workspace_members = {Path(member).name for member in tomllib.load(handle)["workspace"]["members"]}
+    errors = validate(workflows, workspace_members)
     if errors:
         print("\n".join(errors))
         return 1

@@ -100,7 +100,9 @@ echo "export: snapshot ok ($file_count files)"
 echo "export: committing to branch $branch"
 src_head="$(git -C "$repo_root" rev-parse --short "$source_ref")"
 git -C "$tree" init -q -b "$branch"
-git -C "$tree" add -A
+# -f: main force-tracks some evidence logs that .gitignore would skip; the
+# forbidden-path check above already rejects real local-only files.
+git -C "$tree" add -A -f
 git -C "$tree" -c user.name="Ferrocrate" -c user.email="maintainers@example.invalid" \
   commit -q -m "Ferrocrate public snapshot (from private $source_ref @ $src_head)"
 git -C "$repo_root" fetch -q --force "$tree" "$branch:$branch"

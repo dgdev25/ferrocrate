@@ -17,16 +17,23 @@ if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
 }
 
 $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+$signtoolPath = 'signtool.exe'
 if ($null -eq $signtool) {
-  throw "signtool.exe not found"
+  $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+  $signtoolPath = Get-ChildItem -Path $sdkBin -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+    Select-Object -First 1 -ExpandProperty FullName
+  if ([string]::IsNullOrWhiteSpace($signtoolPath)) {
+    throw "signtool.exe not found"
+  }
 }
 
 $pfxPath = Join-Path $env:RUNNER_TEMP ("codesign-" + [guid]::NewGuid().ToString() + ".pfx")
 try {
   [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
-  & signtool.exe sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_PFX_PASSWORD /tr $TimestampUrl /td SHA256 $MsiPath
+  & $signtoolPath sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_PFX_PASSWORD /tr $TimestampUrl /td SHA256 $MsiPath
   if ($LASTEXITCODE -ne 0) { throw "signtool signing failed with exit code $LASTEXITCODE" }
-  & signtool.exe verify /pa /all /v $MsiPath
+  & $signtoolPath verify /pa /all /v $MsiPath
   if ($LASTEXITCODE -ne 0) { throw "signtool verification failed with exit code $LASTEXITCODE" }
   Write-Host "signed windows artifact: $MsiPath"
 } finally {

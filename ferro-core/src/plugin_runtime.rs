@@ -229,6 +229,7 @@ struct PluginChild {
 
 impl Drop for PluginChild {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(self.child.id() as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -244,6 +245,7 @@ impl Drop for PluginChild {
     }
 }
 
+#[cfg(unix)]
 fn nonblocking(pipe: &impl std::os::fd::AsFd) -> std::io::Result<()> {
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
     let flags = fcntl(pipe, FcntlArg::F_GETFL).map_err(std::io::Error::from)?;
@@ -252,6 +254,11 @@ fn nonblocking(pipe: &impl std::os::fd::AsFd) -> std::io::Result<()> {
         FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
     )
     .map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn nonblocking<T>(_pipe: &T) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -664,8 +671,11 @@ fn execute_plugin_inner(
             return Err(error);
         }
     };
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let deadline = Instant::now() + Duration::from_secs(manifest.limits.timeout_secs);
     let child = match command
         .stdin(Stdio::piped())

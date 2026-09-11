@@ -1024,13 +1024,49 @@ fn default_vm_name() -> String {
 }
 
 fn command_exists(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        // Some required tools (notably macOS ssh-keygen and hdiutil) do not
-        // implement `--version`; being executable is the availability test.
-        .map(|_| true)
-        .unwrap_or(false)
+    resolve_command_path(bin).is_some()
+}
+
+fn resolve_command_path(bin: &str) -> Option<PathBuf> {
+    if bin.trim().is_empty() {
+        return None;
+    }
+    let paths = if Path::new(bin).components().count() > 1 {
+        vec![PathBuf::from(bin)]
+    } else {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(bin))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    paths.into_iter().find_map(|path| {
+        let candidates = if cfg!(windows) && path.extension().is_none() {
+            vec![path.with_extension("exe"), path.with_extension("cmd"), path]
+        } else {
+            vec![path]
+        };
+        candidates.into_iter().find(|candidate| {
+            let Ok(metadata) = fs::metadata(candidate) else {
+                return false;
+            };
+            if !metadata.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        })
+    })
 }
 
 fn require_command(bin: &str) -> Result<(), DesktopError> {

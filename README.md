@@ -10,7 +10,7 @@
 
 Ferrocrate runs containers the way Docker does, from a single Rust binary.
 Point your existing `docker` CLI, Dockerfiles, and Compose files at it and
-they work unchanged; or use the native `ferrocrate` command, the desktop app,
+they work unchanged; or use the native `ferro-cli` command, the desktop app,
 or the fleet control plane. On Linux a container is a normal process the
 kernel isolates, and that is where the speed comes from. Every capability the
 project claims is backed by a dated test report you can read.
@@ -43,10 +43,12 @@ Build and run your own project — a Dockerfile and one command, as always:
 ./target/release/ferro-cli run --rm myapp:1.0
 ```
 
-Keep using the real Docker CLI, pointed at Ferrocrate's daemon:
+Keep using the real Docker CLI, pointed at Ferrocrate's daemon (start it with
+the Docker-compatible API enabled, then point `DOCKER_HOST` at its socket):
 
 ```bash
-export DOCKER_HOST=unix:///run/ferrocrate/docker.sock
+sudo ./target/release/ferro-cli daemon --docker-compat &
+export DOCKER_HOST=unix:///var/run/ferrocrate.sock
 docker build -t myapp:1.0 .
 docker run myapp:1.0
 ```
@@ -191,7 +193,7 @@ register.
 | Warm start p95 (target ≤ 50 ms) | 47–49 ms | [2026-08-22](docs/evidence/performance/2026-08-22-startup-slo-refresh.md) |
 | Daemon memory added per container | 0 KiB | [2026-08-22](docs/evidence/performance/2026-08-22-startup-slo-refresh.md) |
 | 100 create/start/stop/remove cycles in a row | 100/100, 105 ms mean cycle | [2026-08-21](docs/evidence/performance/2026-08-21-ferrocrate-container-lifecycle-100-current-head-ce80ecd7.md) |
-| Release CLI binary size | 21 MiB | [2026-08-21](docs/evidence/performance/2026-08-21-local-safe-suite-current-head-67323480.md) |
+| Release CLI binary size | 20 MiB | [2026-08-17](docs/evidence/performance/2026-08-17-binary-size-current-head-5ae8fb45.md) |
 | Compose: up + scale 3 services | 654 ms | [2026-08-25](docs/evidence/performance/2026-08-25-compose-profiles-scale-watch.md) |
 
 </details>
@@ -242,8 +244,8 @@ features for containers).
 
 Images are built and run only for the host's architecture. There is no
 emulation of foreign architectures, no `--platform` builds, and no
-multi-architecture manifests; that work is parked in
-[Round 11](docs/ROADMAP.md).
+multi-architecture manifests; cross-platform output is deferred under item 10
+of the [roadmap](docs/ROADMAP.md).
 
 The authoritative support contract is
 [`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md). Every row links dated

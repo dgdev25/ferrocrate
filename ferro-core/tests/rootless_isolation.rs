@@ -21,6 +21,7 @@ fn resolves_rootless_config_from_system() {
 /// no proc-shaped substitute. The surrounding production runtime obtains an
 /// authenticated permit for the exact rootless mapping mutation.
 #[test]
+#[ignore = "requires a host that permits authenticated subordinate UID/GID mappings; run the qualification command with --ignored"]
 fn rootless_configuration_mutates_the_real_runtime_namespaces() {
     // A rootful qualification run resolves the caller as the trusted
     // administrator. Enforce mode must deny ordinary callers, but an

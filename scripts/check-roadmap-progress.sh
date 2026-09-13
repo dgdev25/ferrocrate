@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
-roadmap="${1:-$repo_root/docs/ROADMAP.md}"
+roadmap="${1:-$repo_root/docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md}"
 if [[ ! -f "$roadmap" ]]; then
   echo "roadmap not found: $roadmap" >&2
   exit 2
@@ -38,7 +38,15 @@ fi
 printf 'roadmap progress: %d complete / %d open / %d total (%d%% complete)\n' \
   "$completed" "$open" "$total" "$((completed * 100 / total))"
 
-expected_total="${FERROCRATE_ROADMAP_EXPECTED_TOTAL:-27}"
+if [[ -n "${FERROCRATE_ROADMAP_EXPECTED_TOTAL:-}" ]]; then
+  expected_total="$FERROCRATE_ROADMAP_EXPECTED_TOTAL"
+elif [[ "$roadmap" == "$repo_root/docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md" ]]; then
+  expected_total=37
+else
+  # Alternative execution roadmaps have their own completion scope.  Callers
+  # may pin a count through FERROCRATE_ROADMAP_EXPECTED_TOTAL when needed.
+  expected_total=""
+fi
 if [[ "$expected_total" =~ ^[0-9]+$ ]] && (( total != expected_total )); then
   echo "roadmap progress failed: expected $expected_total checklist rows, found $total" >&2
   exit 1

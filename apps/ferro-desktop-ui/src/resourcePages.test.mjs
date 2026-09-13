@@ -70,6 +70,15 @@ test("web mode renders a validated daemon-host path fallback when dialogs are un
   assert.doesNotMatch(valid, /Choose directory/);
 });
 
+test("a host-path field without an edit callback is explicitly read-only", () => {
+  const markup = renderToStaticMarkup(createElement(resourcePages.HostPathField, {
+    label: "Compose file",
+    kind: "file",
+    value: "/srv/app/compose.yml",
+  }));
+  assert.match(markup, /readonly=""/);
+});
+
 test("resource page state keeps empty and populated controls mutually exclusive while a loaded Compose project stays populated", () => {
   assert.equal(typeof resourcePages.resourcePageState, "function");
   assert.deepEqual(resourcePages.resourcePageState("volumes", 0), {

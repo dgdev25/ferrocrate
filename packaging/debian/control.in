@@ -5,6 +5,7 @@ Priority: optional
 Architecture: @ARCHITECTURE@
 Maintainer: FerroCrate maintainers <maintainers@ferrocrate.dev>
 Depends: apparmor
+Replaces: ferro-crate-desktop
 Description: rootless-first OCI container runtime
  FerroCrate provides a Docker-compatible local container runtime with
  rootless execution and bridge networking support.

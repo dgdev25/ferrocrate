@@ -9,9 +9,14 @@ import json, sys
 bundle = json.load(open(sys.argv[1]))["bundle"]
 assert bundle["targets"] == ["appimage", "deb", "dmg", "nsis", "msi"], bundle["targets"]
 assert bundle["externalBin"] == ["binaries/ferrocrate", "binaries/ferro-desktop-sidecar"], bundle["externalBin"]
+assert "files" not in bundle["linux"]["deb"], bundle["linux"]["deb"]
+package = json.load(open(sys.argv[1].replace("src-tauri/tauri.conf.json", "package.json")))
+assert package["dependencies"]["@tauri-apps/api"].startswith("2.11."), package["dependencies"]
+assert package["devDependencies"]["@tauri-apps/cli"].startswith("^2.11."), package["devDependencies"]
 PY
 grep -Fq 'tauri-plugin-updater' "$repo_root/apps/ferro-desktop-ui/src-tauri/Cargo.toml"
 grep -Fq 'build-deb-package.sh' "$repo_root/scripts/build-release-artifacts.sh"
+grep -Fqx 'Replaces: ferro-crate-desktop' "$repo_root/packaging/debian/control.in"
 grep -Fq 'archive="ferrocrate-${version}-linux-${arch}${archive_suffix}.tar.gz"' "$repo_root/scripts/install.sh"
 ! grep -Fq 'ferrocrate-${version}-${arch}.AppImage' "$repo_root/scripts/install.sh"
 test -x "$repo_root/scripts/bundle-sidecars.sh"

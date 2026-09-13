@@ -1,6 +1,6 @@
 #!/bin/bash
-# FerroCrate Local Build & Release Script
-# Builds, tests, signs, and releases binaries to GitHub Release
+# FerroCrate legacy local candidate helper.
+# It creates local artifacts and a local tag. It does not publish a release.
 # Usage: ./scripts/build-and-release.sh <version>
 # Example: ./scripts/build-and-release.sh v0.1.0
 

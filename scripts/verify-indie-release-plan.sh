@@ -4,27 +4,15 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 cd "$repo_root"
 
-plan="docs/INDIE_RELEASE_PLAN.md"
+plan="docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
 roadmap="docs/ROADMAP.md"
-[[ -f "$plan" ]] || { echo "missing indie release plan: $plan" >&2; exit 1; }
+[[ -f "$plan" ]] || { echo "missing production readiness roadmap: $plan" >&2; exit 1; }
 [[ -f "$roadmap" ]] || { echo "missing roadmap: $roadmap" >&2; exit 1; }
 
-required_headings=(
-  "### 1. Rootless Linux usability"
-  "### 2. Reliable rootful Linux baseline"
-  "### 3. Docker/OCI compatibility"
-  "### 4. CRI and Compose confidence"
-  "### 5. Security release gates"
-  "### 6. Operational packaging"
-  "### 7. Open-source readiness"
-  "### 8. Evidence and performance"
-)
-for heading in "${required_headings[@]}"; do
-  grep -Fq "$heading" "$plan" || {
-    echo "indie release plan is missing heading: $heading" >&2
-    exit 1
-  }
-done
+grep -Fq 'This is the active execution roadmap.' "$plan" || {
+  echo "production readiness roadmap lacks its authority statement" >&2
+  exit 1
+}
 
 required_files=(
   LICENSE
@@ -34,7 +22,7 @@ required_files=(
   SUPPORT.md
   README.md
   CHANGELOG.md
-  docs/INDIE_RELEASE_PLAN.md
+  docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md
   docs/operations/local-release-gate.md
   docs/evidence/performance/benchmark-register.md
 )
@@ -54,22 +42,23 @@ if ! grep -Eiq 'supported|experimental|planned' README.md; then
   exit 1
 fi
 
-# GitHub Actions were intentionally removed; a workflow directory containing
-# executable workflow definitions would silently reintroduce an unreviewed CI
-# path. Empty parent directories are harmless and do not fail this check.
-if [[ -d .github/workflows ]] && find .github/workflows -type f -print -quit | grep -q .; then
-  echo "unexpected GitHub workflow files found; use the documented local gate" >&2
+if [[ ! -d .github/workflows ]] || ! find .github/workflows -type f -name '*.yml' -print -quit | grep -q .; then
+  echo "missing self-hosted GitHub Actions workflows" >&2
+  exit 1
+fi
+if ! grep -R -Eq 'self-hosted.*ferro-lab' .github/workflows; then
+  echo "GitHub Actions workflows must use ferro-lab self-hosted runners" >&2
   exit 1
 fi
 
-gate_count="$(grep -c '^| [^|].* | \(Partial\|Open\|Complete\|Blocked\) |' "$plan" || true)"
-if [[ "$gate_count" -ne 8 ]]; then
-  echo "expected eight current indie gate status rows, found $gate_count" >&2
+gate_count="$(grep -cE '^- \[[ x]\] R[0-9]+' "$plan" || true)"
+if [[ "$gate_count" -ne 34 ]]; then
+  echo "expected 34 production readiness rows, found $gate_count" >&2
   exit 1
 fi
 
-if ! grep -Fq 'The current repository-wide roadmap contains ' "$plan"; then
-  echo "indie plan is missing its repository-wide roadmap count" >&2
+if ! grep -Fq '## Phase 6 — Publish honest readiness evidence' "$plan"; then
+  echo "production readiness roadmap lacks the release-evidence phase" >&2
   exit 1
 fi
 
@@ -92,12 +81,12 @@ grep -Fq "The matrix now contains $declared declared cases: $implemented impleme
   echo "Docker API matrix evidence count is stale (expected $declared/$implemented/$unsupported)" >&2
   exit 1
 }
-grep -Fq "authoritative at $declared declared cases:" "$plan" || {
-  echo "indie release plan Docker API matrix count is stale (expected $declared)" >&2
+grep -Fq "authoritative at $declared declared cases:" "$roadmap" || {
+  echo "roadmap Docker API matrix count is stale (expected $declared)" >&2
   exit 1
 }
 grep -Eq "$declared declared cases(:|,) $implemented implemented, (0|zero) partial, and $unsupported explicit(ly)? unsupported" "$roadmap" || {
   echo "roadmap Docker API matrix count is stale (expected $declared/$implemented/$unsupported)" >&2
   exit 1
 }
-echo "indie release plan gate passed: eight status rows, required public artifacts, no workflows"
+echo "production readiness documentation gate passed: 34 status rows, required public artifacts, self-hosted workflows"

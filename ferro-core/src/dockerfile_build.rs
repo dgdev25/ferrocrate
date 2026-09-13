@@ -1259,12 +1259,43 @@ pub(crate) fn build_from_dockerfile_with_store_and_compression_with_contexts_and
     build_args: &HashMap<String, String>,
     execution_options: &DockerfileExecutionOptions,
 ) -> Result<BuildResult, DockerfileBuildError> {
+    let control = BuildControl::load()?;
+    build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args_and_control(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        authority,
+        named_contexts,
+        secrets,
+        authorization_plan_digest,
+        build_args,
+        execution_options,
+        control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args_and_control(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    named_contexts: &HashMap<String, PathBuf>,
+    secrets: &HashMap<String, PathBuf>,
+    authorization_plan_digest: Option<&str>,
+    build_args: &HashMap<String, String>,
+    execution_options: &DockerfileExecutionOptions,
+    control: BuildControl,
+) -> Result<BuildResult, DockerfileBuildError> {
     if !dockerfile_path.exists() {
         return Err(DockerfileBuildError::MissingDockerfile(
             dockerfile_path.display().to_string(),
         ));
     }
-    let control = BuildControl::load()?;
 
     let dockerfile = fs::read_to_string(dockerfile_path)?;
     let stages = select_build_target(
@@ -7005,6 +7036,39 @@ impl BuildControl {
         self.deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
+}
+
+#[cfg(test)]
+fn build_with_cancel_file_for_test(
+    dockerfile_path: &Path,
+    tag: Option<&str>,
+    runtime_dir: &Path,
+    compression: CompressionFormat,
+    store: &LocalImageStore,
+    authority: &crate::authorization::surface::SurfaceMutationAuthority<'_>,
+    cancel_file: &Path,
+) -> Result<BuildResult, DockerfileBuildError> {
+    let control = BuildControl {
+        limits: BuildLimits {
+            cancel_file: Some(cancel_file.to_path_buf()),
+            ..BuildLimits::default()
+        },
+        deadline: None,
+    };
+    build_from_dockerfile_with_store_and_compression_with_contexts_and_secrets_and_build_args_and_control(
+        dockerfile_path,
+        tag,
+        runtime_dir,
+        compression,
+        store,
+        authority,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        &HashMap::new(),
+        &DockerfileExecutionOptions::default(),
+        control,
+    )
 }
 
 fn parse_limit_env(name: &str) -> Result<Option<u64>, DockerfileBuildError> {
@@ -13242,16 +13306,15 @@ mod tests {
         let (dockerfile, runtime_dir, store) = write_minimal_build_fixture(temp.path());
         let cancel_file = temp.path().join("cancel.flag");
         fs::write(&cancel_file, b"cancel").unwrap();
-        std::env::set_var("FERROCRATE_BUILD_CANCEL_FILE", &cancel_file);
-        let outcome = build_from_dockerfile_with_store_and_compression(
+        let outcome = super::build_with_cancel_file_for_test(
             &dockerfile,
             Some("local/cancel:latest"),
             &runtime_dir,
             CompressionFormat::Gzip,
             &store,
             &crate::authorization::surface::SurfaceMutationAuthority::for_test(),
+            &cancel_file,
         );
-        std::env::remove_var("FERROCRATE_BUILD_CANCEL_FILE");
         let error = match outcome {
             Err(error) => error,
             Ok(_) => panic!("cancelled build must fail"),
@@ -13287,16 +13350,15 @@ mod tests {
         .expect("seed build for cache replay");
         let cancel_file = temp.path().join("cancel.flag");
         fs::write(&cancel_file, b"cancel").unwrap();
-        std::env::set_var("FERROCRATE_BUILD_CANCEL_FILE", &cancel_file);
-        let outcome = build_from_dockerfile_with_store_and_compression(
+        let outcome = super::build_with_cancel_file_for_test(
             &dockerfile,
             Some("local/cache-cancel:latest"),
             &runtime_dir,
             CompressionFormat::Gzip,
             &store,
             &authority,
+            &cancel_file,
         );
-        std::env::remove_var("FERROCRATE_BUILD_CANCEL_FILE");
         assert!(
             matches!(outcome, Err(DockerfileBuildError::Cancelled(_))),
             "cancel must win over an otherwise valid cache hit"

@@ -14,7 +14,7 @@ jobs:
     needs: candidate-validation
     # An isolated, privileged qualification host is required. Ordinary build
     # runners must never silently stand in for host/fault qualification.
-    runs-on: [self-hosted, linux, x64, ferro-release-qualified]
+    runs-on: [self-hosted, linux, ferro-lab]
     environment: release
     timeout-minutes: 180
     env:

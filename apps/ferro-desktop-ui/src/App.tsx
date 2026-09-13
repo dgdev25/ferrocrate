@@ -1419,6 +1419,7 @@ function LocalApp(): JSX.Element {
           <Icon name="search" size={16} />
           <input
             ref={globalSearchRef}
+            name="global-search"
             value={globalSearch}
             onChange={(event) => setGlobalSearch(event.target.value)}
             placeholder="Filter containers, images, volumes, networks…"
@@ -1744,7 +1745,7 @@ function LocalApp(): JSX.Element {
                   {inspectorError ? <ActionErrorNotice error={inspectorError} onDismiss={() => setInspectorError(null)} onStart={() => void recoverFirstRun()} onDoctor={() => setActiveSection("doctor")} /> : null}
 
                   <div id="container-panel-logs" role="tabpanel" aria-labelledby="container-tab-logs" className={`detail-pane logs-pane ${detailTab === "logs" ? "active" : ""}`}>
-                    <div className="log-toolbar"><input value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
+                    <div className="log-toolbar"><input name="log-filter" value={logFilter} onChange={(event) => setLogFilter(event.target.value)} placeholder="Filter log stream" /></div>
                     <pre className="log-output">{visibleLogText || (logsFollowing ? "Waiting for log lines…" : "Select a container and start following logs.")}</pre>
                     <div className="detail-foot">
                       <button className="btn btn-secondary" onClick={toggleLogPause} disabled={!logsFollowing}><Icon name={logsPaused ? "play" : "pause"} size={16} />{logsPaused ? "Resume" : "Pause"}</button>
@@ -1759,10 +1760,10 @@ function LocalApp(): JSX.Element {
                   <div id="container-panel-terminal" role="tabpanel" aria-labelledby="container-tab-terminal" className={`detail-pane terminal-pane ${detailTab === "terminal" ? "active" : ""}`}>
                     {selectedRow?.state !== "running" ? <p className="muted" role="status">Start this service to open a shell.</p> : null}
                     <details className="terminal-options"><summary>Shell options</summary><div className="terminal-config">
-                      <input value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
-                      <input value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
-                      <input value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
-                      <textarea value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
+                      <input name="terminal-shell" value={terminalShell} onChange={(event) => setTerminalShell(event.target.value)} placeholder="shell (sh)" />
+                      <input name="terminal-user" value={terminalUser} onChange={(event) => setTerminalUser(event.target.value)} placeholder="user (optional)" />
+                      <input name="terminal-workdir" value={terminalWorkdir} onChange={(event) => setTerminalWorkdir(event.target.value)} placeholder="workdir (optional)" />
+                      <textarea name="terminal-environment" value={terminalEnv} onChange={(event) => setTerminalEnv(event.target.value)} placeholder="KEY=value, one per line" rows={3} />
                     </div>
                     </details>
                     <div className="terminal-host" ref={setTerminalHost} aria-label="Interactive container terminal" />
@@ -1792,7 +1793,7 @@ function LocalApp(): JSX.Element {
                     {containerDetail ? (
                       <>
                         {selectedRow?.statsAvailable === false ? null : <div className="stat-cards"><div><span>CPU usage</span><strong>{selectedRow?.cpu || "Waiting for live stats…"}</strong></div><div><span>Memory usage</span><strong>{selectedRow?.memoryUsage == null ? "Waiting for live stats…" : formatBytes(selectedRow.memoryUsage)}</strong></div><div><span>Memory limit</span><strong>{selectedRow?.memoryLimit == null ? "Unlimited" : formatBytes(selectedRow.memoryLimit)}</strong></div><div><span>Health</span><strong>{containerDetail.health?.status || "Not configured"}</strong></div></div>}
-                        <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
+                            <section className="drawer-section"><h3>Resource limits</h3><div className="editor-grid"><label><span>Memory bytes</span><input name="container-memory-bytes" inputMode="numeric" value={detailMemory} onChange={(event) => setDetailMemory(event.target.value)} /></label><label><span>CPU quota</span><input name="container-cpu-quota" inputMode="numeric" value={detailCpuQuota} onChange={(event) => setDetailCpuQuota(event.target.value)} /></label><label><span>CPU period</span><input name="container-cpu-period" inputMode="numeric" value={detailCpuPeriod} onChange={(event) => setDetailCpuPeriod(event.target.value)} /></label></div><button className="btn btn-primary" onClick={() => void updateContainerResources()} disabled={runtimeBusy}>Apply limits</button></section>
                         <section className="drawer-section"><h3>Health history</h3>{containerDetail.health ? <><p className="muted">{containerDetail.health.status} · failing streak {containerDetail.health.failing_streak}</p>{containerDetail.health.log.length ? <ol className="health-list">{containerDetail.health.log.map((entry, index) => <li key={`${entry.start}:${index}`}><strong>Exit {entry.exit_code}</strong><span>{entry.start} → {entry.end}</span><code>{entry.output || "No output"}</code></li>)}</ol> : <p className="muted">No health checks recorded.</p>}</> : <p className="muted">No health check configured.</p>}</section>
                       </>
                     ) : <div className="empty-state"><strong>No stats loaded</strong><span>Select a container row.</span></div>}

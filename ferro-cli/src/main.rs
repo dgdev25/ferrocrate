@@ -39,6 +39,11 @@ mod dashboard;
 #[cfg(target_os = "linux")]
 #[rustfmt::skip]
 mod linux_cli {
+mod docker_api;
+mod image_archive;
+
+use docker_api::normalize_docker_api_path;
+use image_archive::docker_save_image_archive;
 use super::network_lifecycle;
 
 use self::network_lifecycle::{
@@ -12711,62 +12716,6 @@ fn append_commit_symlink<W: Write>(
 }
 
 #[cfg(target_os = "linux")]
-fn docker_save_image_archive(
-    runtime_dir: &Path,
-    store: &LocalImageStore,
-    names: &[String],
-) -> Result<Vec<u8>, String> {
-    let mut manifest_entries = Vec::new();
-    let mut repositories = serde_json::Map::new();
-    let mut blobs = Vec::<(String, Vec<u8>)>::new();
-    for (image_index, name) in names.iter().enumerate() {
-        let reference = resolve_reference(store, name).map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("docker: unknown image {name}"))?;
-        let manifest = parse_image_manifest(&reference.manifest_json)
-            .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
-        let config_path = resolve_config_path_with_store(runtime_dir, name, store)
-            .map_err(|error| format!("docker: image config unavailable: {error}"))?
-            .ok_or_else(|| "docker: image config blob is unavailable".to_string())?;
-        let layer_paths = resolve_layer_paths_with_store(runtime_dir, name, store)
-            .map_err(|error| format!("docker: image layer unavailable: {error}"))?;
-        if layer_paths.len() != manifest.layers.len() {
-            return Err("docker: image layer metadata does not match stored blobs".to_string());
-        }
-        let config_name = format!("{}.json", manifest.config.digest.strip_prefix("sha256:").unwrap_or(&manifest.config.digest));
-        blobs.push((config_name.clone(), std::fs::read(config_path)
-            .map_err(|error| format!("docker: image export config: {error}"))?));
-        let mut layers = Vec::new();
-        for (layer_index, layer_path) in layer_paths.iter().enumerate() {
-            let layer_name = format!("image-{image_index}/layer-{layer_index}.tar");
-            let mut reader = open_decompressed_layer_reader(layer_path)
-                .map_err(|error| format!("docker: image export layer: {error}"))?;
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).map_err(|error| format!("docker: image export layer: {error}"))?;
-            blobs.push((layer_name.clone(), bytes));
-            layers.push(layer_name);
-        }
-        manifest_entries.push(serde_json::json!({"Config": config_name, "RepoTags": [reference.reference.clone()], "Layers": layers}));
-        if let Some(colon) = reference.reference.rfind(':') {
-            if colon > reference.reference.rfind('/').unwrap_or(0) {
-                repositories.insert(reference.reference[..colon].to_string(), serde_json::json!({&reference.reference[colon + 1..]: reference.digest}));
-            }
-        }
-    }
-    let mut archive = Vec::new();
-    let mut builder = tar::Builder::new(&mut archive);
-    let append = |builder: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8]| -> Result<(), String> {
-        let mut header = tar::Header::new_gnu(); header.set_size(bytes.len() as u64); header.set_mode(0o644); header.set_cksum();
-        builder.append_data(&mut header, path, bytes).map_err(|error| format!("docker: image export {path}: {error}"))
-    };
-    append(&mut builder, "manifest.json", &serde_json::to_vec(&manifest_entries).map_err(|error| error.to_string())?)?;
-    append(&mut builder, "repositories", &serde_json::to_vec(&repositories).map_err(|error| error.to_string())?)?;
-    for (path, bytes) in blobs { append(&mut builder, &path, &bytes)?; }
-    builder.finish().map_err(|error| format!("docker: finish image export: {error}"))?;
-    drop(builder);
-    Ok(archive)
-}
-
-#[cfg(target_os = "linux")]
 fn docker_load_image_archive(
     runtime_dir: &Path,
     store: &LocalImageStore,
@@ -13068,6 +13017,12 @@ fn docker_archive_path_selection(
     record: &ferro_core::container_store::ContainerRecord,
     relative: &Path,
 ) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), String> {
+    // `selected` is canonicalized before the boundary check. Canonicalize the
+    // rootfs boundary too, or a valid root path can compare unequal when its
+    // runtime directory contains a symlinked component.
+    let rootfs = rootfs
+        .canonicalize()
+        .map_err(|error| format!("docker: container rootfs is unavailable: {error}"))?;
     if record.tmpfs_mounts.iter().any(|mount| {
         let target = Path::new(mount.target.trim_start_matches('/'));
         relative == target || relative.starts_with(target)
@@ -18708,7 +18663,14 @@ fn docker_image_lookup<T, E: std::fmt::Display>(
     result: Result<Option<T>, E>,
 ) -> Result<T, String> {
     result
-        .map_err(|_| format!("docker: unknown image {name}"))?
+        .map_err(|error| {
+            let error = error.to_string();
+            if error.starts_with("invalid image reference:") {
+                format!("docker: unknown image {name}")
+            } else {
+                error
+            }
+        })?
         .ok_or_else(|| format!("docker: unknown image {name}"))
 }
 
@@ -20445,7 +20407,11 @@ fn run_daemon(
                         // later error therefore closes the socket, so retain
                         // the exact bounded cause in the daemon log instead
                         // of silently turning it into a client-side reset.
-                        tracing::error!("docker compatibility connection failed: {error}");
+                        if docker_client_closed_connection(&error) {
+                            tracing::debug!("docker compatibility client closed connection: {error}");
+                        } else {
+                            tracing::error!("docker compatibility connection failed: {error}");
+                        }
                     }
                 });
             }
@@ -20478,6 +20444,14 @@ fn run_daemon(
             Err(error) => return Err(format!("daemon: accept failed: {error}")),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_client_closed_connection(error: &str) -> bool {
+    error == "docker: client closed connection"
+        || error.contains("Broken pipe (os error 32)")
+        || error.contains("Connection reset by peer (os error 104)")
+        || error.contains("Connection aborted (os error 103)")
 }
 
 #[cfg(target_os = "linux")]
@@ -23556,7 +23530,10 @@ fn handle_docker_compat_connection(
 
     let response = match response_result {
         Ok(response) => response,
-        Err(err) => docker_error_response(docker_status_for_error(&err), &err),
+        Err(err) => {
+            tracing::warn!(error = %err, "docker compatibility request failed");
+            docker_error_response(docker_status_for_error(&err), &err)
+        }
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
     if let Some(execution) = buildkit_control_hijack {
@@ -24991,38 +24968,6 @@ fn docker_image_apply_time_bounds(
 }
 
 #[cfg(target_os = "linux")]
-fn normalize_docker_api_path(path: &str) -> String {
-    if !path.starts_with("/v") {
-        return path.to_string();
-    }
-
-    let mut parts = path.splitn(3, '/');
-    let first = parts.next().unwrap_or_default();
-    let version = parts.next().unwrap_or_default();
-    let rest = parts.next();
-    if !first.is_empty() {
-        return path.to_string();
-    }
-    if version.len() < 2 || !version.starts_with('v') {
-        return path.to_string();
-    }
-
-    let version_body = &version[1..];
-    let valid = version_body
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || ch == '.')
-        && version_body.chars().any(|ch| ch.is_ascii_digit());
-    if !valid {
-        return path.to_string();
-    }
-
-    match rest {
-        Some(rest) if !rest.is_empty() => format!("/{rest}"),
-        _ => "/".to_string(),
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     if body.is_empty() {
         return Err("invalid JSON: EOF".to_string());
@@ -26248,6 +26193,9 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     loop {
         let read = stream.read(&mut byte).map_err(|err| err.to_string())?;
         if read == 0 {
+            if buffer.is_empty() {
+                return Err("docker: client closed connection".to_string());
+            }
             break;
         }
         buffer.extend_from_slice(&byte[..read]);
@@ -34981,6 +34929,14 @@ volumes:
     }
 
     #[test]
+    fn read_http_request_distinguishes_an_empty_client_close() {
+        let (writer, mut reader) = StdUnixStream::pair().expect("pair");
+        drop(writer);
+        let err = read_http_request(&mut reader).expect_err("client close");
+        assert_eq!(err, "docker: client closed connection");
+    }
+
+    #[test]
     fn read_http_request_preserves_case_insensitive_upgrade_headers() {
         let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
         writer
@@ -37738,6 +37694,77 @@ volumes:
         assert!(
             error.contains("config digest does not match its filename"),
             "got: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_save_uses_legacy_docker_layer_tar_paths() {
+        use crate::linux_cli::{docker_load_image_archive, docker_save_image_archive};
+        use sha2::Digest;
+
+        fn append_entry(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes)
+                .expect("append archive entry");
+        }
+
+        let layer = b"ferrocrate-save-layer".to_vec();
+        let layer_hex = format!("{:x}", sha2::Sha256::digest(&layer));
+        let config = serde_json::json!({
+            "architecture": "amd64",
+            "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_hex}")]}
+        });
+        let config_bytes = serde_json::to_vec(&config).expect("serialize image config");
+        let config_hex = format!("{:x}", sha2::Sha256::digest(&config_bytes));
+        let manifest = serde_json::json!([{
+            "Config": format!("{config_hex}.json"),
+            "RepoTags": ["ferrocrate-save:latest"],
+            "Layers": [format!("layers/{layer_hex}")],
+        }]);
+        let mut input = tar::Builder::new(Vec::new());
+        append_entry(&mut input, &format!("{config_hex}.json"), &config_bytes);
+        append_entry(&mut input, &format!("layers/{layer_hex}"), &layer);
+        append_entry(
+            &mut input,
+            "manifest.json",
+            &serde_json::to_vec(&manifest).expect("serialize archive manifest"),
+        );
+        let input = input.into_inner().expect("finish input archive");
+
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let store = LocalImageStore::open(runtime.path().join("images")).expect("image store");
+        let authorization = test_surface_authorization(runtime.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        docker_load_image_archive(runtime.path(), &store, &authorization, &origin, &input)
+            .expect("load fixture image");
+
+        let archive = docker_save_image_archive(
+            runtime.path(),
+            &store,
+            &["ferrocrate-save:latest".to_string()],
+        )
+        .expect("save fixture image");
+        let paths = tar::Archive::new(std::io::Cursor::new(archive))
+            .entries()
+            .expect("read saved archive")
+            .map(|entry| {
+                entry
+                    .expect("read saved archive entry")
+                    .path()
+                    .expect("saved archive path")
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            paths.iter().any(|path| path.to_string_lossy().ends_with("/layer.tar")),
+            "saved archive must use Docker's legacy layer.tar path: {paths:?}"
         );
     }
 
@@ -42767,6 +42794,19 @@ FROM --platform=linux/${MYARCH} busybox\n";
         )
         .expect_err("invalid Docker image names must appear absent to inspect");
         assert_eq!(error, "docker: unknown image FooBar");
+    }
+
+    #[test]
+    fn docker_client_closures_do_not_log_as_daemon_failures() {
+        assert!(super::docker_client_closed_connection(
+            "Broken pipe (os error 32)"
+        ));
+        assert!(super::docker_client_closed_connection(
+            "Connection reset by peer (os error 104)"
+        ));
+        assert!(!super::docker_client_closed_connection(
+            "docker: invalid request"
+        ));
     }
 
     #[test]

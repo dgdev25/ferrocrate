@@ -354,7 +354,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-muted); }
 .global-search { height: 36px; width: min(410px, 35vw); background: var(--surface); }
 .desktop-tabs { grid-column: 1; grid-row: 1 / 3; flex-direction: column; padding: 22px 14px; gap: 6px; background: #242628; color: #EEE6DC; border: 0; overflow: auto; }
 .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 0 3px 30px; }
-.sidebar-brand img { object-fit: contain; }
+.sidebar-brand img { object-fit: contain; border-radius: 9px; background: var(--brand-light); padding: 2px; }
 .sidebar-brand strong { display: block; font-size: 19px; letter-spacing: -.5px; }
 .sidebar-brand span { display: block; margin-top: 2px; color: #B4B5B4; font-size: 10px; }
 .sidebar-label { margin: 8px 12px; color: #B4B5B4; font-size: 10px; letter-spacing: .13em; text-transform: uppercase; }

@@ -85,6 +85,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bench -p 'test_suite_*.py'
           bash scripts/test-qualification-fault-matrix.sh
           node --test scripts/release-artifacts.test.mjs
+          node --test scripts/validate-bundled-sidecars.test.mjs
       - name: Dependency policy
         if: runner.os == 'Linux'
         shell: bash

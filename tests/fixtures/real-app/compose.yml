@@ -1,25 +1,26 @@
-# Representative local application: web + API + database + worker. The API is
-# intentionally attached to both application bridges so this fixture exercises
-# Compose multi-network attachment through the real Docker client.
+# Representative local application: web + API + database + worker. It uses a
+# project-owned network so the rootless runtime can create an isolated lease.
 services:
   web:
     image: ${FERROCRATE_REAL_APP_BUSYBOX_IMAGE:-public.ecr.aws/docker/library/busybox:latest}
     command: ["sh", "-c", "httpd -f -p 18091 -h /srv"]
     volumes:
       - ./webroot:/srv
-    networks: [frontend]
+    ports: ["18091:18091"]
+    networks: [app]
   api:
     image: ${FERROCRATE_REAL_APP_BUSYBOX_IMAGE:-public.ecr.aws/docker/library/busybox:latest}
     command: ["sh", "-c", "httpd -f -p 18092 -h /srv"]
     volumes:
       - ./apiroot:/srv
-    networks: [frontend, backend]
+    ports: ["18092:18092"]
+    networks: [app]
     depends_on:
       - db
   db:
     image: ${FERROCRATE_REAL_APP_DB_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}
     command: ["redis-server", "--port", "16399", "--save", "", "--appendonly", "no"]
-    networks: [backend]
+    networks: [app]
     healthcheck:
       test: ["CMD", "redis-cli", "-p", "16399", "ping"]
       interval: 2s
@@ -30,15 +31,10 @@ services:
     command: ["sh", "-c", "while true; do date +%s > /var/lib/worker/heartbeat; sleep 1; done"]
     volumes:
       - workerdata:/var/lib/worker
-    networks: [backend]
+    networks: [app]
     depends_on:
       - db
 volumes:
   workerdata: {}
 networks:
-  frontend:
-    external: true
-    name: ${COMPOSE_PROJECT_NAME}_frontend
-  backend:
-    external: true
-    name: ${COMPOSE_PROJECT_NAME}_backend
+  app: {}

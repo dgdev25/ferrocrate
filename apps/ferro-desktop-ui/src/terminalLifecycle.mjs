@@ -8,6 +8,8 @@ export function writeTerminalOutput(terminalRef, payload) {
 export function mountTerminalHost(host, terminalRef, createMountedTerminal) {
   if (!host || terminalRef.current) return undefined;
   const mounted = createMountedTerminal(host);
+  const terminalInput = host.querySelector?.("textarea.xterm-helper-textarea");
+  terminalInput?.setAttribute("name", "terminal-input");
   terminalRef.current = mounted.terminal;
   let disposed = false;
   return () => {

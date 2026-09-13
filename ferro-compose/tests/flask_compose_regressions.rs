@@ -48,3 +48,21 @@ fn flask_missing_dependency_is_required_by_default() {
         &HashMap::new(),
     ).is_err());
 }
+
+#[test]
+fn real_app_networks_are_project_owned_for_rootless_compose() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/real-app/compose.yml");
+    let config = ComposeFile::parse(
+        &std::fs::read_to_string(fixture).expect("read real-app Compose fixture"),
+        &HashMap::new(),
+    )
+    .expect("parse real-app Compose fixture");
+    let networks = config.networks.expect("real-app networks");
+    assert_eq!(
+        networks.len(),
+        1,
+        "real-app uses one rootless network lease"
+    );
+    assert!(!networks["app"].external, "app must be project-owned");
+}

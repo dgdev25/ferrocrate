@@ -13,10 +13,10 @@ import { DialogFocusScope } from "./modalFocus.mjs";
 test("standalone modal families connect shared keyboard isolation and close handling", () => {
   const close = () => {};
   for (const element of [
-    ComposeFileDialog({ open: true, value: "", onCancel: close }),
-    PullImageDialog({ open: true, imageTarget: "", onCancel: close }),
-    ResourceCreateDialog({ kind: "volume", name: "", onCancel: close }),
-    ResourceCreateDialog({ kind: "network", name: "", onCancel: close }),
+    ComposeFileDialog({ open: true, value: "", onChange: close, onCancel: close }),
+    PullImageDialog({ open: true, imageTarget: "", onImageTargetChange: close, onCancel: close }),
+    ResourceCreateDialog({ kind: "volume", name: "", onNameChange: close, onCancel: close }),
+    ResourceCreateDialog({ kind: "network", name: "", onNameChange: close, onSubnetChange: close, onCancel: close }),
     LicensingDialog({ open: true, onClose: close }),
     BuildLicensingDialog({ open: true, onClose: close }),
   ]) {

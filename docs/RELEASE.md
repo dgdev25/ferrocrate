@@ -1,128 +1,45 @@
-# FerroCrate Release Process
+# FerroCrate release process
 
-**TL;DR**: Run one command to build, test, sign, and release to GitHub.
+Use the tag-triggered GitHub Actions workflow on self-hosted `ferro-lab`
+runners to qualify a release candidate. The workflow requires both candidate
+validation and candidate qualification before it can publish.
 
-```bash
-./scripts/build-and-release.sh v0.1.1
-```
+Do not publish a release while any required row in the production readiness
+roadmap is failed, blocked, or not run.
 
-That's it. No more GitHub Actions free tier issues.
+## Candidate procedure
 
-## How It Works
+1. Select the exact commit and version.
+2. Run the required candidate gate on the qualified host:
 
-The `build-and-release.sh` script replaces the need for GitHub Actions CI/CD. It:
+   ```bash
+   bash scripts/local-release-gate.sh --version vX.Y.Z
+   ```
 
-1. **Validates** - Checks all required tools exist
-2. **Tests** - Runs `cargo fmt`, `cargo clippy`, `cargo test`
-3. **Builds** - Compiles release artifacts with `cargo build --release`
-4. **Signs** - Creates GPG signatures for all binaries
-5. **Checksums** - Generates SHA256 checksums
-6. **Tags** - Creates a git tag for the version
-7. **Pushes** - Pushes the tag to GitHub
-8. **Releases** - Creates a GitHub Release with all artifacts
+3. Build platform artifacts through the release workflow. It applies the
+   platform signing steps and creates `SHA256SUMS` and `latest.json`.
+4. Verify each signed installer and updater payload on its advertised platform.
+5. Review the evidence bundle against the candidate support matrix.
+6. A maintainer approves the GitHub publication after all required rows pass.
 
-## Quick Start
+Local commands prepare artifacts only. They do not prove native signing,
+install, update, rollback, runtime fault handling, or desktop interaction.
 
-### First Time Setup (5 minutes)
+## Required signing material
 
-```bash
-# List your GPG keys
-gpg --list-secret-keys --keyid-format short
+The release workflow needs the protected signing credentials described in
+[`SIGNING.md`](release/SIGNING.md). Do not replace a missing trusted Apple or
+Windows identity with a self-signed certificate.
 
-# Set the key ID for releases
-export FERROCRATE_GPG_KEY_ID="YOUR_KEY_ID"
+## Legacy helper
 
-# Verify GitHub CLI is authenticated
-gh auth status
-```
+`scripts/build-and-release.sh` is a legacy local helper. It creates local
+artifacts and a local Git tag. It does not push a tag or create a GitHub
+release. Do not use it as the production release procedure.
 
-### Release a New Version
+## Evidence and support
 
-```bash
-# From ferrocrate root directory
-
-# Test build (creates tag but doesn't push)
-./scripts/build-and-release.sh v0.1.1-test
-
-# Production build (builds, signs, tags, pushes, and releases)
-export FERROCRATE_GPG_KEY_ID="YOUR_KEY_ID"
-./scripts/build-and-release.sh v0.1.1
-```
-
-### Verify Release
-
-```bash
-# Check what was built
-ls -lh release-artifacts/
-
-# View the GitHub Release
-gh release view v0.1.1
-
-# Edit release notes if needed
-gh release edit v0.1.1 --notes "Release notes here"
-```
-
-## Why This Approach?
-
-| Aspect | GitHub Actions | Local Build |
-|--------|---|---|
-| Free tier limits | 2,000 min/month | Unlimited |
-| Billing blocks | Yes | No |
-| Build feedback | 30+ seconds | Instant |
-| Debugging | Hard (via logs) | Easy (live output) |
-| Dependencies | Needs setup in workflow | Local system deps |
-| Reproducibility | GitHub runner image | Your machine |
-
-## The Script Does Everything
-
-**No more:**
-- ❌ GitHub Actions workflow debugging
-- ❌ Billing issues blocking releases
-- ❌ Waiting for GitHub's CI/CD
-- ❌ Manual GPG signing
-- ❌ Manual checksum generation
-
-**Instead:**
-- ✅ One command: `./scripts/build-and-release.sh v0.1.1`
-- ✅ Full control over the process
-- ✅ See exactly what's happening
-- ✅ Release whenever you want
-
-## What If It Fails?
-
-The script has comprehensive error checking. If it fails, it tells you exactly where:
-
-```
-✓ All required tools found
-✓ In ferrocrate root directory
-✓ Version format valid: v0.1.1
-✓ Code formatting OK
-✓ Clippy checks passed
-✓ All tests passed
-✓ Build succeeded
-✓ Found 3 binary artifacts
-✓ Signed: ferro-cli
-✓ Signed: ferro-mind
-✓ Signed: ferrocrate
-✓ Checksums written to: SHA256SUMS.txt
-✓ Tag created: v0.1.1
-✓ Tag pushed: v0.1.1
-✓ GitHub release created/updated: v0.1.1
-```
-
-Fix any issues and run again. The script is idempotent for most operations.
-
-## Next: Binary Distribution Phases
-
-- **Phase 1 (DONE)**: GitHub Releases, installer, GPG signing
-- **Phase 2**: Homebrew tap, .deb packaging, GitHub Package Registry
-- **Phase 3**: Chocolatey, Winget, Snap store
-
-See `docs/BINARY_DISTRIBUTION_PIPELINE.md` for full details.
-
-## Files
-
-- `scripts/build-and-release.sh` - Main build script
-- `scripts/sign-binaries.sh` - GPG signing utility (called by build script)
-- `scripts/install.sh` - Universal installer for end users
-- `docs/BUILD_AND_RELEASE.md` - Detailed guide with troubleshooting
+- [Candidate support matrix](operations/candidate-support-2026-09-05.md)
+- [Local release-gate contract](operations/local-release-gate.md)
+- [Production readiness roadmap](PRODUCTION-READINESS-ROADMAP-2026-09-05.md)
+- [Release artifact contract](release-artifacts.md)

@@ -80,7 +80,11 @@ cleanup() {
       kill -KILL $fixture_pids 2>/dev/null || true
     fi
   fi
-  find "$runtime_dir" -depth -delete 2>/dev/null || true
+  if [[ "${FERROCRATE_KEEP_DOCKER_CLI_RUNTIME:-0}" == "1" ]]; then
+    echo "Docker CLI compatibility runtime retained: $runtime_dir" >&2
+  else
+    find "$runtime_dir" -depth -delete 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -133,8 +137,8 @@ curl --fail --silent --show-error --unix-socket "$socket" \
 docker -H "$host" history "$image" >/dev/null
 save_archive="$runtime_dir/image-save.tar"
 docker -H "$host" save "$image" -o "$save_archive" >/dev/null
-tar -tf "$save_archive" | grep -qx 'manifest.json'
-tar -tf "$save_archive" | grep -q '/layer.tar$'
+[[ "$(tar -tf "$save_archive" | grep -Fxc 'manifest.json')" == "1" ]]
+[[ "$(tar -tf "$save_archive" | grep -Ec '/layer\.tar$')" -ge 1 ]]
 docker -H "$host" load -i "$save_archive" >/dev/null
 docker -H "$host" image inspect "$image" >/dev/null
 exclude_check_name="docker-cli-copy-exclude-$$"

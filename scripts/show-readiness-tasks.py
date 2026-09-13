@@ -6,7 +6,7 @@ import re
 
 root = Path(__file__).resolve().parents[1]
 roadmap = root / "docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
-state = json.loads((root / "docs/evidence/closeout-2026-09-05/tasks.json").read_text())
+state = json.loads((root / "docs/internal/evidence-raw/closeout-2026-09-05/tasks.json").read_text())
 tasks = re.findall(r"^- \[([ x])\] (R\d+) — (.*)$", roadmap.read_text(), re.M)
 done = sum(checked == "x" for checked, _, _ in tasks)
 print(f"FerroCrate production readiness | {done}/{len(tasks)} complete")

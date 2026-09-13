@@ -93,7 +93,7 @@ def validate(workflows, workspace_members=None):
     require(isinstance(needs, list) and {"candidate-validation", "candidate-qualification", "cli", "linux-desktop", "macos-desktop", "windows-desktop"} <= set(needs), "publication must depend on all candidate and packaging jobs")
     require(publish.get("if") in (None, "success()", "${{ success() }}", SAME_REPOSITORY_GUARD), "publication may not bypass dependency success")
     require(qualification.get("needs") == "candidate-validation", "qualification must follow candidate validation")
-    require("ferro-release-qualified" in qualification.get("runs-on", []), "privileged qualification requires its dedicated runner label")
+    require(qualification.get("runs-on") == ["self-hosted", "linux", "ferro-lab"], "privileged qualification must use the ferro-lab Linux runner")
     require(qualification.get("env", {}).get("FERROCRATE_READINESS_REQUIRED") == "rootful,apparmor,rootless", "qualification must retain all required host modes")
     for name, job in [("candidate-validation", validation), ("candidate-qualification", qualification), *ci.items()]:
         require(not job.get("continue-on-error"), name + ": candidate job cannot ignore failure")

@@ -20403,7 +20403,9 @@ fn run_daemon(
                         // later error therefore closes the socket, so retain
                         // the exact bounded cause in the daemon log instead
                         // of silently turning it into a client-side reset.
-                        if docker_client_closed_connection(&error) {
+                        if docker_client_closed_connection(&error)
+                            || docker_buildkit_control_teardown(&error)
+                        {
                             tracing::debug!("docker compatibility client closed connection: {error}");
                         } else {
                             tracing::error!("docker compatibility connection failed: {error}");
@@ -20448,6 +20450,29 @@ fn docker_client_closed_connection(error: &str) -> bool {
         || error.contains("Broken pipe (os error 32)")
         || error.contains("Connection reset by peer (os error 104)")
         || error.contains("Connection aborted (os error 103)")
+}
+
+/// True only for the specific ways buildx tears down its BuildKit control
+/// (h2) session once a build has finished: it opens short-lived probe/
+/// teardown connections that close (or reset) before, or immediately after,
+/// the HTTP/2 handshake completes. h2 surfaces those as handshake or accept
+/// errors carrying an EOF-during-preface or broken-pipe/reset message rather
+/// than as a plain `std::io::Error`, so `docker_client_closed_connection`
+/// does not already recognize them. Any other `buildkit control:` failure
+/// (a real protocol error, a bad request, etc.) still logs at ERROR.
+#[cfg(target_os = "linux")]
+fn docker_buildkit_control_teardown(error: &str) -> bool {
+    let Some(cause) = error
+        .strip_prefix("buildkit control: h2 handshake failed: ")
+        .or_else(|| error.strip_prefix("buildkit control: accept failed: "))
+    else {
+        return false;
+    };
+    let cause = cause.to_ascii_lowercase();
+    cause.contains("connection closed before reading preface")
+        || cause.contains("broken pipe")
+        || cause.contains("reset by peer")
+        || cause.contains("connection aborted")
 }
 
 #[cfg(target_os = "linux")]
@@ -42838,6 +42863,30 @@ FROM --platform=linux/${MYARCH} busybox\n";
         ));
         assert!(!super::docker_client_closed_connection(
             "docker: invalid request"
+        ));
+    }
+
+    #[test]
+    fn buildkit_control_teardown_does_not_log_as_daemon_failures() {
+        assert!(super::docker_buildkit_control_teardown(
+            "buildkit control: h2 handshake failed: connection closed before reading preface"
+        ));
+        assert!(super::docker_buildkit_control_teardown(
+            "buildkit control: h2 handshake failed: Broken pipe (os error 32)"
+        ));
+        assert!(super::docker_buildkit_control_teardown(
+            "buildkit control: h2 handshake failed: Connection reset by peer (os error 104)"
+        ));
+        assert!(super::docker_buildkit_control_teardown(
+            "buildkit control: accept failed: broken pipe"
+        ));
+        // Only recognized teardown causes are downgraded; a genuine protocol
+        // or handshake failure on a live connection must still log at ERROR.
+        assert!(!super::docker_buildkit_control_teardown(
+            "buildkit control: h2 handshake failed: frame with invalid size"
+        ));
+        assert!(!super::docker_buildkit_control_teardown(
+            "buildkit control request failed: invalid session id"
         ));
     }
 

@@ -27,7 +27,7 @@ use self-hosted runners only.
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">
 </p>
 
-## 🚀 Quickstart
+## Quickstart
 
 Build the CLI and run a container:
 
@@ -83,7 +83,7 @@ supported through the authenticated Buildx docker driver; the classic build
 path is kept and produces the same image digest. Arbitrary LLB and
 `gateway.v0` frontends are not supported.
 
-## 📊 Benchmarks against Docker
+## Benchmarks against Docker
 
 <p align="center">
   <img src="docs/assets/benchmark.svg" alt="Median seconds per operation on the same host: Ferrocrate is faster on nine of ten operations; Docker is faster on attached run-to-exit" width="100%">
@@ -231,7 +231,7 @@ Around the engine: `ferro-desktop` and the Tauri app in `apps/ferro-desktop-ui`
 shared browser transport), and `ferro-mind` (resource monitoring and anomaly
 features for containers).
 
-## 🖥️ Platform support
+## Platform support
 
 | Platform | Status |
 |---|---|
@@ -271,7 +271,7 @@ experimental or unsupported, the matrix says so.
   the packaged Ubuntu AppArmor profile on a disposable host; see
   [`SECURITY.md`](SECURITY.md).
 
-## 🛠️ Development
+## Development
 
 ```bash
 cargo test --workspace                       # full suite
@@ -286,6 +286,6 @@ platform bundles. Contribution and release notes:
 [`docs/operations/external-ci.md`](docs/operations/external-ci.md).
 Open follow-ups live in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## 📄 License
+## License
 
 [Apache-2.0](LICENSE)

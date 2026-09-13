@@ -39,6 +39,11 @@ mod dashboard;
 #[cfg(target_os = "linux")]
 #[rustfmt::skip]
 mod linux_cli {
+mod docker_api;
+mod image_archive;
+
+use docker_api::normalize_docker_api_path;
+use image_archive::docker_save_image_archive;
 use super::network_lifecycle;
 
 use self::network_lifecycle::{
@@ -10739,11 +10744,13 @@ fn parse_volume_mounts(
     let mut out = Vec::new();
     for entry in volumes {
         let parts = entry.split(':').collect::<Vec<_>>();
-        let (source, target, read_only, anonymous) = match parts.as_slice() {
-            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true),
-            [source, target] => ((*source).to_string(), *target, false, false),
-            [source, target, "ro"] => ((*source).to_string(), *target, true, false),
-            [source, target, "rw"] => ((*source).to_string(), *target, false, false),
+        let (source, target, read_only, anonymous, subpath) = match parts.as_slice() {
+            [target] if target.starts_with('/') => (anonymous_volume_name(), *target, false, true, None),
+            [source, target] => ((*source).to_string(), *target, false, false, None),
+            [source, target, "ro"] => ((*source).to_string(), *target, true, false, None),
+            [source, target, "rw"] => ((*source).to_string(), *target, false, false, None),
+            [source, target, "ro", subpath] => ((*source).to_string(), *target, true, false, Some(*subpath)),
+            [source, target, "rw", subpath] => ((*source).to_string(), *target, false, false, Some(*subpath)),
             _ => return Err("run: volume must be source:target[:ro]".to_string()),
         };
 
@@ -10769,6 +10776,20 @@ fn parse_volume_mounts(
                 }
             };
             record.path
+        };
+
+        let source_path = if let Some(subpath) = subpath {
+            let subpath = std::path::Path::new(subpath);
+            if subpath.is_absolute() || subpath.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+                return Err("docker: volume subpath must be a relative path within the volume".to_string());
+            }
+            let path = std::path::Path::new(&source_path).join(subpath);
+            if !path.exists() {
+                return Err(format!("docker: cannot access path {}", path.display()));
+            }
+            path.to_string_lossy().into_owned()
+        } else {
+            source_path
         };
 
         out.push(ferro_core::mounts::BindMount {
@@ -11273,7 +11294,7 @@ fn execute_build(
     validate_build_platform(platform)?;
     let runtime_dir = runtime_dir();
     let compression = parse_compression(compression)?;
-    let named_contexts = parse_build_contexts(build_context)?;
+    let mut named_contexts = parse_build_contexts(build_context)?;
     let secrets = parse_build_secrets(secrets)?;
     let retry_limit = build_retry_limit()?;
     if ferrofile.is_some() && !secrets.is_empty() {
@@ -11340,6 +11361,14 @@ fn execute_build(
             } else {
                 context_dir.join(dockerfile)
             };
+            named_contexts.extend(prepare_external_copy_contexts(
+                store,
+                origin,
+                authorization,
+                &dockerfile_path,
+                build_args,
+                &named_contexts,
+            )?);
             prefetch_dockerfile_bases(
                 store,
                 origin,
@@ -11495,6 +11524,77 @@ fn prefetch_dockerfile_bases(
     )
     .map_err(|error| error.to_string())?;
     prefetch_image_references(store, origin, authorization, bases, session_auth)
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_external_copy_contexts(
+    runtime_dir: &Path,
+    store: &LocalImageStore,
+    references: &[String],
+) -> Result<HashMap<String, PathBuf>, String> {
+    let destination = runtime_dir.join("build").join("external-image-contexts");
+    std::fs::create_dir_all(&destination)
+        .map_err(|error| format!("build: create external COPY contexts: {error}"))?;
+    let mut contexts = HashMap::with_capacity(references.len());
+    for reference in references {
+        let record = resolve_reference(store, reference)
+            .map_err(|error| format!("build: inspect COPY source {reference}: {error}"))?
+            .ok_or_else(|| format!("build: COPY source image was not found: {reference}"))?;
+        let key = format!(
+            "{:x}",
+            Sha256::digest(format!("{reference}\0{}", record.digest).as_bytes())
+        );
+        let rootfs = destination.join(key);
+        if !rootfs.is_dir() {
+            let temporary = destination.join(format!(
+                ".copy-context-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let layers = ferro_core::image_fetch::resolve_layer_paths_with_store(
+                runtime_dir,
+                reference,
+                store,
+            )
+            .map_err(|error| format!("build: resolve COPY source {reference}: {error}"))?;
+            let images = runtime_dir.join("images");
+            ferro_core::layer_cache::construct_rootfs_cached(
+                &temporary,
+                &layers,
+                &images.join("file-cas").join("shake256"),
+                &images.join("layer-cache"),
+            )
+            .map_err(|error| format!("build: materialize COPY source {reference}: {error}"))?;
+            if let Err(error) = std::fs::rename(&temporary, &rootfs) {
+                let _ = std::fs::remove_dir_all(&temporary);
+                if !rootfs.is_dir() {
+                    return Err(format!("build: publish COPY source {reference}: {error}"));
+                }
+            }
+        }
+        contexts.insert(reference.clone(), rootfs);
+    }
+    Ok(contexts)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_external_copy_contexts(
+    store: &LocalImageStore,
+    origin: &RequestOrigin,
+    authorization: &SurfaceAuthorization,
+    dockerfile: &Path,
+    build_args: &HashMap<String, String>,
+    named_contexts: &HashMap<String, PathBuf>,
+) -> Result<HashMap<String, PathBuf>, String> {
+    let references = ferro_core::dockerfile_build::dockerfile_external_copy_images_with_build_args(
+        dockerfile, build_args,
+    )
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .filter(|reference| !named_contexts.contains_key(reference))
+    .collect::<Vec<_>>();
+    prefetch_image_references(store, origin, authorization, references.clone(), None)?;
+    materialize_external_copy_contexts(&runtime_dir(), store, &references)
 }
 
 #[cfg(target_os = "linux")]
@@ -12616,62 +12716,6 @@ fn append_commit_symlink<W: Write>(
 }
 
 #[cfg(target_os = "linux")]
-fn docker_save_image_archive(
-    runtime_dir: &Path,
-    store: &LocalImageStore,
-    names: &[String],
-) -> Result<Vec<u8>, String> {
-    let mut manifest_entries = Vec::new();
-    let mut repositories = serde_json::Map::new();
-    let mut blobs = Vec::<(String, Vec<u8>)>::new();
-    for (image_index, name) in names.iter().enumerate() {
-        let reference = resolve_reference(store, name).map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("docker: unknown image {name}"))?;
-        let manifest = parse_image_manifest(&reference.manifest_json)
-            .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
-        let config_path = resolve_config_path_with_store(runtime_dir, name, store)
-            .map_err(|error| format!("docker: image config unavailable: {error}"))?
-            .ok_or_else(|| "docker: image config blob is unavailable".to_string())?;
-        let layer_paths = resolve_layer_paths_with_store(runtime_dir, name, store)
-            .map_err(|error| format!("docker: image layer unavailable: {error}"))?;
-        if layer_paths.len() != manifest.layers.len() {
-            return Err("docker: image layer metadata does not match stored blobs".to_string());
-        }
-        let config_name = format!("{}.json", manifest.config.digest.strip_prefix("sha256:").unwrap_or(&manifest.config.digest));
-        blobs.push((config_name.clone(), std::fs::read(config_path)
-            .map_err(|error| format!("docker: image export config: {error}"))?));
-        let mut layers = Vec::new();
-        for (layer_index, layer_path) in layer_paths.iter().enumerate() {
-            let layer_name = format!("image-{image_index}/layer-{layer_index}.tar");
-            let mut reader = open_decompressed_layer_reader(layer_path)
-                .map_err(|error| format!("docker: image export layer: {error}"))?;
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).map_err(|error| format!("docker: image export layer: {error}"))?;
-            blobs.push((layer_name.clone(), bytes));
-            layers.push(layer_name);
-        }
-        manifest_entries.push(serde_json::json!({"Config": config_name, "RepoTags": [reference.reference.clone()], "Layers": layers}));
-        if let Some(colon) = reference.reference.rfind(':') {
-            if colon > reference.reference.rfind('/').unwrap_or(0) {
-                repositories.insert(reference.reference[..colon].to_string(), serde_json::json!({&reference.reference[colon + 1..]: reference.digest}));
-            }
-        }
-    }
-    let mut archive = Vec::new();
-    let mut builder = tar::Builder::new(&mut archive);
-    let append = |builder: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8]| -> Result<(), String> {
-        let mut header = tar::Header::new_gnu(); header.set_size(bytes.len() as u64); header.set_mode(0o644); header.set_cksum();
-        builder.append_data(&mut header, path, bytes).map_err(|error| format!("docker: image export {path}: {error}"))
-    };
-    append(&mut builder, "manifest.json", &serde_json::to_vec(&manifest_entries).map_err(|error| error.to_string())?)?;
-    append(&mut builder, "repositories", &serde_json::to_vec(&repositories).map_err(|error| error.to_string())?)?;
-    for (path, bytes) in blobs { append(&mut builder, &path, &bytes)?; }
-    builder.finish().map_err(|error| format!("docker: finish image export: {error}"))?;
-    drop(builder);
-    Ok(archive)
-}
-
-#[cfg(target_os = "linux")]
 fn docker_load_image_archive(
     runtime_dir: &Path,
     store: &LocalImageStore,
@@ -12973,6 +13017,12 @@ fn docker_archive_path_selection(
     record: &ferro_core::container_store::ContainerRecord,
     relative: &Path,
 ) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), String> {
+    // `selected` is canonicalized before the boundary check. Canonicalize the
+    // rootfs boundary too, or a valid root path can compare unequal when its
+    // runtime directory contains a symlinked component.
+    let rootfs = rootfs
+        .canonicalize()
+        .map_err(|error| format!("docker: container rootfs is unavailable: {error}"))?;
     if record.tmpfs_mounts.iter().any(|mount| {
         let target = Path::new(mount.target.trim_start_matches('/'));
         relative == target || relative.starts_with(target)
@@ -15836,13 +15886,23 @@ fn prepare_compose_service(
         let context = build.context.as_deref().unwrap_or(".");
         let dockerfile = build.dockerfile.as_deref().unwrap_or("Dockerfile");
         let dockerfile_path = project_dir.join(context).join(dockerfile);
+        let empty_build_args = HashMap::new();
+        let build_args = build.args.as_ref().unwrap_or(&empty_build_args);
+        let named_contexts = prepare_external_copy_contexts(
+            store,
+            origin,
+            authorization,
+            &dockerfile_path,
+            build_args,
+            &HashMap::new(),
+        )?;
         prefetch_dockerfile_bases(
             store,
             origin,
             authorization,
             &dockerfile_path,
             None,
-            build.args.as_ref().unwrap_or(&HashMap::new()),
+            build_args,
         )?;
         let plan = ferro_core::dockerfile_build::prepare_dockerfile_build_with_contexts_and_build_args_and_options(
             &dockerfile_path,
@@ -15850,8 +15910,8 @@ fn prepare_compose_service(
             &runtime_dir(),
             CompressionFormat::Gzip,
             store,
-            &HashMap::new(),
-            build.args.as_ref().unwrap_or(&HashMap::new()),
+            &named_contexts,
+            build_args,
             &ferro_core::dockerfile_build::DockerfileExecutionOptions {
                 context_dir: Some(project_dir.join(context)),
                 target_stage: build.target.clone(),
@@ -18165,6 +18225,8 @@ struct DockerCreateRequest {
     healthcheck: Option<DockerHealthcheck>,
     #[serde(rename = "Tty", default)]
     tty: bool,
+    #[serde(rename = "OpenStdin", default)]
+    open_stdin: bool,
     #[serde(rename = "HostConfig")]
     host_config: Option<DockerHostConfig>,
     #[serde(rename = "NetworkingConfig")]
@@ -18313,6 +18375,30 @@ struct DockerMount {
     target: Option<String>,
     #[serde(rename = "ReadOnly", default)]
     read_only: bool,
+    #[serde(rename = "BindOptions")]
+    bind_options: Option<DockerBindOptions>,
+    #[serde(rename = "VolumeOptions")]
+    volume_options: Option<DockerVolumeOptions>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerBindOptions {
+    #[serde(rename = "CreateMountpoint", default)]
+    create_mountpoint: bool,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct DockerVolumeOptions {
+    #[serde(rename = "NoCopy", default)]
+    _no_copy: bool,
+    #[serde(rename = "Subpath", default)]
+    subpath: String,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -18434,6 +18520,9 @@ struct DockerCreateSpec {
     network_aliases: Vec<String>,
     #[serde(default)]
     tty: bool,
+    /// Docker keeps this creation-time setting for later `attach` clients.
+    #[serde(default)]
+    open_stdin: bool,
     #[serde(default)]
     log_options: HashMap<String, String>,
     #[serde(default = "default_log_driver")]
@@ -18508,6 +18597,9 @@ fn docker_start_run_inputs(spec: &DockerCreateSpec) -> DockerStartRunInputs {
         "io.ferrocrate.log.driver={}",
         spec.log_driver
     ));
+    if spec.open_stdin {
+        annotations.push("io.ferrocrate.open-stdin=true".to_string());
+    }
     if spec.ipc_mode_host {
         annotations.push("io.ferrocrate.ipc.mode=host".to_string());
     }
@@ -18560,6 +18652,26 @@ fn docker_resolve_id(
     }
     docker_pending_id(pending, requested)
         .ok_or_else(|| format!("docker: container not found: {requested}"))
+}
+
+#[cfg(target_os = "linux")]
+/// Docker inspect treats an invalid image selector as an absent object. This
+/// lets the Docker CLI finish its container-or-image lookup and print its
+/// standard `no such object` error.
+fn docker_image_lookup<T, E: std::fmt::Display>(
+    name: &str,
+    result: Result<Option<T>, E>,
+) -> Result<T, String> {
+    result
+        .map_err(|error| {
+            let error = error.to_string();
+            if error.starts_with("invalid image reference:") {
+                format!("docker: unknown image {name}")
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(|| format!("docker: unknown image {name}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -20295,7 +20407,11 @@ fn run_daemon(
                         // later error therefore closes the socket, so retain
                         // the exact bounded cause in the daemon log instead
                         // of silently turning it into a client-side reset.
-                        tracing::error!("docker compatibility connection failed: {error}");
+                        if docker_client_closed_connection(&error) {
+                            tracing::debug!("docker compatibility client closed connection: {error}");
+                        } else {
+                            tracing::error!("docker compatibility connection failed: {error}");
+                        }
                     }
                 });
             }
@@ -20328,6 +20444,14 @@ fn run_daemon(
             Err(error) => return Err(format!("daemon: accept failed: {error}")),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn docker_client_closed_connection(error: &str) -> bool {
+    error == "docker: client closed connection"
+        || error.contains("Broken pipe (os error 32)")
+        || error.contains("Connection reset by peer (os error 104)")
+        || error.contains("Connection aborted (os error 103)")
 }
 
 #[cfg(target_os = "linux")]
@@ -22324,8 +22448,22 @@ fn handle_docker_compat_connection(
                     }
                     if spec.auto_remove {
                         if let Ok(mut results) = state.auto_remove_results.lock() {
-                            results.remove(&id);
+                            // Docker's CLI follows a failed `run --rm` start
+                            // with `/wait`. Keep the conventional daemon
+                            // failure status long enough for that request;
+                            // otherwise it blocks against a record we just
+                            // removed.
+                            results.insert(id.clone(), Some(125));
                         }
+                        // `docker run --rm` expects a failed start to leave
+                        // no created reservation. Keeping it makes the CLI
+                        // open `/wait` against a container that can never
+                        // exit, which blocks the caller indefinitely.
+                        if let Ok(mut pending) = state.pending.lock() {
+                            pending.remove(&id);
+                        }
+                        let _ = state.name_store.release_reserved_name(&id);
+                        let _ = state.persist_pending();
                     }
                     return Err(error);
                 }
@@ -22955,9 +23093,10 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/images/")
                     .trim_end_matches("/json");
                 let name = percent_decode_path_segment(encoded_name)?;
-                let reference = resolve_reference(&store, &name)
-                    .map_err(|err| err.to_string())?
-                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let reference = docker_image_lookup(
+                    &name,
+                    resolve_reference(&store, &name).map_err(|err| err.to_string()),
+                )?;
                 let body = docker_image_inspect_payload(runtime_dir.as_ref(), &store, &reference)?;
                 http_response(200, body.to_string().as_bytes(), "application/json")
             }
@@ -22966,9 +23105,10 @@ fn handle_docker_compat_connection(
                     .trim_start_matches("/images/")
                     .trim_end_matches("/history");
                 let name = percent_decode_path_segment(encoded_name)?;
-                let reference = resolve_reference(&store, &name)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("docker: unknown image {name}"))?;
+                let reference = docker_image_lookup(
+                    &name,
+                    resolve_reference(&store, &name).map_err(|error| error.to_string()),
+                )?;
                 let manifest = parse_image_manifest(&reference.manifest_json)
                     .map_err(|error| format!("docker: invalid image manifest: {error}"))?;
                 let history = manifest
@@ -23390,7 +23530,10 @@ fn handle_docker_compat_connection(
 
     let response = match response_result {
         Ok(response) => response,
-        Err(err) => docker_error_response(docker_status_for_error(&err), &err),
+        Err(err) => {
+            tracing::warn!(error = %err, "docker compatibility request failed");
+            docker_error_response(docker_status_for_error(&err), &err)
+        }
     };
     stream.write_all(&response).map_err(|err| err.to_string())?;
     if let Some(execution) = buildkit_control_hijack {
@@ -23502,8 +23645,29 @@ fn handle_docker_compat_connection(
     if let Some((id, condition, timeout, pending_auto_remove)) = wait_follow {
         let follow_runtime = daemon_runtime.as_ref();
         let auto_remove_result = || -> Result<Option<i32>, String> {
+            // `docker attach` opens `wait?condition=next-exit` after the
+            // hijacked stream closes. For `docker run --rm`, auto-removal
+            // waits for that attach to finish before it records its result.
+            // Prefer the already-published terminal record here, or attach
+            // and auto-removal wait on each other forever.
+            if let Ok(record) = follow_runtime.inspect(&id) {
+                if !matches!(
+                    record.status.as_str(),
+                    "created" | "running" | "restarting" | "paused"
+                ) {
+                    return Ok(Some(record.last_exit_code.unwrap_or(0)));
+                }
+            }
             let started = Instant::now();
             loop {
+                if let Ok(record) = follow_runtime.inspect(&id) {
+                    if !matches!(
+                        record.status.as_str(),
+                        "created" | "running" | "restarting" | "paused"
+                    ) {
+                        return Ok(Some(record.last_exit_code.unwrap_or(0)));
+                    }
+                }
                 let result = state
                     .auto_remove_results
                     .lock()
@@ -24804,38 +24968,6 @@ fn docker_image_apply_time_bounds(
 }
 
 #[cfg(target_os = "linux")]
-fn normalize_docker_api_path(path: &str) -> String {
-    if !path.starts_with("/v") {
-        return path.to_string();
-    }
-
-    let mut parts = path.splitn(3, '/');
-    let first = parts.next().unwrap_or_default();
-    let version = parts.next().unwrap_or_default();
-    let rest = parts.next();
-    if !first.is_empty() {
-        return path.to_string();
-    }
-    if version.len() < 2 || !version.starts_with('v') {
-        return path.to_string();
-    }
-
-    let version_body = &version[1..];
-    let valid = version_body
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || ch == '.')
-        && version_body.chars().any(|ch| ch.is_ascii_digit());
-    if !valid {
-        return path.to_string();
-    }
-
-    match rest {
-        Some(rest) if !rest.is_empty() => format!("/{rest}"),
-        _ => "/".to_string(),
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerCreateSpec, String> {
     if body.is_empty() {
         return Err("invalid JSON: EOF".to_string());
@@ -24953,6 +25085,7 @@ fn parse_docker_create_spec(body: &[u8], name: Option<String>) -> Result<DockerC
         ipc_mode_host: host_config.ipc_mode.as_deref() == Some("host"),
         network_aliases,
         tty: request.tty,
+        open_stdin: request.open_stdin,
         log_options,
         log_driver,
         auto_remove: host_config.auto_remove,
@@ -25445,10 +25578,10 @@ fn docker_inspect_payload(
             "Env": record.env,
             "Cmd": record.command,
             "Tty": record.tty,
-            "AttachStdin": false,
+            "AttachStdin": record.annotations.get("io.ferrocrate.open-stdin").is_some_and(|value| value == "true"),
             "AttachStdout": true,
             "AttachStderr": true,
-            "OpenStdin": false,
+            "OpenStdin": record.annotations.get("io.ferrocrate.open-stdin").is_some_and(|value| value == "true"),
             "StdinOnce": false,
             "WorkingDir": record.workdir,
             "User": record.user,
@@ -25700,10 +25833,10 @@ fn docker_pending_inspect_payload(
             "Cmd": spec.cmd,
             "Volumes": spec.image_volumes.iter().map(|target| (target.clone(), serde_json::json!({}))).collect::<serde_json::Map<_, _>>(),
             "Tty": spec.tty,
-            "AttachStdin": false,
+            "AttachStdin": spec.open_stdin,
             "AttachStdout": true,
             "AttachStderr": true,
-            "OpenStdin": false,
+            "OpenStdin": spec.open_stdin,
             "StdinOnce": false,
             "WorkingDir": spec.workdir,
             "User": spec.user,
@@ -25906,6 +26039,20 @@ fn docker_mounts_to_binds(
         if mount.extra.values().any(|value| !docker_value_is_default_shaped(value)) {
             return Err("docker: Mount contains options this runtime does not implement".to_string());
         }
+        if mount
+            .bind_options
+            .as_ref()
+            .is_some_and(|options| options.extra.values().any(|value| !docker_value_is_default_shaped(value)))
+        {
+            return Err("docker: BindOptions contains options this runtime does not implement".to_string());
+        }
+        if mount
+            .volume_options
+            .as_ref()
+            .is_some_and(|options| options.extra.values().any(|value| !docker_value_is_default_shaped(value)))
+        {
+            return Err("docker: VolumeOptions contains options this runtime does not implement".to_string());
+        }
         let source = mount.source.as_deref().filter(|source| !source.is_empty());
         let target = mount.target.as_deref().filter(|target| target.starts_with('/'));
         let target = target.ok_or_else(|| "docker: Mount.Target must be an absolute path".to_string())?;
@@ -25915,12 +26062,33 @@ fn docker_mounts_to_binds(
                 let source = source
                     .filter(|source| source.starts_with('/'))
                     .ok_or_else(|| "docker: bind Mount.Source must be an absolute path".to_string())?;
+                if mount
+                    .bind_options
+                    .as_ref()
+                    .is_some_and(|options| options.create_mountpoint)
+                {
+                    std::fs::create_dir_all(source).map_err(|error| {
+                        format!("docker: create bind mount source {source}: {error}")
+                    })?;
+                } else if !std::path::Path::new(source).exists() {
+                    return Err(format!("docker: bind mount source does not exist: {source}"));
+                }
                 binds.push(format!("{source}:{target}{mode}"));
             }
             "volume" => {
                 let source = source
                     .ok_or_else(|| "docker: volume Mount.Source is required".to_string())?;
-                volumes.push(format!("{source}:{target}{mode}"));
+                let subpath = mount
+                    .volume_options
+                    .as_ref()
+                    .filter(|options| !options.subpath.is_empty())
+                    .map(|options| options.subpath.as_str());
+                let mode = if mount.read_only { "ro" } else { "rw" };
+                if let Some(subpath) = subpath {
+                    volumes.push(format!("{source}:{target}:{mode}:{subpath}"));
+                } else {
+                    volumes.push(format!("{source}:{target}{mode}"));
+                }
             }
             kind => return Err(format!("docker: unsupported Mount.Type {kind}")),
         }
@@ -26025,6 +26193,9 @@ fn read_http_request(stream: &mut UnixStream) -> Result<HttpRequest, String> {
     loop {
         let read = stream.read(&mut byte).map_err(|err| err.to_string())?;
         if read == 0 {
+            if buffer.is_empty() {
+                return Err("docker: client closed connection".to_string());
+            }
             break;
         }
         buffer.extend_from_slice(&byte[..read]);
@@ -34758,6 +34929,14 @@ volumes:
     }
 
     #[test]
+    fn read_http_request_distinguishes_an_empty_client_close() {
+        let (writer, mut reader) = StdUnixStream::pair().expect("pair");
+        drop(writer);
+        let err = read_http_request(&mut reader).expect_err("client close");
+        assert_eq!(err, "docker: client closed connection");
+    }
+
+    #[test]
     fn read_http_request_preserves_case_insensitive_upgrade_headers() {
         let (mut writer, mut reader) = StdUnixStream::pair().expect("pair");
         writer
@@ -37518,6 +37697,77 @@ volumes:
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_save_uses_legacy_docker_layer_tar_paths() {
+        use crate::linux_cli::{docker_load_image_archive, docker_save_image_archive};
+        use sha2::Digest;
+
+        fn append_entry(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes)
+                .expect("append archive entry");
+        }
+
+        let layer = b"ferrocrate-save-layer".to_vec();
+        let layer_hex = format!("{:x}", sha2::Sha256::digest(&layer));
+        let config = serde_json::json!({
+            "architecture": "amd64",
+            "os": "linux",
+            "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{layer_hex}")]}
+        });
+        let config_bytes = serde_json::to_vec(&config).expect("serialize image config");
+        let config_hex = format!("{:x}", sha2::Sha256::digest(&config_bytes));
+        let manifest = serde_json::json!([{
+            "Config": format!("{config_hex}.json"),
+            "RepoTags": ["ferrocrate-save:latest"],
+            "Layers": [format!("layers/{layer_hex}")],
+        }]);
+        let mut input = tar::Builder::new(Vec::new());
+        append_entry(&mut input, &format!("{config_hex}.json"), &config_bytes);
+        append_entry(&mut input, &format!("layers/{layer_hex}"), &layer);
+        append_entry(
+            &mut input,
+            "manifest.json",
+            &serde_json::to_vec(&manifest).expect("serialize archive manifest"),
+        );
+        let input = input.into_inner().expect("finish input archive");
+
+        let runtime = tempfile::tempdir().expect("runtime directory");
+        let store = LocalImageStore::open(runtime.path().join("images")).expect("image store");
+        let authorization = test_surface_authorization(runtime.path());
+        let origin = ferro_core::authorization::RequestOrigin::cli_current().expect("origin");
+        docker_load_image_archive(runtime.path(), &store, &authorization, &origin, &input)
+            .expect("load fixture image");
+
+        let archive = docker_save_image_archive(
+            runtime.path(),
+            &store,
+            &["ferrocrate-save:latest".to_string()],
+        )
+        .expect("save fixture image");
+        let paths = tar::Archive::new(std::io::Cursor::new(archive))
+            .entries()
+            .expect("read saved archive")
+            .map(|entry| {
+                entry
+                    .expect("read saved archive entry")
+                    .path()
+                    .expect("saved archive path")
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            paths.iter().any(|path| path.to_string_lossy().ends_with("/layer.tar")),
+            "saved archive must use Docker's legacy layer.tar path: {paths:?}"
+        );
+    }
+
     #[test]
     fn rejects_invalid_bind_mount() {
         let err = parse_bind_mounts(&["/host".to_string()]).expect_err("invalid");
@@ -37581,6 +37831,38 @@ volumes:
         assert_eq!(mounts[0].target, std::path::Path::new("var/lib/worker"));
         assert!(!mounts[0].read_only);
         assert_eq!(volume_store.list().expect("list volumes").len(), 1);
+    }
+
+    #[test]
+    fn volume_mount_accepts_a_relative_subpath() {
+        let runtime = configured_cli_runtime("disabled");
+        let volume_store = LocalVolumeStore::open(runtime.path().join("volumes"))
+            .expect("volume store");
+        let origin = ferro_core::authorization::RequestOrigin::cli_current()
+            .expect("CLI request origin");
+        let authorization = test_surface_authorization(runtime.path());
+        let plan = volume_store
+            .prepare_create("subpath-data", "local", BTreeMap::new())
+            .expect("prepare volume");
+        let permit = authorization
+            .authorize_volume_create_plan(&origin, &plan)
+            .expect("authorize volume");
+        let record = volume_store
+            .create_with_driver_authorized(plan, permit)
+            .expect("create volume");
+        let subpath = std::path::Path::new(&record.path).join("logs");
+        std::fs::create_dir_all(&subpath).expect("create subpath");
+
+        let mounts = parse_volume_mounts(
+            &volume_store,
+            &["subpath-data:/data:rw:logs".to_string()],
+            &origin,
+            &authorization,
+        )
+        .expect("relative subpath");
+
+        assert_eq!(mounts[0].source, subpath);
+        assert_eq!(mounts[0].target, std::path::Path::new("data"));
     }
 
     #[test]
@@ -38567,6 +38849,19 @@ FROM --platform=linux/${MYARCH} busybox\n";
     }
 
     #[test]
+    fn docker_create_spec_preserves_open_stdin_for_later_attach() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","Cmd":["sh"],"OpenStdin":true}"#,
+            None,
+        )
+        .expect("OpenStdin preference should be retained until start");
+        assert!(spec.open_stdin);
+        assert!(docker_start_run_inputs(&spec)
+            .annotations
+            .contains(&"io.ferrocrate.open-stdin=true".to_string()));
+    }
+
+    #[test]
     fn docker_create_spec_preserves_named_network_for_start() {
         let spec = parse_docker_create_spec(
             br#"{"Image":"busybox","HostConfig":{"NetworkMode":"app-backend"}}"#,
@@ -38715,6 +39010,16 @@ FROM --platform=linux/${MYARCH} busybox\n";
     }
 
     #[test]
+    fn docker_create_preserves_volume_subpath_for_start() {
+        let spec = parse_docker_create_spec(
+            br#"{"Image":"busybox","HostConfig":{"Mounts":[{"Type":"volume","Source":"data","Target":"/work","VolumeOptions":{"Subpath":"logs"}}]}}"#,
+            None,
+        )
+        .expect("volume subpath create spec");
+        assert_eq!(spec.image_volumes, vec!["data:/work:rw:logs"]);
+    }
+
+    #[test]
     fn docker_create_spec_rejects_unsupported_host_config_fields() {
         for field in [
             r#""Privileged":true"#,
@@ -38824,6 +39129,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,
@@ -39082,6 +39388,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
                 ipc_mode_host: false,
                 network_aliases: Vec::new(),
                 tty: false,
+                open_stdin: false,
                 log_options: HashMap::new(),
                 log_driver: "json-file".to_string(),
                 auto_remove: false,
@@ -39258,6 +39565,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,
@@ -39400,6 +39708,7 @@ FROM --platform=linux/${MYARCH} busybox\n";
             ipc_mode_host: false,
             network_aliases: Vec::new(),
             tty: false,
+            open_stdin: false,
             log_options: HashMap::new(),
             log_driver: "json-file".to_string(),
             auto_remove: false,
@@ -42475,6 +42784,29 @@ FROM --platform=linux/${MYARCH} busybox\n";
         let authorization = test_surface_authorization(temp.path());
         let err = handle_pull(&store, "", false, &authorization).expect_err("invalid image");
         assert!(err.contains("invalid image reference"));
+    }
+
+    #[test]
+    fn docker_image_lookup_maps_invalid_names_to_not_found() {
+        let error = super::docker_image_lookup(
+            "FooBar",
+            Result::<Option<()>, String>::Err("invalid image reference: FooBar".to_string()),
+        )
+        .expect_err("invalid Docker image names must appear absent to inspect");
+        assert_eq!(error, "docker: unknown image FooBar");
+    }
+
+    #[test]
+    fn docker_client_closures_do_not_log_as_daemon_failures() {
+        assert!(super::docker_client_closed_connection(
+            "Broken pipe (os error 32)"
+        ));
+        assert!(super::docker_client_closed_connection(
+            "Connection reset by peer (os error 104)"
+        ));
+        assert!(!super::docker_client_closed_connection(
+            "docker: invalid request"
+        ));
     }
 
     #[test]

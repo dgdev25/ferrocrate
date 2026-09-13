@@ -49,6 +49,7 @@ python3 scripts/test_candidate_evidence.py
 python3 scripts/test_readiness_scope.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bench -p 'test_suite_*.py'
 node --test scripts/release-artifacts.test.mjs
+node --test scripts/validate-bundled-sidecars.test.mjs
 bash scripts/test-qualification-fault-matrix.sh
 python3 scripts/check-advisory-exceptions.py
 

@@ -52,10 +52,6 @@
     ],
     "linux": {
       "deb": {
-        "files": {
-          "/etc/apparmor.d/usr.local.bin.ferrocrate": "../../../packaging/apparmor/usr.local.bin.ferrocrate",
-          "/etc/systemd/system/ferrocrate.service": "../../../packaging/systemd/ferrocrate.service"
-        },
         "desktopTemplate": "packaging/debian/ferrocrate-desktop.desktop"
       }
     }

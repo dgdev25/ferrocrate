@@ -22,9 +22,10 @@ test("desktop tabs follow the binding order with counts and right-aligned system
   }
   assert.match(markup, /class="desktop-tabs"/);
   assert.match(markup, /class="tab-spacer"/);
-  assert.doesNotMatch(markup, /<button[^>]*aria-label=/);
+  assert.match(markup, /<button[^>]*aria-label="Workspaces"/);
+  assert.match(markup, /<button[^>]*aria-label="Settings"/);
   assert.match(markup, /<span>Settings<\/span>/);
-  assert.match(markup, /folded-forge-mark.png/);
+  assert.match(markup, /ferrocrate-modular-mark.png/);
   assert.match(markup, /aria-current="page"/);
   assert.match(markup, /<span>Workspaces<\/span><span class="tab-count"> 5<\/span>/);
   assert.match(markup, /<span>Images<\/span><span class="tab-count"> 12<\/span>/);

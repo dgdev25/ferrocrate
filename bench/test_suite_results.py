@@ -29,6 +29,15 @@ class ParserTests(unittest.TestCase):
             rows = self.parser().parse_go(output, None)
             self.assertTrue(any(row["status"] == "error" for row in rows))
 
+    def test_go_helper_package_with_no_test_files_is_an_aggregate(self):
+        events = [
+            dict(Package="one/helper", Action="output", Output="?\tone/helper\t[no test files]\n"),
+            dict(Package="one/helper", Action="pass"),
+        ]
+        rows = self.parser().parse_go("\n".join(map(json.dumps, events)), None)
+        self.assertEqual(rows, [{"package": "one/helper", "step": "package-summary",
+                                 "status": "pass", "record_type": "aggregate", "stderr_tail": ""}])
+
     def test_skip_list_does_not_erase_an_executed_failure(self):
         rows = self.parser().parse_go(json.dumps(dict(Package="one", Test="Test", Action="fail")), "Test")
         self.assertEqual(rows[0]["status"], "fail")

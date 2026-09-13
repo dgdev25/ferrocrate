@@ -213,11 +213,38 @@ ensure_registry_bin() {
   fi
 }
 
+# The upstream CLI E2E suite names its two fixture images as registry:5000
+# references. Its normal CI setup pushes those tags to a test registry. The
+# local suite wrapper does not start that registry, so cache the exact tags in
+# the selected engine before Go starts. Docker and Ferrocrate then resolve the
+# references locally instead of making an unavailable registry request.
+ensure_cli_e2e_fixtures() {
+  if [ "$ENGINE" != ferrocrate ]; then
+    "$DIR/scripts/test/e2e/load-image" fetch-only
+    return
+  fi
+  # The Docker CLI URL-encodes `fromImage` and this daemon path currently
+  # rejects a digest reference after decoding it. Use the same raw API form as
+  # the Moby fixture pre-seed below, then use the compatibility tag endpoint.
+  # Do not run the suite if either fixture is absent.
+  local source destination
+  while IFS='|' read -r source destination; do
+    curl -sf -X POST --unix-socket "$SOCK" \
+      "http://localhost/v1.43/images/create?fromImage=$source" >/dev/null \
+      || return 1
+    docker image tag "$source" "$destination" >/dev/null || return 1
+    docker image inspect "$destination" >/dev/null || return 1
+  done <<'FIXTURES'
+alpine@sha256:69665d02cb32192e52e07644d76bc6f25abeb5410edc1c7a81a10ba3f0efb90a|registry:5000/alpine:frozen
+busybox@sha256:3e8fa85ddfef1af9ca85a5cfb714148956984e02f00bec3f7f49d3925a91e0e7|registry:5000/busybox:frozen
+FIXTURES
+}
+
 # --- run and convert ---
 case "$SUITE" in
   cli-e2e|compose-e2e|moby-integration|buildkit-dockerfile)
     case "$SUITE" in
-      cli-e2e)             PKG=./e2e/...;;
+      cli-e2e)             ensure_cli_e2e_fixtures || { echo "CLI fixture pre-seed failed" >&2; exit 2; }; PKG=./e2e/...;;
       compose-e2e)         PKG=./pkg/e2e/...;;
       # Moby's integration suite is large and restarts the daemon in places; those
       # cases go in skip.txt rather than being worked around. Nightly only.

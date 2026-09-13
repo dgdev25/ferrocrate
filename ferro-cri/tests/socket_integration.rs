@@ -2898,10 +2898,7 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
     unsafe {
         std::env::set_var("FERROCRATE_RUNTIME_DIR", runtime.path());
     }
-    let socket_for_server = socket.clone();
-    let server = tokio::spawn(async move {
-        let _ = ferro_cri::server::serve(socket_for_server).await;
-    });
+    let mut server = spawn_cri_process(runtime.path(), &socket);
     wait_for_socket(&socket).await;
 
     let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
@@ -2947,16 +2944,27 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         })
         .await
         .expect("start container");
+    let pre_restart_exec = client
+        .exec_sync(ferro_cri::runtime::ExecSyncRequest {
+            container_id: container.clone(),
+            cmd: vec!["/bin/busybox".into(), "echo".into(), "started".into()],
+            timeout: 5,
+        })
+        .await
+        .expect("confirm workload before daemon restart")
+        .into_inner();
+    assert_eq!(pre_restart_exec.exit_code, 0);
+    assert_eq!(
+        String::from_utf8_lossy(&pre_restart_exec.stdout).trim(),
+        "started"
+    );
 
     // Exercise the daemon restart boundary while the workload is live. The
     // replacement server must recover the SQLite-backed CRI metadata and
     // report the same container identity/state before any new RPC is issued.
-    server.abort();
-    let _ = server.await;
-    let socket_for_restart = socket.clone();
-    let restarted_server = tokio::spawn(async move {
-        let _ = ferro_cri::server::serve(socket_for_restart).await;
-    });
+    server.kill().expect("stop CRI daemon for restart");
+    server.wait().expect("wait for CRI daemon");
+    let mut restarted_server = spawn_cri_process(runtime.path(), &socket);
     wait_for_socket(&socket).await;
     let mut client = RuntimeServiceClient::new(connect_channel(socket.clone()).await);
     let recovered = client
@@ -3061,8 +3069,10 @@ async fn cri_socket_starts_and_execs_a_real_oci_rootfs_fixture() {
         })
         .await
         .expect("remove sandbox");
-    restarted_server.abort();
-    let _ = restarted_server.await;
+    restarted_server.kill().expect("stop restarted CRI daemon");
+    restarted_server
+        .wait()
+        .expect("wait for restarted CRI daemon");
     unsafe {
         std::env::remove_var("FERROCRATE_RUNTIME_DIR");
     }

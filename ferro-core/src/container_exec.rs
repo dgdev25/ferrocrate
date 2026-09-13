@@ -222,6 +222,10 @@ fn build_rootless_bwrap(
     for (source, target, read_only) in mounts {
         crate::mounts::normalize_mount_target(Path::new(target))
             .map_err(|error| ContainerExecError::InvalidMountTarget(error.to_string()))?;
+        // Bubblewrap does not create a bind destination. Docker permits a
+        // volume target that is absent from the image, so create it inside the
+        // sandbox before applying the bind.
+        bwrap.arg("--dir").arg(format!("/{target}"));
         bwrap
             .arg(if *read_only { "--ro-bind" } else { "--bind" })
             .arg(source)
@@ -1041,6 +1045,29 @@ mod tests {
         )
         .expect_err("traversal target must fail before helper launch");
         assert!(error.to_string().contains("invalid mount target"));
+    }
+
+    #[test]
+    fn rootless_bwrap_creates_a_missing_mount_target_before_binding() {
+        if !crate::rootless::bubblewrap_available() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("rootfs tempdir");
+        let command = super::build_rootless_bwrap(
+            root.path(),
+            &["/bin/true".to_string()],
+            &[],
+            None,
+            &[("/tmp".to_string(), "volume".to_string(), false)],
+            &[],
+            false,
+        )
+        .expect("build rootless command");
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--dir", "/volume"]));
     }
 
     #[test]

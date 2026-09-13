@@ -42,6 +42,21 @@ test("stale cleanup preserves a remounted terminal target", () => {
   assert.equal(terminalRef.current, second);
 });
 
+test("a mounted terminal names xterm's hidden input", () => {
+  let name = null;
+  const host = {
+    querySelector(selector) {
+      assert.equal(selector, "textarea.xterm-helper-textarea");
+      return { setAttribute(attribute, value) { if (attribute === "name") name = value; } };
+    },
+  };
+  const terminalRef = { current: null };
+
+  mountTerminalHost(host, terminalRef, () => ({ terminal: { write() {} }, dispose() {} }));
+
+  assert.equal(name, "terminal-input");
+});
+
 test("terminal output follows the current mounted target and ignores no target", () => {
   const first = { visibleText: "", write(bytes) { this.visibleText += new TextDecoder().decode(bytes); } };
   const second = { visibleText: "", write(bytes) { this.visibleText += new TextDecoder().decode(bytes); } };

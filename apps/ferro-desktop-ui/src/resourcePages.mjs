@@ -181,6 +181,7 @@ export function HostPathField({
           id: inputId,
           value,
           onChange,
+          readOnly: !onChange,
           placeholder: `absolute ${kind} path on the daemon host`,
           "aria-invalid": visibleError ? true : undefined,
           "aria-describedby": visibleError ? "host-path-error" : "host-path-help",

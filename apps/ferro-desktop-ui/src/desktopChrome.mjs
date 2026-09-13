@@ -24,6 +24,7 @@ function tabButton(section, icon, label, activeSection, onSelect, count, iconOnl
     className: `desktop-tab${active ? " active" : ""}`,
     onClick: () => onSelect(section),
     "aria-current": active ? "page" : undefined,
+    "aria-label": label,
   },
   createElement(Icon, { name: icon, size: 16, className: "tab-icon" }),
   createElement("span", { className: iconOnly ? "visually-hidden" : undefined }, label),
@@ -33,7 +34,7 @@ function tabButton(section, icon, label, activeSection, onSelect, count, iconOnl
 export function DesktopTabBar({ activeSection, counts, onSelect }) {
   return createElement("nav", { className: "desktop-tabs", "aria-label": "Primary" },
     createElement("div", { className: "sidebar-brand" },
-      createElement("img", { src: "/brand/folded-forge-mark.png", alt: "", width: 38, height: 38 }),
+      createElement("img", { src: "/brand/ferrocrate-modular-mark.png", alt: "", width: 38, height: 38 }),
       createElement("div", null, createElement("strong", null, "FerroCrate"), createElement("span", null, "Local development"))),
     createElement("p", { className: "sidebar-label" }, "Workspace"),
     RESOURCE_TABS.map(([section, icon, label]) => (

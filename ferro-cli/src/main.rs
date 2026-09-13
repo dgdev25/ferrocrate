@@ -22481,36 +22481,72 @@ fn handle_docker_compat_connection(
                     .remove(&id);
                 state.persist_pending()?;
                 if spec.auto_remove {
-                    let remove_runtime = runtime.request_scoped(origin.clone());
+                    // Auto-remove runs on a background thread that outlives
+                    // the `/start` response and typically outlives the
+                    // client connection too: a foreground `docker run --rm`
+                    // exits as soon as its attach stream closes, often
+                    // before this thread gets to call `remove`. Authorizing
+                    // against the client's captured request origin then
+                    // fails identity revalidation against a peer that is no
+                    // longer alive ("invalid runtime identity"), and the
+                    // container is silently never removed. Auto-remove is a
+                    // daemon-owned cleanup of a policy the client already
+                    // established at create time, so authorize it as the
+                    // daemon itself, matching every other internally
+                    // triggered mutation in this file.
+                    let remove_origin = RequestOrigin::cli_current();
                     let remove_state = Arc::clone(&state);
                     let remove_id = id.clone();
-                    std::thread::spawn(move || {
-                        if wait_for_container_exit(&remove_runtime, &remove_id).is_ok() {
-                            let exit_code = remove_runtime
-                                .inspect(&remove_id)
-                                .ok()
-                                .and_then(|record| record.last_exit_code)
-                                .unwrap_or(0);
-                            // Auto-remove owns the log files, so it must wait
-                            // for every attach registered before start to read
-                            // and flush the terminal bytes. A fixed grace
-                            // period loses output on slow hosts.
-                            if remove_state
-                                .wait_for_pre_start_attaches_to_finish(&remove_id)
-                                .is_err()
-                            {
-                                return;
-                            }
-                            if remove_runtime.remove(&remove_id).is_ok() {
-                                // Publish only after removal so `docker run
-                                // --rm` cannot return while network/volume
-                                // associations are still being torn down.
-                                if let Ok(mut results) = remove_state.auto_remove_results.lock() {
-                                    results.insert(remove_id, Some(exit_code));
+                    match remove_origin {
+                        Ok(remove_origin) => {
+                            let remove_runtime = runtime.request_scoped(remove_origin);
+                            std::thread::spawn(move || {
+                                if wait_for_container_exit(&remove_runtime, &remove_id).is_ok() {
+                                    let exit_code = remove_runtime
+                                        .inspect(&remove_id)
+                                        .ok()
+                                        .and_then(|record| record.last_exit_code)
+                                        .unwrap_or(0);
+                                    // Auto-remove owns the log files, so it must wait
+                                    // for every attach registered before start to read
+                                    // and flush the terminal bytes. A fixed grace
+                                    // period loses output on slow hosts.
+                                    if remove_state
+                                        .wait_for_pre_start_attaches_to_finish(&remove_id)
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    match remove_runtime.remove(&remove_id) {
+                                        Ok(()) => {
+                                            // Publish only after removal so `docker run
+                                            // --rm` cannot return while network/volume
+                                            // associations are still being torn down.
+                                            if let Ok(mut results) =
+                                                remove_state.auto_remove_results.lock()
+                                            {
+                                                results.insert(remove_id, Some(exit_code));
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(
+                                                container_id = %remove_id,
+                                                error = %error,
+                                                "docker auto-remove failed"
+                                            );
+                                        }
+                                    }
                                 }
-                            }
+                            });
                         }
-                    });
+                        Err(error) => {
+                            tracing::error!(
+                                container_id = %id,
+                                error = %error,
+                                "docker auto-remove could not resolve daemon identity"
+                            );
+                        }
+                    }
                 }
                 http_response(204, &[], "text/plain")
             }

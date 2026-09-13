@@ -4875,6 +4875,93 @@ fn docker_compat_auto_remove_preserves_wait_exit_result() {
 }
 
 #[test]
+fn docker_compat_auto_remove_removes_container_after_client_attach_disconnects() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping rootful auto-remove attach fixture");
+        return;
+    }
+    let harness = DaemonHarness::spawn();
+    build_local_busybox_image(&harness, "compat/auto-remove-attach:latest");
+    let body = r#"{"Image":"compat/auto-remove-attach:latest","Cmd":["/bin/busybox","true"],"HostConfig":{"NetworkMode":"none","AutoRemove":true}}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=auto-remove-attach HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response: {response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).expect("create JSON")["Id"]
+        .as_str()
+        .expect("container id")
+        .to_string();
+
+    // `docker run --rm` attaches before `/start`, then disconnects as soon
+    // as the container's output stream closes on exit. Reproduce that: open
+    // the pre-start attach hijack, start the container, wait for the 101
+    // handshake and the attach loop to close on its own, and then drop the
+    // connection exactly as the client would.
+    let mut attach = UnixStream::connect(&harness.socket_path).expect("connect attach socket");
+    attach
+        .write_all(
+            format!(
+                "POST /v1.45/containers/{id}/attach?logs=0&stream=1&stdin=0&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write attach request");
+
+    let starter = std::thread::scope(|scope| {
+        let harness_ref = &harness;
+        let start_id = id.clone();
+        let start = scope.spawn(move || {
+            harness_ref.request("POST", &format!("/v1.45/containers/{start_id}/start"))
+        });
+        attach
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set attach timeout");
+        let mut headers = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !headers.ends_with(b"\r\n\r\n") {
+            attach.read_exact(&mut byte).expect("read attach headers");
+            headers.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101"),
+            "headers={}",
+            String::from_utf8_lossy(&headers)
+        );
+        start.join().expect("start thread")
+    });
+    assert_eq!(starter.0, 204, "start response: {}", starter.1);
+
+    // The daemon closes the hijacked stream on its own once the container
+    // exits; read to EOF the way a real client would, then drop the socket.
+    let mut drain = Vec::new();
+    attach
+        .read_to_end(&mut drain)
+        .expect("drain attach stream to EOF");
+    drop(attach);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut containers = serde_json::json!([]);
+    while Instant::now() < deadline {
+        let (status, body) = harness.request("GET", "/v1.45/containers/json?all=1");
+        assert_eq!(status, 200, "list response: {body}");
+        containers = serde_json::from_str(&body).expect("list JSON");
+        let still_present = containers
+            .as_array()
+            .expect("list array")
+            .iter()
+            .any(|entry| entry["Id"].as_str() == Some(id.as_str()));
+        if !still_present {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("auto-removed container {id} still present after client disconnect: {containers}");
+}
+
+#[test]
 fn docker_compat_attach_logs_zero_does_not_emit_history() {
     let harness = DaemonHarness::spawn();
     let body = r#"{"Image":"busybox","Cmd":["true"]}"#;

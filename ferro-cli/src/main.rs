@@ -8809,14 +8809,10 @@ fn dispatch_remote_socket(
             if *orphans {
                 return Err("system prune --orphans requires a local daemon connection".to_string());
             }
-            let container_filters = serde_json::json!({"status": {"exited": true}});
-            request(
-                "POST",
-                format!(
-                    "/containers/prune?filters={}",
-                    percent_encode_path_component(&container_filters.to_string())
-                ),
-            )?;
+            // `/containers/prune` already only removes stopped containers;
+            // Docker's endpoint (and ours) accepts only `label`/`until`
+            // filters, so no filter is sent here.
+            request("POST", "/containers/prune".to_string())?;
             let image_filters = serde_json::json!({
                 "dangling": [if *all { "false" } else { "true" }]
             });

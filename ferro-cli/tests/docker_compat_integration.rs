@@ -627,6 +627,63 @@ fn native_cli_automatically_delegates_to_active_daemon_owner() {
 }
 
 #[test]
+fn native_cli_system_prune_removes_stopped_containers_through_daemon() {
+    let harness = DaemonHarness::spawn();
+    let create_body = r#"{"Image":"busybox","Cmd":["true"]}"#;
+    let create = format!(
+        "POST /v1.45/containers/create?name=prune-target HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        create_body.len(),
+        create_body
+    );
+    let (status, response) = harness.request_raw(&create);
+    assert_eq!(status, 201, "create response={response}");
+
+    // `ferro-cli system prune` forwards to the daemon's `/containers/prune`
+    // when a daemon owns the runtime. It must succeed and remove the
+    // stopped container exactly as the daemonless path does.
+    let output = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["system", "prune"])
+        .output()
+        .expect("run native system prune against daemon-owned runtime");
+    assert!(
+        output.status.success(),
+        "native system prune failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("system prune"),
+        "native system prune did not print a summary: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let list = Command::new(env!("CARGO_BIN_EXE_ferro-cli"))
+        .env("FERROCRATE_HOME", harness.runtime_dir())
+        .env("FERROCRATE_RUNTIME_DIR", harness.socket_dir())
+        .env("FERROCRATE_DESKTOP_FORWARD", "0")
+        .env_remove("FERROCRATE_ENTITLEMENT_FILE")
+        .env_remove("FERROCRATE_ENTITLEMENT_PUBKEY")
+        .args(["containers", "--all", "--format", "json"])
+        .output()
+        .expect("list containers after prune");
+    assert!(list.status.success(), "container list after prune failed");
+    let containers: Vec<serde_json::Value> =
+        serde_json::from_slice(&list.stdout).expect("container list JSON after prune");
+    assert!(
+        !containers
+            .iter()
+            .any(|container| container["Names"][0] == "/prune-target"),
+        "system prune did not remove the stopped container: {}",
+        String::from_utf8_lossy(&list.stdout)
+    );
+}
+
+#[test]
 fn stale_owner_record_does_not_prevent_direct_cli_ownership() {
     let runtime = cli_fixture::configured_runtime("disabled");
     let canonical_runtime = runtime.path().canonicalize().expect("canonical runtime");

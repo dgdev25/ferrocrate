@@ -27,41 +27,137 @@ use self-hosted runners only.
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">
 </p>
 
-## Quickstart
+## Getting started
 
-Build the CLI and run a container:
+Every command below was run as a normal user, without `sudo`, on the Linux
+host that builds this repository. The native CLI needs no daemon: each command
+does its own work and keeps images, containers and volumes under
+`~/.ferrocrate` (`/var/lib/ferrocrate` when run as root; set `FERROCRATE_HOME`
+to use another directory). If you know Docker, the commands and flags are the
+same; only the binary name differs.
+
+### What you need
+
+- A Linux host from the [platform support](#platform-support) table. macOS and
+  Windows users get the desktop app, not the CLI.
+- Rust through `rustup`. The repository pins the toolchain in
+  `rust-toolchain.toml`, so `rustup` installs the right version on first build.
+- For rootless use: unprivileged user namespaces enabled, entries for your
+  user in `/etc/subuid` and `/etc/subgid`, and the `newuidmap`, `newgidmap`,
+  `slirp4netns` and `bwrap` binaries. `bash scripts/verify-rootless.sh` tells
+  you what is missing.
+- The `docker` CLI, only if you want step 6.
+
+There are no prebuilt binaries yet; you build from source.
+
+### 1. Build the CLI
 
 ```bash
+git clone https://github.com/dgdev25/ferrocrate.git
+cd ferrocrate
 cargo build --release -p ferro-cli
-./target/release/ferro-cli run --rm alpine:3.20 echo hello
+install -m 755 target/release/ferro-cli ~/.local/bin/ferro-cli   # optional, puts it on PATH
 ```
 
-Build and run your own project — a Dockerfile and one command, as always:
+### 2. Run a container
 
 ```bash
-./target/release/ferro-cli build -t myapp:1.0 .
-./target/release/ferro-cli run --rm myapp:1.0
+ferro-cli run --rm alpine:3.20 echo hello
 ```
 
-Keep using the real Docker CLI, pointed at Ferrocrate's daemon (start it with
-the Docker-compatible API enabled, then point `DOCKER_HOST` at its socket):
+This pulls the image, verifies every layer digest, runs the command and
+removes the container. The first two output lines are the container id and
+the runtime details; your command's output follows.
+
+### 3. Build an image from a Dockerfile
 
 ```bash
-sudo ./target/release/ferro-cli daemon --docker-compat &
+mkdir hello && cd hello
+cat > Dockerfile <<'EOF'
+FROM alpine:3.20
+COPY hello.sh /hello.sh
+CMD ["/bin/sh", "/hello.sh"]
+EOF
+printf '#!/bin/sh\necho "hello from ferrocrate"\n' > hello.sh
+
+ferro-cli build -t hello:1.0 .
+ferro-cli images
+ferro-cli run --rm hello:1.0
+```
+
+`build` also accepts `--build-arg`, `--secret`, `--cache-from` and
+`--cache-to`, as Docker does.
+
+### 4. Run a service with a name, a port and a volume
+
+```bash
+ferro-cli run -d --name web -p 8080:8080 -v webdata:/www busybox:1.36 \
+  sh -c 'echo hello > /www/index.html; exec httpd -f -v -p 8080 -h /www'
+
+curl http://127.0.0.1:8080/        # hello
+ferro-cli ps                       # running containers; -a includes stopped ones
+ferro-cli logs --tail 5 web        # -f follows
+ferro-cli exec web ls /www         # run a command inside; -it for a shell
+ferro-cli stop web
+ferro-cli start web
+ferro-cli stop web
+ferro-cli rm web
+ferro-cli volume rm webdata
+```
+
+### 5. Compose
+
+```bash
+cat > compose.yaml <<'EOF'
+services:
+  app:
+    image: alpine:3.20
+    command: ["sh", "-c", "echo compose says hi; sleep 3600"]
+EOF
+
+ferro-cli compose up -d
+ferro-cli compose ps
+ferro-cli compose logs
+ferro-cli compose down
+```
+
+`compose` also has `stop`, `start`, `restart`, `pull`, `config` and `watch`.
+
+### 6. Keep using the real Docker CLI
+
+Start the daemon with the Docker-compatible API on, then point `DOCKER_HOST`
+at its socket. The daemon shares the same state directory as the native CLI,
+so images built one way are visible the other way.
+
+```bash
+# rootless
+ferro-cli daemon --docker-compat --socket "$XDG_RUNTIME_DIR/ferrocrate.sock" &
+export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/ferrocrate.sock"
+
+# or as root (default socket /var/run/ferrocrate.sock)
+sudo ferro-cli daemon --docker-compat &
 export DOCKER_HOST=unix:///var/run/ferrocrate.sock
-docker build -t myapp:1.0 .
-docker run myapp:1.0
+
+docker version
+docker build -t hello:1.0 .
+docker run --rm hello:1.0
+docker ps -a
 ```
 
-Open the local dashboard in a browser (it prints a one-time token URL and
-lives only while the command runs):
+Docker's default BuildKit path works through this socket; see
+[How it works](#how-it-works) for the limits.
+
+### 7. Clean up
 
 ```bash
-./target/release/ferro-cli dashboard --listen 127.0.0.1:43190
+kill %1                        # stop the daemon from step 6 (as root: sudo pkill -x ferro-cli)
+ferro-cli rmi hello:1.0
+ferro-cli system prune         # stopped containers, unused images, build cache
+ferro-cli volume prune
 ```
 
-`scripts/verify-rootless.sh` checks what rootless mode needs on your host
-(user namespaces, cgroup delegation, `slirp4netns`).
+Optional: `ferro-cli dashboard --listen 127.0.0.1:43190` serves a local
+browser dashboard for the life of the command and prints a one-time token URL.
 
 ## How it works
 

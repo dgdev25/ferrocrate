@@ -38,7 +38,7 @@ signed release ships.
 | --- | --- | --- |
 | macOS 13+ (Intel) | `FerroCrate_Desktop_0.1.0_x64.dmg` | [Install on macOS](#install-on-macos) |
 | Linux (x86_64, glibc) | `FerroCrate.Desktop_0.1.0_amd64.deb` or `.AppImage` | [Install on Linux](#install-on-linux) |
-| Windows 10/11 (x64) | *building — check back shortly* | [Install on Windows](#install-on-windows) |
+| Windows 10/11 (x64) | `FerroCrate.Desktop_0.1.0_x64-setup.exe` or `.msi` | [Install on Windows](#install-on-windows) |
 
 ### Install on macOS
 

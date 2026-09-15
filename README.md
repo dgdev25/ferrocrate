@@ -23,6 +23,9 @@ not qualify the current candidate. See the
 for required host, runtime, installer and UI evidence. All CI and release jobs
 use self-hosted runners only.
 
+**Download:** [macOS (Intel), unsigned](https://github.com/dgdev25/ferrocrate/releases/tag/v0.1.0-unsigned) —
+not notarized; right-click the app and choose **Open** on first launch.
+
 <p align="center">
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">
 </p>

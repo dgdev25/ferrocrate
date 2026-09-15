@@ -105,7 +105,7 @@ say "building UI"
 export PATH="$root/target/debug:$root/target/release:$PATH"
 if [[ "$mode" == "web" ]]; then
   say "starting desktop supervisor (Ferrocrate socket: $FERROCRATE_RUNTIME_DIR/ferrocrate.sock)"
-  "$root/target/debug/ferro-desktop" daemon &
+  "$root/target/release/ferro-desktop" daemon &
   daemon_pid=$!
   trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
   daemon_ready=false

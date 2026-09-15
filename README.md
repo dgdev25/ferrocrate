@@ -27,6 +27,22 @@ use self-hosted runners only.
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">
 </p>
 
+## Desktop app
+
+The desktop app shows Compose projects as workspaces, with per-service status,
+ports, CPU and memory, and one-click logs, terminal and stop. Start it from a
+checkout with `scripts/dev-desktop.sh` (add `--web` to open it in a browser).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/workspaces-dark.png">
+  <img src="docs/assets/screenshots/workspaces-light.png" alt="Ferrocrate Desktop Workspaces page: a four-service Compose project named storefront with every service running, published ports, and per-service CPU and memory" width="100%">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/images-dark.png">
+  <img src="docs/assets/screenshots/images-light.png" alt="Ferrocrate Desktop Images page: local images with size, creation time and whether a container uses them" width="100%">
+</picture>
+
 ## Getting started
 
 Every command below was run as a normal user, without `sudo`, on the Linux

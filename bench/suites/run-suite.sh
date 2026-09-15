@@ -3,8 +3,7 @@
 #
 # Runs a suite that Docker's own projects maintain against Ferrocrate's
 # Docker-compatible socket, and converts its output into bench result records.
-# Source A of docs/testing/TEST-PROGRAM-PLAN.md: the widest coverage per unit of
-# effort, because every failure is already a precise reproduction someone else wrote.
+# Every failure is already a precise upstream reproduction.
 #
 # Docker is the oracle: run with --engine docker to record what the suite does
 # against the real daemon, so a failure on both engines is classified app-or-env

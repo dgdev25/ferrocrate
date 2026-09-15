@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Differential fuzzer: run the same command sequence on Docker and Ferrocrate and
-compare every step. Source B of docs/testing/TEST-PROGRAM-PLAN.md.
+compare every step.
 
 A step passes when both engines agree on exit status, on normalised stdout, and on
 the observable state afterwards. A divergence is shrunk to the shortest sequence

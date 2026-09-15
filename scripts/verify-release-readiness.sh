@@ -24,8 +24,12 @@ record_unavailable() {
   fi
 }
 
-echo "[release] validating historical host-matrix inventory (not candidate qualification)"
-bash scripts/verify-host-matrix-evidence.sh
+if [[ -f docs/evidence/host-matrix/rows.tsv ]]; then
+  echo "[release] validating private historical host-matrix inventory (not candidate qualification)"
+  bash scripts/verify-host-matrix-evidence.sh
+else
+  echo "[release] historical host-matrix inventory not present in public checkout"
+fi
 
 echo "[release] validating Docker API contract"
 cargo test -p ferro-cli --test api_compat_matrix --offline -- --nocapture

@@ -54,7 +54,7 @@ bash scripts/test-qualification-fault-matrix.sh
 python3 scripts/check-advisory-exceptions.py
 
 if (( ! skip_workspace && ! skip_format )); then
-  : "${FERROCRATE_CANDIDATE_EVIDENCE:?full release gate requires a candidate evidence manifest; see docs/operations/candidate-evidence.md}"
+  : "${FERROCRATE_CANDIDATE_EVIDENCE:?full release gate requires the path to a private candidate evidence manifest}"
   python3 scripts/check-candidate-evidence.py --manifest "$FERROCRATE_CANDIDATE_EVIDENCE" \
     --candidate "$candidate_head" --repo "$repo_root"
 fi

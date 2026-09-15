@@ -2,7 +2,7 @@
 
 Thanks for helping improve Ferrocrate. The project is currently Linux-first and
 rootful by default; rootless, cross-distribution, and Docker-compatibility
-features must be described according to the evidence in `docs/evidence/`.
+claims must match `docs/FEATURE-MATRIX.md`.
 
 ## Before opening a change
 
@@ -27,7 +27,7 @@ bash scripts/verify-release-readiness.sh
 
 Privileged and host-dependent checks must be run only on an approved disposable
 Linux host. Record the distribution, kernel, architecture, backend, and any
-explicit skips in `docs/evidence/`.
+explicit skips outside the public repository.
 
 ## Pull requests
 

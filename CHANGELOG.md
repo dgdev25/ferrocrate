@@ -1,7 +1,7 @@
 # Changelog
 
-This file records release-level changes. Detailed implementation evidence lives
-under `docs/evidence/`.
+This file records release-level changes. Detailed qualification evidence is
+retained outside the public repository.
 
 ## Unreleased
 

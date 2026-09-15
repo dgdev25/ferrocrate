@@ -58,7 +58,31 @@ __pycache__/
 /apps/ferro-desktop-ui/src-tauri/binaries/
 /release-artifacts/
 
-# Internal process history, task lists, handoffs, design scratch, business
-# plans and unreferenced raw evidence dumps. Local only (ADR-018).
-/docs/internal/
+# Public documentation is an allowlist. Everything else under docs stays local.
+/docs/**
+!/docs/assets/
+!/docs/assets/*.svg
+!/docs/assets/screenshots/
+!/docs/assets/screenshots/*.png
+!/docs/FEATURE-MATRIX.md
+!/docs/performance-baselines.md
+!/docs/RELEASE.md
+!/docs/release/
+!/docs/release/SIGNING.md
+!/docs/compatibility/
+!/docs/compatibility/rootless-install.md
+!/docs/architecture/
+!/docs/architecture/legacy-sled-importers.md
+!/docs/operations/
+!/docs/operations/docker-migration.md
+!/docs/operations/managed-overlays.md
+!/docs/operations/registry.md
 /ROADMAP-CLOSEOUT.md
+
+# arc runtime
+adws/adw_data/sessions/
+adws/adw_data/arc.db*
+adws/adw_data/catalogue.db*
+adws/adw_data/*.imported-*
+adws/adw_data/last_ui_run.*.log
+*.pyc

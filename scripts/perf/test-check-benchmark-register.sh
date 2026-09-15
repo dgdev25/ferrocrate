@@ -2,13 +2,18 @@
 set -euo pipefail
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)}"
+register="$repo_root/docs/evidence/performance/benchmark-register.md"
+if [[ ! -f "$register" ]]; then
+  echo "benchmark register gate skipped: private register not present"
+  exit 0
+fi
 bash "$repo_root/scripts/perf/check-benchmark-register.sh" \
-  "$repo_root/docs/evidence/performance/benchmark-register.md" >/dev/null
+  "$register" >/dev/null
 
 tmp="$(mktemp -d /tmp/ferrocrate-benchmark-register-gate.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 broken="$tmp/register.md"
-cp "$repo_root/docs/evidence/performance/benchmark-register.md" "$broken"
+cp "$register" "$broken"
 current_report="$(sed -n 's/.*\[iptables\](\([^)]*\.md\)).*/\1/p' "$broken" | head -n 1)"
 [[ -n "$current_report" ]] || { echo "benchmark register fixture has no current report" >&2; exit 1; }
 sed -i "0,/${current_report//\//\\/}/s//missing-report.md/" "$broken"

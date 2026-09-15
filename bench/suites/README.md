@@ -1,9 +1,7 @@
 # Borrowed suites
 
-Source A of `docs/testing/TEST-PROGRAM-PLAN.md`: run the test suites Docker's own
-projects maintain against Ferrocrate's Docker-compatible socket. The widest
-coverage per unit of effort, because every failure is a precise reproduction
-somebody else already wrote.
+Runs test suites maintained by Docker projects against Ferrocrate's
+Docker-compatible socket. Every failure is a precise upstream reproduction.
 
 ```bash
 bench/suites/run-suite.sh cli-e2e                  # against Ferrocrate

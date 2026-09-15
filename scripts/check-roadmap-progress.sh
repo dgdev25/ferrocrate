@@ -2,17 +2,12 @@
 set -euo pipefail
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
-# The default roadmap is maintainer-local (gitignored under docs/internal/,
-# ADR-025). Without it, only the public benchmark register is checked.
+# The default roadmap and benchmark register are maintainer-local.
 default_roadmap="$repo_root/docs/internal/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
 roadmap="${1:-$default_roadmap}"
 if [[ ! -f "$roadmap" ]]; then
   if [[ $# -eq 0 ]]; then
     echo "roadmap progress skipped: maintainer roadmap not present"
-    if [[ "${FERROCRATE_SKIP_BENCHMARK_REGISTER:-0}" != "1" ]]; then
-      bash "$repo_root/scripts/perf/check-benchmark-register.sh" \
-        "$repo_root/docs/evidence/performance/benchmark-register.md"
-    fi
     exit 0
   fi
   echo "roadmap not found: $roadmap" >&2
@@ -63,7 +58,7 @@ if [[ "$expected_total" =~ ^[0-9]+$ ]] && (( total != expected_total )); then
   exit 1
 fi
 
-if [[ "${FERROCRATE_SKIP_BENCHMARK_REGISTER:-0}" != "1" ]]; then
+if [[ "${FERROCRATE_SKIP_BENCHMARK_REGISTER:-0}" != "1" && -f "$repo_root/docs/evidence/performance/benchmark-register.md" ]]; then
   bash "$repo_root/scripts/perf/check-benchmark-register.sh" \
     "$repo_root/docs/evidence/performance/benchmark-register.md"
 fi

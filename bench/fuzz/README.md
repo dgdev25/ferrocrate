@@ -1,7 +1,7 @@
 # Differential fuzzer
 
-Source B of `docs/testing/TEST-PROGRAM-PLAN.md`. Generates command sequences,
-runs each on Docker and on Ferrocrate from a clean state, and compares after
+Generates command sequences, runs each on Docker and on Ferrocrate from a clean
+state, and compares after
 every step: exit status, normalised stdout, and the observable state
 (`ps -a`, `images`, `volume ls`). The first divergence is shrunk by
 delete-one reduction to the shortest sequence that still diverges and saved as a

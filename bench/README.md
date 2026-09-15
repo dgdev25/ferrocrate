@@ -1,7 +1,7 @@
 # bench — real-app test bench
 
 Runs the same command matrix against real applications on Docker and on
-Ferrocrate and reports parity. Plan and rules: `docs/testing/REAL-APP-BENCH-PLAN.md`.
+Ferrocrate and reports parity.
 
 ```bash
 bench/run-app.sh battleships both     # one app, both engines

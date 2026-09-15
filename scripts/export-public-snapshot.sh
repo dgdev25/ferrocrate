@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the public snapshot of this repository as a single-commit orphan
-# branch named `public`, from the current `main` tree.
+# Legacy helper for building a single-commit public branch. The live repository
+# now uses the documentation allowlist in `.gitignore`.
 #
 #   scripts/export-public-snapshot.sh           # build/refresh the `public` branch
 #   scripts/export-public-snapshot.sh --verify  # build into a temp dir and check only

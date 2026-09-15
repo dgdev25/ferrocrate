@@ -4,8 +4,8 @@ Use the tag-triggered GitHub Actions workflow on self-hosted `ferro-lab`
 runners to qualify a release candidate. The workflow requires both candidate
 validation and candidate qualification before it can publish.
 
-Do not publish a release while any required row in the production readiness
-roadmap is failed, blocked, or not run.
+Do not publish a release while a required qualification row is failed, blocked,
+or not run.
 
 ## Candidate procedure
 
@@ -19,7 +19,7 @@ roadmap is failed, blocked, or not run.
 3. Build platform artifacts through the release workflow. It applies the
    platform signing steps and creates `SHA256SUMS` and `latest.json`.
 4. Verify each signed installer and updater payload on its advertised platform.
-5. Review the evidence bundle against the candidate support matrix.
+5. Review the private qualification bundle against `FEATURE-MATRIX.md`.
 6. A maintainer approves the GitHub publication after all required rows pass.
 
 Local commands prepare artifacts only. They do not prove native signing,
@@ -37,9 +37,4 @@ Windows identity with a self-signed certificate.
 artifacts and a local Git tag. It does not push a tag or create a GitHub
 release. Do not use it as the production release procedure.
 
-## Evidence and support
-
-- [Candidate support matrix](operations/candidate-support-2026-09-05.md)
-- [Local release-gate contract](operations/local-release-gate.md)
-- [Roadmap](ROADMAP.md)
-- [Release artifact contract](release-artifacts.md)
+The public support boundary is maintained in [`FEATURE-MATRIX.md`](FEATURE-MATRIX.md).

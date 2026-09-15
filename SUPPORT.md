@@ -1,9 +1,8 @@
 # Ferrocrate support
 
 Ferrocrate is currently a Linux-first project. Support claims follow the
-dated qualification records in [`docs/evidence/`](docs/evidence/) and the
-consolidated [`docs/ROADMAP.md`](docs/ROADMAP.md); a feature described as
-best-effort or host-dependent is not a production-support guarantee.
+public [`feature matrix`](docs/FEATURE-MATRIX.md); experimental or host-dependent
+features are not production-support guarantees.
 
 ## Before opening an issue
 
@@ -19,9 +18,7 @@ Please include:
   and the matching dated evidence record if one exists.
 
 Do not attach private keys, registry credentials, unrestricted packet captures,
-or generated runtime state. See the [support policy](docs/operations/support-policy.md)
-for qualification levels, incident requirements, and compatibility/deprecation
-rules.
+or generated runtime state.
 
 ## Security reports
 
@@ -35,4 +32,3 @@ Do not disclose vulnerabilities in a public issue. Follow
 - Use the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md)
   for proposed behavior or compatibility work.
 - For contribution questions, read [`CONTRIBUTING.md`](CONTRIBUTING.md).
-

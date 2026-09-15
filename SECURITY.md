@@ -10,5 +10,4 @@ and a minimal proof of concept when safe. Please allow maintainers reasonable
 time to reproduce, patch, test, and coordinate disclosure.
 
 Ferrocrate is not yet a universal Docker replacement. The supported scope and
-known qualification boundaries are maintained in `docs/ROADMAP.md`
-and the dated evidence index.
+known qualification boundaries are maintained in `docs/FEATURE-MATRIX.md`.

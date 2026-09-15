@@ -6,8 +6,8 @@ journal, CRI delegation replay, and Compose fan-out replay. The optional
 `legacy-sled-importers` (ferro-core) and `legacy-sled` (ferro-compose)
 features and the `sled` dependency were removed on 2026-08-21 after the
 migration window closed. The feature-gated importers were verified green
-immediately before removal (see
-`docs/evidence/storage/2026-08-21-sled-compat-removal.md`).
+immediately before removal. The detailed qualification record is retained
+outside the public repository.
 
 Current contract for a legacy Sled data directory on disk:
 

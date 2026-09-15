@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname -- "$0")/../.." && pwd)"
 updater="$repo_root/scripts/perf/update-benchmark-register.py"
 register="$repo_root/docs/evidence/performance/benchmark-register.md"
+if [[ ! -f "$register" ]]; then
+  echo "benchmark register updater skipped: private register not present"
+  exit 0
+fi
 latest_head="$(sed -n 's/^Latest benchmark-relevant implementation head: `\([^`]*\)`.*/\1/p' "$register")"
 [[ -n "$latest_head" ]] || { echo "benchmark register fixture has no current head" >&2; exit 1; }
 # Report filenames are dated evidence, not a clock contract.  A report may be

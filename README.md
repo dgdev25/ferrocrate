@@ -34,11 +34,11 @@ then follow the platform guide. These are local, unsigned builds: not
 notarized, not code-signed, and the in-app updater is disabled until a
 signed release ships.
 
-| Platform | Package | Guide |
-| --- | --- | --- |
-| macOS 13+ (Intel) | `FerroCrate_Desktop_0.1.0_x64.dmg` | [Install on macOS](#install-on-macos) |
-| Linux (x86_64, glibc) | `FerroCrate.Desktop_0.1.0_amd64.deb` or `.AppImage` | [Install on Linux](#install-on-linux) |
-| Windows 10/11 (x64) | `FerroCrate.Desktop_0.1.0_x64-setup.exe` or `.msi` | [Install on Windows](#install-on-windows) |
+| Platform | Package | Download | Guide |
+| --- | --- | --- | --- |
+| macOS 13+ (Intel) | `FerroCrate_Desktop_0.1.0_x64.dmg` | [.dmg](https://github.com/dgdev25/ferrocrate/releases/download/v0.1.0-unsigned/FerroCrate_Desktop_0.1.0_x64.dmg) | [Install on macOS](#install-on-macos) |
+| Linux (x86_64, glibc) | `FerroCrate.Desktop_0.1.0_amd64.deb` or `.AppImage` | [.deb](https://github.com/dgdev25/ferrocrate/releases/download/v0.1.0-unsigned/FerroCrate.Desktop_0.1.0_amd64.deb) &#124; [.AppImage](https://github.com/dgdev25/ferrocrate/releases/download/v0.1.0-unsigned/FerroCrate.Desktop_0.1.0_amd64.AppImage) | [Install on Linux](#install-on-linux) |
+| Windows 10/11 (x64) | `FerroCrate.Desktop_0.1.0_x64-setup.exe` or `.msi` | [.exe](https://github.com/dgdev25/ferrocrate/releases/download/v0.1.0-unsigned/FerroCrate.Desktop_0.1.0_x64-setup.exe) &#124; [.msi](https://github.com/dgdev25/ferrocrate/releases/download/v0.1.0-unsigned/FerroCrate.Desktop_0.1.0_x64_en-US.msi) | [Install on Windows](#install-on-windows) |
 
 ### Install on macOS
 

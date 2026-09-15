@@ -23,12 +23,40 @@ not qualify the current candidate. See the
 for required host, runtime, installer and UI evidence. All CI and release jobs
 use self-hosted runners only.
 
-**Download:** [macOS (Intel), unsigned](https://github.com/dgdev25/ferrocrate/releases/tag/v0.1.0-unsigned) —
-not notarized; right-click the app and choose **Open** on first launch.
-
 <p align="center">
   <img src="docs/assets/features.svg" alt="What Ferrocrate does: Docker-compatible, native Rust engine, builds both ways, desktop app on three OSes, fleet control plane, evidence for every claim" width="100%">
 </p>
+
+## Install
+
+Download a package from the [latest release](https://github.com/dgdev25/ferrocrate/releases/tag/v0.1.0-unsigned),
+then follow the platform guide. These are local, unsigned builds: not
+notarized, not code-signed, and the in-app updater is disabled until a
+signed release ships.
+
+| Platform | Package | Guide |
+| --- | --- | --- |
+| macOS 13+ (Intel) | `FerroCrate_Desktop_0.1.0_x64.dmg` | [Install on macOS](#install-on-macos) |
+| Linux (x86_64, glibc) | `FerroCrate.Desktop_0.1.0_amd64.deb` or `.AppImage` | [Install on Linux](#install-on-linux) |
+| Windows 10/11 (x64) | *building — check back shortly* | [Install on Windows](#install-on-windows) |
+
+### Install on macOS
+
+Open the `.dmg`, drag **FerroCrate Desktop** to Applications. Gatekeeper
+blocks an unsigned app on the first launch: right-click the app in
+Applications and choose **Open**, then confirm. Later launches open normally.
+
+### Install on Linux
+
+**Debian/Ubuntu:** `sudo apt install ./FerroCrate.Desktop_0.1.0_amd64.deb`
+
+**Any distro (glibc-based):** make the AppImage executable and run it —
+`chmod +x FerroCrate.Desktop_0.1.0_amd64.AppImage && ./FerroCrate.Desktop_0.1.0_amd64.AppImage`
+
+### Install on Windows
+
+Run the installer. Since it isn't signed, SmartScreen will show "Windows
+protected your PC" — click **More info**, then **Run anyway**.
 
 ## Desktop app
 

@@ -41,5 +41,5 @@ release. Do not use it as the production release procedure.
 
 - [Candidate support matrix](operations/candidate-support-2026-09-05.md)
 - [Local release-gate contract](operations/local-release-gate.md)
-- [Production readiness roadmap](PRODUCTION-READINESS-ROADMAP-2026-09-05.md)
+- [Roadmap](ROADMAP.md)
 - [Release artifact contract](release-artifacts.md)

@@ -2,8 +2,19 @@
 set -euo pipefail
 
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
-roadmap="${1:-$repo_root/docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md}"
+# The default roadmap is maintainer-local (gitignored under docs/internal/,
+# ADR-025). Without it, only the public benchmark register is checked.
+default_roadmap="$repo_root/docs/internal/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
+roadmap="${1:-$default_roadmap}"
 if [[ ! -f "$roadmap" ]]; then
+  if [[ $# -eq 0 ]]; then
+    echo "roadmap progress skipped: maintainer roadmap not present"
+    if [[ "${FERROCRATE_SKIP_BENCHMARK_REGISTER:-0}" != "1" ]]; then
+      bash "$repo_root/scripts/perf/check-benchmark-register.sh" \
+        "$repo_root/docs/evidence/performance/benchmark-register.md"
+    fi
+    exit 0
+  fi
   echo "roadmap not found: $roadmap" >&2
   exit 2
 fi
@@ -40,7 +51,7 @@ printf 'roadmap progress: %d complete / %d open / %d total (%d%% complete)\n' \
 
 if [[ -n "${FERROCRATE_ROADMAP_EXPECTED_TOTAL:-}" ]]; then
   expected_total="$FERROCRATE_ROADMAP_EXPECTED_TOTAL"
-elif [[ "$roadmap" == "$repo_root/docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md" ]]; then
+elif [[ "$roadmap" == "$default_roadmap" ]]; then
   expected_total=37
 else
   # Alternative execution roadmaps have their own completion scope.  Callers

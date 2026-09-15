@@ -16,7 +16,7 @@ kernel isolates, and that is where the speed comes from. Every capability the
 project claims is backed by a dated test report you can read.
 
 **Status: alpha release.** Production qualification is in progress on the
-[active readiness roadmap](docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md).
+[roadmap](docs/ROADMAP.md).
 Historical host and desktop test reports describe their dated scope; they do
 not qualify the current candidate. See the
 [candidate support contract](docs/operations/candidate-support-2026-09-05.md)
@@ -193,7 +193,7 @@ Every row links the report it comes from; nothing here is estimated.
 
 Host: Intel i9-14900K, 32 threads, 61 GB RAM, Ubuntu 26.04, kernel 7.0.0-30,
 Docker 29.7.2. `alpine:latest`, `--network none`, 10 iterations (5 for pull
-and build). Report: [`docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md`](docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md).
+and build). Report: [`docs/evidence/performance/2026-08-23-docker-vs-ferrocrate.md`](docs/evidence/performance/2026-08-23-docker-vs-ferrocrate.md).
 
 | Operation | Ferrocrate | Docker | Difference |
 |---|---:|---:|---:|
@@ -335,8 +335,8 @@ features for containers).
 | Ubuntu 24.04 on Oracle A1 (aarch64, kernel 6.17) | Supported; dated row in the feature matrix |
 | Rocky 9 (kernel 5.14), Ubuntu 20.04 HWE (kernel 5.15) | Qualified with opt-in `legacy-peercred`; the default pidfd authentication fails closed on these kernels |
 | Rootless mode | Qualified on the host rows in the feature matrix; a missing `SO_PEERPIDFD` fails closed unless legacy peercred is enabled |
-| Windows 11 | Desktop app through WSL2; 24/24 acceptance checks ([final VM verification](docs/desktop/VM-ACCEPTANCE-2026-08-25.md#final-vm-verification----2026-08-26)) |
-| macOS Tahoe | Desktop app through a QEMU-HVF Linux VM; 24/24 acceptance checks ([final VM verification](docs/desktop/VM-ACCEPTANCE-2026-08-25.md#final-vm-verification----2026-08-26)) |
+| Windows 11 | Desktop app through WSL2; 24/24 acceptance checks ([final VM verification](docs/evidence/desktop/2026-08-25-vm-acceptance.md#final-vm-verification----2026-08-26)) |
+| macOS Tahoe | Desktop app through a QEMU-HVF Linux VM; 24/24 acceptance checks ([final VM verification](docs/evidence/desktop/2026-08-25-vm-acceptance.md#final-vm-verification----2026-08-26)) |
 
 Images are built and run only for the host's architecture. There is no
 emulation of foreign architectures, no `--platform` builds, and no
@@ -353,10 +353,10 @@ experimental or unsupported, the matrix says so.
 - **Fleet UI:** `ferro-mgr fleet-ui` manages enrolled hosts over an
   operator-authenticated mTLS admin endpoint, with Hosts, Containers, Deploys,
   and Health screens; read-only `view` sessions and audited `operate` actions.
-  Report: [fleet acceptance](docs/fleet/FLEET-TEST-REPORT-2026-08-25.md).
+  Report: [fleet acceptance](docs/evidence/fleet/2026-08-25-fleet-test-report.md).
   Local demo: `scripts/fleet-demo.sh up`.
 - **Dashboard:** the browser dashboard's 24 checks, token, Host and Origin
-  rules are in the [dashboard report](docs/desktop/DASHBOARD-TEST-REPORT-2026-08-25.md).
+  rules are in the [dashboard report](docs/evidence/desktop/2026-08-25-dashboard-test-report.md).
 - **LAN image mirror (experimental, opt-in):** announces images by mDNS and
   serves digest-verified, read-only pulls to peers on private IPv4, falling
   back to the registry. Proof: [LAN mirror evidence](docs/evidence/networking/2026-08-25-lan-image-mirror.md).

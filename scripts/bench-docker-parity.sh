@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Measure the eleven Docker-versus-FerroCrate rows documented in
-# docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md.
+# docs/evidence/performance/2026-08-23-docker-vs-ferrocrate.md.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

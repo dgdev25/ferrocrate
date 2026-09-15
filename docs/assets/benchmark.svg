@@ -12,7 +12,7 @@
   </defs>
   <rect width="1200" height="640" fill="var(--bg)"/>
   <text class="lbl" x="48" y="52" font-size="24">Median seconds per operation — lower is better</text>
-  <text class="muted" x="48" y="76" font-size="13">Same host, both engines unprivileged, alpine:latest, --network none, 10 iterations (5 for build). Source: docs/benchmarks/DOCKER-VS-FERROCRATE-2026-08-23.md</text>
+  <text class="muted" x="48" y="76" font-size="13">Same host, both engines unprivileged, alpine:latest, --network none, 10 iterations (5 for build). Source: docs/evidence/performance/2026-08-23-docker-vs-ferrocrate.md</text>
   <rect x="930" y="40" width="12" height="12" rx="2" class="d"/><text class="muted" x="948" y="51" font-size="13">Docker 29.7</text>
   <rect x="1040" y="40" width="12" height="12" rx="2" class="f"/><text class="muted" x="1058" y="51" font-size="13">Ferrocrate</text>
 

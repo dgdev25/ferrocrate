@@ -4,15 +4,18 @@ set -euo pipefail
 repo_root="${FERROCRATE_REPO_ROOT:-$(cd "$(dirname -- "$0")/.." && pwd)}"
 cd "$repo_root"
 
-plan="docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
+# The production readiness roadmap is maintainer-local (gitignored under
+# docs/internal/, ADR-025). Its checks run only where the file exists.
+plan="docs/internal/PRODUCTION-READINESS-ROADMAP-2026-09-05.md"
 roadmap="docs/ROADMAP.md"
-[[ -f "$plan" ]] || { echo "missing production readiness roadmap: $plan" >&2; exit 1; }
 [[ -f "$roadmap" ]] || { echo "missing roadmap: $roadmap" >&2; exit 1; }
 
-grep -Fq 'This is the active execution roadmap.' "$plan" || {
-  echo "production readiness roadmap lacks its authority statement" >&2
-  exit 1
-}
+if [[ -f "$plan" ]]; then
+  grep -Fq 'This is the active execution roadmap.' "$plan" || {
+    echo "production readiness roadmap lacks its authority statement" >&2
+    exit 1
+  }
+fi
 
 required_files=(
   LICENSE
@@ -22,7 +25,6 @@ required_files=(
   SUPPORT.md
   README.md
   CHANGELOG.md
-  docs/PRODUCTION-READINESS-ROADMAP-2026-09-05.md
   docs/operations/local-release-gate.md
   docs/evidence/performance/benchmark-register.md
 )
@@ -51,15 +53,17 @@ if ! grep -R -Eq 'self-hosted.*ferro-lab' .github/workflows; then
   exit 1
 fi
 
-gate_count="$(grep -cE '^- \[[ x]\] R[0-9]+' "$plan" || true)"
-if [[ "$gate_count" -ne 34 ]]; then
-  echo "expected 34 production readiness rows, found $gate_count" >&2
-  exit 1
-fi
+if [[ -f "$plan" ]]; then
+  gate_count="$(grep -cE '^- \[[ x]\] R[0-9]+' "$plan" || true)"
+  if [[ "$gate_count" -ne 34 ]]; then
+    echo "expected 34 production readiness rows, found $gate_count" >&2
+    exit 1
+  fi
 
-if ! grep -Fq '## Phase 6 — Publish honest readiness evidence' "$plan"; then
-  echo "production readiness roadmap lacks the release-evidence phase" >&2
-  exit 1
+  if ! grep -Fq '## Phase 6 — Publish honest readiness evidence' "$plan"; then
+    echo "production readiness roadmap lacks the release-evidence phase" >&2
+    exit 1
+  fi
 fi
 
 bash scripts/perf/check-benchmark-register.sh
@@ -89,4 +93,8 @@ grep -Eq "$declared declared cases(:|,) $implemented implemented, (0|zero) parti
   echo "roadmap Docker API matrix count is stale (expected $declared/$implemented/$unsupported)" >&2
   exit 1
 }
-echo "production readiness documentation gate passed: 34 status rows, required public artifacts, self-hosted workflows"
+if [[ -f "$plan" ]]; then
+  echo "production readiness documentation gate passed: 34 status rows, required public artifacts, self-hosted workflows"
+else
+  echo "production readiness documentation gate passed: required public artifacts, self-hosted workflows (maintainer roadmap absent; row checks skipped)"
+fi
